@@ -1,11 +1,12 @@
 # Platform notes
 
-Facts about Nomad, Hetzner Cloud, Vultr and prior art that tent's design relies on.
+Facts about Nomad, Hetzner Cloud, Vultr, S3-compatible object stores and prior art that tent's design relies on.
 
-> **Verified on 2026-09-25.** Sources: official documentation, the Hetzner Cloud OpenAPI spec
-> (`https://docs.hetzner.cloud/cloud.spec.json`), the Vultr API reference (OpenAPI spec from a Wayback copy of
-> `https://www.vultr.com/api/`, 2026-09-12) plus live calls to public Vultr endpoints, release APIs and upstream source
-> code (Nomad `main`, kops `master`, hcloud-go, govultr, cloud-init). The confidence is high unless marked otherwise.
+> **Verified on 2026-09-25**, and [section 5](#5-s3-compatible-object-stores) on 2026-09-26. Sources: official
+> documentation, the Hetzner Cloud OpenAPI spec (`https://docs.hetzner.cloud/cloud.spec.json`), the Vultr API
+> reference (OpenAPI spec from a Wayback copy of `https://www.vultr.com/api/`, 2026-09-12) plus live calls to public
+> Vultr endpoints, release APIs and upstream source code (Nomad `main`, kops `master`, hcloud-go, govultr,
+> cloud-init). The confidence is high unless marked otherwise.
 >
 > Items marked 🔬 are **unverified** and are checked with `hack/vultr-spike` against a real account before code
 > depends on them. Facts marked "spike 2026-09-25" were measured by the spike runs of that day (see
@@ -20,7 +21,8 @@ Facts about Nomad, Hetzner Cloud, Vultr and prior art that tent's design relies 
 2. [Hetzner Cloud](#2-hetzner-cloud)
 3. [Vultr](#3-vultr) (spike results: [3.16](#316-spike-runs-2026-09-25))
 4. [Prior art](#4-prior-art)
-5. [Sources](#5-sources)
+5. [S3-compatible object stores](#5-s3-compatible-object-stores)
+6. [Sources](#6-sources)
 
 ---
 
@@ -354,7 +356,8 @@ Facts about Nomad, Hetzner Cloud, Vultr and prior art that tent's design relies 
 - **S3 credentials can be created only in the Console.** Neither the Cloud API nor hcloud-go manage buckets.
 - **Supported:** versioning, Object Lock (enabled at bucket creation), bucket policies and lifecycle rules.
 - **Conditional writes.** Conditional PUT and DELETE are unsupported on versioned buckets. `If-None-Match: *` on
-  unversioned buckets is undocumented and unverified, so test it before relying on it.
+  unversioned buckets is undocumented and unverified, so test it before relying on it. Until E2E does, tent treats
+  every endpoint on `your-objectstorage.com` as a store without conditional writes ([5.1](#51-conditional-writes-)).
 - **Limits:** 100 buckets, 200 credentials and 750 requests per second per bucket.
 
 ### 2.11 DNS
@@ -714,7 +717,8 @@ Facts about Nomad, Hetzner Cloud, Vultr and prior art that tent's design relies 
   `s3_secret_key`. Keys cover the whole subscription.
 - **Conditional writes** are not documented by Vultr. The endpoints run Ceph Object Gateway "tentacle", whose source
   honours `If-Match` and `If-None-Match` on PutObject. Likely supported, but untested 🔬. The spike's check needs an
-  existing bucket and was not run on 2026-09-25.
+  existing bucket and was not run on 2026-09-25. Ceph RGW 20.2.4 on RADOS honoured both in a local test on 2026-09-26
+  ([5.1](#51-conditional-writes-)); Vultr's endpoints themselves are still untested.
 
 ### 3.13 DNS
 
@@ -911,7 +915,71 @@ user data and rolls every node.
 
 ---
 
-## 5. Sources
+## 5. S3-compatible object stores
+
+### 5.1 Conditional writes ⏳
+
+The conditional-put lock ([architecture §10.4](architecture.md#104-locking)) needs `PutObject` with
+`If-None-Match: *` (create only) and `If-Match: <ETag>` (replace only that version), atomic under concurrent writers.
+Few servers document how they behave.
+
+**Documented:**
+- **AWS S3** supports both headers. A failed condition gets 412. A concurrent request may get 409
+  `ConditionalRequestConflict` instead, and `If-Match` on a missing object gets 404.
+- **Cloudflare R2** lists `If-Match` and `If-None-Match` for PutObject (S3 API compatibility page, updated
+  2026-07-31), but says nothing about concurrent writers. The race subtests in CI check that against a real R2 bucket.
+- **R2 throttling.** R2 takes at most one write per second to a key and answers faster writes with 429
+  `TooManyRequests` (error 10058). It does not document whether conditional puts that fail their condition count
+  toward that limit.
+- **AWS S3 and Ceph RGW** throttle with 503 `SlowDown`.
+
+**Verified on 2026-09-26** by running each server in Docker and sending it single and concurrent conditional puts
+through aws-sdk-go-v2:
+
+| Server | Version | Conditional puts |
+|---|---|---|
+| Garage | v2.4.1 | both headers ignored: a second create-only put returns 200 |
+| Scality CloudServer | 9.4.3 | both headers ignored |
+| Ceph RGW on the DBStore backend | 20.2.4 | both headers ignored |
+| S3Proxy | 4.1.1 | honoured one request at a time, not atomic under concurrent writers |
+| Adobe S3Mock | 5.2.3 | honoured one request at a time, not atomic under concurrent writers |
+| Ceph RGW on RADOS, the backend Vultr runs | 20.2.4 | honoured; the loser of a race gets 412 or 409 `ConcurrentModification` |
+| versitygw | 1.8.0 | honoured, atomic in every race |
+| RustFS | 1.0.0 | honoured, atomic in every race |
+| SeaweedFS | 4.47 | honoured, atomic in every race |
+| moto | 5.2.3 | honoured, atomic in every race |
+| pgsty/silo, a MinIO fork | — | honoured, atomic in every race |
+
+- `If-Match` on a missing key returns 404 `NoSuchKey` on most servers and 412 on SeaweedFS.
+- Every server accepts the SDK's default CRC32 request checksum.
+- Ceph RGW and moto send no response checksum.
+
+**What the s3 backend does with this:**
+- It never sends a conditional put again after a 500 or a lost answer
+  ([architecture §10.1](architecture.md#101-backends)).
+- It sends a throttled request (429, `TooManyRequests` or `SlowDown`) again after a random wait of 1–2 seconds, up to
+  30 attempts in all, conditional puts included: the server did not carry out a throttled request. The SDK does not
+  retry R2's 429 `TooManyRequests`, but it retries a 503 `SlowDown` on a plain request (3 attempts, backoff up to
+  20 s) inside each of these attempts.
+- It reads 412, any 409, and a 404 on an `If-Match` put as "precondition failed", and 501 as "no conditional puts".
+- It validates response checksums only where the API requires them.
+- A probe decides at run time whether the server enforces the headers. A server that ignores them gets the
+  provider's lock or the best-effort one instead of a broken one. The probe cannot tell S3Proxy and S3Mock from atomic
+  servers.
+- It does not probe Hetzner Object Storage (`your-objectstorage.com` and its subdomains) and treats it as a store
+  without conditional writes until E2E proves them ([ADR-0010](adr/0010-state-store-and-locking.md)). A Hetzner
+  cluster then locks with the firewall mutex (M4); any other cluster that keeps its state there gets the best-effort
+  lease with a loud warning.
+
+**MinIO.** The community edition's repository has been archived since 2026-04-25, and it ships as source only: there
+are no binaries, and its container images can no longer be pulled. So CI runs no local S3 server: the maintainer
+decided on 2026-09-26 to test the s3 backend against Cloudflare R2 only (issue #22 first named MinIO). A MinIO server
+that someone already runs is still an S3-compatible store for tent. It was not tested here; pgsty/silo, a fork,
+passes every check.
+
+---
+
+## 6. Sources
 
 Nomad:
 - Releases API: <https://api.releases.hashicorp.com/v1/releases/nomad>
@@ -961,6 +1029,13 @@ Vultr:
 Nomad status and agent API:
 - <https://developer.hashicorp.com/nomad/api-docs/status>
 - <https://developer.hashicorp.com/nomad/api-docs/agent>
+
+S3-compatible object stores:
+- AWS S3 conditional writes: <https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html>
+- Cloudflare R2 S3 API compatibility: <https://developers.cloudflare.com/r2/api/s3/api/>
+- Cloudflare R2 limits (one write per second per key): <https://developers.cloudflare.com/r2/platform/limits/>
+- Cloudflare R2 error codes (10058 `TooManyRequests`): <https://developers.cloudflare.com/r2/api/error-codes/>
+- MinIO community edition (archived): <https://github.com/minio/minio>
 
 Prior art:
 - kops: <https://github.com/kubernetes/kops>

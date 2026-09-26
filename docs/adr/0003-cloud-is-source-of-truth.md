@@ -1,6 +1,9 @@
 # ADR-0003: The cloud is the source of truth: ownership labels and deterministic names
 
-- **Status:** Accepted (label prefix `tent/` and API group `tent/v1alpha1` confirmed by the maintainer on 2026-09-25); extended by [ADR-0015](0015-idempotency-without-unique-names.md)
+- **Status:** Accepted (label prefix `tent/` and API group `tent/v1alpha1` confirmed by the maintainer on 2026-09-25);
+  extended by [ADR-0015](0015-idempotency-without-unique-names.md). Since 2026-09-26, cluster and node group names
+  also exclude the names Windows reserves (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`), because they
+  become state store keys ([architecture §10.1](../architecture.md#101-backends)).
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0002](0002-direct-cloud-apis-and-own-engine.md), [ADR-0009](0009-server-discovery-fixed-ip-slots.md),

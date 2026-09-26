@@ -18,8 +18,10 @@ Providers, in order:
   notices before the first tag (ADR-0020, "Before the first tag").
 - M0.2 added the API types with defaults and validation (`api/v1alpha1`), the spec file reader and writer
   (`internal/spec`) and the JSON Schema (`api/v1alpha1/tent.schema.json`, ADR-0022).
+- M0.3 added the state store (`internal/statestore`): the `file://` and `s3://` backends, the cluster layout, the
+  version guard and cluster locks (`docs/architecture.md` §10). CI tests the s3 backend against Cloudflare R2.
 - The Vultr spike has run (2026-09-25).
-- Next: the rest of M0, then M1. See `docs/roadmap.md`.
+- Next: the spec commands (M0.4), then M1. See `docs/roadmap.md`.
 
 ## Read before changing anything
 
