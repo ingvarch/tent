@@ -1,0 +1,63 @@
+# The Vultr cluster of architecture §3.1 with its two node groups. It uses every field of tent/v1alpha1
+# except cloud.hetzner, which only a Hetzner cluster has.
+apiVersion: tent/v1alpha1
+kind: Cluster
+metadata:
+  name: prod
+spec:
+  channel: stable
+  cloud:
+    provider: vultr
+    region: ams
+    zones: [ams]
+    vultr: {}
+  networking:
+    cidr: 10.64.0.0/16
+  access:
+    ssh: [203.0.113.7/32]
+    api: [0.0.0.0/0]
+  sshKeys:
+    - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILVMgcq7nf63leSBwZNfB40Oi4XwSKWNKchNmRGNCb9k ops@example
+  nomad:
+    version: 2.0.7
+    region: global
+    tls: {verifyHTTPSClient: true}
+    clientIntroduction: strict
+    extraConfig:
+      server: |
+        server {
+          heartbeat_grace = "30s"
+        }
+      client: |
+        client {
+          gc_max_allocs = 100
+        }
+---
+apiVersion: tent/v1alpha1
+kind: NodeGroup
+metadata:
+  name: servers
+  cluster: prod
+spec:
+  role: server
+  machineType: vc2-2c-4gb
+  image: ubuntu-24.04
+  size: 3
+  zones: [ams]
+---
+apiVersion: tent/v1alpha1
+kind: NodeGroup
+metadata:
+  name: workers
+  cluster: prod
+spec:
+  role: client
+  machineType: vc2-2c-4gb
+  image: ubuntu-24.04
+  size: 3
+  zones: [ams]
+  nomad:
+    nodePool: default
+    nodeClass: general
+    drivers: [docker, exec]
+    meta: {team: platform}
