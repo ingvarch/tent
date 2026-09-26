@@ -1,0 +1,25 @@
+{
+  "apiVersion": "tent/v1alpha1",
+  "kind": "NodeGroup",
+  "metadata": {
+    "name": "workers",
+    "cluster": "prod"
+  },
+  "spec": {
+    "role": "client",
+    "machineType": "vc2-2c-4gb",
+    "image": "ubuntu-24.04",
+    "size": 3,
+    "nomad": {
+      "nodePool": "default",
+      "nodeClass": "general",
+      "drivers": [
+        "docker",
+        "exec"
+      ],
+      "meta": {
+        "team": "platform"
+      }
+    }
+  }
+}

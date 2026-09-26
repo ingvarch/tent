@@ -1,0 +1,40 @@
+{
+  "apiVersion": "tent/v1alpha1",
+  "kind": "Cluster",
+  "metadata": {
+    "name": "prod"
+  },
+  "spec": {
+    "channel": "stable",
+    "cloud": {
+      "provider": "vultr",
+      "region": "ams",
+      "zones": [
+        "ams"
+      ],
+      "vultr": {}
+    },
+    "networking": {
+      "cidr": "10.64.0.0/16"
+    },
+    "access": {
+      "ssh": [
+        "203.0.113.7/32"
+      ],
+      "api": [
+        "0.0.0.0/0"
+      ]
+    },
+    "sshKeys": [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILVMgcq7nf63leSBwZNfB40Oi4XwSKWNKchNmRGNCb9k ops@example"
+    ],
+    "nomad": {
+      "version": "2.0.7",
+      "region": "global",
+      "tls": {
+        "verifyHTTPSClient": true
+      },
+      "clientIntroduction": "strict"
+    }
+  }
+}
