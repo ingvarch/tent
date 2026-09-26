@@ -65,6 +65,14 @@ linters:
           deny:
             - pkg: github.com/hashicorp/nomad
               desc: the Nomad root module is BUSL-licensed (ADR-0011)
+        # The JSON Schema libraries only generate and test the schema (ADR-0022).
+        jsonschema-only-in-apischema:
+          files: ["$all", "!${base-path}/internal/apischema/**"]
+          deny:
+            - pkg: github.com/invopop/jsonschema
+              desc: the JSON Schema libraries are used only by internal/apischema (ADR-0022)
+            - pkg: github.com/santhosh-tekuri/jsonschema
+              desc: the JSON Schema libraries are used only by internal/apischema (ADR-0022)
     forbidigo:
       forbid:
         - pattern: ^panic$

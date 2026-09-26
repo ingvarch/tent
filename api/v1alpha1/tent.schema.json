@@ -1,0 +1,359 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/ingvarch/tent/main/api/v1alpha1/tent.schema.json",
+  "$defs": {
+    "Access": {
+      "properties": {
+        "ssh": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SSH lists the CIDRs allowed to reach port 22. Empty closes SSH on the cloud firewall."
+        },
+        "api": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "API lists the CIDRs allowed to reach the Nomad API on port 4646. Left out, it is 0.0.0.0/0: mTLS and ACLs protect the API, and tent warns while it is open to everyone. An empty list is an error, because tent needs the API."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "Access says who may reach the nodes from the internet."
+    },
+    "Cloud": {
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "vultr",
+            "hetzner"
+          ],
+          "description": "Provider is vultr or hetzner."
+        },
+        "region": {
+          "type": "string",
+          "description": "Region is a Vultr region (ams) or a Hetzner network zone (eu-central)."
+        },
+        "zones": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Zones are the failure domains. Vultr has none: left out, zones is [region], and any other value is an error. On Hetzner they are locations such as fsn1 and must be given."
+        },
+        "vultr": {
+          "$ref": "#/$defs/VultrCloud",
+          "description": "Vultr holds Vultr settings. Set it only when the provider is vultr."
+        },
+        "hetzner": {
+          "$ref": "#/$defs/HetznerCloud",
+          "description": "Hetzner holds Hetzner settings. Set it only when the provider is hetzner."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "provider",
+        "region"
+      ],
+      "description": "Cloud says where the cluster runs."
+    },
+    "Cluster": {
+      "properties": {
+        "apiVersion": {
+          "type": "string",
+          "const": "tent/v1alpha1",
+          "description": "APIVersion is always tent/v1alpha1."
+        },
+        "kind": {
+          "type": "string",
+          "const": "Cluster",
+          "description": "Kind is Cluster or NodeGroup."
+        },
+        "metadata": {
+          "$ref": "#/$defs/ClusterMeta",
+          "description": "Metadata names the cluster."
+        },
+        "spec": {
+          "$ref": "#/$defs/ClusterSpec",
+          "description": "Spec is what the operator wants the cluster to be."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "apiVersion",
+        "kind",
+        "metadata",
+        "spec"
+      ],
+      "description": "Cluster is a Nomad cluster on one cloud provider."
+    },
+    "ClusterMeta": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name of the cluster: 2 to 20 characters, [a-z][a-z0-9-]{0,18}[a-z0-9]. It prefixes every resource name."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "description": "ClusterMeta names a cluster."
+    },
+    "ClusterNomad": {
+      "properties": {
+        "version": {
+          "type": "string",
+          "description": "Version of Nomad, for example 2.0.7. Empty means the version recommended by the channel."
+        },
+        "region": {
+          "type": "string",
+          "description": "Region is the Nomad region. Defaults to global."
+        },
+        "tls": {
+          "$ref": "#/$defs/TLS",
+          "description": "TLS configures mTLS on the Nomad API."
+        },
+        "clientIntroduction": {
+          "type": "string",
+          "enum": [
+            "strict",
+            "warn",
+            "none"
+          ],
+          "description": "ClientIntroduction is strict, warn or none. Defaults to strict, or to warn when the cluster has a combined group; strict is an error with a combined group, whose client registers before intro tokens exist."
+        },
+        "extraConfig": {
+          "$ref": "#/$defs/ExtraConfig",
+          "description": "ExtraConfig is HCL added to the agents as 99-user.hcl. It is not validated or supported."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ClusterNomad configures the Nomad agents of the whole cluster."
+    },
+    "ClusterSpec": {
+      "properties": {
+        "channel": {
+          "type": "string",
+          "description": "Channel names the recommended Nomad versions and images. Defaults to stable."
+        },
+        "cloud": {
+          "$ref": "#/$defs/Cloud",
+          "description": "Cloud says where the cluster runs."
+        },
+        "networking": {
+          "$ref": "#/$defs/Networking",
+          "description": "Networking is the cluster's private network."
+        },
+        "access": {
+          "$ref": "#/$defs/Access",
+          "description": "Access says who may reach the nodes from the internet."
+        },
+        "sshKeys": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SSHKeys are public keys installed on every node, for diagnostics only."
+        },
+        "nomad": {
+          "$ref": "#/$defs/ClusterNomad",
+          "description": "Nomad configures the Nomad agents of the whole cluster."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "cloud"
+      ],
+      "description": "ClusterSpec is what the operator wants the cluster to be."
+    },
+    "ExtraConfig": {
+      "properties": {
+        "server": {
+          "type": "string",
+          "description": "Server is added to server and combined nodes."
+        },
+        "client": {
+          "type": "string",
+          "description": "Client is added to client and combined nodes."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ExtraConfig is HCL added to the agents as 99-user.hcl."
+    },
+    "HetznerCloud": {
+      "properties": {},
+      "additionalProperties": false,
+      "type": "object",
+      "description": "HetznerCloud holds Hetzner settings of a cluster. There are none yet."
+    },
+    "Networking": {
+      "properties": {
+        "cidr": {
+          "type": "string",
+          "description": "CIDR of the private network, a private IPv4 prefix. Defaults to 10.64.0.0/16."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "Networking is the cluster's private network."
+    },
+    "NodeGroup": {
+      "properties": {
+        "apiVersion": {
+          "type": "string",
+          "const": "tent/v1alpha1",
+          "description": "APIVersion is always tent/v1alpha1."
+        },
+        "kind": {
+          "type": "string",
+          "const": "NodeGroup",
+          "description": "Kind is Cluster or NodeGroup."
+        },
+        "metadata": {
+          "$ref": "#/$defs/NodeGroupMeta",
+          "description": "Metadata names the node group and its cluster."
+        },
+        "spec": {
+          "$ref": "#/$defs/NodeGroupSpec",
+          "description": "Spec is what the operator wants the node group to be."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "apiVersion",
+        "kind",
+        "metadata",
+        "spec"
+      ],
+      "description": "NodeGroup is a set of identical nodes in one cluster."
+    },
+    "NodeGroupMeta": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name of the node group: 2 to 20 characters, [a-z][a-z0-9-]{0,18}[a-z0-9]."
+        },
+        "cluster": {
+          "type": "string",
+          "description": "Cluster is the name of the cluster the group belongs to."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "cluster"
+      ],
+      "description": "NodeGroupMeta names a node group and its cluster."
+    },
+    "NodeGroupNomad": {
+      "properties": {
+        "nodePool": {
+          "type": "string",
+          "description": "NodePool of the clients. Defaults to the node pool named default for client and combined groups."
+        },
+        "nodeClass": {
+          "type": "string",
+          "description": "NodeClass of the clients."
+        },
+        "drivers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Drivers are the task drivers the clients enable, for example docker and exec."
+        },
+        "meta": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Meta is client metadata that jobs can use in constraints."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "NodeGroupNomad configures the Nomad clients of a group."
+    },
+    "NodeGroupSpec": {
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": [
+            "server",
+            "client",
+            "combined"
+          ],
+          "description": "Role is server, client or combined."
+        },
+        "machineType": {
+          "type": "string",
+          "description": "MachineType is the provider's plan or server type, for example vc2-2c-4gb on Vultr or cx23 on Hetzner."
+        },
+        "image": {
+          "type": "string",
+          "description": "Image is the operating system image by name. Defaults to ubuntu-24.04."
+        },
+        "size": {
+          "type": "integer",
+          "description": "Size is the number of nodes. A server or combined group has 1, 3 or 5; a client group has 0 or more."
+        },
+        "zones": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Zones the nodes are spread over, a subset of the cluster zones. Defaults to all cluster zones."
+        },
+        "nomad": {
+          "$ref": "#/$defs/NodeGroupNomad",
+          "description": "Nomad configures the Nomad clients of the group. Server groups leave it empty."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "role",
+        "machineType",
+        "size"
+      ],
+      "description": "NodeGroupSpec is what the operator wants the node group to be."
+    },
+    "TLS": {
+      "properties": {
+        "verifyHTTPSClient": {
+          "type": "boolean",
+          "description": "VerifyHTTPSClient requires client certificates on the HTTP API. Defaults to true; tent ui keeps the browser working either way."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "TLS configures mTLS on the Nomad API."
+    },
+    "VultrCloud": {
+      "properties": {},
+      "additionalProperties": false,
+      "type": "object",
+      "description": "VultrCloud holds Vultr settings of a cluster. There are none yet."
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/Cluster"
+    },
+    {
+      "$ref": "#/$defs/NodeGroup"
+    }
+  ]
+}
