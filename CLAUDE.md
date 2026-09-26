@@ -1,0 +1,87 @@
+# CLAUDE.md
+
+Guidance for Claude Code in this repository.
+
+## Project
+
+tent is a Go CLI that provisions and operates HashiCorp Nomad clusters on cloud providers: kops for Nomad. The module
+path is `github.com/ingvarch/tent`.
+
+Providers, in order:
+1. **Vultr** is implemented first and runs the E2E suite (`docs/adr/0014-vultr-first-provider-and-e2e.md`).
+2. **Hetzner Cloud** is second.
+3. **AWS** comes later. It must remain possible without changes to the core.
+
+**Status:** M0 Foundation is in progress: the skeleton (Go module, `tent version`, Makefile, lint rules) has landed,
+with CI on Linux, macOS and Windows and a GoReleaser release pipeline that waits for the repository to go public
+(ADR-0020). The Vultr spike has run (2026-09-25). Next: the rest of M0, then M1. See `docs/roadmap.md`.
+
+## Read before changing anything
+
+1. `docs/architecture.md`: the design and the source of truth.
+2. `docs/adr/`: accepted decisions. Do not diverge silently. If an implementation must deviate, write a superseding
+   ADR first (see `docs/adr/README.md`).
+3. `docs/platform-notes.md`: verified Nomad, Hetzner and Vultr API facts and quirks as of 2026-09-25.
+   - Re-verify items marked ⏳ (prices, availability, versions) before relying on them.
+   - Items marked 🔬 are unverified until `hack/vultr-spike` has run.
+4. `docs/roadmap.md`: milestone checklists. Tick items as they land.
+
+## Conventions
+
+- **Language.** Everything committed is in English: code, comments, log messages, CLI output, docs and commit
+  messages.
+- **Go.** `go 1.26`, because `github.com/hashicorp/nomad/api` requires it.
+  - Standard library first; `log/slog` for logging.
+  - Wrap errors with context (`fmt.Errorf("…: %w", err)`). No panics in library code.
+- **Layering** (ADR-0021, enforced by depguard in `.golangci.yml`):
+  - `api/...` imports only the standard library and other `api/` packages.
+  - Only `cmd/tent` imports provider packages (`internal/cloud/vultr`, `internal/cloud/hetzner`, …); everything else,
+    `internal/model`, `internal/rollout` and `internal/app` included, uses the interfaces in `internal/cloud`.
+    Tests and the provider packages themselves are exempt.
+  - Cloud SDKs (govultr, hcloud-go) are imported only by their provider package, tests included.
+  - `internal/nodeup` (the tent-node agent) never imports `internal/cloud/...`.
+  - Only `internal/nomadops` imports `github.com/hashicorp/nomad/api`.
+  - Never import the root module `github.com/hashicorp/nomad`; it is BUSL-licensed.
+- **Visibility.** Everything is under `internal/` except the public API types in `api/`.
+- **Weakest primitives.** Core mechanisms assume the weakest cloud primitives: non-unique names, no fixed IPs, no
+  graceful shutdown. Richer primitives are optimizations behind `Capabilities` (ADR-0015 to ADR-0017).
+- **Credentials.** Cloud credentials (`VULTR_API_KEY`, `HCLOUD_TOKEN`) never go into specs, the state store, logs or
+  nodes.
+- **Idempotency.** Every mutating operation must be safe to re-run after an interruption.
+  - Deterministic names.
+  - Adopt a resource only when its ownership markers match.
+  - Operation ids where names are not unique; never let an SDK blindly retry a create.
+  - Create the replacement before removing the old node.
+- **Tests.**
+  - Unit tests sit next to the code, with golden files under `testdata/`.
+  - Every engine task needs an "apply → re-plan → no-op" test.
+  - E2E tests use the `e2e` build tag and never run by default.
+- **Checks.** `make check` runs fmt, lint, test and build; `make fmt` and `make lint` need golangci-lint at the version
+  pinned in the Makefile. Releases follow ADR-0020.
+
+## Maintainer decisions
+
+Decided on 2026-09-25 (`docs/architecture.md` §18, the table in `docs/roadmap.md`):
+
+- labels use the prefix `tent/`, and the API group is `tent/v1alpha1`;
+- `access.api` defaults to `[0.0.0.0/0]` (mTLS + ACL), with a loud warning while it is open;
+- node group roles are `server`, `client` and `combined` (ADR-0019);
+- the default OS image is `ubuntu-24.04`; E2E also runs on `ubuntu-26.04`;
+- Consul and Vault are out of v1;
+- tent is licensed under Apache-2.0.
+
+Anything else that only the maintainer can decide goes into `docs/architecture.md` §18. Ask before implementing it.
+
+## Vultr spike
+
+`hack/vultr-spike/spike.sh` checks undocumented Vultr behaviour against a real account (see its README).
+
+- Never paste API keys into chat or commit them. The script reads `VULTR_API_KEY` from the environment.
+- After a run, copy the findings into `docs/platform-notes.md` §3 and resolve the provisional items of ADR-0018.
+
+## ADR workflow
+
+For a new significant decision:
+1. Copy `docs/adr/template.md` to `docs/adr/NNNN-short-title.md`.
+2. Add it to the index in `docs/adr/README.md`.
+3. Update `docs/architecture.md` in the same change.

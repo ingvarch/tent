@@ -1,0 +1,2 @@
+# LF on every system: the build config tests read files as committed.
+* text=auto eol=lf

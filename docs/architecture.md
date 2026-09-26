@@ -1,0 +1,1600 @@
+# tent: Architecture
+
+> **Status:** accepted design, 2026-09-25. Revised the same day: Vultr is now implemented first and hosts the E2E
+> suite, and Hetzner Cloud is second ([ADR-0014](adr/0014-vultr-first-provider-and-e2e.md)). **Scope:** v1 covers
+> Vultr and Hetzner Cloud, with AWS kept in mind.
+>
+> - Why each decision was made: [ADRs](adr/README.md).
+> - Verified platform facts and sources: [platform notes](platform-notes.md).
+> - Milestones and current status: [roadmap](roadmap.md).
+>
+> This document describes the design as it should be. If code and this document disagree, fix one of them. A
+> deliberate change of direction needs a new ADR.
+
+## Contents
+
+1. [Overview](#1-overview)
+2. [Design principles](#2-design-principles)
+3. [Domain model and API](#3-domain-model-and-api)
+4. [System architecture](#4-system-architecture)
+5. [Repository layout and dependency rules](#5-repository-layout-and-dependency-rules)
+6. [Reconciliation engine](#6-reconciliation-engine)
+7. [Provider abstraction](#7-provider-abstraction)
+8. [Nodes: tent-node and NodeConfig](#8-nodes-tent-node-and-nodeconfig)
+9. [Security](#9-security)
+10. [State store and locking](#10-state-store-and-locking)
+11. [Vultr provider](#11-vultr-provider)
+12. [Hetzner provider](#12-hetzner-provider)
+13. [Lifecycle flows](#13-lifecycle-flows)
+14. [CLI](#14-cli)
+15. [Testing](#15-testing)
+16. [Technology stack and releases](#16-technology-stack-and-releases)
+17. [Risks](#17-risks)
+18. [Open questions](#18-open-questions)
+- [Appendix A: Nomad agent configuration sketches](#appendix-a-nomad-agent-configuration-sketches)
+- [Appendix B: cloud-init user data sketch](#appendix-b-cloud-init-user-data-sketch)
+
+---
+
+## 1. Overview
+
+tent is a CLI that turns a declarative cluster specification into a running, secured HashiCorp Nomad cluster on a
+cloud provider. It then keeps operating that cluster: scaling, Nomad-aware rolling updates, upgrades, backups and
+teardown. tent is to Nomad what kops is to Kubernetes.
+
+The name is the only metaphor: a nomad pitches a tent anywhere, and tent pitches a Nomad cluster on any cloud. The
+API uses plain terms such as `Cluster` and `NodeGroup`.
+
+The order of providers:
+1. **Vultr** is implemented first and runs the E2E suite.
+2. **Hetzner Cloud** comes second. Its design below is complete and waits for an account that can run E2E again.
+3. **AWS** comes later.
+
+See [ADR-0014](adr/0014-vultr-first-provider-and-e2e.md).
+
+### 1.1 Goals (v1)
+
+- **Two providers**, Vultr and Hetzner Cloud, both with production-grade defaults: 3 or 5 Nomad servers and any
+  number of client node groups.
+- **Secure bootstrap:** mTLS for RPC and HTTP, gossip encryption, ACLs, client introduction and per-node
+  certificates.
+- **A plan/apply workflow.** Every operation is idempotent and safe to interrupt. The only state lives in the state
+  store and the cloud itself.
+- **Day-2 operations:** scale, rolling update, upgrade, validate, backup and restore, and a delete that leaves nothing
+  behind.
+- **Room for more clouds.** AWS and others can be added as providers without changes to the core.
+
+### 1.2 Non-goals (v1)
+
+- **Consul and Vault.** They may come later as optional components ([ADR-0011](adr/0011-nomad-only-scope-and-licensing.md)).
+- **Autoscaling and automatic replacement of failed nodes.** Both need an in-cluster controller; later.
+- **Private topology**, meaning nodes without public IPs behind NAT. A later milestone; Vultr's managed NAT gateway
+  makes it easier there.
+- **Multi-region Nomad federation, Windows clients and Nomad Enterprise features.**
+- **Managing workloads**, except a small set of optional addons later.
+
+### 1.3 Constraints that shape the design
+
+These were verified on 2026-09-25. Details and sources are in [platform notes](platform-notes.md).
+
+**Nomad**
+- **Versions.** Nomad CE 2.0.7 is current.
+  - Since 1.11, client introduction lets servers require a short-lived token for a client's first registration.
+  - `server.retry_join` will be removed in 2.1. Only the `server_join {}` block remains.
+- **Endpoints tent relies on.**
+  - `GET /v1/status/peers` needs no ACL token. mTLS still applies.
+  - There is no HTTP endpoint that makes an agent leave gracefully.
+- **Licensing.** Nomad is licensed under BUSL 1.1 since 1.7. The Go API module `github.com/hashicorp/nomad/api` is
+  MPL-2.0.
+- **Cloud auto-join** (go-discover) supports neither Vultr nor Hetzner.
+
+**Vultr**
+- **Missing primitives.**
+  - Resource names are not unique, and create calls have no idempotency key.
+  - Tags are plain strings and exist only on instances.
+  - No fixed private IP can be requested in a VPC.
+  - The API has no graceful shutdown: `halt` is a hard power-off.
+  - No availability zones and no placement spread.
+  - No signed instance identity.
+- **Limits and behaviour.**
+  - The `user_data` size limit is undocumented, but user_data can be changed after creation.
+  - A firewall group filters public traffic only, and an instance can have just one.
+  - API rate limit: 30 requests per second per IP.
+  - Billing is hourly with a one-hour minimum.
+  - New-account limits are opaque.
+
+**Hetzner Cloud**
+- **Missing primitives.** No autoscaling groups, no IAM and no signed instance identity.
+- **Firewalls** filter only public interfaces and do not apply to load balancers.
+- **API behaviour.**
+  - Rate limit: 3600 requests per hour per project.
+  - `user_data` is at most 32 KiB and cannot be changed.
+  - A fixed private IP can only be requested through `attach_to_network`.
+- **Capacity.**
+  - New accounts start with a limit of 5 servers.
+  - Since June 2026 Hetzner restricts server creation for some accounts.
+
+**Market**
+- No existing tool covers the full Nomad cluster lifecycle (a "kops for Nomad").
+
+---
+
+## 2. Design principles
+
+| # | Principle | ADR |
+|---|---|---|
+| 1 | **Desired state lives in the state store; actual state lives in the cloud.** There is no tfstate. Resources are found by ownership markers. | [0003](adr/0003-cloud-is-source-of-truth.md) |
+| 2 | **Plan, then apply.** Mutating commands print a plan by default, and `--yes` applies it. | [0002](adr/0002-direct-cloud-apis-and-own-engine.md) |
+| 3 | **Nodes are immutable.** A changed node configuration means the node is replaced. tent never SSHes into live nodes to change them. | [0005](adr/0005-immutable-nodes-and-nomad-aware-rollouts.md) |
+| 4 | **The lifecycle is Nomad-aware.** No node is removed without a drain, and no server without a Raft quorum check. Replacements are created before old nodes go, so a crash leaves a surplus node, not a missing one. | [0005](adr/0005-immutable-nodes-and-nomad-aware-rollouts.md), [0017](adr/0017-api-driven-server-removal.md) |
+| 5 | **The core knows nothing about specific clouds, and providers know nothing about Nomad.** The core expresses intents, and providers map them to native resources. | [0004](adr/0004-layered-architecture.md) |
+| 6 | **Core mechanisms assume the weakest cloud primitives.** Unique names, fixed IPs and graceful shutdown are optimizations switched on by capabilities, never assumptions. | [0015](adr/0015-idempotency-without-unique-names.md), [0016](adr/0016-server-discovery-seed-and-refresh.md), [0017](adr/0017-api-driven-server-removal.md) |
+| 7 | **Secure by default.** mTLS everywhere, gossip encryption, ACLs and client introduction. Cloud credentials never reach nodes. | [0007](adr/0007-security-baseline.md), [0008](adr/0008-node-credential-delivery.md) |
+| 8 | **Testability is an architectural requirement.** The cloud and Nomad sit behind interfaces with fakes. We use golden tests and real-cloud E2E runs with a janitor. | [0012](adr/0012-testing-strategy.md), [0014](adr/0014-vultr-first-provider-and-e2e.md) |
+| 9 | **Every command is idempotent and safe to interrupt.** It can be re-run after Ctrl-C or a crash and will converge. | [0003](adr/0003-cloud-is-source-of-truth.md), [0015](adr/0015-idempotency-without-unique-names.md) |
+
+---
+
+## 3. Domain model and API
+
+### 3.1 Kinds
+
+The API has two kinds, similar to `Cluster` and `InstanceGroup` in kops. Both live in the state store and can be
+kept in a single multi-document YAML file for `tent apply -f`.
+
+A Vultr cluster:
+
+```yaml
+apiVersion: tent/v1alpha1
+kind: Cluster
+metadata:
+  name: prod                     # [a-z][a-z0-9-]{0,18}[a-z0-9]; prefix of every resource name
+spec:
+  channel: stable                # recommended versions and images (see 13.5)
+  cloud:
+    provider: vultr
+    region: ams                  # Vultr: region | Hetzner: network zone | AWS: region
+    zones: [ams]                 # Vultr has no availability zones: must equal [region]
+    vultr: {}                    # provider-specific block
+  networking:
+    cidr: 10.64.0.0/16           # VPC CIDR; accepted Vultr masks are verified by hack/vultr-spike
+    topology: public             # public | private (NAT; later)
+  access:
+    ssh: [203.0.113.7/32]        # empty = SSH closed on the cloud firewall
+    api: [0.0.0.0/0]             # the default; :4646 is protected by mTLS + ACL, and tent warns while it is open
+  sshKeys:
+    - ssh-ed25519 AAAA... ops@example
+  nomad:
+    version: 2.0.7
+    region: global
+    acl: {enabled: true}
+    tls: {verifyHTTPSClient: true}
+    clientIntroduction: strict   # strict | warn | none
+    extraConfig:                 # escape hatch, rendered into 99-user.hcl
+      server: ""
+      client: ""
+---
+apiVersion: tent/v1alpha1
+kind: NodeGroup
+metadata:
+  name: servers
+  cluster: prod
+spec:
+  role: server                   # server | client | combined (ADR-0019)
+  machineType: vc2-2c-4gb        # provider-native plan id
+  image: ubuntu-24.04            # resolved by the provider (Vultr: os_id 2284)
+  size: 3
+---
+apiVersion: tent/v1alpha1
+kind: NodeGroup
+metadata:
+  name: workers
+  cluster: prod
+spec:
+  role: client
+  machineType: vc2-2c-4gb
+  image: ubuntu-24.04
+  size: 3
+  nomad:
+    nodePool: default
+    nodeClass: general
+    drivers: [docker, exec]
+    meta: {team: platform}
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0
+    drainTimeout: 10m
+```
+
+The same cluster on Hetzner differs only in the provider-specific parts:
+
+```yaml
+spec:
+  cloud:
+    provider: hetzner
+    region: eu-central           # network zone
+    zones: [fsn1, nbg1, hel1]    # locations: one server per location survives the loss of a location
+    hetzner:
+      apiLoadBalancer: {enabled: false}
+# NodeGroup: machineType: cx23 / cx33, and optionally
+#   hetzner: {placementGroup: spread, publicIPv4: true, publicIPv6: true}
+```
+
+### 3.2 Concept mapping
+
+This table is also the check that the abstraction survives several providers.
+
+| Concept | tent | Nomad | Vultr | Hetzner | AWS (later) |
+|---|---|---|---|---|---|
+| Cluster | `Cluster` | region | instances tagged + resources marked for the cluster | resources labelled `tent/cluster=<name>` | VPC and tagged resources |
+| Region | `cloud.region` | — | region (`ams`) | network zone (`eu-central`) | region (`eu-central-1`) |
+| Failure domain | `cloud.zones[]` | `datacenter` | none (`zones = [region]`) | location (`fsn1`) | availability zone |
+| Group of nodes | `NodeGroup` | `node_pool`, `node_class`, `meta` | tagged instances | labelled servers plus a placement group | EC2 instances, later an ASG |
+| Perimeter | `access` intents | — | one firewall group per role (public only) + host nftables | Cloud Firewalls (public only) + host nftables | Security Groups |
+| Server discovery | join strategy | `server_join` | seed list + tent-node refresh | fixed private IP slots | cloud auto-join by tags |
+| Node identity | — | mTLS plus intro token | none (secrets via user data, scrubbed after bootstrap) | none (secrets via user data) | instance identity document plus IAM role |
+| State store | `--state` | — | Object Storage (S3 API) or any S3 | Object Storage (S3 API) or any S3 | S3 |
+
+### 3.3 API rules
+
+- **API version.** User-facing kinds use `apiVersion: tent/v1alpha1` (group decided on 2026-09-25).
+  Every stored object carries its apiVersion. Conversion functions are added when a second version appears.
+- **User spec and completed spec.** The user spec is what the operator wrote. The completed spec has every default
+  filled in and records what was last applied. The state store keeps both, and `tent get cluster --full` prints the
+  completed one.
+- **Strict decoding.** Unknown fields are errors. Validation errors carry field paths, for example
+  `spec.size: must be 1, 3 or 5 for role=server`.
+- **Roles.** A node group's role is `server`, `client` or `combined`. A cluster has exactly one group whose role is
+  `server` or `combined`, and its size is 1, 3 or 5. `combined` runs server and client in one agent, for dev and
+  small clusters, and counts as a server everywhere ([ADR-0019](adr/0019-combined-server-client-role.md)).
+- **JSON Schema** is generated from the Go types, so editors can autocomplete specs.
+- **Provider-native values.** Machine types and images are provider-native strings, with no "small/medium"
+  abstractions. The provider validates them against the live API: the type exists and is available in the region
+  or location, and the image architecture matches. Images are given by name (`ubuntu-24.04`), and the provider
+  resolves them (Vultr: numeric `os_id`).
+- **Server groups.** v1 allows exactly one server group, of size 1, 3 or 5. Size 1 requires `--allow-single-server`.
+- **Zones.** A group's `zones` must be a subset of the cluster zones and defaults to all of them. Nodes are spread so
+  that per-zone counts stay balanced. On Vultr, `cloud.zones` must equal `[cloud.region]`, and `validate` warns that
+  the cluster has a single failure domain.
+- **Escape hatch.** `nomad.extraConfig` is rendered verbatim into `99-user.hcl`. Nomad merges configuration files in
+  lexicographic order, so user settings win. This is documented as unsupported.
+- **No secrets in specs.** Cloud credentials come from environment variables. SSH keys are public keys only.
+
+### 3.4 Naming and ownership markers
+
+**Names** are deterministic on every provider.
+- On Hetzner they are unique and double as an idempotency guard.
+- On Vultr they are only readable handles, and idempotency comes from operation ids
+  ([ADR-0015](adr/0015-idempotency-without-unique-names.md)).
+
+| Object | Rule / pattern | Notes |
+|---|---|---|
+| Cluster name | `^[a-z][a-z0-9-]{0,18}[a-z0-9]$` (≤ 20) | prefix of every resource name |
+| NodeGroup name | same pattern (≤ 20) | |
+| Machines | `<cluster>-<group>-<index>` (≤ 63) | Hetzner servers: index = slot. Otherwise the lowest free index. Also the hostname and the Nomad node name. |
+| Network | `<cluster>` | Vultr: VPC description carries the ownership marker |
+| Firewalls | Hetzner: `<cluster>-nodes`, `<cluster>-servers`; Vultr: one group per role | |
+| Placement groups (Hetzner) | `<cluster>-<group>-<shard>` | shards of ≤ 10 servers |
+| Load balancers | `<cluster>-api`, `<cluster>-internal` | optional |
+| SSH key | `<cluster>-<fingerprint[:8]>` | Hetzner: an existing key with the same fingerprint is adopted, never deleted |
+| Lock | Hetzner only: `<cluster>-lock` (an empty firewall) | see [10.4](#104-locking) |
+
+**Canonical labels** are the provider-neutral ownership model. The key prefix is `tent/` (decided on 2026-09-25).
+
+| Label | Value | Meaning |
+|---|---|---|
+| `tent/cluster` | cluster name | the only ownership signal |
+| `tent/nodegroup` | group name | machines, placement groups |
+| `tent/role` | `server` / `client` / `combined` | machines |
+| `tent/spec-hash` | 16 hex chars | semantic hash of the node configuration ([8.4](#84-nomad-configuration-rendering)) |
+| `tent/slot` | `0`–`6` | Hetzner Nomad servers only |
+| `tent/op` | UUID | operation id of the create call ([ADR-0015](adr/0015-idempotency-without-unique-names.md)) |
+| `tent/lock-for` | cluster name | the Hetzner lock firewall only; it deliberately has no `tent/cluster` |
+| `tent/e2e`, `tent/e2e-run` | `true`, run id | resources created by E2E tests |
+
+**How labels are encoded per provider:**
+
+- **Hetzner:** native key/value labels on every resource. Label selectors filter on the server side.
+- **Vultr:**
+  - *Instances.* Each canonical label becomes one string tag. `GET /v2/instances?tag=` filters by a single tag on the
+    server side (the cluster tag); everything else is filtered on the client.
+  - *Other resources* (VPC, firewall group, load balancer, SSH key) have no tags. A marker such as
+    `tent:cluster=prod;kind=vpc` goes into their one free-text field (description, label or name), and tent filters on
+    the client.
+  - *Tag syntax.* Tags are `key=value`, stored verbatim (for example `tent/cluster=prod`). They are always
+    lower-case, because Vultr's tag filter is an exact but case-insensitive match (spike 2026-09-25,
+    [ADR-0018](adr/0018-vultr-provider-design.md)).
+  - *Where it lives.* The codec is the only code that knows the exact tag syntax: `internal/cloud/vultr/labels.go`.
+
+**Nomad-side identity:**
+- the node name is the hostname, which is the cloud machine name;
+- `datacenter` is the node's zone (`fsn1` on Hetzner, `ams` on Vultr);
+- clients get node meta `tent_cluster`, `tent_nodegroup` and `tent_instance_id`.
+
+Since Nomad 1.5 jobs default to `datacenters = ["*"]`, so mapping zones to datacenters costs nothing, and
+`spread { attribute = "${node.datacenter}" }` spreads workloads where there are several zones.
+
+---
+
+## 4. System architecture
+
+```
+ operator / CI
+      │
+┌─────▼──────────────────────────── tent (CLI) ──────────────────────────────┐
+│ cli (cobra) ─► app: use cases (create / update / rollout / validate / ...)  │
+│                  │                                                          │
+│   statestore ◄───┼──► model (spec → intents, NodeConfig) ──► pki           │
+│   (spec, PKI,    │         │                                                │
+│    lock)         │         ▼                                                │
+│                  │   cloud.Provider ──► engine (plan/apply DAG)             │
+│                  │   ├─ vultr   (first)                                     │
+│                  │   └─ hetzner (second; aws later)                         │
+│                  └──► rollout / validate ──► nomadops (ACL, raft, drain)   │
+└──────┬───────────────────┬──────────────────────────┬──────────────────────┘
+       ▼                   ▼                          ▼
+  S3 / file          Cloud API                Nomad API :4646 (mTLS + ACL)
+                           │ VM + user_data(NodeConfig)
+                           ▼
+               cloud-init ─► tent-node ─► nomad (systemd)
+```
+
+### 4.1 Three responsibilities
+
+This split is the central decision.
+
+1. **Infrastructure**: network, firewalls, placement groups, load balancers and SSH keys. It is not Nomad-aware and is
+   a graph of provider-implemented tasks run by the engine ([§6](#6-reconciliation-engine)).
+2. **Node lifecycle**: create, replace and remove machines.
+   - It is Nomad-aware: it drains nodes and respects Raft quorum.
+   - It lives in the core (`internal/rollout`) and calls only provider primitives: `List`, `Create`, `Stop` and
+     `Delete`.
+   - Nodes are **not** tasks in the engine graph. In kops the Hetzner "ServerGroup" is a task, so replacing one node
+     re-runs the whole plan.
+3. **Nomad configuration**: agent config, TLS material, ACL bootstrap, node pools and the rest of day-1 setup. It
+   does not depend on the cloud and lives in the core.
+
+### 4.2 Two binaries
+
+- `tent` is the CLI for operators and CI.
+- `tent-node` is the node agent that cloud-init runs on each VM, similar to kops' `nodeup`. Its version always matches
+  the CLI that created the node exactly.
+
+---
+
+## 5. Repository layout and dependency rules
+
+```
+github.com/ingvarch/tent
+├── api/v1alpha1/        # public types: Cluster, NodeGroup, defaults, validation (stdlib only)
+├── cmd/
+│   ├── tent/            # CLI entrypoint; registers providers
+│   └── tent-node/       # node agent entrypoint
+├── internal/
+│   ├── cli/             # cobra commands, flags, output (table|yaml|json): a thin layer
+│   ├── app/             # use cases; used by the CLI, e2e tests and a future controller
+│   ├── model/           # spec -> cloud-agnostic intents (network, access, groups, join)
+│   ├── engine/          # task graph: plan/apply, diff rendering, retries, concurrency
+│   ├── cloud/           # Provider / Nodes interfaces, capabilities, registry, common types
+│   │   ├── vultr/       # govultr wrapper, label codec, tasks, nodes, inventory, pricing
+│   │   └── hetzner/     # hcloud-go wrapper, tasks, nodes, inventory, pricing, lock
+│   ├── nodeconfig/      # versioned tent <-> tent-node contract, Nomad config rendering
+│   ├── nodeup/          # tent-node phases: system, host firewall, runtime, CNI, nomad, join refresh
+│   │   └── env/         # metadata clients: vultr/, hetzner/ (IMDSv2 for AWS later)
+│   ├── nomadops/        # the ONLY importer of github.com/hashicorp/nomad/api
+│   ├── rollout/         # scale up/down, rolling update, server quorum safety
+│   ├── validate/        # cloud + Nomad health checks
+│   ├── pki/             # CA, certificates, gossip key, tokens
+│   ├── statestore/      # Store interface, file:// and s3://, layout, locking
+│   ├── assets/          # Nomad / CNI / tent-node sources, signature and checksum verification
+│   ├── channels/        # embedded channel files: recommended versions and images
+│   ├── buildinfo/       # version, commit, date (ldflags)
+│   └── buildconfig/     # tests only: CI workflows, Makefile and release config stay consistent
+├── test/e2e/            # //go:build e2e: black-box tests against real clouds (Vultr first)
+├── hack/                # janitor, dev upload of tent-node, vultr-spike/
+└── docs/                # this document, ADRs, platform notes, roadmap
+```
+
+`depguard` in golangci-lint enforces the dependency rules ([ADR-0021](adr/0021-import-rules.md)):
+
+- `api/...` imports only the standard library and other `api/` packages, so third parties can use the types. Its
+  tests are exempt.
+- Only `cmd/tent` imports provider packages (`internal/cloud/<provider>`), to register them. Every other package,
+  the core (`internal/model`, `internal/rollout`, `internal/app`) included, uses only the interfaces in
+  `internal/cloud`, so no package reaches a provider through another one. Tests are exempt, and so is code under
+  `internal/cloud/<provider>/`, so a provider can have subpackages.
+- Cloud SDKs (govultr, hcloud-go) are imported only by their provider's packages, tests included.
+- `internal/nodeup` never imports `internal/cloud/...`. No code that can create or delete cloud resources ever runs
+  on a node.
+- Only `internal/nomadops` imports `github.com/hashicorp/nomad/api`. The root module `github.com/hashicorp/nomad` is
+  BUSL-licensed and must never be imported.
+- Everything except `api/` is `internal/`. The project makes no compatibility promises before it has to.
+
+---
+
+## 6. Reconciliation engine
+
+See [ADR-0002](adr/0002-direct-cloud-apis-and-own-engine.md).
+
+```go
+// Task is one desired cloud object. Providers implement tasks;
+// the engine only orders, plans and applies them.
+type Task interface {
+	Key() Key    // stable identity, e.g. {Kind: "vultr.FirewallGroup", Name: "prod-servers"}
+	Deps() []Key // explicit edges; no reflection
+
+	// Plan compares the desired object with the snapshot. It must not call the cloud.
+	Plan(ctx context.Context, env *Env) (Change, error)
+	// Apply executes a planned change. It must be safe to retry.
+	Apply(ctx context.Context, env *Env, ch Change) error
+	// Delete removes an owned object of this kind (used by prune and cluster deletion).
+	// Creation and deletion live in the same type so they cannot drift apart.
+	Delete(ctx context.Context, env *Env, obj Object) error
+}
+
+type Change struct {
+	Action Action      // Noop | Create | Update | Replace | Delete
+	Diff   []FieldDiff // human readable, e.g. rules[3]: + tcp/4646 from 203.0.113.7/32
+	Reason string
+}
+
+type Env struct {
+	Snapshot *Inventory // every resource owned by the cluster, fetched once per run
+	Outputs  *Outputs   // IDs/IPs produced by applied tasks, read by dependents
+	DryRun   bool
+}
+```
+
+Behaviour:
+
+- **Snapshot instead of a lookup per task.** At the start of a run the provider lists every resource kind once:
+  labelled lists on Hetzner, tag and client-side filters on Vultr. `Plan` reads only this snapshot. The number of API
+  calls grows with the number of resource kinds, not resources. This is critical under Hetzner's 3600 requests per
+  hour.
+- **Plan** runs sequentially in topological order. Dependents of a task that will be created see "known after apply"
+  values, as in Terraform.
+- **Apply** runs in parallel with a bounded worker pool. A task starts when its dependencies have finished. A failure
+  cancels only its dependents, and all errors are collected.
+- **Idempotency without a state file.** Deterministic names and ownership markers make every task safe to re-run.
+  Detecting a create whose response was lost depends on the provider
+  ([ADR-0015](adr/0015-idempotency-without-unique-names.md)):
+  - *`UniqueNames` (Hetzner).* A retried create returns `uniqueness_error`. The task looks the resource up by name and
+    adopts it, but only if the ownership labels match.
+  - *No unique names (Vultr).*
+    - Every create carries a client-generated operation id (`tent/op`).
+    - SDK-level retries of non-idempotent calls are disabled.
+    - After an ambiguous failure, the task searches by operation id before it retries.
+    - A dedupe pass removes accidental copies.
+- **Normalisation.** Every task normalises cloud-side values before diffing, so a plan never shows a diff forever,
+  which is a known kops bug class. Each task has an "apply, re-plan, expect no-op" test.
+- **Prune.** Resources that carry the cluster marker but that no task claims become `Delete` changes. Exceptions:
+  nodes, which `rollout` manages, and volumes, which are never deleted implicitly.
+- **Errors and retries.**
+  - Retryable: rate limits (honouring `Retry-After` / `RateLimit-Reset`), conflicts, `locked` and 5xx on idempotent
+    calls.
+  - Permanent: `invalid_input`, `resource_unavailable` after fallbacks, `forbidden`.
+  - Per-task deadlines use jittered backoff.
+- **Output.**
+  - A human-readable plan: `+ create`, `~ update` with field diffs, `- delete`, `-/+ replace`.
+  - `-o json` for machines.
+  - `--exit-code` returns 2 when the plan has changes, for drift detection in CI.
+
+Deliberately **not** copied from kops' `fi` framework:
+- task contracts checked by reflection only at runtime;
+- dependency discovery by walking struct fields;
+- "nil means don't care", which cannot express removing a field;
+- deletion code separate from creation code;
+- re-applying the whole graph for every replaced node.
+
+---
+
+## 7. Provider abstraction
+
+See [ADR-0004](adr/0004-layered-architecture.md).
+
+### 7.1 Interfaces
+
+```go
+type Provider interface {
+	Name() string
+	Capabilities() Capabilities
+
+	// Spec time: provider defaults and validation against the live API
+	// (region/location exists, machine type available there, image resolves for the architecture).
+	Default(c *api.Cluster, groups []*api.NodeGroup) error
+	Validate(ctx context.Context, c *api.Cluster, groups []*api.NodeGroup) error
+
+	// Infrastructure: cloud-agnostic intents -> tasks for the engine.
+	BuildInfra(ctx context.Context, m *model.Cluster) ([]engine.Task, error)
+	Inventory(ctx context.Context, cluster string) (*Inventory, error)
+
+	Nodes() Nodes                                           // primitives for rollout
+	Join(m *model.Cluster) model.JoinStrategy               // how agents find servers
+	PackUserData(nc *nodeconfig.NodeConfig) ([]byte, error) // encoding and size limits
+	Locker(cluster string) statestore.Locker                // optional cloud-native mutex; may be nil
+}
+
+// Nodes are primitives only. Drain and quorum logic lives in the core (rollout).
+type Nodes interface {
+	List(ctx context.Context, cluster string) ([]Instance, error)
+	Create(ctx context.Context, req CreateRequest) (Instance, error) // group, zone, name, op id, fixed IP?, user data
+	Stop(ctx context.Context, in Instance) error                    // graceful if GracefulShutdown, else hard
+	Delete(ctx context.Context, in Instance) error
+	ScrubUserData(ctx context.Context, in Instance) error           // only if MutableUserData
+}
+
+type Capabilities struct {
+	ManagedGroups         bool // native autoscaling groups (AWS: yes; Vultr, Hetzner: no)
+	InstanceIdentity      bool // signed instance identity documents (AWS: yes; Vultr, Hetzner: no)
+	CloudAutoJoin         bool // go-discover support (AWS: yes; Vultr, Hetzner: no)
+	FirewallCoversPrivate bool // AWS SGs filter VPC traffic; Vultr and Hetzner firewalls are public-only
+	UniqueNames           bool // Hetzner: yes. Vultr: no -> operation ids (ADR-0015)
+	KeyValueLabels        bool // Hetzner: labels everywhere. Vultr: string tags on instances only
+	FixedPrivateIPs       bool // Hetzner: attach_to_network ip. Vultr: no -> seed + refresh (ADR-0016)
+	GracefulShutdown      bool // Hetzner: ACPI shutdown. Vultr: no, halt is hard (ADR-0017)
+	FailureDomains        bool // Hetzner eu-central: 3 locations. Vultr: none
+	SpreadPlacement       bool // Hetzner: placement groups. Vultr: none
+	MutableUserData       bool // Vultr: PATCH user_data -> scrub secrets after bootstrap
+	MaxUserDataBytes      int  // Hetzner: 32 KiB. Vultr: 64 KiB budget (the API accepts at least 4 MiB)
+	CostEstimates         bool // Hetzner /pricing, Vultr /plans
+}
+```
+
+On the node side, `tent-node` uses a small per-provider environment interface:
+- **Vultr:** the metadata service at `http://169.254.169.254/v1.json`.
+- **Hetzner:** `http://169.254.169.254/hetzner/v1/...`.
+- **AWS:** IMDSv2 later.
+
+```go
+type Environment interface {
+	InstanceID(ctx context.Context) (string, error) // Vultr: instance-v2-id (the API UUID)
+	Zone(ctx context.Context) (string, error)       // normalised to lower case (Vultr reports "AMS")
+	PrivateIPv4(ctx context.Context) (netip.Addr, error)
+	UserData(ctx context.Context) ([]byte, error)
+	MetadataEndpoint() netip.Addr // blocked for workloads by the host firewall
+}
+```
+
+### 7.2 Intents (the provider's input)
+
+`model.Cluster` is computed by the core from the specs. The provider sees only this type, never Nomad specifics.
+
+- **Network.** The cluster CIDR and, where the provider supports fixed IPs, named subnets. On Hetzner these are
+  `control` for fixed addresses and `nodes` for automatic ones.
+- **Access rules.** `From` (CIDRs, the internet, a group, the cluster) → `To` (a group or role), with ports and
+  protocol.
+  - Rules cover internet-facing access (SSH, the API, ingress) **and** intra-cluster traffic (4646–4648 and the
+    dynamic port range between nodes).
+  - Vultr and Hetzner firewalls cannot filter private traffic. Their providers map only the internet-facing rules,
+    and intra-cluster rules are enforced by tent-node's host firewall.
+  - AWS will map all of them to Security Groups.
+- **Node groups:** role, machine type, image, zones, size, the per-group NodeConfig template and the spec hash.
+- **Join strategy.** Fixed slots on Hetzner, seed plus refresh on Vultr, and cloud auto-join tags on AWS.
+- **Load balancers** (optional): the API load balancer, and later an internal one and ingress.
+
+### 7.3 Provider comparison (what the core must not assume)
+
+| Area | Vultr (first) | Hetzner (second) | AWS (later) | Mechanism that keeps the core unchanged |
+|---|---|---|---|---|
+| Region/zones | region, no AZs | network zone / locations | region / AZs | `cloud.region`, `cloud.zones` semantics |
+| Ownership | string tags (instances), text fields elsewhere | key/value labels | tags | per-provider label codec |
+| Idempotent create | operation ids | unique names | client tokens / tags | `UniqueNames` ([ADR-0015](adr/0015-idempotency-without-unique-names.md)) |
+| Perimeter | one public-only firewall group per instance | public-only Cloud Firewalls | Security Groups | access intents + host firewall |
+| Node groups | tent creates each VM | tent creates each VM | EC2 directly, ASG later | `Nodes` primitives; `ManagedGroups` |
+| Server discovery | seed + refresh | fixed IP slots | cloud auto-join | `JoinStrategy` ([ADR-0016](adr/0016-server-discovery-seed-and-refresh.md)) |
+| Server removal | hard stop + Nomad API | ACPI shutdown + Nomad API | terminate + Nomad API | `GracefulShutdown` ([ADR-0017](adr/0017-api-driven-server-removal.md)) |
+| Node credentials | user data, scrubbed after bootstrap | user data | IAM role / bootstrap controller | credential delivery strategy ([9.5](#95-target-architecture-bootstrap-controller)) |
+| State store | Vultr Object Storage / any S3 | Hetzner Object Storage / any S3 | S3 | the same `s3://` backend |
+| Metadata | `/v1.json` | `/hetzner/v1/` | IMDSv2 | `nodeup/env.Environment` |
+
+---
+
+## 8. Nodes: tent-node and NodeConfig
+
+See [ADR-0006](adr/0006-two-binaries-and-nodeconfig.md).
+
+### 8.1 Bootstrap chain
+
+```
+cloud-init (user_data: minimal cloud-config; vendor package upgrades disabled)
+  ├─ write /etc/tent/node.json            # NodeConfig, gzip+base64 in user data, mode 0600
+  ├─ download tent-node (mirrors) + verify sha256
+  └─ tent-node install                    # installs tent-node.service (oneshot, every boot)
+        │                                 # and tent-node-join.timer (join refresh, every 60 s)
+        └─ tent-node up                   # idempotent phases, see below
+              └─ systemctl start nomad
+```
+
+- **No operator, no SSH.** The node bootstraps itself, without the operator being online and without SSH access. This
+  is a precondition for future autoscaling and automatic replacement. SSH is used only for diagnostics
+  (`tent toolbox dump`).
+- **No vendor package upgrades.** The cloud-config disables package update and upgrade. Vultr's vendor data has set the
+  same since at least 2026-09, but it may change, so tent sets it anyway. OS patching happens by replacing nodes.
+
+### 8.2 tent-node phases
+
+`tent-node up` runs as a systemd oneshot on every boot. Every phase checks the current state before it acts, and
+Nomad is restarted only when its files actually changed.
+
+| Phase | What it does |
+|---|---|
+| `preflight` | Checks the OS and architecture. The instance id and hostname from the metadata service must match NodeConfig, which protects against mixed-up user data. |
+| `system` | Hostname, sysctls, kernel modules (`br_netfilter`, `overlay`), time sync, journald limits. |
+| `hostfirewall` | **Owns the host firewall.** Disables ufw or firewalld if the image enabled them (Vultr images do). Applies tent's nftables ruleset: SSH, Nomad ports 4646–4648 and the dynamic port range only from the cluster CIDR, and a drop rule for `169.254.169.254` from forwarded (container) traffic and non-root processes. |
+| `runtime` | Docker from the distribution package by default, plus `daemon.json` (log limits, live-restore). |
+| `cni` | CNI reference plugins into `/opt/cni/bin`, verified by sha256. |
+| `join` | Writes `05-join.hcl`: the seed or slot list from NodeConfig, refreshed from the live peer set when a server is reachable ([ADR-0016](adr/0016-server-discovery-seed-and-refresh.md)). |
+| `nomad` | Downloads the Nomad zip (verified by sha256); creates the user and directories; writes the TLS files (mode 0600), the agent configuration files, the intro token into `<client state_dir>/intro_token.jwt` and the systemd unit; starts Nomad. |
+| `verify` | Checks the local `/v1/agent/health`. Writes `/var/lib/tent/status.json` for `tent toolbox dump`. |
+
+`tent-node refresh-join` runs from a systemd timer every 60 seconds:
+1. It calls `GET https://<known server>:4646/v1/status/peers`, authenticating with the node's own certificate. The
+   endpoint needs no ACL token.
+2. It rewrites `05-join.hcl` atomically when the peer set changes.
+3. Nomad reads that file only at start, so the refresh never restarts Nomad. It only guarantees that the next start
+   finds the current servers.
+
+### 8.3 NodeConfig contract
+
+```go
+// NodeConfig is the versioned contract between tent (producer) and tent-node (consumer).
+type NodeConfig struct {
+	APIVersion string  // "tent/v1alpha1"
+	Kind       string  // "NodeConfig"
+	Cluster    string
+	NodeGroup  string
+	Instance   string  // expected hostname / cloud machine name
+	Role       Role    // server | client | combined
+	Assets     []Asset // {Name, URLs (mirrors), SHA256}: nomad, cni-plugins
+	Files      []File  // {Path, Mode, Owner, Content, PerNode}: Nomad config, TLS material, intro token
+	Join       Join    // {Strategy: slots|seed-refresh, Addresses []netip.Addr, RefreshInterval}
+	System     System  // sysctls, kernel modules, container runtime settings
+	Firewall   HostFirewall
+	SpecHash   string  // semantic hash of the group-level configuration (see 8.4)
+}
+```
+
+- **Size.** The encoded NodeConfig must stay well below the provider's user data limit.
+  - Hetzner: 32 KiB, so tests fail above 24 KiB.
+  - Vultr: the API accepts at least 4 MiB. tent's budget is 64 KiB, verified end to end through the metadata service
+    and cloud-init (spike 2026-09-25).
+  - Fallback if a provider's limit is too small: user data carries only a short-lived presigned URL and a key for an
+    encrypted NodeConfig object in the state bucket.
+- **Versioning.** The contract is versioned, and tent-node always has the CLI's version. Version skew therefore
+  appears only when a newer CLI operates a cluster whose nodes an older CLI created. Those nodes keep running their
+  tent-node until they are replaced.
+
+### 8.4 Nomad configuration rendering
+
+- **The CLI renders the final Nomad agent configuration**, and tent-node only writes files. So:
+  - `tent update` can show a diff of the Nomad configuration per group;
+  - the hash of the rendered configuration is exactly the "node is outdated" signal;
+  - tent-node stays thin.
+- **Files in `/etc/nomad.d/`**, merged by Nomad in lexicographic order:
+
+  | File | Contents | Scope |
+  |---|---|---|
+  | `00-tent.hcl` | group configuration | identical on all nodes of a group |
+  | `05-join.hcl` | `server_join { retry_join = [...] }` | per node; maintained by tent-node, never part of the hash |
+  | `10-node.hcl` | `name`, `datacenter`, `tent_instance_id` meta | per node |
+  | `99-user.hcl` | `extraConfig` | group |
+- **Values known only at runtime** (private IP, interface name) are go-sockaddr templates that select the interface by
+  cluster CIDR. Nomad supports them in `bind_addr`, `addresses`, `advertise` and `client.network_interface`.
+  Interface names vary on both Vultr and Hetzner, so this matters on both.
+- **Spec hash:** the first 16 hex characters of sha256 over the canonical group-level content.
+  - Included: `00-tent.hcl`, `99-user.hcl`, asset versions and sha256s, system settings, the host firewall and the
+    tent-node version.
+  - Excluded: per-node files (certificates, keys, intro token, `05-join.hcl`, `10-node.hcl`) and mirror URLs.
+  - So a different download mirror never rolls the cluster (a kops pitfall). A new tent version that changes rendering
+    does roll nodes, and the plan says why.
+- **Format.** The agent configuration is parsed by HCL1. Rendering uses text templates with strict escaping and
+  golden-file tests.
+
+Full sketches: [Appendix A](#appendix-a-nomad-agent-configuration-sketches).
+
+### 8.5 Artifacts and verification
+
+| Artifact | Source | Verification |
+|---|---|---|
+| Nomad | `https://releases.hashicorp.com/nomad/<v>/nomad_<v>_linux_<arch>.zip` | The **CLI** downloads `nomad_<v>_SHA256SUMS` and verifies its detached signature with HashiCorp's release key, which is embedded in tent. The node verifies only the sha256 carried in NodeConfig. |
+| CNI plugins | GitHub releases of `containernetworking/plugins` (version pinned in the channel) | sha256 in NodeConfig |
+| tent-node | GitHub release of tent (`tent-node_linux_<arch>` + `checksums.txt`) | The CLI reads `checksums.txt` of its own version and puts the sha256 into user data. |
+| Docker | the distribution's package repository | distribution package signatures |
+
+- Trust is established once, on the operator's side, so nodes need no PGP.
+- The HashiCorp APT repository is deliberately **not** used: its signing key was rotated on 2026-09-09 after a
+  security incident.
+- Development builds of tent-node are uploaded to object storage and served through a presigned URL (`TENT_NODE_URL`
+  plus `TENT_NODE_SHA256`).
+
+### 8.6 Operating systems
+
+- **Ubuntu** (apt-based) is supported in v1. The default image is `ubuntu-24.04` (decided on 2026-09-25). E2E also
+  runs on `ubuntu-26.04`.
+- **Architectures:** x86-64 everywhere, and arm64 only where the provider offers it. Hetzner has CAX; Vultr has no
+  arm64 Cloud Compute.
+- **Other distributions** come later behind a small `osfamily` abstraction in `nodeup`.
+
+---
+
+## 9. Security
+
+See [ADR-0007](adr/0007-security-baseline.md) and [ADR-0008](adr/0008-node-credential-delivery.md).
+
+### 9.1 PKI
+
+- **One CA per cluster**, ECDSA P-256, the same as `nomad tls`. The CA private key lives only in the state store and
+  never reaches a node.
+- **The CA is stored as a bundle from day one** (`pki/ca-bundle.pem` plus the id of the active signer), so CA rotation
+  can be added later without migrating the storage format.
+- **Per-node certificates:**
+  - servers get `server.<region>.nomad` and clients get `client.<region>.nomad`, both plus `localhost` and
+    `127.0.0.1`;
+  - extended key usage is `serverAuth` **and** `clientAuth`, because tent-node's join refresh calls the servers' HTTP
+    API with the node certificate;
+  - validity is 1 year, and renewal means replacement; `tent validate` warns 30 days before expiry.
+- **No IP addresses in certificates.** The CLI connects to a server's public IP with
+  `TLSServerName = server.<region>.nomad`, so server IPs can change freely.
+- **Operator certificates** use `cli.<region>.nomad`. They are short-lived (24 hours by default) and issued on demand
+  by `tent export nomad`.
+- **mTLS** is on for RPC and HTTP: `verify_server_hostname = true`, and `verify_https_client = true` by default.
+- **The gossip encryption key** is used on servers only.
+
+### 9.2 ACL and tokens
+
+- **ACLs are always enabled.**
+- **Bootstrap.**
+  - tent generates the bootstrap secret, a UUID, and stores it in the state store **before** calling
+    `POST /v1/acl/bootstrap {"BootstrapSecret": ...}`.
+  - Bootstrap is not idempotent: a second call fails with "ACL bootstrap already done". On retry, tent verifies the
+    stored secret with `GET /v1/acl/token/self`.
+- **The bootstrap token is used only by tent itself.** Scoped tokens with TTLs for tent's own operations come later.
+- **For humans**, `tent export nomad` issues a separate ACL token with a TTL.
+
+### 9.3 Client introduction
+
+Servers run with `client_introduction { enforcement = "strict" }` (Nomad 1.11+).
+
+- **Issuing.** Right before each client VM is created, tent requests an introduction token with
+  `POST /v1/acl/identity/client-introduction-token`. The token is bound to the node name and node pool, with a TTL
+  of at most 30 minutes.
+- **Delivery.** tent-node writes the token to `<client state_dir>/intro_token.jwt`, because the agent configuration
+  file cannot carry it.
+- **Lifetime.** Nomad uses the token only for the first registration. After that the node holds a self-renewing node
+  identity.
+- **Gotchas.**
+  - An expired or mismatched token is rejected even with `enforcement = "warn"`.
+  - A VM that fails to register within the TTL is simply replaced, which is idempotent.
+  - Client introduction does not replace mTLS.
+
+### 9.4 Secrets on nodes: threat model
+
+Neither Vultr nor Hetzner offers instance identity. `user_data` is readable through the metadata service from inside
+the VM, and by default that includes containers.
+
+| In user data | Risk if read | Mitigation |
+|---|---|---|
+| CA certificate | none (public) | — |
+| Node certificate and key | impersonate that node | nftables blocks the metadata endpoint for containers and non-root processes; servers run no workloads (except combined nodes, [ADR-0019](adr/0019-combined-server-client-role.md)); **Vultr: user data is scrubbed after bootstrap** |
+| Gossip key (servers only) | join the server gossip pool | servers run no workloads (except combined nodes); Serf and RPC listen only on the private network |
+| Intro token (clients only) | register a fake client | TTL ≤ 30 min, bound to one node name and pool, used once at first registration |
+| Cloud API token | — | **never on nodes** |
+| State store credentials | — | **never on nodes** (unlike kops on Hetzner) |
+
+Scrubbing on Vultr works like this:
+- Vultr lets user data be changed after creation.
+- Once a node has registered with Nomad, tent replaces its user data with a non-secret stub (`Nodes.ScrubUserData`).
+- From then on the metadata service no longer serves the secrets.
+
+The spike confirmed on 2026-09-25 that this works: the metadata service serves the updated value within seconds, and
+cloud-init does not re-run after a restart ([ADR-0018](adr/0018-vultr-provider-design.md)). Hetzner user data is
+immutable, so there it stays for the node's lifetime.
+
+### 9.5 Target architecture: bootstrap controller
+
+This is v2, and it is mandatory for ASG-style groups where every instance shares the same user data.
+
+A bootstrap controller runs on the servers, modelled on kops-controller:
+1. The node generates its key locally and sends a CSR with its claimed instance id.
+2. The controller looks the instance up in the cloud API.
+   - Vultr and Hetzner: it checks the ownership markers, the private IP, the creation time and that the node is not
+     already registered.
+   - AWS: it checks the signed instance identity document.
+3. On providers without identity documents, the controller also calls back to the private IP that the API reported
+   and runs a one-time challenge.
+4. It issues the certificate and the intro token.
+
+User data then carries no secrets at all. Credential delivery is therefore a strategy chosen by capabilities:
+`userdata` (v1), `controller` (v2), and possibly `iam-s3` on AWS.
+
+### 9.6 Network perimeter
+
+- **Cloud firewalls cover the public interface only**, on both providers.
+  - Vultr: two firewall groups per cluster, one per role, because an instance can have only one.
+  - Hetzner: `<cluster>-nodes` and `<cluster>-servers`.
+- **What they allow:**
+  - 22/tcp from `access.ssh`;
+  - ICMP;
+  - 4646/tcp to servers from `access.api`. The default is `[0.0.0.0/0]`, because mTLS and ACL protect the API.
+    `validate` and every mutating command warn loudly while it is open to the whole internet.
+
+  Everything else is dropped.
+- **Hetzner** firewalls are applied both by label selector and explicitly at server creation. **Vultr** sets the
+  group at instance creation. Either way the machine is protected from its first packet.
+- **Binding.** RPC and Serf bind only to the private address. HTTP on clients binds to localhost plus the private
+  address. HTTP on servers binds to all addresses, behind the cloud firewall.
+- **Private traffic is not filtered by either cloud.** tent-node's nftables ruleset allows Nomad ports only from the
+  cluster CIDR.
+- **Load balancers:** Vultr load balancers are always public, and Hetzner firewalls do not apply to load balancers. An
+  optional API load balancer is therefore safe only because of mTLS plus ACL. Vultr load balancer firewall rules can
+  narrow the sources.
+
+### 9.7 Operator access
+
+- **`tent export nomad`** writes `NOMAD_ADDR`, `NOMAD_CACERT`, `NOMAD_CLIENT_CERT`, `NOMAD_CLIENT_KEY`,
+  `NOMAD_TLS_SERVER_NAME` and `NOMAD_TOKEN` into files and prints the matching `export` lines. The certificate and the
+  token are short-lived.
+- **`tent ui`** is a local reverse proxy from `127.0.0.1:4646` to the cluster that injects mTLS and the token. The
+  browser UI works without installing client certificates, and `verify_https_client = true` stays on.
+
+### 9.8 Credentials handling
+
+- **Cloud credentials** come from `VULTR_API_KEY` and `HCLOUD_TOKEN`, later also from token files. They never go into
+  specs, the state store, logs or nodes.
+- **Vultr.** Use a service user whose IAM policy covers only the actions tent needs: compute instances, VPCs,
+  firewalls, SSH keys, and optionally load balancers and object storage. Add an IP allow-list for CI where possible.
+  Vultr IAM also supports OIDC role trusts, a route to short-lived CI credentials; this is to be evaluated.
+- **Hetzner.** Tokens are project-wide (Read, or Read & Write) and the rate limit is per project, so use one project
+  per cluster or environment.
+- **State store credentials** come from the standard AWS credential chain.
+
+---
+
+## 10. State store and locking
+
+See [ADR-0010](adr/0010-state-store-and-locking.md).
+
+### 10.1 Backends
+
+- **`file:///path`:** local development and single-runner CI jobs (E2E uses it).
+- **`s3://bucket/prefix?endpoint=…&region=…`:** uses aws-sdk-go-v2 and works with any S3-compatible store.
+  - **Vultr Object Storage** (`<cluster-id>.vultrobjects.com`):
+    - EU endpoints: `ams1`, `ams2`, `lhr1`, `mxp1`.
+    - At least $18/month (Standard tier); the Archive tier cannot hold state.
+    - Access keys can be created through the Vultr API.
+  - **Hetzner Object Storage** (`<fsn1|nbg1|hel1>.your-objectstorage.com`): EU only, keys only from the Console,
+    €6.49/month base price.
+  - **AWS S3, Cloudflare R2, MinIO.**
+- **The state store does not depend on the compute provider.** A Vultr cluster may keep its state in R2, for example.
+- **Credentials** come from the standard AWS credential chain.
+- **Bucket versioning** is recommended.
+
+```go
+type Store interface {
+	Get(ctx context.Context, path string) ([]byte, Version, error) // ErrNotFound
+	Put(ctx context.Context, path string, data []byte, opts PutOptions) (Version, error)
+	List(ctx context.Context, prefix string) ([]string, error)
+	Delete(ctx context.Context, path string) error
+	Capabilities() StoreCapabilities // e.g. ConditionalPut
+}
+
+type PutOptions struct {
+	IfNoneMatch bool    // create only
+	IfMatch     Version // optimistic concurrency, when supported
+}
+```
+
+### 10.2 Layout
+
+```
+<state>/<cluster>/
+  tent-version                           # minimum tent version; older CLIs refuse to touch the cluster
+  cluster.yaml                           # user spec
+  nodegroups/<name>.yaml                 # user specs
+  cluster.completed.yaml                 # last applied, with all defaults
+  pki/ca-bundle.pem                      # public
+  pki/private/ca.key                     # secret
+  secrets/gossip.key                     # secret
+  secrets/acl-bootstrap-token            # secret
+  backups/<timestamp>.snap               # Raft snapshots (contain the keyring: secret)
+  history/<timestamp>-<operation>.yaml   # audit trail of applies
+```
+
+`tent delete cluster` removes the state last. It refuses to remove files it does not recognise unless `--force` is
+given.
+
+### 10.3 Secrets at rest
+
+- v1 relies on the bucket being private and on provider-side encryption.
+- Later, an optional `SecretStore` layer over `Store` adds client-side encryption with `age`.
+
+### 10.4 Locking
+
+Mutating commands (`update`, `rolling-update`, `upgrade`, `delete`, `backup restore`) take a cluster lock. The lock
+is a lease that records owner, host, operation, acquired-at and expires-at, and it is renewed during the operation.
+tent picks the first mechanism that works:
+
+| Order | Mechanism | Where |
+|---|---|---|
+| 1 | Conditional put (`PutObject` with `If-None-Match: *`) | AWS S3, R2, recent MinIO. **Vultr Object Storage**: probably, since it runs Ceph Tentacle, but unverified (the spike's check needs a bucket and has not run). **Hetzner Object Storage**: unsupported on versioned buckets and undocumented otherwise. |
+| 2 | `flock` | `file://` |
+| 3 | Cloud-native mutex, available only on providers with `UniqueNames` | **Hetzner**: an empty firewall named `<cluster>-lock` labelled `tent/lock-for=<cluster>`. Creating it acquires the lock, deleting it releases it. It deliberately has no `tent/cluster` label, so inventory and prune ignore it. |
+| 4 | Best-effort lease (write a token, wait, read back) with a loud warning | anything else, for example Vultr compute with Hetzner Object Storage |
+
+`tent state unlock --force` removes a stale lock.
+
+---
+
+## 11. Vultr provider
+
+The first provider. See [ADR-0018](adr/0018-vultr-provider-design.md) for the decisions and
+[platform notes §3](platform-notes.md#3-vultr) for the facts. Items marked 🔬 are verified with
+[`hack/vultr-spike`](../hack/vultr-spike/README.md) before the provider code relies on them.
+
+### 11.1 Resources
+
+| Resource | Name / marker | Managed by | Notes |
+|---|---|---|---|
+| SSH key | name `tent:cluster=<c>;kind=ssh-key;fp=<fp8>` | engine | names are not unique; ownership comes from the marker |
+| VPC | description `tent:cluster=<c>;kind=vpc` | engine | one per cluster; region-scoped; at most 5 VPCs per region; CIDR from `networking.cidr` (`/16`, `/20` and `/24` verified) |
+| Firewall groups | description `tent:cluster=<c>;kind=firewall;role=<role>` | engine | one per role, because an instance has exactly one group; each group reports its `max_rule_count` (50 in examples) |
+| Instances | label = hostname = `<cluster>-<group>-<index>`; tags = canonical labels via the codec | rollout via `Nodes` | see [11.3](#113-creating-a-node) |
+| Load balancer (optional) | label `tent:cluster=<c>;kind=lb;name=api` | engine + rollout | always public; targets are instance IDs, so rollout updates membership on replacement; LB firewall rules narrow the sources |
+| NAT gateway (private topology, later) | tag | engine | one per VPC, $0.03/hour |
+
+### 11.2 Server discovery: seed and refresh
+
+Vultr cannot assign fixed private IPs, go-discover does not support Vultr, and the load balancer is always public.
+Vultr's own Nomad guide puts static private IPs into `retry_join`, which goes stale as soon as servers are replaced.
+tent therefore uses the generic seed-and-refresh strategy
+([ADR-0016](adr/0016-server-discovery-seed-and-refresh.md)):
+
+1. **Seed.** At creation, tent renders the private IPs of the servers that already exist into the node's
+   `05-join.hcl`. It takes them from `GET /v2/instances/{id}/vpcs` (`ip_address`, `mac_address`). On first bootstrap,
+   `server-0` is created first, and the remaining servers get `[server-0]`. Serf join is transitive, so
+   `bootstrap_expect` sees every server.
+2. **Refresh.** On boot and every 60 seconds, tent-node asks a known server for `GET /v1/status/peers` and rewrites
+   `05-join.hcl` whenever the peer set changes.
+3. **Rollout guard.** Before replacing servers, every node must be healthy. Between server replacements tent waits at
+   least one refresh interval.
+
+### 11.3 Creating a node
+
+```
+POST /v2/instances {region, plan, os_id, label, hostname,
+                    tags: [<canonical labels>, <tent/op=uuid>],
+                    sshkey_id: [...], firewall_group_id, attach_vpc: [vpc],
+                    user_data, backups: "disabled"}              → 202 {instance.id}
+poll GET /v2/instances/{id} until status=active, power_status=running, server_status=ok
+GET /v2/instances/{id}/vpcs → private IP (seed lists, LB membership)
+```
+
+- **VPC at creation.** The VPC is attached only at creation. Attaching later reboots the VM. cloud-init configures the
+  private interface statically from metadata. MTU is 1450, and interface names vary, so interfaces are matched by MAC
+  or CIDR, never by name.
+- **No duplicates.** govultr retries POST requests on 429/5xx by default. tent disables that for create and follows
+  [ADR-0015](adr/0015-idempotency-without-unique-names.md): after an ambiguous failure it searches by the `tent/op`
+  tag and only then retries.
+- **Readiness.** `server_status` goes through `installingbooting`. The instance is ready only when all three status
+  fields read `active`, `running` and `ok`.
+- **Boot time.** Spike 2026-09-25, `vc2-1c-1gb` in `ams`, counted from the create call
+  ([platform notes §3.4](platform-notes.md#34-user_data-metadata-and-identity)):
+  - The API reports `active/running/ok` after 46–73 s, sometimes before the kernel has started. Readiness in the API
+    does not mean the OS is up.
+  - sshd becomes public about 31 s after kernel start, when a vendor-data script removes its
+    `ListenAddress 127.0.0.1`. cloud-init, vendor data included, finishes 32–37 s after kernel start.
+  - From outside, cloud-init was done after 129–149 s. E2E and rollout timeouts allow twice that: 5 minutes per new
+    node.
+  - Vultr's vendor data no longer upgrades packages. So tent-node can run from cloud-init `runcmd`; an earlier start
+    would save only seconds.
+  - Deploying from snapshots adds 10–15 minutes, so it is avoided.
+
+### 11.4 Removing a node
+
+- **No graceful shutdown.** Vultr's `halt` is a hard power-off (verified 2026-09-25), and the API has no graceful
+  shutdown (`GracefulShutdown=false`). `DELETE /v2/instances/{id}` destroys a running instance immediately.
+- **Servers** follow the Nomad-API removal path of [ADR-0017](adr/0017-api-driven-server-removal.md):
+  1. surge;
+  2. transfer leadership if needed;
+  3. `DELETE` the old instance;
+  4. remove the Raft peer, then `force-leave` with `prune`;
+  5. verify.
+- **Clients:** drain through the Nomad API → `DELETE` → purge.
+
+### 11.5 Firewall and host firewall
+
+- **Cloud side.** Two firewall groups, `servers` and `clients`, carry the internet-facing rules from the access
+  intents. The rules are accept-only, and unmatched inbound traffic is dropped. They filter the public interface only:
+  a group without a 4646 rule blocked 4646 from the internet within 12 s, while 4646 over the VPC stayed open (spike
+  2026-09-25).
+- **Host side.** Vultr's Ubuntu 24.04 image enables ufw: deny incoming, allow 22/tcp only. That blocks Nomad ports on
+  the VPC as well, so tent-node's `hostfirewall` phase must disable ufw and apply tent's nftables ruleset.
+- **SSH.** The image allows root login with a password, and password guessing from the internet starts within minutes.
+  The firewall groups allow 22/tcp only from `access.ssh`, and an empty list closes it.
+- **Sysctls.** Vultr's vendor data writes `/usr/lib/sysctl.d/90-vultr.conf` and makes it immutable. tent-node puts
+  its sysctls into a later file, such as `/etc/sysctl.d/99-tent.conf`.
+
+### 11.6 user_data
+
+- **Size.** The API accepts at least 4 MiB (spike 2026-09-25). tent keeps its own 64 KiB budget for NodeConfig. A
+  65,508-byte user_data worked end to end: the metadata service served all of it, and cloud-init wrote its
+  `write_files` payload intact. Larger payloads are pointless and were not tested on an instance.
+- **Contents.** A cloud-config that disables package update and upgrade (Vultr's vendor data sets the same today; tent
+  keeps it explicit), plus the NodeConfig.
+- **Scrubbing.** After the node registers, `Nodes.ScrubUserData` PATCHes the user data to a non-secret stub. Verified
+  2026-09-25: the metadata service serves the stub 4 s after the PATCH, and after a restart cloud-init neither re-runs
+  `runcmd` nor changes the instance-id. Per-boot modules would run from the stub, so the stub contains none.
+
+### 11.7 Zones, placement and availability
+
+- **One failure domain.** A Vultr cluster lives in a single data center. There are no availability zones and no
+  placement or anti-affinity parameters. Three servers survive the loss of a VM, not of the data center, and there is
+  no guarantee that they run on different hosts. `validate` states this.
+- **Availability preflight.** `GET /v2/regions/{id}/availability?type=vc2` returns the plans deployable right now.
+  The `locations` field in `/v2/plans` does not mean "in stock".
+- **Account limits** are opaque and not exposed by the API. Create errors that mention limits are surfaced verbatim
+  with a hint to request an increase.
+- **Deploy incidents recur.** E2E retries in a fallback region.
+
+### 11.8 API client, rate limits, cost
+
+- **API client.**
+  - govultr v3, pinned.
+  - Automatic retries off for non-idempotent calls.
+  - A tent-side token bucket, 10 requests/s by default, under Vultr's 30 requests/s per IP.
+  - `Retry-After` is honoured.
+  - A small wrapper turns govultr's untyped errors (`{"error","status"}` in the message) into typed errors.
+- **Cost.** `GET /v2/plans` gives `monthly_cost`.
+  - Hourly cost: tent computes `monthly_cost / 672` itself, because the API's `hourly_cost` divides by 730 and is
+    about 8% low.
+  - Minimum 1 hour per instance, and stopped instances are billed.
+  - Some locations cost more (the `location_cost` multiplier, for example 1.5× in São Paulo).
+  - Extras: a load balancer costs $10/month, a NAT gateway $0.03/hour.
+
+### 11.9 Private topology (later)
+
+- Instances are created with `vpc_only: true`: no public interface, egress through a managed NAT gateway on the VPC.
+- The API is reached through a load balancer or a bastion.
+- This is simpler than on Hetzner, which has no managed NAT.
+
+---
+
+## 12. Hetzner provider
+
+The second provider. The design is complete and is implemented after Vultr (roadmap M4).
+
+### 12.1 Resources
+
+| Resource | Name | Managed by | Notes |
+|---|---|---|---|
+| SSH key | `<cluster>-<fp8>` | engine | Unique per fingerprint in a project. An existing key is adopted, but not labelled or deleted. |
+| Network | `<cluster>` | engine | `ip_range` = `networking.cidr` |
+| Subnets | — | engine | `control` /24 and `nodes` /20, type `cloud`, `network_zone` = `cloud.region` |
+| Firewalls | `<cluster>-nodes`, `<cluster>-servers` | engine | `apply_to` label selectors; 50 rules per firewall, 5 firewalls per server |
+| Placement groups | `<cluster>-<group>-<shard>` | engine | type `spread`, ≤ 10 servers each, not bound to a location, set at server creation |
+| Servers | `<cluster>-<group>-<index>` | rollout via `Nodes` | see [12.4](#124-creating-a-node) |
+| Load balancer (optional) | `<cluster>-api` | engine | label-selector targets (`tent/role=server`), TCP passthrough on 4646, private IPs |
+| Lock | `<cluster>-lock` | statestore / provider | empty firewall, see [10.4](#104-locking) |
+
+### 12.2 Address plan
+
+```
+10.64.0.0/16            network (one network zone per cluster)
+├─ 10.64.0.0/24         subnet "control": only explicitly assigned IPs
+│   ├─ 10.64.0.1        gateway (first address of the network, reserved by Hetzner)
+│   ├─ 10.64.0.2        internal load balancer (optional, later)
+│   └─ 10.64.0.10–.16   Nomad server slots 0–6 (up to 5 servers + 2 surge)
+└─ 10.64.16.0/20        subnet "nodes": clients, auto-assigned via attach ip_range
+```
+
+- The default CIDR avoids the Docker bridge (`172.17.0.0/16`) and the Nomad bridge (`172.26.64.0/20`).
+- The private network MTU is 1450.
+
+### 12.3 Server discovery
+
+Hetzner can assign fixed private IPs, so it uses static slots
+([ADR-0009](adr/0009-server-discovery-fixed-ip-slots.md)):
+
+- `05-join.hcl` always lists all 7 slot IPs.
+- A surge server takes a free slot, and the replaced server frees its own.
+
+The seed-and-refresh timer still runs. It is harmless here, and it would cover slot changes.
+
+| Strategy | Pros | Cons | Use |
+|---|---|---|---|
+| **Fixed IP slots** | Free, no token on nodes, and the list never goes stale. | Only via `attach_to_network`, so each server is created powered off, attached, then powered on: +2 actions. | **Hetzner default** |
+| Seed + refresh | Works without fixed IPs. | A timer on each node. | Vultr default; a Hetzner fallback |
+| Internal LB (`public_interface: false`) | One stable address. | About €7 per month. | private topology (later) |
+| `exec=` + hcloud CLI | Documented by Nomad. | An API token on every node. | rejected |
+
+### 12.4 Creating a node
+
+```
+1. POST /servers {name, server_type, image, location, ssh_keys, labels, user_data,
+                  placement_group, firewalls, public_net, start_after_create: false}   # no networks
+2. wait for the create action
+3. POST /servers/{id}/actions/attach_to_network
+       servers: {network, ip: <slot IP>}
+       clients: {network, ip_range: <nodes subnet>}
+4. wait for the action
+5. POST /servers/{id}/actions/poweron, then wait
+```
+
+- **Resumable.** Each step checks the current state first. A `uniqueness_error` on step 1 means "adopt it if the
+  labels match".
+- **Waiting.** Waits use `Action.WaitFor`, which batches up to 25 action ids, with exponential `WithPollOpts`.
+- **Servers without any public IP** must get their network at creation, so private topology uses an internal load
+  balancer for joining.
+
+### 12.5 Removing a node
+
+1. `POST /servers/{id}/actions/shutdown` sends an ACPI shutdown. tent polls until the server is `off`, falling back
+   to `poweroff` after a timeout.
+2. `DELETE /servers/{id}`.
+
+With `leave_on_terminate = true`, the ACPI shutdown makes a server leave the Raft peer set gracefully. That is the
+`GracefulShutdown` optimization of [ADR-0017](adr/0017-api-driven-server-removal.md). The Nomad-API checks still run
+afterwards.
+
+### 12.6 Zones, placement, availability, rate limits, cost
+
+- **Zones.** A cluster lives in exactly one network zone, and only `eu-central` (fsn1, nbg1, hel1) has several
+  locations.
+- **Placement.** Nodes are spread over the group's zones. A surge node goes to the zone of the node it replaces.
+  Placement groups keep each shard of ≤ 10 servers on different physical hosts.
+- **Availability.** The preflight checks `server_types[].locations[].available`. tent handles
+  `412 resource_unavailable` with zone fallback.
+- **Account limit.** The default is 5 servers, and Hetzner does not expose limits in the API, so the check is
+  advisory.
+- **Rate limit.**
+  - The RoundTripper throttles adaptively on `RateLimit-Remaining` and `RateLimit-Reset`.
+  - Never use `datacenter`: `/datacenters` returns 410 from 2026-10-01. Use `locations[].deprecation` instead of the
+    removed `deprecated`.
+- **Cost.** `GET /pricing` returns the prices. A minimal HA cluster of 3×CX23, 2×CX33 and 5 IPv4 addresses costs
+  about €36 per month excluding VAT (Sept 2026 prices).
+
+---
+
+## 13. Lifecycle flows
+
+### 13.1 `tent create cluster`
+
+- Generates or loads the specs and writes them to the state store without touching the cloud, as in kops.
+- `--yes` runs `update cluster --yes` right away.
+- `create -f file.yaml` loads multi-document YAML.
+
+### 13.2 `tent update cluster [--yes]`
+
+```
+ 1. lock → load specs → defaults → validate (+ live: types, regions/locations, images, availability)
+ 2. ensure secrets (idempotent): CA, gossip key, ACL bootstrap token
+ 3. model → provider.BuildInfra → engine plan → print → apply
+    (ssh key → network → firewalls → [placement groups] → [LB])
+ 4. servers first: create missing servers
+    (Hetzner: into slots; Vultr: server-0 first, then the rest seeded with existing server IPs)
+ 5. wait for a leader → ACL bootstrap with the pre-generated secret
+ 6. day-1 over the API: node pools (descriptions/meta), other cluster settings
+ 7. clients: for each missing node → intro token → Nodes.Create (seeded with current server IPs) → wait ready
+ 8. Vultr: scrub user data of nodes that registered (Nodes.ScrubUserData)
+ 9. scale down surplus nodes: drain → stop/delete → purge
+10. validate → write cluster.completed.yaml + history → unlock
+11. report: "N nodes are out of date (reason: config diff) → run tent rolling-update cluster"
+```
+
+`update` never replaces existing nodes. It reports outdated nodes and why. Replacement is always explicit.
+
+### 13.3 `tent rolling-update cluster [--yes]`
+
+**Order.** All server groups roll before any client group. This follows Nomad's upgrade guide, and the planner refuses
+any state in which clients would run a newer Nomad than servers. A node is outdated when its `tent/spec-hash` differs
+from the desired hash, or when `--force` is given.
+
+**Servers**, one at a time. Precondition: autopilot healthy, failure tolerance ≥ 1, every node healthy.
+
+```
+create the replacement (Hetzner: free slot; Vultr: seeded with the current servers)
+→ wait: it is a Raft voter and autopilot reports Healthy
+     (GET /v1/operator/autopilot/health answers HTTP 429 while unhealthy: treat as "not yet")
+→ if the old server is the leader: PUT /v1/operator/raft/transfer-leadership to an updated server
+→ stop the old server: ACPI shutdown where GracefulShutdown (graceful leave via leave_on_terminate),
+  otherwise hard stop/DELETE (Vultr)
+→ if it is still a peer: DELETE /v1/operator/raft/peer?id=<raft id>; PUT /v1/agent/force-leave?node=<name>&prune=true
+→ wait: peer count back to N, autopilot healthy
+→ seed-and-refresh providers: wait at least one join refresh interval
+→ delete the old VM (if not already) → next
+```
+
+See [ADR-0017](adr/0017-api-driven-server-removal.md).
+
+**Clients**, per group, honouring `maxSurge` and `maxUnavailable`:
+
+```
+create surge node(s) → wait until registered and ready
+     (optionally start ineligible via client.default_ineligible, Nomad ≥ 2.0.3; check the node; mark eligible)
+→ old node: mark ineligible → drain (deadline, honours job migrate{} blocks) → wait for completion
+→ stop/delete the VM → purge the node in Nomad → validate → next batch
+```
+
+- **Targeted.** Replacements call `Nodes` directly and never re-run the whole plan.
+- **Crash-safe.** Because the new node is created first, a crash leaves an extra outdated node, and the next run
+  finishes the job.
+
+### 13.4 Scaling
+
+- **Scale up** is part of `update`.
+- **Scale down** is also part of `update`. It is always shown in the plan and always drains first. Victims are
+  chosen in this order:
+  1. outdated nodes;
+  2. nodes in the most loaded zone;
+  3. the newest nodes.
+- **Server group size** can change 1 → 3 → 5 and back, one server at a time, never below quorum.
+
+### 13.5 `tent upgrade cluster [--yes]`
+
+- Reads the cluster's channel. The file is embedded in the binary, and a URL can override it.
+- A channel defines recommended and supported Nomad versions, the CNI plugin version and default images per provider.
+- The command proposes upgrades, rewrites the spec and prints the plan. Then run `update` and `rolling-update`.
+- It never downgrades. Only channel-tested version pairs are allowed, because Nomad's 2.x version skew policy has not
+  been restated.
+- **Later:** an opt-in in-place upgrade strategy (swap the binary and restart).
+
+### 13.6 `tent validate cluster [--wait 10m]`
+
+- **Cloud checks.** Every group has `size` running machines. There are no unknown machines with the cluster marker
+  and no duplicates.
+  - Lock state is reported.
+  - On Vultr, it warns about the single failure domain.
+- **Nomad checks.**
+  - A leader exists, and every expected server is an alive voter.
+  - Autopilot is healthy.
+  - Every expected client is `ready` and eligible.
+  - Nomad versions are consistent.
+  - Certificate expiry is more than 30 days away.
+- **Output.** A table of failures. `--wait` loops until the cluster is valid, and the exit code is non-zero while it
+  is not.
+
+### 13.7 `tent delete cluster [--yes]`
+
+1. Lock, build the inventory from ownership markers, print the deletion plan.
+2. Delete in dependency order with retries, looping until the inventory is empty or a timeout expires.
+   - **Vultr:** load balancers → instances → (wait until detached) → firewall groups → VPC → SSH keys. The VPC delete
+     fails with `400 The following servers are attached…` for 14–20 s after its instances are gone, so it is
+     retried.
+   - **Hetzner:** load balancers → servers → placement groups → firewalls → network → owned SSH keys.
+3. Volumes are deleted only with `--delete-volumes`. Volumes created by CSI drivers carry no tent markers, a known
+   kops leak.
+4. Delete the state last, then release the lock.
+
+### 13.8 Backups
+
+- **`tent backup create`** reads `GET /v1/operator/snapshot` and stores the snapshot under `backups/`.
+- **`tent backup restore`** writes it back with `PUT /v1/operator/snapshot`.
+- **Scheduling.** The snapshot agent is Enterprise-only, so scheduled backups are the operator's cron or CI calling
+  `tent backup create`.
+
+---
+
+## 14. CLI
+
+| Command | kops analogue | Purpose |
+|---|---|---|
+| `tent create cluster NAME [flags]`, `tent create -f FILE` | `create cluster` | generate or load specs into the state store |
+| `tent get clusters\|nodegroups\|nodes [-o yaml\|json] [--full]` | `get` | inspect specs and nodes |
+| `tent edit cluster\|nodegroup NAME` | `edit` | `$EDITOR` with validation and a diff before saving |
+| `tent replace -f FILE`, `tent apply -f FILE` | `replace` | GitOps; `apply` = `replace` + `update` |
+| `tent update cluster [--yes] [--exit-code]` | `update cluster` | infrastructure, node counts, day-1 configuration |
+| `tent rolling-update cluster [--yes] [--nodegroups a,b] [--force]` | `rolling-update cluster` | Nomad-aware replacement |
+| `tent upgrade cluster [--yes]` | `upgrade cluster` | version bumps from the channel |
+| `tent validate cluster [--wait 10m]` | `validate cluster` | cloud and Nomad health |
+| `tent delete cluster [--yes]` | `delete cluster` | full cleanup by ownership markers |
+| `tent export nomad [--ttl 24h]` | `export kubeconfig --admin` | short-lived operator credentials and env |
+| `tent ui` | — | local mTLS proxy for the UI and CLI |
+| `tent cost` | — | monthly and hourly cost of the cluster or plan (Vultr `/plans`, Hetzner `/pricing`) |
+| `tent backup create\|restore` | etcd-manager backups | Raft snapshots |
+| `tent toolbox dump` | `toolbox dump` | diagnostics bundle (via SSH) |
+| `tent state unlock [--force]` | — | remove a stale lock |
+| `tent version` | `version` | build info |
+
+- **Global flags:** `--state` (env `TENT_STATE`), `--name` (env `TENT_CLUSTER`), `-o table|yaml|json`, `-v`,
+  `--log-format text|json`.
+- **Cloud credentials:** `VULTR_API_KEY`, `HCLOUD_TOKEN`.
+- **Configuration precedence:** flags, then environment, then `~/.config/tent/config.yaml` (defaults only, never
+  secrets), then built-in defaults.
+- **Exit codes:** 0 success, 1 error, 2 "plan has changes" (only with `--exit-code`).
+- **Output:** human progress and plans, or structured JSON events with `-o json`. Logs use `log/slog`.
+
+---
+
+## 15. Testing
+
+Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen in
+[ADR-0014](adr/0014-vultr-first-provider-and-e2e.md).
+
+1. **Unit tests:**
+   - defaults and validation;
+   - PKI;
+   - Nomad config rendering (golden HCL);
+   - the label codecs;
+   - the address plan;
+   - rollout decisions as pure functions (cluster state → next step).
+2. **Provider tests.**
+   - Tasks and `Nodes` run against in-memory fakes of narrow SDK interfaces: govultr service interfaces and hcloud-go
+     `I*Client`.
+   - The fakes inject provider-specific failures:
+     - Vultr: duplicate-prone creates, lost responses, 429 with `Retry-After`.
+     - Hetzner: `uniqueness_error`, actions, 412.
+3. **Integration tests without a cloud**, like kops' `tests/integration`.
+   - Full `update`, `rolling-update` and `delete` flows run against a fake provider and a fake Nomad API.
+   - Golden files hold the plan and the sequence of operations.
+   - Interruption tests cut a flow at every step and check that the next run converges.
+   - Runs on every PR.
+4. **tent-node tests.** Phases run with an abstracted filesystem and exec. Occasionally they run in a
+   systemd-enabled container or a VM.
+5. **E2E on Vultr** (`//go:build e2e`, black box):
+   - Region `ams`, falling back to `fra` or `lhr`.
+   - Scenarios: `smoke`, `ha`, `upgrade` and `security`.
+   - A dedicated account or IAM service user, with limits raised before CI is wired.
+   - Runs are serialized, and each stays under 60 minutes because billing has a one-hour minimum.
+   - About $0.05–0.09 per 5-VM run.
+   - A janitor deletes everything tagged `tent/e2e` that is older than 3 hours.
+   - Nightly, and on a PR label.
+   - Hetzner E2E, including the `arm` scenario on CAX, is added in M4 once an account can create servers reliably.
+6. **Platform spike.** [`hack/vultr-spike`](../hack/vultr-spike/README.md) verifies undocumented Vultr behaviour
+   before the provider relies on it. It runs manually and its report goes into the platform notes.
+7. **Build config tests.** `internal/buildconfig` reads the CI and release workflows, the Makefile and
+   `.goreleaser.yaml`, and fails when they disagree, for example on the golangci-lint version or the test command
+   ([ADR-0020](adr/0020-release-channels-and-ci-conventions.md)). They run with the unit tests.
+
+---
+
+## 16. Technology stack and releases
+
+See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
+[ADR-0020](adr/0020-release-channels-and-ci-conventions.md).
+
+- **Go.** `go 1.26` or newer in `go.mod`: `github.com/hashicorp/nomad/api` requires it. hcloud-go needs 1.25+, and
+  govultr 1.23+.
+- **Libraries:**
+  - `spf13/cobra`;
+  - `vultr/govultr/v3` (pinned; retries off for non-idempotent calls; own limiter);
+  - `hetznercloud/hcloud-go/v2`;
+  - `hashicorp/nomad/api` (pinned by pseudo-version);
+  - `aws-sdk-go-v2/service/s3`;
+  - `sigs.k8s.io/yaml`;
+  - `ProtonMail/go-crypto`;
+  - `golang.org/x/sync/errgroup`;
+  - `log/slog`;
+  - tests: `google/go-cmp`.
+- **Quality gates:**
+  - golangci-lint with the depguard layer rules; `go vet` runs as its govet linter;
+  - `go test -race` on Linux, macOS and Windows with the Go from `go.mod`, which builds the release, and on Linux with
+    the newest Go too;
+  - govulncheck, also weekly;
+  - a release snapshot on every pull request;
+  - `make check` runs fmt, lint, test and build locally;
+  - Renovate.
+- **Releases** use GoReleaser on `v*` tags:
+  - `tent` for linux, darwin and windows on amd64 and arm64: archives, a Homebrew cask with signed and notarized
+    macOS binaries, and deb and rpm packages;
+  - `tent-node` for linux on amd64 and arm64, as raw binaries, from M2;
+  - `checksums.txt` with a keyless cosign signature, and an SBOM per archive;
+  - tent-node's version always equals the CLI's;
+  - nothing is released while the repository is private.
+
+---
+
+## 17. Risks
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Opaque Vultr new-account limits (possibly tiny; perhaps a per-day creation cap) | E2E cannot create its VMs | request increases before wiring CI; surface limit errors verbatim; the maintainer's account ran 3 instances at once on 2026-09-25 |
+| Recurring Vultr deploy/API incidents | flaky E2E and rollouts | idempotent retries, fallback region, tag-based janitor |
+| Vultr single failure domain, no anti-affinity | a data-center outage takes the whole cluster down | documented; `validate` warns; multi-region federation later |
+| Vultr API churn (VPC 2.0 removed in 2026; the Terraform provider broke) | runtime breakage | pin govultr, Renovate, nightly E2E |
+| Undocumented Vultr behaviour (user_data limit, tag syntax, firewall scope, halt semantics) | wrong assumptions in code | `hack/vultr-spike` settled all of these on 2026-09-25 except Object Storage conditional writes; re-run it when Vultr changes something relevant |
+| Hetzner capacity and account limits (5 servers, creation restrictions since June 2026) | Hetzner provider cannot be E2E-tested | Vultr first (ADR-0014); Hetzner E2E in M4 |
+| Nomad 2.x version skew rules not yet restated | broken upgrades | channels allow only tested version pairs; servers before clients |
+| BUSL licence of Nomad | a paid managed offering would need a commercial licence | tent downloads official binaries and never redistributes them; stays free (not legal advice) |
+| Secrets in user data | node impersonation if metadata leaks | mitigations in [9.4](#94-secrets-on-nodes-threat-model), including scrubbing on Vultr; bootstrap controller in v2 |
+| Hetzner rate limit (3600/h per project) | slow or failing large rollouts | snapshots, batched waits, adaptive throttling, targeted rollouts, one project per cluster |
+
+---
+
+## 18. Open questions
+
+Questions that only the maintainer can decide go here. The six initial questions were decided on 2026-09-25:
+
+1. **Label prefix and API group:** `tent/…` labels and `apiVersion: tent/v1alpha1`
+   ([ADR-0003](adr/0003-cloud-is-source-of-truth.md)). This is effectively permanent, because existing clusters are
+   found by their ownership markers.
+2. **Default API exposure:** `access.api` defaults to `[0.0.0.0/0]` with mTLS + ACL, as in kops, and tent warns loudly
+   while it is open ([ADR-0007](adr/0007-security-baseline.md)).
+3. **Combined server+client mode:** allowed for dev and small clusters through an explicit `combined` role
+   ([ADR-0019](adr/0019-combined-server-client-role.md)).
+4. **Default OS image:** `ubuntu-24.04`. E2E also runs on `ubuntu-26.04`.
+5. **Consul and Vault:** out of v1 ([ADR-0011](adr/0011-nomad-only-scope-and-licensing.md)).
+6. **Licence of tent:** Apache-2.0, like kops, and compatible with MPL-2.0 dependencies.
+
+---
+
+## Appendix A: Nomad agent configuration sketches
+
+These are illustrative. Once the golden files exist in the repository, they are authoritative.
+
+**Server: `/etc/nomad.d/00-tent.hcl`** (group level, part of the spec hash):
+
+```hcl
+# Rendered by tent. Do not edit: changes are overwritten on the next boot.
+region             = "global"
+data_dir           = "/var/lib/nomad"
+leave_on_terminate = true # graceful leave where the provider can shut down via ACPI
+
+addresses {
+  http = "0.0.0.0" # reached by the tent CLI through the cloud firewall (access.api)
+  rpc  = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+  serf = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+}
+
+advertise {
+  http = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+  rpc  = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+  serf = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+}
+
+server {
+  enabled          = true
+  bootstrap_expect = 3
+  encrypt          = "<gossip key>"
+
+  client_introduction {
+    enforcement = "strict"
+  }
+}
+
+acl {
+  enabled = true
+}
+
+tls {
+  http = true
+  rpc  = true
+
+  ca_file   = "/etc/nomad.d/tls/ca.pem"
+  cert_file = "/etc/nomad.d/tls/agent.pem"
+  key_file  = "/etc/nomad.d/tls/agent-key.pem"
+
+  verify_server_hostname = true
+  verify_https_client    = true
+}
+
+autopilot {
+  cleanup_dead_servers = true
+}
+
+telemetry {
+  prometheus_metrics   = true
+  publish_node_metrics = true
+}
+```
+
+**Client: `/etc/nomad.d/00-tent.hcl`** (group level):
+
+```hcl
+# Rendered by tent. Do not edit: changes are overwritten on the next boot.
+region             = "global"
+data_dir           = "/var/lib/nomad"
+leave_on_terminate = true # also triggers drain_on_shutdown as a safety net
+
+addresses {
+  http = "127.0.0.1 {{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+  rpc  = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+}
+
+advertise {
+  http = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+  rpc  = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+}
+
+client {
+  enabled           = true
+  node_pool         = "default"
+  node_class        = "general"
+  network_interface = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"name\" }}"
+
+  drain_on_shutdown {
+    deadline           = "10m"
+    ignore_system_jobs = true
+  }
+
+  options {
+    # Cloud environment fingerprinters only slow down startup on Vultr and Hetzner.
+    "fingerprint.denylist" = "env_aws,env_gce,env_azure,env_digitalocean"
+  }
+
+  meta {
+    tent_cluster   = "prod"
+    tent_nodegroup = "workers"
+    team           = "platform"
+  }
+}
+
+tls {
+  http = true
+  rpc  = true
+
+  ca_file   = "/etc/nomad.d/tls/ca.pem"
+  cert_file = "/etc/nomad.d/tls/agent.pem"
+  key_file  = "/etc/nomad.d/tls/agent-key.pem"
+
+  verify_server_hostname = true
+  verify_https_client    = true
+}
+
+telemetry {
+  prometheus_metrics   = true
+  publish_node_metrics = true
+}
+```
+
+**Join list: `/etc/nomad.d/05-join.hcl`** (per node, maintained by tent-node, excluded from the spec hash):
+
+```hcl
+# Maintained by tent-node (join refresh). Do not edit.
+# Servers use the serf port (4648), clients the RPC port (4647).
+client {
+  server_join {
+    retry_join = ["10.64.0.5:4647", "10.64.0.9:4647", "10.64.0.12:4647"]
+  }
+}
+```
+
+On servers the same file sets `server { server_join { retry_join = [...] } }`. On Hetzner it lists the seven slot IPs.
+
+**Per node: `/etc/nomad.d/10-node.hcl`** (excluded from the spec hash):
+
+```hcl
+# Rendered by tent for this node only.
+name       = "prod-workers-3"
+datacenter = "ams"
+
+client {
+  meta {
+    tent_instance_id = "cb676a46-66fd-4dfb-b839-443f2e6c0b60"
+  }
+}
+```
+
+---
+
+## Appendix B: cloud-init user data sketch
+
+```yaml
+#cloud-config
+package_update: false    # OS patching happens by node replacement
+package_upgrade: false   # Vultr's vendor data sets this too (2026-09); kept explicit in case it changes
+write_files:
+  - path: /etc/tent/node.json
+    encoding: gz+b64
+    owner: root:root
+    permissions: "0600"
+    content: H4sIAAAAAAAA...   # gzip+base64 NodeConfig
+runcmd:
+  - - /bin/sh
+    - -c
+    - |
+      set -eu
+      for url in "https://github.com/ingvarch/tent/releases/download/v0.1.0/tent-node_linux_amd64" "<mirror>"; do
+        curl -fsSL --retry 5 -o /usr/local/bin/tent-node "$url" && break
+      done
+      echo "<sha256>  /usr/local/bin/tent-node" | sha256sum -c -
+      chmod 0755 /usr/local/bin/tent-node
+      /usr/local/bin/tent-node install --config /etc/tent/node.json
+```
+
+`tent-node install` writes and starts two units:
+
+- **`/etc/systemd/system/tent-node.service`:** `Type=oneshot`, `RemainAfterExit=yes`, ordered
+  `Before=nomad.service`, runs `tent-node up`.
+- **`tent-node-join.timer`:** runs `tent-node refresh-join` every 60 seconds.
+
+On Vultr, tent replaces this user data with a non-secret stub once the node has registered (§9.4).

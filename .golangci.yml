@@ -1,0 +1,89 @@
+version: "2"
+
+run:
+  build-tags:
+    - e2e
+
+linters:
+  enable:
+    - depguard
+    - dupl
+    - errorlint
+    - forbidigo
+    - gocritic
+    - misspell
+    - nolintlint
+    - revive
+    - unconvert
+  settings:
+    depguard:
+      rules:
+        # api/ is public, so it stays importable by anyone: standard library and other api/ packages only.
+        api-stdlib-only:
+          files: ["${base-path}/api/**", "!$test"]
+          allow:
+            - $gostd
+            - github.com/ingvarch/tent/api
+        # Only cmd/tent imports provider packages, to register them (ADR-0021). No other package can reach a
+        # provider, directly or through another package.
+        providers-only-in-cmd:
+          files: ["$all", "!$test", "!${base-path}/cmd/tent/**", "!${base-path}/internal/cloud/*/**"]
+          deny:
+            - pkg: github.com/ingvarch/tent/internal/cloud/
+              desc: only cmd/tent imports provider packages; use the interfaces in internal/cloud (ADR-0021)
+        # Each cloud SDK stays inside its own provider package (ADR-0021).
+        govultr-only-in-vultr:
+          files: ["$all", "!${base-path}/internal/cloud/vultr/**"]
+          deny:
+            - pkg: github.com/vultr/govultr
+              desc: govultr is used only by internal/cloud/vultr (ADR-0021)
+        hcloud-only-in-hetzner:
+          files: ["$all", "!${base-path}/internal/cloud/hetzner/**"]
+          deny:
+            - pkg: github.com/hetznercloud/hcloud-go
+              desc: hcloud-go is used only by internal/cloud/hetzner (ADR-0021)
+        # No code that can create or delete cloud resources runs on a node, not even the provider interfaces.
+        nodeup-no-cloud:
+          files: ["${base-path}/internal/nodeup/**"]
+          deny:
+            - pkg: github.com/ingvarch/tent/internal/cloud$
+              desc: tent-node never touches cloud APIs
+            - pkg: github.com/ingvarch/tent/internal/cloud/
+              desc: tent-node never touches cloud APIs
+        # Only internal/nomadops talks to Nomad (ADR-0011).
+        nomad-only-in-nomadops:
+          files: ["$all", "!${base-path}/internal/nomadops/**"]
+          deny:
+            - pkg: github.com/hashicorp/nomad
+              desc: only internal/nomadops imports github.com/hashicorp/nomad/api (ADR-0011)
+        # The Nomad root module is BUSL-licensed; only the MPL-2.0 api module may be imported (ADR-0011).
+        nomadops-api-only:
+          files: ["${base-path}/internal/nomadops/**"]
+          list-mode: lax
+          allow:
+            - github.com/hashicorp/nomad/api
+          deny:
+            - pkg: github.com/hashicorp/nomad
+              desc: the Nomad root module is BUSL-licensed (ADR-0011)
+    forbidigo:
+      forbid:
+        - pattern: ^panic$
+          msg: library code returns errors instead of panicking
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [forbidigo]
+      - path: ^cmd/
+        linters: [forbidigo]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/ingvarch/tent

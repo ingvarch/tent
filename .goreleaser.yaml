@@ -1,0 +1,96 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: tent
+
+builds:
+  - main: ./cmd/tent
+    binary: tent
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/ingvarch/tent/internal/buildinfo.version=v{{ .Version }}
+      - -X github.com/ingvarch/tent/internal/buildinfo.commit={{ .ShortCommit }}
+      - -X github.com/ingvarch/tent/internal/buildinfo.date={{ .Date }}
+    targets:
+      - linux_amd64_v1
+      - linux_arm64_v8.0
+      - darwin_amd64_v1
+      - darwin_arm64_v8.0
+      - windows_amd64_v1
+      - windows_arm64_v8.0
+
+archives:
+  # A zip for Windows, a tarball everywhere else.
+  - formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+checksum:
+  name_template: checksums.txt
+
+# Keyless: the release job's OIDC token proves which workflow signed (ADR-0013).
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - --yes
+    artifacts: checksum
+
+sboms:
+  - artifacts: archive
+
+# Gatekeeper runs a downloaded binary only once Apple has notarized it. A snapshot has no Apple keys.
+notarize:
+  macos:
+    - enabled: "{{ not .IsSnapshot }}"
+      sign:
+        certificate: "{{ .Env.MACOS_SIGN_P12 }}"
+        password: "{{ .Env.MACOS_SIGN_PASSWORD }}"
+      notarize:
+        issuer_id: "{{ .Env.MACOS_NOTARY_ISSUER_ID }}"
+        key_id: "{{ .Env.MACOS_NOTARY_KEY_ID }}"
+        key: "{{ .Env.MACOS_NOTARY_KEY }}"
+        wait: true
+        timeout: 20m
+
+changelog:
+  use: github-native
+
+# A -rc tag is published as a prerelease, not as Latest.
+release:
+  prerelease: auto
+
+nfpms:
+  - vendor: Igor Churmeev
+    maintainer: Igor Churmeev <ingvarch@gmail.com>
+    homepage: &homepage https://github.com/ingvarch/tent
+    description: &description Provision and operate HashiCorp Nomad clusters on cloud providers
+    license: &license Apache-2.0
+    file_name_template: "{{ .ConventionalFileName }}"
+    formats:
+      - deb
+      - rpm
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/tent/LICENSE
+
+homebrew_casks:
+  - homepage: *homepage
+    description: *description
+    license: *license
+    skip_upload: auto
+    repository:
+      owner: ingvarch
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
