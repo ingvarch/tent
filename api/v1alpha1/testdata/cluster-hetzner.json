@@ -1,0 +1,25 @@
+{
+  "apiVersion": "tent/v1alpha1",
+  "kind": "Cluster",
+  "metadata": {
+    "name": "prod"
+  },
+  "spec": {
+    "cloud": {
+      "provider": "hetzner",
+      "region": "eu-central",
+      "zones": [
+        "fsn1",
+        "nbg1",
+        "hel1"
+      ],
+      "hetzner": {}
+    },
+    "nomad": {
+      "extraConfig": {
+        "server": "server {\n  heartbeat_grace = \"30s\"\n}\n",
+        "client": "client {\n  gc_max_allocs = 100\n}\n"
+      }
+    }
+  }
+}

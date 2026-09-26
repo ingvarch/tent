@@ -1,0 +1,17 @@
+{
+  "apiVersion": "tent/v1alpha1",
+  "kind": "NodeGroup",
+  "metadata": {
+    "name": "servers",
+    "cluster": "prod"
+  },
+  "spec": {
+    "role": "server",
+    "machineType": "vc2-2c-4gb",
+    "image": "ubuntu-24.04",
+    "size": 3,
+    "zones": [
+      "ams"
+    ]
+  }
+}
