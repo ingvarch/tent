@@ -51,6 +51,46 @@ jobs:
           go-version: ${{ matrix.go != 'go.mod' && matrix.go || '' }}
       - run: go test -race ./...
 
+  # The s3 state store against a Cloudflare R2 bucket; the test job runs the s3 tests against the fake. Without the
+  # bucket URL and its keys, as in forks, it skips. Each run writes below ci/run-<id>/ and deletes what it wrote; a
+  # cancelled or timed-out run cannot, so a lifecycle rule on the bucket expires what is left.
+  #
+  # Setup:
+  # - the repository variable TENT_TEST_S3_URL is the bucket URL ending in /ci, such as
+  #   s3://tent-ci/ci?endpoint=https://<account>.r2.cloudflarestorage.com&region=auto;
+  # - the secrets R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY hold an R2 API token limited to that bucket, with
+  #   Object Read & Write;
+  # - a lifecycle rule on the bucket expires objects under ci/ after 1 day.
+  s3:
+    name: test s3 on Cloudflare R2
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - id: r2
+        env:
+          READY: >-
+            ${{ vars.TENT_TEST_S3_URL != '' && secrets.R2_ACCESS_KEY_ID != '' &&
+            secrets.R2_SECRET_ACCESS_KEY != '' }}
+        run: |
+          if [ "$READY" = true ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=S3 tests skipped::TENT_TEST_S3_URL or the R2 keys are not available to this run."
+          fi
+      - if: steps.r2.outputs.ready == 'true'
+        uses: actions/checkout@v7
+      - if: steps.r2.outputs.ready == 'true'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - if: steps.r2.outputs.ready == 'true'
+        env:
+          TENT_TEST_S3_URL: ${{ vars.TENT_TEST_S3_URL }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        # -count=1: a cached pass says nothing about the bucket today.
+        run: go test -race -count=1 -run '^TestS3(Store|LeaseLocker|NewLocker)$' ./internal/statestore/
+
   snapshot:
     name: release snapshot
     runs-on: ubuntu-26.04
