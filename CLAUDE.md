@@ -12,9 +12,14 @@ Providers, in order:
 2. **Hetzner Cloud** is second.
 3. **AWS** comes later. It must remain possible without changes to the core.
 
-**Status:** M0 Foundation is in progress: the skeleton (Go module, `tent version`, Makefile, lint rules) has landed,
-with CI on Linux, macOS and Windows and a GoReleaser release pipeline that waits for the repository to go public
-(ADR-0020). The Vultr spike has run (2026-09-25). Next: the rest of M0, then M1. See `docs/roadmap.md`.
+**Status:** M0 Foundation is in progress.
+- The skeleton is in place: Go module, `tent version`, Makefile, lint rules, CI on Linux, macOS and Windows, and a
+  GoReleaser release pipeline. The repository is public; the pipeline needs its secrets and third-party licence
+  notices before the first tag (ADR-0020, "Before the first tag").
+- M0.2 added the API types with defaults and validation (`api/v1alpha1`), the spec file reader and writer
+  (`internal/spec`) and the JSON Schema (`api/v1alpha1/tent.schema.json`, ADR-0022).
+- The Vultr spike has run (2026-09-25).
+- Next: the rest of M0, then M1. See `docs/roadmap.md`.
 
 ## Read before changing anything
 

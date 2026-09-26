@@ -1,11 +1,13 @@
 # Roadmap
 
-> **Current status (2026-09-26):** M0 in progress. The skeleton has landed: the Go module, `tent version`, the Makefile,
-> the import rules in golangci-lint, CI on Linux, macOS and Windows, and the release pipeline for `tent`.
+> **Current status (2026-09-26):** M0 in progress. The skeleton and the API have landed: the Go module, `tent version`,
+> the Makefile, the import rules in golangci-lint, CI on Linux, macOS and Windows, the release pipeline for `tent`, the
+> API types with defaults and validation, the spec reader and writer, and the JSON Schema
+> ([ADR-0022](adr/0022-json-schema-from-go-types.md)).
 >
 > - Vultr is the first provider and the E2E platform ([ADR-0014](adr/0014-vultr-first-provider-and-e2e.md)).
 > - Hetzner Cloud is second.
-> - **Next:** the rest of M0 (API types, state store, spec commands), then M1.
+> - **Next:** the rest of M0 (the state store and the spec commands), then M1.
 >
 > **Work items live in GitHub:** each milestone below links to its GitHub milestone, and the
 > [tent roadmap project][project] shows the open issues. This file keeps the goals and exit criteria; close issues as

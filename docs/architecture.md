@@ -154,20 +154,18 @@ spec:
   cloud:
     provider: vultr
     region: ams                  # Vultr: region | Hetzner: network zone | AWS: region
-    zones: [ams]                 # Vultr has no availability zones: must equal [region]
-    vultr: {}                    # provider-specific block
+    zones: [ams]                 # Vultr has no zones: left out, it defaults to [region], the only valid value
+    vultr: {}                    # provider-specific block, optional; no fields yet
   networking:
-    cidr: 10.64.0.0/16           # VPC CIDR; accepted Vultr masks are verified by hack/vultr-spike
-    topology: public             # public | private (NAT; later)
+    cidr: 10.64.0.0/16           # VPC CIDR, a private IPv4 range; the default
   access:
     ssh: [203.0.113.7/32]        # empty = SSH closed on the cloud firewall
     api: [0.0.0.0/0]             # the default; :4646 is protected by mTLS + ACL, and tent warns while it is open
   sshKeys:
-    - ssh-ed25519 AAAA... ops@example
+    - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILVMgcq7nf63leSBwZNfB40Oi4XwSKWNKchNmRGNCb9k ops@example
   nomad:
     version: 2.0.7
     region: global
-    acl: {enabled: true}
     tls: {verifyHTTPSClient: true}
     clientIntroduction: strict   # strict | warn | none
     extraConfig:                 # escape hatch, rendered into 99-user.hcl
@@ -200,10 +198,6 @@ spec:
     nodeClass: general
     drivers: [docker, exec]
     meta: {team: platform}
-  rollingUpdate:
-    maxSurge: 1
-    maxUnavailable: 0
-    drainTimeout: 10m
 ```
 
 The same cluster on Hetzner differs only in the provider-specific parts:
@@ -213,12 +207,14 @@ spec:
   cloud:
     provider: hetzner
     region: eu-central           # network zone
-    zones: [fsn1, nbg1, hel1]    # locations: one server per location survives the loss of a location
-    hetzner:
-      apiLoadBalancer: {enabled: false}
-# NodeGroup: machineType: cx23 / cx33, and optionally
-#   hetzner: {placementGroup: spread, publicIPv4: true, publicIPv6: true}
+    zones: [fsn1, nbg1, hel1]    # locations, required: one server per location survives the loss of a location
+    hetzner: {}                  # provider-specific block, optional; no fields yet
+# NodeGroup: machineType: cx23 / cx33
 ```
+
+Fields for later milestones (private topology, the API load balancer, rolling update settings, Hetzner placement and
+IP options) join the types with those milestones. ACLs are always on ([ADR-0007](adr/0007-security-baseline.md)), so
+there is no `acl` field.
 
 ### 3.2 Concept mapping
 
@@ -242,20 +238,32 @@ This table is also the check that the abstraction survives several providers.
 - **User spec and completed spec.** The user spec is what the operator wrote. The completed spec has every default
   filled in and records what was last applied. The state store keeps both, and `tent get cluster --full` prints the
   completed one.
-- **Strict decoding.** Unknown fields are errors. Validation errors carry field paths, for example
-  `spec.size: must be 1, 3 or 5 for role=server`.
+- **Strict decoding.** Keys are case-sensitive, and unknown fields, duplicate keys and null values are errors: an empty
+  value such as `vultr:` is almost always a forgotten entry, so write `vultr: {}`. Decoding errors name the document,
+  and the line when the file has the key, for example `document 2 (NodeGroup): line 37: unknown field "spec.sizee"`.
+  Validation errors carry field paths, for example `NodeGroup servers: spec.size: must be 1, 3 or 5 for role=server`.
 - **Roles.** A node group's role is `server`, `client` or `combined`. A cluster has exactly one group whose role is
   `server` or `combined`, and its size is 1, 3 or 5. `combined` runs server and client in one agent, for dev and
   small clusters, and counts as a server everywhere ([ADR-0019](adr/0019-combined-server-client-role.md)).
-- **JSON Schema** is generated from the Go types, so editors can autocomplete specs.
+- **JSON Schema.** The schema of both kinds lives at `api/v1alpha1/tent.schema.json`, and `make generate` rewrites it
+  from the Go types ([ADR-0022](adr/0022-json-schema-from-go-types.md)). Editors with the YAML language server check
+  and autocomplete a spec file whose first line is:
+
+  ```yaml
+  # yaml-language-server: $schema=https://raw.githubusercontent.com/ingvarch/tent/main/api/v1alpha1/tent.schema.json
+  ```
+
+  The schema checks field names, types, required fields and allowed values. Name and CIDR patterns, sizes and
+  provider rules are checked by tent only.
 - **Provider-native values.** Machine types and images are provider-native strings, with no "small/medium"
   abstractions. The provider validates them against the live API: the type exists and is available in the region
   or location, and the image architecture matches. Images are given by name (`ubuntu-24.04`), and the provider
   resolves them (Vultr: numeric `os_id`).
 - **Server groups.** v1 allows exactly one server group, of size 1, 3 or 5. Size 1 requires `--allow-single-server`.
 - **Zones.** A group's `zones` must be a subset of the cluster zones and defaults to all of them. Nodes are spread so
-  that per-zone counts stay balanced. On Vultr, `cloud.zones` must equal `[cloud.region]`, and `validate` warns that
-  the cluster has a single failure domain.
+  that per-zone counts stay balanced. On Vultr, `cloud.zones` left out defaults to `[cloud.region]`, the only value it
+  accepts, and `validate` warns that the cluster has a single failure domain. On Hetzner, `cloud.zones` lists
+  locations and is required.
 - **Escape hatch.** `nomad.extraConfig` is rendered verbatim into `99-user.hcl`. Nomad merges configuration files in
   lexicographic order, so user settings win. This is documented as unsupported.
 - **No secrets in specs.** Cloud credentials come from environment variables. SSH keys are public keys only.
@@ -366,12 +374,14 @@ This split is the central decision.
 
 ```
 github.com/ingvarch/tent
-├── api/v1alpha1/        # public types: Cluster, NodeGroup, defaults, validation (stdlib only)
+├── api/v1alpha1/        # public types: Cluster, NodeGroup, defaults, validation (stdlib only); tent.schema.json
 ├── cmd/
 │   ├── tent/            # CLI entrypoint; registers providers
 │   └── tent-node/       # node agent entrypoint
 ├── internal/
 │   ├── cli/             # cobra commands, flags, output (table|yaml|json): a thin layer
+│   ├── spec/            # multi-document YAML specs: strict decoding with file lines, encoding in field order
+│   ├── apischema/       # generates api/v1alpha1/tent.schema.json (make generate); not linked into tent
 │   ├── app/             # use cases; used by the CLI, e2e tests and a future controller
 │   ├── model/           # spec -> cloud-agnostic intents (network, access, groups, join)
 │   ├── engine/          # task graph: plan/apply, diff rendering, retries, concurrency
@@ -815,7 +825,8 @@ User data then carries no secrets at all. Credential delivery is therefore a str
 - **What they allow:**
   - 22/tcp from `access.ssh`;
   - ICMP;
-  - 4646/tcp to servers from `access.api`. The default is `[0.0.0.0/0]`, because mTLS and ACL protect the API.
+  - 4646/tcp to servers from `access.api`. Left out, `access.api` is `[0.0.0.0/0]`, because mTLS and ACL protect the
+    API. An explicit empty list is a validation error, because the tent CLI reaches the servers through this port.
     `validate` and every mutating command warn loudly while it is open to the whole internet.
 
   Everything else is dropped.
@@ -1361,10 +1372,12 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
   - `hashicorp/nomad/api` (pinned by pseudo-version);
   - `aws-sdk-go-v2/service/s3`;
   - `sigs.k8s.io/yaml`;
+  - `go.yaml.in/yaml/v3` and `sigs.k8s.io/json` for spec files ([ADR-0022](adr/0022-json-schema-from-go-types.md));
+  - `invopop/jsonschema`, in the schema generator only;
   - `ProtonMail/go-crypto`;
   - `golang.org/x/sync/errgroup`;
   - `log/slog`;
-  - tests: `google/go-cmp`.
+  - tests: `google/go-cmp`, and `santhosh-tekuri/jsonschema/v6` to check examples against the schema.
 - **Quality gates:**
   - golangci-lint with the depguard layer rules; `go vet` runs as its govet linter;
   - `go test -race` on Linux, macOS and Windows with the Go from `go.mod`, which builds the release, and on Linux with
