@@ -1,7 +1,8 @@
 # ADR-0013: Technology stack and release engineering
 
 - **Status:** Accepted; govultr added by [ADR-0018](0018-vultr-provider-design.md); extended by
-  [ADR-0020](0020-release-channels-and-ci-conventions.md)
+  [ADR-0020](0020-release-channels-and-ci-conventions.md); JSON Schema generator and spec decoding
+  libraries added by [ADR-0022](0022-json-schema-from-go-types.md)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0006](0006-two-binaries-and-nodeconfig.md), [ADR-0011](0011-nomad-only-scope-and-licensing.md),
