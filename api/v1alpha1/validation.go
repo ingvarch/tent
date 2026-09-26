@@ -45,6 +45,7 @@ func (e Errors) Error() string {
 
 var (
 	namePattern      = regexp.MustCompile(`^[a-z][a-z0-9-]{0,18}[a-z0-9]$`)
+	reservedPattern  = regexp.MustCompile(`^(con|prn|aux|nul|com[1-9]|lpt[1-9])$`) // names Windows reserves
 	channelPattern   = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 	regionPattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`) // also cloud zones and the Nomad region
 	versionPattern   = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
@@ -220,7 +221,7 @@ func checkGroup(ck checker, g *NodeGroup, c *Cluster, opts ValidateOptions, shar
 			fmt.Sprintf("duplicate node group name: %d groups are named %s", shared, g.Metadata.Name))
 	}
 	// A cluster with a missing or invalid name has nothing to compare with; the cluster reports it.
-	if namePattern.MatchString(c.Metadata.Name) && g.Metadata.Cluster != c.Metadata.Name {
+	if nameProblem(c.Metadata.Name) == "" && g.Metadata.Cluster != c.Metadata.Name {
 		ck.add("metadata.cluster", "must be "+c.Metadata.Name+", the cluster's name")
 	}
 	s := &g.Spec
@@ -339,10 +340,24 @@ func (ck checker) header(t TypeMeta, kind, name string) {
 	if t.Kind != kind {
 		ck.add("kind", "must be "+kind)
 	}
-	if ck.required("metadata.name", name) && !namePattern.MatchString(name) {
-		ck.add("metadata.name", "must be 2 to 20 lowercase letters, digits or dashes, starting with a letter and "+
-			"ending with a letter or digit")
+	if ck.required("metadata.name", name) {
+		if problem := nameProblem(name); problem != "" {
+			ck.add("metadata.name", problem)
+		}
 	}
+}
+
+// nameProblem returns what is wrong with a cluster or node group name, or "" when nothing is.
+func nameProblem(name string) string {
+	switch {
+	case !namePattern.MatchString(name):
+		return "must be 2 to 20 lowercase letters, digits or dashes, starting with a letter and ending with a " +
+			"letter or digit"
+	case reservedPattern.MatchString(name):
+		// The state store names files and directories after clusters and node groups; Windows cannot create these.
+		return "must not be " + name + ": Windows reserves that name"
+	}
+	return ""
 }
 
 // required reports whether v is set.

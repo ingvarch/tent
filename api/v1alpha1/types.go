@@ -19,13 +19,15 @@ type TypeMeta struct {
 
 // ClusterMeta names a cluster.
 type ClusterMeta struct {
-	// Name of the cluster: 2 to 20 characters, [a-z][a-z0-9-]{0,18}[a-z0-9]. It prefixes every resource name.
+	// Name of the cluster: 2 to 20 characters, [a-z][a-z0-9-]{0,18}[a-z0-9], and not a name Windows reserves, such
+	// as con or com1. It prefixes every resource name.
 	Name string `json:"name"`
 }
 
 // NodeGroupMeta names a node group and its cluster.
 type NodeGroupMeta struct {
-	// Name of the node group: 2 to 20 characters, [a-z][a-z0-9-]{0,18}[a-z0-9].
+	// Name of the node group: 2 to 20 characters, [a-z][a-z0-9-]{0,18}[a-z0-9], and not a name Windows reserves,
+	// such as con or com1.
 	Name string `json:"name"`
 	// Cluster is the name of the cluster the group belongs to.
 	Cluster string `json:"cluster"`

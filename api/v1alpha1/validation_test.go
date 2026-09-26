@@ -110,6 +110,22 @@ func TestValidateAccepts(t *testing.T) {
 			},
 		},
 		{
+			name: "names starting with ones Windows reserves",
+			spec: func(o *objects) {
+				renamed("console")(o)
+				o.NodeGroups[0].Metadata.Name = "com10"
+				o.NodeGroups[1].Metadata.Name = "nul-1"
+			},
+		},
+		{
+			name: "names ending with ones Windows reserves",
+			spec: func(o *objects) {
+				renamed("falcon")(o)
+				o.NodeGroups[0].Metadata.Name = "x-aux"
+				o.NodeGroups[1].Metadata.Name = "x-lpt1"
+			},
+		},
+		{
 			name: "IPv6 sources",
 			spec: func(o *objects) {
 				o.Cluster.Spec.Access = Access{
@@ -187,6 +203,17 @@ func TestValidateReportsFieldPaths(t *testing.T) {
 			name: "cluster name invalid",
 			spec: func(o *objects) { o.Cluster.Metadata.Name = "Prod" },
 			want: Errors{{"Cluster Prod", "metadata.name", nameRule}},
+		},
+		{
+			name: "cluster name reserved by Windows",
+			spec: renamed("con"),
+			want: Errors{{"Cluster con", "metadata.name", "must not be con: Windows reserves that name"}},
+		},
+		{
+			// The groups still name prod; the reserved name is not worth copying into them.
+			name: "cluster name reserved by Windows, groups name another",
+			spec: func(o *objects) { o.Cluster.Metadata.Name = "nul" },
+			want: Errors{{"Cluster nul", "metadata.name", "must not be nul: Windows reserves that name"}},
 		},
 		// Cluster spec.
 		{
@@ -415,6 +442,11 @@ func TestValidateReportsFieldPaths(t *testing.T) {
 			want: Errors{{"NodeGroup (no name)", "metadata.name", "required"}},
 		},
 		{
+			name: "group name reserved by Windows",
+			spec: func(o *objects) { o.NodeGroups[1].Metadata.Name = "lpt9" },
+			want: Errors{{"NodeGroup lpt9", "metadata.name", "must not be lpt9: Windows reserves that name"}},
+		},
+		{
 			// A missing name is reported as required, not as shared.
 			name: "two groups without a name",
 			spec: func(o *objects) {
@@ -579,6 +611,30 @@ func TestValidateReportsFieldPaths(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, tc.run)
+	}
+}
+
+func TestValidateRejectsWindowsNames(t *testing.T) {
+	names := []string{"con", "prn", "aux", "nul"}
+	for d := '1'; d <= '9'; d++ {
+		names = append(names, "com"+string(d), "lpt"+string(d))
+	}
+	for _, name := range names {
+		reserved := "must not be " + name + ": Windows reserves that name"
+		for _, tc := range []validateCase{
+			{
+				name: "cluster " + name,
+				spec: renamed(name),
+				want: Errors{{"Cluster " + name, "metadata.name", reserved}},
+			},
+			{
+				name: "group " + name,
+				spec: func(o *objects) { o.NodeGroups[1].Metadata.Name = name },
+				want: Errors{{"NodeGroup " + name, "metadata.name", reserved}},
+			},
+		} {
+			t.Run(tc.name, tc.run)
+		}
 	}
 }
 
