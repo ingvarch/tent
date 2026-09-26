@@ -96,7 +96,7 @@
       "properties": {
         "name": {
           "type": "string",
-          "description": "Name of the cluster: 2 to 20 characters, [a-z][a-z0-9-]{0,18}[a-z0-9]. It prefixes every resource name."
+          "description": "Name of the cluster: 2 to 20 characters, [a-z][a-z0-9-]{0,18}[a-z0-9], and not a name Windows reserves, such as con or com1. It prefixes every resource name."
         }
       },
       "additionalProperties": false,
@@ -242,7 +242,7 @@
       "properties": {
         "name": {
           "type": "string",
-          "description": "Name of the node group: 2 to 20 characters, [a-z][a-z0-9-]{0,18}[a-z0-9]."
+          "description": "Name of the node group: 2 to 20 characters, [a-z][a-z0-9-]{0,18}[a-z0-9], and not a name Windows reserves, such as con or com1."
         },
         "cluster": {
           "type": "string",
