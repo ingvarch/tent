@@ -85,7 +85,7 @@ network configuration, host firewall rules, and the journal of the halted boot.
    the measured fact and the date.
 2. Resolve the provisional items of [ADR-0018](../../docs/adr/0018-vultr-provider-design.md). Mark each confirmed item
    on the status line, or write a superseding ADR if a decision changes.
-3. Tick the spike items in [`docs/roadmap.md`](../../docs/roadmap.md).
+3. Update the related GitHub issues, for example the Object Storage conditional writes check.
 
 ## SSH
 

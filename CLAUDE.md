@@ -24,7 +24,8 @@ with CI on Linux, macOS and Windows and a GoReleaser release pipeline that waits
 3. `docs/platform-notes.md`: verified Nomad, Hetzner and Vultr API facts and quirks as of 2026-09-25.
    - Re-verify items marked ⏳ (prices, availability, versions) before relying on them.
    - Items marked 🔬 are unverified until `hack/vultr-spike` has run.
-4. `docs/roadmap.md`: milestone checklists. Tick items as they land.
+4. `docs/roadmap.md`: milestone goals and exit criteria. The work items are GitHub issues in milestones M0–M6
+   (project "tent roadmap"); close them as they land.
 
 ## Conventions
 
