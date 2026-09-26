@@ -277,8 +277,8 @@ This table is also the check that the abstraction survives several providers.
 
 | Object | Rule / pattern | Notes |
 |---|---|---|
-| Cluster name | `^[a-z][a-z0-9-]{0,18}[a-z0-9]$` (≤ 20) | prefix of every resource name |
-| NodeGroup name | same pattern (≤ 20) | |
+| Cluster name | `^[a-z][a-z0-9-]{0,18}[a-z0-9]$` (≤ 20), except `con`, `prn`, `aux`, `nul`, `com1`–`com9` and `lpt1`–`lpt9` | prefix of every resource name. Names become state store keys, and Windows reserves the excluded ones ([10.1](#101-backends)). |
+| NodeGroup name | same rules (≤ 20) | a state store key too |
 | Machines | `<cluster>-<group>-<index>` (≤ 63) | Hetzner servers: index = slot. Otherwise the lowest free index. Also the hostname and the Nomad node name. |
 | Network | `<cluster>` | Vultr: VPC description carries the ownership marker |
 | Firewalls | Hetzner: `<cluster>-nodes`, `<cluster>-servers`; Vultr: one group per role | |
@@ -867,33 +867,72 @@ See [ADR-0010](adr/0010-state-store-and-locking.md).
 
 ### 10.1 Backends
 
-- **`file:///path`:** local development and single-runner CI jobs (E2E uses it).
-- **`s3://bucket/prefix?endpoint=…&region=…`:** uses aws-sdk-go-v2 and works with any S3-compatible store.
+`statestore.Open(ctx, url)` opens a store. It wraps every backend in a check that rejects invalid paths before the
+backend sees them, and it names the operation and the path in every error.
+
+- **`file:///abs/path`** (`file:///C:/state` on Windows): local development and single-runner CI jobs (E2E uses it).
+  - Local disks only. Network file systems such as NFS emulate file locks per process, so two goroutines of one
+    process would not exclude each other and conditional puts would not be atomic.
+  - Every operation holds a file lock on `.tent-store.lock` in the root: shared to read, exclusive to write or delete.
+  - A write goes to a temp file in the object's directory, which is synced and renamed over the object; then the
+    directory is synced. Files are `0600` and directories `0700`, because the store holds secrets.
+  - It differs from object stores in two ways. On a case-insensitive file system, the default on macOS and Windows,
+    `a` and `A` are the same object. And a path cannot be both an object and the prefix of other objects, so `a` and
+    `a/b` cannot both exist.
+- **`s3://bucket[/prefix]?endpoint=…&region=…&pathStyle=true`:** uses aws-sdk-go-v2 and works with any S3-compatible
+  store.
+  - `endpoint` is `https://host` or `http://host`, and every store except AWS S3 needs it.
+  - `region` is needed unless the AWS configuration names one. Cloudflare R2 takes `auto`.
+  - `pathStyle=true` is for servers without bucket host names.
+  - A conditional put gets none of the SDK's retries, because a retry after a lost answer would find the first
+    write and report a lost race to the process that won it. So a conditional put that gets a 500 or no answer is
+    never sent again.
+  - A throttled request (429, `TooManyRequests` or `SlowDown`) is sent again after a random wait of 1–2 seconds, up
+    to 30 attempts in all. This includes conditional puts, because the server did not carry out a throttled request.
+    The SDK does not retry R2's 429 `TooManyRequests`, but it retries a 503 `SlowDown` on a plain request (3
+    attempts, backoff up to 20 s) inside each of these attempts.
+    Cloudflare R2 takes one write per second to a key and answers faster writes with 429 `TooManyRequests`.
   - **Vultr Object Storage** (`<cluster-id>.vultrobjects.com`):
     - EU endpoints: `ams1`, `ams2`, `lhr1`, `mxp1`.
     - At least $18/month (Standard tier); the Archive tier cannot hold state.
     - Access keys can be created through the Vultr API.
   - **Hetzner Object Storage** (`<fsn1|nbg1|hel1>.your-objectstorage.com`): EU only, keys only from the Console,
-    €6.49/month base price.
+    €6.49/month base price. tent does not use its conditional writes ([10.4](#104-locking)).
   - **AWS S3, Cloudflare R2, MinIO.**
 - **The state store does not depend on the compute provider.** A Vultr cluster may keep its state in R2, for example.
-- **Credentials** come from the standard AWS credential chain.
+- **Credentials** come from the standard AWS credential chain: the environment, the shared files, or the machine's
+  role. They never go in the URL: `Open` rejects a URL that contains `@`, and its errors never repeat the URL.
 - **Bucket versioning** is recommended.
+- **Tests.** Every backend runs the conformance suites in `internal/statestore/storetest`. CI runs the s3 backend's
+  suites against a Cloudflare R2 bucket ([platform notes §5.1](platform-notes.md#51-conditional-writes-)).
 
 ```go
 type Store interface {
 	Get(ctx context.Context, path string) ([]byte, Version, error) // ErrNotFound
 	Put(ctx context.Context, path string, data []byte, opts PutOptions) (Version, error)
-	List(ctx context.Context, prefix string) ([]string, error)
-	Delete(ctx context.Context, path string) error
-	Capabilities() StoreCapabilities // e.g. ConditionalPut
+	List(ctx context.Context, prefix string) ([]string, error) // full paths, sorted
+	Delete(ctx context.Context, path string) error              // deleting a missing object succeeds
+	Capabilities(ctx context.Context) (Capabilities, error)     // may ask the backend once, then keeps the answer
+	String() string                                             // the URL without credentials
 }
 
-type PutOptions struct {
+type PutOptions struct { // at most one of the two
 	IfNoneMatch bool    // create only
-	IfMatch     Version // optimistic concurrency, when supported
+	IfMatch     Version // replace only this version
+}
+
+type Capabilities struct {
+	ConditionalPut bool // PutOptions are enforced atomically, also between processes
 }
 ```
+
+- **Conditional puts.** When the condition does not hold, `Put` writes nothing and returns `ErrPreconditionFailed`. A
+  store without `ConditionalPut` writes nothing and returns an error that wraps `errors.ErrUnsupported`: it never
+  falls back to reading first and writing in a separate step.
+- **Paths** are segments separated by single slashes, such as `prod/cluster.yaml`. A segment matches
+  `[A-Za-z0-9_][A-Za-z0-9._-]*`, does not end with `.`, and is not a Windows device name (`con`, `prn`, `aux`, `nul`,
+  `com1`–`com9`, `lpt1`–`lpt9`, in any case and with any extension). So every path works in every backend on every
+  operating system. Names that start with `.` are left to the backends ([10.2](#102-layout)).
 
 ### 10.2 Layout
 
@@ -903,6 +942,7 @@ type PutOptions struct {
   cluster.yaml                           # user spec
   nodegroups/<name>.yaml                 # user specs
   cluster.completed.yaml                 # last applied, with all defaults
+  lock                                   # the lock's lease, with a conditional-put or best-effort lock (10.4)
   pki/ca-bundle.pem                      # public
   pki/private/ca.key                     # secret
   secrets/gossip.key                     # secret
@@ -910,6 +950,19 @@ type PutOptions struct {
   backups/<timestamp>.snap               # Raft snapshots (contain the keyring: secret)
   history/<timestamp>-<operation>.yaml   # audit trail of applies
 ```
+
+`statestore.Layout` names these objects, and `statestore.Clusters` lists the clusters in a store: the top-level names
+that hold a `cluster.yaml`.
+
+Names that start with `.` belong to the backends, and `List` never returns them: `.tent-store.lock` and
+`.tent-locks/` in the root of a `file://` store, the temp files of its writes (`.tent-tmp-*`), and the objects that
+the s3 backend's probe writes below `.tent-probe/` ([10.4](#104-locking)).
+
+**Version guard.** `CheckVersion` fails when `tent-version` names a newer tent than the running one, for example
+`cluster prod needs tent v0.4.0 or newer; this is v0.3.1`. `RaiseVersion` records the running version when it is
+newer, under the cluster's lock. A release, a pre-release and `git describe` output are checked, and
+`v0.3.0-4-gabc1234` counts as `v0.3.0`. Development builds, such as `dev` and GoReleaser `-SNAPSHOT` builds, skip the
+guard and never raise the version.
 
 `tent delete cluster` removes the state last. It refuses to remove files it does not recognise unless `--force` is
 given.
@@ -921,18 +974,50 @@ given.
 
 ### 10.4 Locking
 
-Mutating commands (`update`, `rolling-update`, `upgrade`, `delete`, `backup restore`) take a cluster lock. The lock
-is a lease that records owner, host, operation, acquired-at and expires-at, and it is renewed during the operation.
-tent picks the first mechanism that works:
+Mutating commands (`update`, `rolling-update`, `upgrade`, `delete`, `backup restore`) take a cluster lock.
+`statestore.NewLocker` picks the first mechanism that fits the store:
 
 | Order | Mechanism | Where |
 |---|---|---|
-| 1 | Conditional put (`PutObject` with `If-None-Match: *`) | AWS S3, R2, recent MinIO. **Vultr Object Storage**: probably, since it runs Ceph Tentacle, but unverified (the spike's check needs a bucket and has not run). **Hetzner Object Storage**: unsupported on versioned buckets and undocumented otherwise. |
-| 2 | `flock` | `file://` |
-| 3 | Cloud-native mutex, available only on providers with `UniqueNames` | **Hetzner**: an empty firewall named `<cluster>-lock` labelled `tent/lock-for=<cluster>`. Creating it acquires the lock, deleting it releases it. It deliberately has no `tent/cluster` label, so inventory and prune ignore it. |
-| 4 | Best-effort lease (write a token, wait, read back) with a loud warning | anything else, for example Vultr compute with Hetzner Object Storage |
+| 1 | `flock` on `.tent-locks/<cluster>.lock` in the store's root | `file://` |
+| 2 | Conditional put: the lease object `<cluster>/lock` is created with `If-None-Match: *` and replaced with `If-Match` | S3 stores whose probe shows that they enforce conditional puts. **AWS S3** and **Cloudflare R2** document both headers; CI runs the lock tests against R2. **Ceph RGW on RADOS**, which Vultr runs, honours them in a local test (20.2.4, 2026-09-26). **Vultr Object Storage** itself is unverified: the spike's check needs a bucket and has not run. Servers that ignore the headers fail the probe and get row 3 or 4 ([platform notes §5.1](platform-notes.md#51-conditional-writes-)). **Not Hetzner Object Storage**: conditional writes are unsupported on versioned buckets and undocumented otherwise, so the s3 backend treats every endpoint on `your-objectstorage.com` or its subdomains as a store without them and does not probe it, until E2E proves them ([ADR-0010](adr/0010-state-store-and-locking.md)). |
+| 3 | Cloud-native mutex from the provider, available only on providers with `UniqueNames` (M4) | **Hetzner**: an empty firewall named `<cluster>-lock` labelled `tent/lock-for=<cluster>`. Creating it acquires the lock, deleting it releases it. It deliberately has no `tent/cluster` label, so inventory and prune ignore it. A Hetzner cluster with Hetzner Object Storage locks this way. |
+| 4 | Best-effort lease (write, wait, read back) with a loud warning | anything else, for example Vultr compute with Hetzner Object Storage |
 
-`tent state unlock --force` removes a stale lock.
+- **flock wins for `file://`.** A `file://` store enforces conditional puts too, but the OS releases a file lock when
+  its process ends, so a crashed tent never leaves a lock to wait out. The lock file is never deleted, because a
+  waiter could then lock the old file while a newcomer locks a new one.
+- **The probe.** The s3 backend creates an object below `.tent-probe/` twice with `If-None-Match: *`, then deletes
+  it. Only a server that refuses the second create counts as enforcing conditional puts, and the store keeps the
+  answer. On R2 it costs about 2–4 s the first time a process locks, because it writes one key three times (two
+  puts and a delete) at one write per second. Hetzner endpoints are never probed. The probe cannot see whether a
+  server stays atomic under concurrent writers: S3Proxy and S3Mock pass it and are not. Before trusting a
+  self-hosted server, set `TENT_TEST_S3_URL` to a bucket on it and run
+  `go test -race -count=1 -run S3 ./internal/statestore/`, which includes the race tests.
+- **The lease** records a random holder ID, the owner (the OS user), host, pid, operation, acquired-at and
+  expires-at. Rows 2 and 4 keep it in `<cluster>/lock`. Under flock it sits next to the lock file, in
+  `.tent-locks/<cluster>.lease`, because Windows keeps other processes from reading a locked file.
+- **Waiting.** `Acquire` tries every 2 seconds until it holds the lock or its context ends. In the second case the
+  error names the holder, for example
+  `cluster prod is locked by igor@laptop (pid 4242) for update since 2026-09-26 10:00:00 UTC`. While another tent
+  holds the lock, a waiting tent writes the lock key at most once per try. When many waiters exceed R2's one write
+  per second per key, the throttled writes are sent again ([10.1](#101-backends)).
+- **Renewal.** A lease lasts 2 minutes (the TTL) and is renewed every TTL/3; a renewal that takes longer than TTL/3
+  fails. `Lost()` closes when the lock is gone, or when renewals have failed until the lease would expire before the
+  next one. The operation must then stop.
+- **Takeover.** A lease past its expiry, by the clock of the one who wants the lock, is taken over. Under flock,
+  expiry does not matter: the OS keeps the lock while its holder runs, and a lease under a free lock was left by a
+  holder that died. Either way `Previous()` returns the old lease so that the CLI can warn. Clocks of different hosts
+  must differ by less than the TTL.
+- **Release** stops the renewals and unlocks with its own 5-second timeout, so it also works after Ctrl-C has
+  cancelled the operation.
+- **`tent state unlock --force`** (`ForceUnlock`) removes the lease whoever holds it and returns it. With a lease in
+  the store, the holder's next renewal fails and its `Lost()` closes. Under flock it refuses while the holder's
+  process runs ("stop that process first"), because only that process can release its file lock; it removes a lease
+  that a dead holder left.
+- **Best effort** can fail. Two holders may both get the lock when one of them takes more than 5 seconds (the wait)
+  between reading the lock and writing its lease. And a renewal, which reads and then writes, may undo a `ForceUnlock`
+  that comes between the two.
 
 ---
 
@@ -1370,7 +1455,10 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
   - `vultr/govultr/v3` (pinned; retries off for non-idempotent calls; own limiter);
   - `hetznercloud/hcloud-go/v2`;
   - `hashicorp/nomad/api` (pinned by pseudo-version);
-  - `aws-sdk-go-v2/service/s3`;
+  - `aws-sdk-go-v2` (`config`, `service/s3`) and `aws/smithy-go` for the s3 state store;
+  - `gofrs/flock` for the file store's locks (`flock` on Unix, `LockFileEx` on Windows);
+  - `golang.org/x/mod/semver` for the version guard, pinned at v0.40.0 because v0.41.0 declares `go 1.26.0` and would
+    rewrite `go.mod`;
   - `sigs.k8s.io/yaml`;
   - `go.yaml.in/yaml/v3` and `sigs.k8s.io/json` for spec files ([ADR-0022](adr/0022-json-schema-from-go-types.md));
   - `invopop/jsonschema`, in the schema generator only;
@@ -1382,6 +1470,10 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
   - golangci-lint with the depguard layer rules; `go vet` runs as its govet linter;
   - `go test -race` on Linux, macOS and Windows with the Go from `go.mod`, which builds the release, and on Linux with
     the newest Go too;
+  - the s3 state store's tests against a Cloudflare R2 bucket, skipped where its secrets are missing, as in forks.
+    The job needs the repository variable `TENT_TEST_S3_URL` (an `s3://tent-ci/ci?…` URL, prefix `ci`), the secrets
+    `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` (an R2 API token limited to the bucket, Object Read & Write), and a
+    lifecycle rule on the bucket that expires objects under `ci/` after 1 day, for runs cancelled before cleanup;
   - govulncheck, also weekly;
   - a release snapshot on every pull request;
   - `make check` runs fmt, lint, test and build locally;

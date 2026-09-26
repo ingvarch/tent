@@ -1,6 +1,10 @@
 # ADR-0010: State store backends, layout and locking
 
-- **Status:** Accepted; for providers without unique names see [ADR-0015](0015-idempotency-without-unique-names.md)
+- **Status:** Accepted; for providers without unique names see [ADR-0015](0015-idempotency-without-unique-names.md).
+  The M0 follow-up (the `Store` interface, the file and S3 backends, and the lease locking with shared conformance
+  tests) was built on 2026-09-26 in `internal/statestore`;
+  [architecture §10](../architecture.md#10-state-store-and-locking) describes it as built. The Hetzner firewall
+  mutex comes with the Hetzner provider in M4, not M1 ([ADR-0014](0014-vultr-first-provider-and-e2e.md)).
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0003](0003-cloud-is-source-of-truth.md), [ADR-0007](0007-security-baseline.md),
