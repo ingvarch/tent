@@ -440,17 +440,19 @@ func TestUnreadableLease(t *testing.T) {
 				t.Fatal(err)
 			}
 			lk := tc.new(s, layout, time.Now)
-			if _, _, err := lk.TryLock(t.Context(), testLease("mine", time.Hour)); err == nil ||
-				errors.Is(err, statestore.ErrLocked) {
+			_, _, err := lk.TryLock(t.Context(), testLease("mine", time.Hour))
+			if errors.Is(err, statestore.ErrLocked) {
 				t.Errorf("TryLock over an unreadable lease: error = %v, want a read error", err)
 			}
-			if _, err := lk.Holder(t.Context()); err == nil {
-				t.Error("Holder of an unreadable lease succeeded")
-			}
+			wantInvalidLease(t, "TryLock", err)
+			_, err = lk.Holder(t.Context())
+			wantInvalidLease(t, "Holder", err)
 			// ForceUnlock removes it anyway, and says it could not read it.
-			if removed, err := lk.ForceUnlock(t.Context()); err == nil || removed != nil {
-				t.Errorf("ForceUnlock of an unreadable lease = %+v, %v; want nil and an error", removed, err)
+			removed, err := lk.ForceUnlock(t.Context())
+			if removed != nil {
+				t.Errorf("ForceUnlock of an unreadable lease removed %+v, want nil with the error", removed)
 			}
+			wantInvalidLease(t, "ForceUnlock", err)
 			if h := holder(t, lk); h != nil {
 				t.Errorf("Holder after ForceUnlock = %+v, want nil", h)
 			}
@@ -552,3 +554,11 @@ type failingDelete struct {
 }
 
 func (s failingDelete) Delete(context.Context, string) error { return s.err }
+
+// wantInvalidLease fails the test unless err, of the call op, says that the stored lease cannot be read.
+func wantInvalidLease(t *testing.T, op string, err error) {
+	t.Helper()
+	if !errors.Is(err, statestore.ErrInvalidLease) {
+		t.Errorf("%s: error = %v, want one that matches ErrInvalidLease", op, err)
+	}
+}
