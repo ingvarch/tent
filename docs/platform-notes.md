@@ -623,6 +623,12 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
   `firewall_group_id: ""` detaches the group (202).
 - **Rule syntax that worked (spike 2026-09-25):** `{ip_type: "v4", protocol: "tcp", subnet: "0.0.0.0",
   subnet_size: 0, port: "22"}`, the same with `v6` and `::`, and `icmp` without a port.
+- **How Vultr lists rules** is not verified 🔬: whether a single port comes back as `22` or `22:22`, the case of
+  `protocol` and `ip_type`, and the form of `subnet` (such as `::` or `0:0:0:0:0:0:0:0`). tent reads all of these
+  forms as one rule.
+- **Deleting a group that instances use** is not verified 🔬. tent retries an answer that says the group is in use
+  (409, 423, or a 4xx whose message says "in use" or "are attached"), as it retries rate limits and 5xx; any other
+  answer fails the delete.
 - **Scope:** "the main network interface", inbound. **Spike 2026-09-25:** a group that allowed only SSH and ICMP
   blocked public :4646 12 s after the `PATCH`, while :4646 over the VPC stayed reachable. Groups do not filter VPC
   traffic.
@@ -658,7 +664,10 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
   There are **no availability zones**.
 - **Availability.** `GET /v2/regions/{id}/availability[?type=vc2]` returns `available_plans[]` and
   `available_vpc_only_plans[]`: the plans deployable right now, without quantities. The `locations` list in
-  `/v2/plans` does **not** mean "in stock".
+  `/v2/plans` does **not** mean "in stock". Checked live on 2026-09-27:
+  - An unknown region answers `400 {"error":"Invalid region.","status":400}`.
+  - `type` takes `all`, `vbm`, `vdc`, `vhp`, `vhf`, `vc2`, `voc`, `vcg`, `vdg`, `vdm`, `vx1`, `voc-g`, `voc-s`,
+    `voc-c` or `voc-m`. Any other value answers 400 `Please provide a valid type: …` with that list.
 - **Images.** Referenced by numeric `os_id` from `GET /v2/os`: Ubuntu 24.04 LTS = **2284**, Ubuntu 26.04 LTS = 2760,
   Debian 12 = 2136, Debian 13 = 2625 (checked live).
 - **No arm64** Cloud Compute plans.
@@ -699,6 +708,12 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
 - **None of these is unique.** Only `GET /v2/instances` filters by tag.
 - **Spike 2026-09-25:** the VPC `description`, the SSH key `name` and the firewall group `description` stored
   `tent:cluster=…;kind=…` markers, including `:`, `=` and `;`, verbatim.
+- **The longest text stored verbatim** is not verified 🔬. The spike's markers had at most 57 characters. With `op`,
+  tent's markers for a 20-character cluster name reach 99 characters on a firewall group, 98 on an SSH key and 82 on
+  a VPC.
+- **A second SSH key with the same key material** is not verified 🔬. Hetzner refuses one
+  ([2.4](#24-servers)). If Vultr refuses too, a second cluster with the same operator key fails, and so does a
+  cluster whose key an operator uploaded by hand.
 
 ### 3.11 Block storage and CSI
 

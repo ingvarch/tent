@@ -226,7 +226,7 @@ This table is also the check that the abstraction survives several providers.
 | Region | `cloud.region` | — | region (`ams`) | network zone (`eu-central`) | region (`eu-central-1`) |
 | Failure domain | `cloud.zones[]` | `datacenter` | none (`zones = [region]`) | location (`fsn1`) | availability zone |
 | Group of nodes | `NodeGroup` | `node_pool`, `node_class`, `meta` | tagged instances | labelled servers plus a placement group | EC2 instances, later an ASG |
-| Perimeter | `access` intents | — | one firewall group per role (public only) + host nftables | Cloud Firewalls (public only) + host nftables | Security Groups |
+| Perimeter | `access` intents | — | a servers firewall group for the server or combined group, a clients group only with a client group (public only) + host nftables | Cloud Firewalls (public only) + host nftables | Security Groups |
 | Server discovery | join strategy | `server_join` | seed list + tent-node refresh | fixed private IP slots | cloud auto-join by tags |
 | Node identity | — | mTLS plus intro token | none (secrets via user data, scrubbed after bootstrap) | none (secrets via user data) | instance identity document plus IAM role |
 | State store | `--state` | — | Object Storage (S3 API) or any S3 | Object Storage (S3 API) or any S3 | S3 |
@@ -282,10 +282,10 @@ This table is also the check that the abstraction survives several providers.
 | NodeGroup name | same rules (≤ 20) | a state store key too |
 | Machines | `<cluster>-<group>-<index>` (≤ 63) | Hetzner servers: index = slot. Otherwise the lowest free index. Also the hostname and the Nomad node name. |
 | Network | `<cluster>` | Vultr: VPC description carries the ownership marker |
-| Firewalls | Hetzner: `<cluster>-nodes`, `<cluster>-servers`; Vultr: one group per role | |
+| Firewalls | Hetzner: `<cluster>-nodes`, `<cluster>-servers`; Vultr: `<cluster>-servers`, `<cluster>-clients` | Vultr: the clients' group exists only with a client group ([11.5](#115-firewall-and-host-firewall)) |
 | Placement groups (Hetzner) | `<cluster>-<group>-<shard>` | shards of ≤ 10 servers |
 | Load balancers | `<cluster>-api`, `<cluster>-internal` | optional |
-| SSH key | `<cluster>-<fingerprint[:8]>` | Hetzner: an existing key with the same fingerprint is adopted, never deleted |
+| SSH key | `<cluster>-<fp>` | Vultr: `fp` is the first 8 hex digits of the SHA-256 digest of the key's decoded data: the digest that `ssh-keygen -l` prints in base64 (`SHA256:…`), written in hex. Hetzner: an existing key with the same fingerprint is adopted, never deleted |
 | Lock | Hetzner only: `<cluster>-lock` (an empty firewall) | see [10.4](#104-locking) |
 
 **Canonical labels** are the provider-neutral ownership model. The key prefix is `tent/` (decided on 2026-09-25).
@@ -508,9 +508,13 @@ Behaviour:
 - **Plan.** Tasks plan one at a time in topological order; ties keep the order in which the provider gives them. A
   task plans noop, create, update or replace; deletes come only from prune. When a task plans create or replace, its
   outputs are unknown to its dependents during the plan, and their diffs show `(known after apply)`, as in Terraform.
-- **Duplicates.** The provider's inventory marks extra copies of an object as `Duplicate`;
-  [ADR-0015](adr/0015-idempotency-without-unique-names.md) says which copy stays. The plan deletes the duplicates with
-  the reason `duplicate`.
+- **Duplicates.** The provider's inventory keeps one object per key and marks the extra copies as `Duplicate`
+  ([ADR-0015](adr/0015-idempotency-without-unique-names.md)). The plan deletes the duplicates with the reason
+  `duplicate`. On Vultr the inventory keeps ([ADR-0023](adr/0023-vultr-inventory-dedupe-and-images.md)):
+  - of firewall groups, the one with the most attached instances, then the oldest, then the one with the lowest id;
+  - of the other kinds, the oldest, then the one with the lowest id.
+
+  A creation date that does not parse counts as newer than any that does.
 - **Apply.** Changes run in parallel, at most 4 at once by default. A change starts once every change it depends on,
   directly or through tasks without changes, has succeeded. A failed change skips every change that waits for it that
   way. The others go on, and all errors are reported together.
@@ -551,7 +555,14 @@ Behaviour:
   - *No unique names (Vultr).*
     - Every create carries a client-generated operation id (`tent/op`).
     - SDK-level retries of non-idempotent calls are disabled.
-    - After an ambiguous failure, the next attempt searches by operation id before it creates.
+    - A create whose answer was lost (`ErrUnavailable`) lists the objects of its kind right away and adopts the one
+      that the cluster owns and whose marker carries its operation id; of several, the one the inventory keeps. When
+      none is listed yet, the error is retryable, and every later attempt searches by operation id before it creates
+      again. The search is a list call, so its errors are retryable as those of any idempotent call.
+    - A create that follows a search that found nothing searches once more after it succeeds, and returns the copy
+      the inventory keeps; when that search fails or finds nothing, the created one
+      ([ADR-0023](adr/0023-vultr-inventory-dedupe-and-images.md)).
+    - Any other error of a create is retryable only when Vultr did not carry the call out, such as a rate limit.
     - A dedupe pass removes accidental copies.
 - **Normalisation.** Every task normalises cloud-side values before diffing, so a plan never shows a diff forever,
   which is a known kops bug class. Each task has an "apply, re-plan, expect no-op" test that uses the helper
@@ -582,27 +593,48 @@ See [ADR-0004](adr/0004-layered-architecture.md).
 
 ### 7.1 Interfaces
 
+`cloud.Provider` in `internal/cloud` has the methods that checking specs and building or deleting a cluster's
+infrastructure need. `vultr.Provider` implements it.
+
+```go
+// Provider is a cloud that tent provisions clusters on. The core reaches a cloud only through it.
+type Provider interface {
+	Name() string // as specs give it, such as vultr
+
+	// Validate checks specs that passed v1alpha1.Validate against the cloud's live API: the region exists,
+	// the machine types can be deployed there, the images exist.
+	Validate(ctx context.Context, c *v1alpha1.Cluster, groups []*v1alpha1.NodeGroup) error
+
+	// BuildInfra returns the engine tasks that make the network, firewalls and SSH keys match the model.
+	// Nodes are not part of it.
+	BuildInfra(ctx context.Context, m *model.Cluster) ([]engine.Task, error)
+	// InfraKinds returns every kind that BuildInfra's tasks manage, in deletion order, whether or not the model
+	// asks for one, so that prune can delete an object the specs no longer ask for.
+	InfraKinds() []engine.Kind
+	// Inventory lists every object the cluster owns. Tasks read it through the provider's own snapshot type.
+	Inventory(ctx context.Context, cluster string) (engine.Snapshot, error)
+}
+```
+
+**Target, not built yet.** The other methods join `Provider` with the code that first uses them:
+- `Nodes` with node creation and rollout;
+- `Join` with server discovery in tent-node;
+- `PackUserData` with NodeConfig;
+- `Locker` with the Hetzner lock firewall;
+- `Capabilities` with the first core code that depends on one;
+- `Default` with the first provider default that `v1alpha1.SetDefaults` does not fill in.
+
+The sketch of the target:
+
 ```go
 type Provider interface {
-	Name() string
+	// Name, Validate, BuildInfra, InfraKinds and Inventory as above, and:
 	Capabilities() Capabilities
-
-	// Spec time: provider defaults and validation against the live API
-	// (region/location exists, machine type available there, image resolves for the architecture).
-	Default(c *api.Cluster, groups []*api.NodeGroup) error
-	Validate(ctx context.Context, c *api.Cluster, groups []*api.NodeGroup) error
-
-	// Infrastructure: cloud-agnostic intents -> tasks for the engine.
-	BuildInfra(ctx context.Context, m *model.Cluster) ([]engine.Task, error)
-	// Every kind that BuildInfra's tasks manage, in deletion order, whether or not this spec needs one,
-	// so that prune can delete an object the spec no longer asks for.
-	InfraKinds() []engine.Kind
-	Inventory(ctx context.Context, cluster string) (engine.Snapshot, error) // the provider's own type
-
-	Nodes() Nodes                                           // primitives for rollout
-	Join(m *model.Cluster) model.JoinStrategy               // how agents find servers
-	PackUserData(nc *nodeconfig.NodeConfig) ([]byte, error) // encoding and size limits
-	Locker(cluster string) statestore.Locker                // optional cloud-native mutex; may be nil
+	Default(c *v1alpha1.Cluster, groups []*v1alpha1.NodeGroup) error // provider defaults, at spec time
+	Nodes() Nodes                                                   // primitives for rollout
+	Join(m *model.Cluster) model.JoinStrategy                       // how agents find servers
+	PackUserData(nc *nodeconfig.NodeConfig) ([]byte, error)         // encoding and size limits
+	Locker(cluster string) statestore.Locker                        // optional cloud-native mutex; may be nil
 }
 
 // Nodes are primitives only. Drain and quorum logic lives in the core (rollout).
@@ -648,19 +680,29 @@ type Environment interface {
 
 ### 7.2 Intents (the provider's input)
 
-`model.Cluster` is computed by the core from the specs. The provider sees only this type, never Nomad specifics.
+`model.New` computes `model.Cluster` from the specs, with every default filled in. The provider sees only this type,
+never Nomad specifics, except in `Validate`, which takes the specs. It holds the cluster's name, provider, region,
+zones and SSH public keys, and:
 
-- **Network.** The cluster CIDR and, where the provider supports fixed IPs, named subnets. On Hetzner these are
-  `control` for fixed addresses and `nodes` for automatic ones.
-- **Access rules.** `From` (CIDRs, the internet, a group, the cluster) → `To` (a group or role), with ports and
-  protocol.
-  - Rules cover internet-facing access (SSH, the API, ingress) **and** intra-cluster traffic (4646–4648 and the
-    dynamic port range between nodes).
-  - Vultr and Hetzner firewalls cannot filter private traffic. Their providers map only the internet-facing rules,
-    and intra-cluster rules are enforced by tent-node's host firewall.
-  - AWS will map all of them to Security Groups.
-- **Node groups:** role, machine type, image, zones, size, the per-group NodeConfig template and the spec hash.
-- **Join strategy.** Fixed slots on Hetzner, seed plus refresh on Vultr, and cloud auto-join tags on AWS.
+- **Network.** The private network: the cluster CIDR from `networking.cidr`.
+- **Access rules.** The internet-facing rules only, the ones cloud firewalls enforce, in this order:
+  - `ssh`: 22/tcp from `access.ssh` to every node;
+  - `icmp`: ICMP from anywhere, IPv4 and IPv6 (`0.0.0.0/0` and `::/0`), to every node;
+  - `api`: 4646/tcp from `access.api` to the servers, the nodes of the server or combined group.
+
+  Sources are sorted, IPv4 first, without repeats. A rule without sources opens nothing and is left out, so an empty
+  `access.ssh` closes SSH.
+- **Node groups**, sorted by name: role, machine type, image by name, zones and size.
+
+**Target, not built yet.**
+- **Intra-cluster rules** (4646–4648 and the dynamic port range between nodes) come with tent-node. Vultr and Hetzner
+  firewalls cannot filter private traffic, so their providers map only the internet-facing rules, and tent-node's
+  host firewall enforces the intra-cluster ones. AWS will map all of them to Security Groups.
+- **Join strategy**, with tent-node: fixed slots on Hetzner, seed plus refresh on Vultr, and cloud auto-join tags on
+  AWS.
+- **Named subnets** where the provider supports fixed IPs: on Hetzner `control` for fixed addresses and `nodes` for
+  automatic ones.
+- **Per group:** the NodeConfig template and the spec hash.
 - **Load balancers** (optional): the API load balancer, and later an internal one and ingress.
 
 ### 7.3 Provider comparison (what the core must not assume)
@@ -901,11 +943,13 @@ User data then carries no secrets at all. Credential delivery is therefore a str
 ### 9.6 Network perimeter
 
 - **Cloud firewalls cover the public interface only**, on both providers.
-  - Vultr: two firewall groups per cluster, one per role, because an instance can have only one.
+  - Vultr: a firewall group for the servers and one for the clients, because an instance can have only one. The
+    clients' group exists only when the cluster has a client group
+    ([ADR-0023](adr/0023-vultr-inventory-dedupe-and-images.md)).
   - Hetzner: `<cluster>-nodes` and `<cluster>-servers`.
 - **What they allow:**
   - 22/tcp from `access.ssh`;
-  - ICMP;
+  - ICMP from anywhere, IPv4 and IPv6;
   - 4646/tcp to servers from `access.api`. Left out, `access.api` is `[0.0.0.0/0]`, because mTLS and ACL protect the
     API. An explicit empty list is a validation error, because the tent CLI reaches the servers through this port.
     `validate` and every mutating command warn loudly while it is open to the whole internet.
@@ -1110,14 +1154,60 @@ The first provider. See [ADR-0018](adr/0018-vultr-provider-design.md) for the de
 
 ### 11.1 Resources
 
-| Resource | Name / marker | Managed by | Notes |
-|---|---|---|---|
-| SSH key | name `tent:cluster=<c>;kind=ssh-key;fp=<fp8>` | engine | names are not unique; ownership comes from the marker |
-| VPC | description `tent:cluster=<c>;kind=vpc` | engine | one per cluster; region-scoped; at most 5 VPCs per region; CIDR from `networking.cidr` (`/16`, `/20` and `/24` verified) |
-| Firewall groups | description `tent:cluster=<c>;kind=firewall;role=<role>` | engine | one per role, because an instance has exactly one group; each group reports its `max_rule_count` (50 in examples) |
-| Instances | label = hostname = `<cluster>-<group>-<index>`; tags = canonical labels via the codec | rollout via `Nodes` | see [11.3](#113-creating-a-node) |
-| Load balancer (optional) | label `tent:cluster=<c>;kind=lb;name=api` | engine + rollout | always public; targets are instance IDs, so rollout updates membership on replacement; LB firewall rules narrow the sources |
-| NAT gateway (private topology, later) | tag | engine | one per VPC, $0.03/hour |
+`vultr.New(api)` returns the provider over a `vultr.API` ([11.8](#118-api-client-rate-limits-cost)); `WithLogger`
+sets where its warnings go.
+
+| Resource | Engine key | Marker | Managed by | Notes |
+|---|---|---|---|---|
+| SSH key | `vultr.SSHKey/<cluster>-<fp>` ([3.4](#34-naming-and-ownership-markers)) | name `tent:cluster=<c>;kind=ssh-key;fp=<fp>;op=<op>` | engine | one per key of `sshKeys`; keys with the same type and data are one, whatever their comments. Two different keys with the same `fp` fail `BuildInfra`. A Vultr key with the marker but other key material fails the plan: delete it in Vultr, and tent creates the spec's key |
+| VPC | `vultr.VPC/<cluster>` | description `tent:cluster=<c>;kind=vpc;op=<op>` | engine | one per cluster, in `cloud.region`, with the CIDR of `networking.cidr` (`/16`, `/20` and `/24` verified); at most 5 VPCs per region. The region and the CIDR never change ([ADR-0023](adr/0023-vultr-inventory-dedupe-and-images.md)): moving the network would need every node replaced first, so the plan fails, for example with `the VPC of cluster prod is 10.64.0.0/16 in ams; the spec asks for 10.65.0.0/16 in ams, and tent cannot move a cluster's network` |
+| Firewall groups | `vultr.FirewallGroup/<cluster>-servers`, `vultr.FirewallGroup/<cluster>-clients` | description `tent:cluster=<c>;kind=firewall;role=server;op=<op>`, or `role=client` | engine | the servers' group for the server or combined group; the clients' group only when the cluster has a client group. An instance has exactly one group. Rules: [11.5](#115-firewall-and-host-firewall) |
+| Instances | none | label = hostname = `<cluster>-<group>-<index>`; tags = canonical labels via the codec | rollout via `Nodes` | see [11.3](#113-creating-a-node) |
+| Load balancer (optional) | later | label `tent:cluster=<c>;kind=lb;name=api` | engine + rollout | always public; targets are instance IDs, so rollout updates membership on replacement; LB firewall rules narrow the sources |
+| NAT gateway (private topology, later) | later | tag | engine | one per VPC, $0.03/hour |
+
+- **Markers.** `op` is the operation id of the create, a lower-case UUID
+  ([ADR-0015](adr/0015-idempotency-without-unique-names.md), [6](#6-reconciliation-engine)). Each task makes one when
+  `BuildInfra` builds it.
+- **Not verified 🔬** ([platform notes §3.10](platform-notes.md#310-ownership-fields-on-other-resources)): whether
+  Vultr accepts a second SSH key with the same key material, and whether it stores markers of up to 99 characters
+  verbatim.
+- **Deletion order.** `InfraKinds` returns `vultr.FirewallGroup`, `vultr.VPC`, `vultr.SSHKey`: the engine deletes
+  firewall groups first and SSH keys last.
+- **Inventory.** `Inventory` makes one list call each for SSH keys, VPCs and firewall groups, over the whole account,
+  then one for the rules of each firewall group it keeps ([ADR-0023](adr/0023-vultr-inventory-dedupe-and-images.md)).
+  - An object is the cluster's when the marker in its name (an SSH key) or its description (a VPC or a firewall
+    group) names the cluster, has the kind of the list it came from, and has the `fp` or `role` its kind needs.
+    Which copy of a key stays: [6](#6-reconciliation-engine). The search after a lost create uses the same rule.
+  - It skips these objects with a warning, and neither adopts nor deletes them:
+    - a text that starts with `tent:` and does not parse, whatever cluster it names;
+    - a marker of the cluster whose kind does not match the list it came from, such as `kind=vpc` on an SSH key;
+    - an SSH key marker of the cluster without an `fp` of 8 lower-case hex digits;
+    - a firewall group marker of the cluster without the role `server` or `client`.
+- **Plan.** The tasks have no dependencies on each other. The plan of the cluster of [3.1](#31-kinds) on an empty
+  account (`internal/cloud/vultr/testdata/infra.plan.golden`):
+
+  ```
+  + vultr.SSHKey/prod-8ba890ed
+  + vultr.VPC/prod
+      + cidr: 10.64.0.0/16
+      + region: ams
+  + vultr.FirewallGroup/prod-servers
+      + rule: v4 icmp 0.0.0.0/0
+      + rule: v4 tcp 0.0.0.0/0 4646
+      + rule: v4 tcp 203.0.113.7/32 22
+      + rule: v6 icmp ::/0
+  + vultr.FirewallGroup/prod-clients
+      + rule: v4 icmp 0.0.0.0/0
+      + rule: v4 tcp 203.0.113.7/32 22
+      + rule: v6 icmp ::/0
+
+  Plan: 4 to create, 0 to update, 0 to replace, 0 to delete.
+  ```
+- **Deletes.** An object that is already gone counts as deleted. Vultr refuses to delete a VPC for up to about 20 s
+  after its servers are gone, and may refuse to delete a firewall group while instances use it; the engine retries
+  both. Vultr's answer to the delete of a firewall group in use is not verified 🔬
+  ([platform notes §3.6](platform-notes.md#36-firewall-groups)).
 
 ### 11.2 Server discovery: seed and refresh
 
@@ -1180,10 +1270,44 @@ GET /v2/instances/{id}/vpcs → private IP (seed lists, LB membership)
 
 ### 11.5 Firewall and host firewall
 
-- **Cloud side.** Two firewall groups, `servers` and `clients`, carry the internet-facing rules from the access
-  intents. The rules are accept-only, and unmatched inbound traffic is dropped. They filter the public interface only:
-  a group without a 4646 rule blocked 4646 from the internet within 12 s, while 4646 over the VPC stayed open (spike
-  2026-09-25).
+- **Cloud side.** The firewall groups carry the internet-facing access rules of the model
+  ([7.2](#72-intents-the-providers-input)). The rules are accept-only, and unmatched inbound traffic is dropped. They
+  filter the public interface only: a group without a 4646 rule blocked 4646 from the internet within 12 s, while
+  4646 over the VPC stayed open (spike 2026-09-25).
+- **Rules per group** ([ADR-0023](adr/0023-vultr-inventory-dedupe-and-images.md)).
+  - `<cluster>-servers`, for the server or combined group: the rules to every node and the rules to the servers.
+  - `<cluster>-clients`, only when the cluster has a client group: the rules to every node.
+  - One Vultr rule per source prefix of an access rule, `v4` or `v6` by the prefix.
+- **Rule text.** tent compares rules by a text: the IP type, the protocol and the subnet, then the port when the rule
+  has one and `source=<source>` when it has a source, such as `v4 tcp 203.0.113.7/32 22` or `v6 icmp ::/0`. It reads
+  a rule as Vultr may write it: the IP type and the protocol in any case, an address in any of its forms, a range of
+  one port (`22:22`) as that port, and an ICMP rule with a port. tent's rules have no source, so a rule with one is
+  always extra. The form in which Vultr lists rules is not verified 🔬
+  ([platform notes §3.6](platform-notes.md#36-firewall-groups)).
+- **Plan.** A missing group plans a create with a `+ rule:` line per rule ([11.1](#111-resources)). An existing group
+  plans an update when its rules differ: a `+ rule:` line for each missing rule and a `- rule:` line for each rule to
+  delete, sorted by the rule text. After `access.ssh` changes from `203.0.113.7/32` to `198.51.100.0/24` and
+  `2001:db8::/48`:
+
+  ```
+  ~ vultr.FirewallGroup/prod-servers
+      + rule: v4 tcp 198.51.100.0/24 22
+      - rule: v4 tcp 203.0.113.7/32 22
+      + rule: v6 tcp 2001:db8::/48 22
+  ```
+- **Apply.** It creates the group when there is none, then lists the group's rules afresh, so it sees what an earlier
+  attempt did.
+  - It adds the missing rules, then deletes the extra rules and every copy of a wanted rule but the one with the
+    lowest id. So a run that swaps a rule, such as a new `access.ssh`, never leaves a moment with neither rule.
+  - When the group lacks room for the additions (its rules and the missing ones pass its limit), or Vultr refuses an
+    addition as over the group's limit, it deletes first.
+  - A rule that is already gone counts as deleted.
+  - A rule create without an answer is retryable with no search first. The retry lists the rules first and does not
+    add a listed rule again. A copy that a slow list lets through is deleted by the next run's plan.
+- **Rule limit.** A group holds at most its `max_rule_count` rules; tent takes 50 for a new group or one that
+  reports none. The plan fails when a group needs more, for example with
+  `firewall group prod-servers needs 53 rules; Vultr allows 50`. When Vultr refuses a rule create because the group
+  is full, the error names that limit ([11.7](#117-zones-placement-and-availability)).
 - **Host side.** Vultr's Ubuntu 24.04 image enables ufw: deny incoming, allow 22/tcp only. That blocks Nomad ports on
   the VPC as well, so tent-node's `hostfirewall` phase must disable ufw and apply tent's nftables ruleset.
 - **SSH.** The image allows root login with a password, and password guessing from the internet starts within minutes.
@@ -1207,10 +1331,36 @@ GET /v2/instances/{id}/vpcs → private IP (seed lists, LB membership)
 - **One failure domain.** A Vultr cluster lives in a single data center. There are no availability zones and no
   placement or anti-affinity parameters. Three servers survive the loss of a VM, not of the data center, and there is
   no guarantee that they run on different hosts. `validate` states this.
-- **Availability preflight.** `GET /v2/regions/{id}/availability?type=vc2` returns the plans deployable right now.
-  The `locations` field in `/v2/plans` does not mean "in stock".
-- **Account limits** are opaque and not exposed by the API. Create errors that mention an account limit are surfaced
-  verbatim with a hint to request an increase.
+- **Preflight.** `Validate` checks the specs against the live API before tent changes anything. It fills in the
+  defaults on copies and makes three calls:
+  1. `GET /v2/regions/{region}/availability`: the plans of every type that the region can deploy now. An unknown
+     region answers `400 Invalid region.` (checked 2026-09-27), an `ErrInvalid`. tent reads only a 400 `ErrInvalid`
+     answer as an unknown region and skips the availability checks; any other error, such as a 405 or a 501, fails
+     the preflight.
+  2. `GET /v2/plans`: every plan. Its `locations` field does not mean "in stock", so tent does not use it.
+  3. `GET /v2/os`: every image.
+
+  It reports every problem at once as field errors, the cluster's first, then each node group's by name:
+  - `Cluster prod: spec.cloud.region: Vultr has no region "xyz"`;
+  - `NodeGroup workers: spec.machineType: plan "vc2-9c-9gb" does not exist`;
+  - `NodeGroup workers: spec.machineType: plan "vc2-2c-4gb" is not available in ams now`;
+  - `NodeGroup servers: spec.image: tent supports ubuntu-24.04 and ubuntu-26.04 on Vultr, not "debian-12"`;
+  - `NodeGroup servers: spec.image: Vultr does not offer ubuntu-24.04 (os_id 2284) now`.
+
+  Any other error of the API fails the preflight as it is (`preflight of cluster prod: …`).
+- **Images.** tent maps image names to Vultr's `os_id` with its own table, checked against `GET /v2/os`
+  ([ADR-0023](adr/0023-vultr-inventory-dedupe-and-images.md)):
+
+  | Image | `os_id` | Vultr's name |
+  |---|---|---|
+  | `ubuntu-24.04` | 2284 | Ubuntu 24.04 LTS x64 |
+  | `ubuntu-26.04` | 2760 | Ubuntu 26.04 LTS x64 |
+- **Limits.** Vultr refuses a create that would pass a limit. tent shows Vultr's message and does not retry.
+  - Account limits, such as the most instances, are opaque and not exposed by the API. Their errors end with
+    `(an account limit can be raised in the Vultr console under Billing, Limits)`.
+  - Vultr does not raise the limit of 5 VPCs per region or the most rules a firewall group holds, so their errors
+    name the limit instead: `ams may already have 5 VPCs, the most Vultr allows in a region: …` and
+    `firewall group prod-servers may already hold the most rules Vultr allows in a group: …`.
 - **Deploy incidents recur.** E2E retries in a fallback region.
 
 ### 11.8 API client, rate limits, cost
@@ -1393,7 +1543,7 @@ afterwards.
  1. lock → load specs → defaults → validate (+ live: types, regions/locations, images, availability)
  2. ensure secrets (idempotent): CA, gossip key, ACL bootstrap token
  3. model → provider.BuildInfra → engine plan → print → apply
-    (ssh key → network → firewalls → [placement groups] → [LB])
+    (SSH keys, network, firewalls, [placement groups], [LB]; tasks that do not depend on each other apply in parallel)
  4. servers first: create missing servers
     (Hetzner: into slots; Vultr: server-0 first, then the rest seeded with existing server IPs)
  5. wait for a leader → ACL bootstrap with the pre-generated secret
@@ -1627,9 +1777,13 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
      - A test seeds objects, sets the plans, images and region availability, reads the objects back without a call,
        and reads the calls that reached the fake.
      - It fails a call on a missing object with `ErrNotFound`, and a sixth VPC in a region or a rule past a group's
-       `max_rule_count` (50 by default) with `ErrLimitReached`.
+       `max_rule_count` (50 by default) with `ErrLimitReached`. It answers the availability of a region it does not
+       know with `400 Invalid region.`, as Vultr does.
      - It injects faults into chosen calls: a lost answer after the fake carried the call out, so a lost create
        leaves its object (`LoseResponse`); a 429 with `Retry-After` (`Throttle`); a given error (`Fail`).
+     - The infrastructure tasks and the preflight run on this fake. Each task has an apply, re-plan, no-op test, and
+       a lost create ends with exactly one object. The plan of the cluster of [3.1](#31-kinds) is a golden file
+       ([11.1](#111-resources)).
      - Core integration tests (item 3) run the real Vultr provider on this fake.
    - Hetzner: a fake of hcloud-go's `I*Client` interfaces that injects `uniqueness_error`, actions and 412.
 3. **Integration tests without a cloud**, like kops' `tests/integration`.
