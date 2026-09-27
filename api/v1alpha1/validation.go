@@ -171,6 +171,9 @@ func checkSSHKeys(ck checker, keys []string) {
 
 // parseSSHKey returns the key data of "<type> <base64> [comment]", or what is wrong with the key.
 func parseSSHKey(key string) (data, problem string) {
+	if strings.ContainsAny(key, "\r\n") {
+		return "", "must be one line"
+	}
 	fields := strings.Fields(key)
 	if len(fields) < 2 {
 		return "", "must be an OpenSSH public key: <type> <base64> [comment]"
@@ -220,10 +223,7 @@ func checkGroup(ck checker, g *NodeGroup, c *Cluster, opts ValidateOptions, shar
 		ck.add("metadata.name",
 			fmt.Sprintf("duplicate node group name: %d groups are named %s", shared, g.Metadata.Name))
 	}
-	// A cluster with a missing or invalid name has nothing to compare with; the cluster reports it.
-	if nameProblem(c.Metadata.Name) == "" && g.Metadata.Cluster != c.Metadata.Name {
-		ck.add("metadata.cluster", "must be "+c.Metadata.Name+", the cluster's name")
-	}
+	checkClusterRef(ck, g, c)
 	s := &g.Spec
 	oneOf(ck, "spec.role", s.Role, Roles())
 	ck.requiredWord("spec.machineType", s.MachineType)
@@ -340,11 +340,57 @@ func (ck checker) header(t TypeMeta, kind, name string) {
 	if t.Kind != kind {
 		ck.add("kind", "must be "+kind)
 	}
-	if ck.required("metadata.name", name) {
-		if problem := nameProblem(name); problem != "" {
-			ck.add("metadata.name", problem)
+	ck.name("metadata.name", name)
+}
+
+// name checks that v is set and follows the name rule.
+func (ck checker) name(path, v string) {
+	if ck.required(path, v) {
+		if problem := nameProblem(v); problem != "" {
+			ck.add(path, problem)
 		}
 	}
+}
+
+// checkClusterRef checks a node group's metadata.cluster: it must be c's name, or without c, a valid name.
+func checkClusterRef(ck checker, g *NodeGroup, c *Cluster) {
+	switch {
+	case c == nil:
+		ck.name("metadata.cluster", g.Metadata.Cluster)
+	// A cluster with a missing or invalid name has nothing to compare with; the cluster reports it.
+	case nameProblem(c.Metadata.Name) == "" && g.Metadata.Cluster != c.Metadata.Name:
+		ck.add("metadata.cluster", "must be "+c.Metadata.Name+", the cluster's name")
+	}
+}
+
+// ValidateNames checks only the names, as Validate does: each object's metadata.name, and each node group's
+// metadata.cluster, which must name the cluster, or a valid cluster when c is nil. Tools that keep objects under
+// their names call it before they read or write anything under them. It returns nil when the names are valid.
+func ValidateNames(c *Cluster, groups []*NodeGroup) Errors {
+	var errs Errors
+	if c != nil {
+		checker{object: label(KindCluster, c.Metadata.Name), errs: &errs}.name("metadata.name", c.Metadata.Name)
+	}
+	for _, g := range sortedGroups(groups) {
+		ck := checker{object: label(KindNodeGroup, g.Metadata.Name), errs: &errs}
+		ck.name("metadata.name", g.Metadata.Name)
+		checkClusterRef(ck, g, c)
+	}
+	return errs
+}
+
+// ValidateName checks the name of a cluster or a node group, by kind, against the rule that Validate applies to
+// metadata.name. Tools call it on names given on their own, such as on the command line.
+func ValidateName(kind, name string) error {
+	problem := nameProblem(name)
+	if problem == "" {
+		return nil
+	}
+	what := "cluster"
+	if kind == KindNodeGroup {
+		what = "node group"
+	}
+	return fmt.Errorf("invalid %s name %q: %s", what, name, problem)
 }
 
 // nameProblem returns what is wrong with a cluster or node group name, or "" when nothing is.

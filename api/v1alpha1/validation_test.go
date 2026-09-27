@@ -372,6 +372,17 @@ func TestValidateReportsFieldPaths(t *testing.T) {
 			want: Errors{{"Cluster prod", "spec.sshKeys[0]", "key data does not match the type ssh-ed25519"}},
 		},
 		{
+			// Two keys in one string read as one key with the second as its comment.
+			name: "ssh key of two lines",
+			spec: func(o *objects) {
+				o.Cluster.Spec.SSHKeys = []string{testSSHKey + "\n" + fakeSSHKey("ssh-rsa"), testSSHKey + "\r"}
+			},
+			want: Errors{
+				{"Cluster prod", "spec.sshKeys[0]", "must be one line"},
+				{"Cluster prod", "spec.sshKeys[1]", "must be one line"},
+			},
+		},
+		{
 			// The same key with another comment is still the same key.
 			name: "duplicate ssh key",
 			spec: func(o *objects) {
@@ -685,5 +696,64 @@ func TestValidateRejectsNilCluster(t *testing.T) {
 	var errs Errors
 	if errors.As(err, &errs) {
 		t.Errorf("Validate(nil, ...) returned Errors %v, want a plain error", errs)
+	}
+}
+
+func TestValidateName(t *testing.T) {
+	for _, tc := range []struct {
+		kind, name string
+		want       string // "" when the name is valid
+	}{
+		{KindCluster, "prod", ""},
+		{KindNodeGroup, "web-2", ""},
+		{KindCluster, "PROD", `invalid cluster name "PROD": ` + nameRule},
+		{KindNodeGroup, "Web", `invalid node group name "Web": ` + nameRule},
+		{KindCluster, "", `invalid cluster name "": ` + nameRule},
+		{KindCluster, "../prod", `invalid cluster name "../prod": ` + nameRule},
+		{KindNodeGroup, "com1", `invalid node group name "com1": must not be com1: Windows reserves that name`},
+	} {
+		err := ValidateName(tc.kind, tc.name)
+		if got := fmt.Sprint(err); (tc.want == "" && err != nil) || (tc.want != "" && got != tc.want) {
+			t.Errorf("ValidateName(%s, %q) = %v, want %q", tc.kind, tc.name, err, tc.want)
+		}
+	}
+}
+
+func TestValidateNames(t *testing.T) {
+	alone := func(edit func(o *objects)) func(o *objects) {
+		return func(o *objects) {
+			o.Cluster = nil
+			edit(o)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(o *objects)
+		want Errors // nil when the names are valid
+	}{
+		{"valid", func(*objects) {}, nil},
+		{"node groups alone", alone(func(*objects) {}), nil},
+		{"other fields", func(o *objects) {
+			o.Cluster.Spec.Channel = "Beta"
+			o.NodeGroups[0].Spec.Size = 2
+		}, nil},
+		{"cluster name", renamed("PROD"), Errors{{"Cluster PROD", "metadata.name", nameRule}}},
+		{"no cluster name", renamed(""), Errors{{"Cluster (no name)", "metadata.name", "required"}}},
+		{"group name", func(o *objects) { o.NodeGroups[1].Metadata.Name = "../y" },
+			Errors{{"NodeGroup ../y", "metadata.name", nameRule}}},
+		{"group of another cluster", func(o *objects) { o.NodeGroups[1].Metadata.Cluster = "../x" },
+			Errors{{"NodeGroup workers", "metadata.cluster", "must be prod, the cluster's name"}}},
+		{"node groups alone of an invalid cluster", alone(func(o *objects) { o.NodeGroups[1].Metadata.Cluster = "../x" }),
+			Errors{{"NodeGroup workers", "metadata.cluster", nameRule}}},
+		{"node groups alone without a cluster", alone(func(o *objects) { o.NodeGroups[0].Metadata.Cluster = "" }),
+			Errors{{"NodeGroup servers", "metadata.cluster", "required"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := fixtures()
+			tc.edit(&o)
+			if diff := cmp.Diff(tc.want, ValidateNames(o.Cluster, o.NodeGroups)); diff != "" {
+				t.Errorf("ValidateNames (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
