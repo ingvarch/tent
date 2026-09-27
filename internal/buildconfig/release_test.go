@@ -13,6 +13,9 @@ import (
 
 // releaseConfig is the part of .goreleaser.yaml the tests look at.
 type releaseConfig struct {
+	Before struct {
+		Hooks []any `json:"hooks"`
+	} `json:"before"`
 	Builds []struct {
 		Main    string   `json:"main"`
 		Binary  string   `json:"binary"`
@@ -21,6 +24,7 @@ type releaseConfig struct {
 		Ldflags []string `json:"ldflags"`
 	} `json:"builds"`
 	Archives []struct {
+		Files           []any    `json:"files"`
 		Formats         []string `json:"formats"`
 		FormatOverrides []struct {
 			Goos    string   `json:"goos"`
@@ -55,12 +59,9 @@ type releaseConfig struct {
 		} `json:"macos"`
 	} `json:"notarize"`
 	NFPMs []struct {
-		Formats  []string `json:"formats"`
-		License  string   `json:"license"`
-		Contents []struct {
-			Src string `json:"src"`
-			Dst string `json:"dst"`
-		} `json:"contents"`
+		Formats  []string      `json:"formats"`
+		License  string        `json:"license"`
+		Contents []packageFile `json:"contents"`
 	} `json:"nfpms"`
 	HomebrewCasks []struct {
 		SkipUpload string `json:"skip_upload"`
@@ -78,6 +79,12 @@ type releaseConfig struct {
 		Draft      bool   `json:"draft"`
 		Prerelease string `json:"prerelease"`
 	} `json:"release"`
+}
+
+// packageFile is a file the deb and rpm packages install.
+type packageFile struct {
+	Src string `json:"src"`
+	Dst string `json:"dst"`
 }
 
 // release parses .goreleaser.yaml.
@@ -170,13 +177,13 @@ func TestReleasePacksDebAndRpmWithTheLicense(t *testing.T) {
 	if len(nfpms) != 1 || !cmp.Equal(nfpms[0].Formats, []string{"deb", "rpm"}) || nfpms[0].License != "Apache-2.0" {
 		t.Fatalf("nfpms = %+v, want deb and rpm under Apache-2.0", nfpms)
 	}
-	// Apache-2.0 asks for the licence in every copy, and a package is a copy.
-	for _, c := range nfpms[0].Contents {
-		if c.Src == "LICENSE" && c.Dst == "/usr/share/doc/tent/LICENSE" {
-			return
+	// Apache-2.0 asks for the licence in every copy, and a package is a copy; the licences of what tent links ask for
+	// their notices too.
+	for _, file := range []string{"LICENSE", noticesFile} {
+		if !slices.Contains(nfpms[0].Contents, packageFile{Src: file, Dst: "/usr/share/doc/tent/" + file}) {
+			t.Errorf("the packages do not ship %s as /usr/share/doc/tent/%s: %+v", file, file, nfpms[0].Contents)
 		}
 	}
-	t.Errorf("the packages do not ship LICENSE: %+v", nfpms[0].Contents)
 }
 
 func TestReleasePublishesTheCaskToTheTap(t *testing.T) {

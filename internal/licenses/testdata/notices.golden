@@ -1,0 +1,28 @@
+Third-party notices for tent
+
+tent contains the Go standard library and the Go modules listed below. Each
+entry gives the module path and version, the licences found in the module's
+licence files, where to download its source code at that version, and the full
+text of those files.
+
+================================================================================
+std go1.26.0
+Licences: BSD-3-Clause
+Source: https://go.dev/dl/go1.26.0.src.tar.gz
+
+--- LICENSE ---
+
+Copyright 2009 The Go Authors.
+
+================================================================================
+example.com/lib v1.0.0
+Licences: Apache-2.0, MIT
+Source: https://proxy.golang.org/example.com/lib/@v/v1.0.0.zip
+
+--- LICENSE ---
+
+The MIT licence.
+
+--- sub/NOTICE ---
+
+A notice without a final newline.

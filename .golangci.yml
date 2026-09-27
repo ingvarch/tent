@@ -73,6 +73,12 @@ linters:
               desc: the JSON Schema libraries are used only by internal/apischema (ADR-0022)
             - pkg: github.com/santhosh-tekuri/jsonschema
               desc: the JSON Schema libraries are used only by internal/apischema (ADR-0022)
+        # The licence classifier only checks the dependencies and writes the release's notices (ADR-0020).
+        licenseclassifier-only-in-licenses:
+          files: ["$all", "!${base-path}/internal/licenses/**"]
+          deny:
+            - pkg: github.com/google/licenseclassifier
+              desc: the licence classifier is used only by internal/licenses (ADR-0020)
     forbidigo:
       forbid:
         - pattern: ^panic$
