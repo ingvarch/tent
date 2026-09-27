@@ -25,48 +25,69 @@ type Objects struct {
 	NodeGroups []*v1alpha1.NodeGroup
 }
 
-// Decode parses multi-document YAML strictly. Unknown fields, keys in the wrong case, duplicate keys, null keys and
-// values, unknown kinds, other API versions and a second Cluster are errors that name the document (1-based). Empty
-// documents are skipped.
+// Decode parses multi-document YAML strictly. A document is an object or a list of objects, as tent get -o json
+// prints them. Unknown fields, keys in the wrong case, duplicate keys, null keys and values, unknown kinds, other API
+// versions and a second Cluster are errors that name the document (1-based) and the item of a list. Empty documents
+// are skipped.
 func Decode(data []byte) (Objects, error) {
-	var o Objects
-	clusterDoc := 0
+	var d decoder
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	for doc := 1; ; doc++ {
 		var n yaml.Node
 		err := dec.Decode(&n)
 		if errors.Is(err, io.EOF) {
-			return o, nil
+			return d.objs, nil
 		}
 		if err != nil {
 			return Objects{}, fmt.Errorf("document %d: %w", doc, err)
 		}
-		root := n.Content[0]
-		if root.ShortTag() == "!!null" {
+		root, where := n.Content[0], fmt.Sprintf("document %d", doc)
+		switch {
+		case root.ShortTag() == "!!null":
 			continue // an empty document
-		}
-		j, err := toJSON(root)
-		if err != nil {
-			return Objects{}, fmt.Errorf("document %d: %w", doc, err)
-		}
-		obj, err := decodeObject(doc, root, j)
-		if err != nil {
-			return Objects{}, err
-		}
-		switch obj := obj.(type) {
-		case *v1alpha1.Cluster:
-			if o.Cluster != nil {
-				return Objects{}, fmt.Errorf("document %d (%s): a second Cluster, the first is document %d",
-					doc, v1alpha1.KindCluster, clusterDoc)
+		case root.Kind == yaml.SequenceNode:
+			for i, item := range root.Content {
+				if err := d.add(fmt.Sprintf("%s, item %d", where, i+1), item); err != nil {
+					return Objects{}, err
+				}
 			}
-			o.Cluster, clusterDoc = obj, doc
-		case *v1alpha1.NodeGroup:
-			o.NodeGroups = append(o.NodeGroups, obj)
+		default:
+			if err := d.add(where, root); err != nil {
+				return Objects{}, err
+			}
 		}
 	}
 }
 
-// toJSON converts the root node of a document to JSON. It rejects anything but a mapping, null or duplicate keys, and
+// decoder collects the objects of a spec file.
+type decoder struct {
+	objs      Objects
+	clusterAt string // where the Cluster is, such as "document 1"
+}
+
+// add decodes the object at root, which where names in errors.
+func (d *decoder) add(where string, root *yaml.Node) error {
+	j, err := toJSON(root)
+	if err != nil {
+		return fmt.Errorf("%s: %w", where, err)
+	}
+	obj, err := decodeObject(where, root, j)
+	if err != nil {
+		return err
+	}
+	switch obj := obj.(type) {
+	case *v1alpha1.Cluster:
+		if d.objs.Cluster != nil {
+			return fmt.Errorf("%s (%s): a second Cluster, the first is %s", where, v1alpha1.KindCluster, d.clusterAt)
+		}
+		d.objs.Cluster, d.clusterAt = obj, where
+	case *v1alpha1.NodeGroup:
+		d.objs.NodeGroups = append(d.objs.NodeGroups, obj)
+	}
+	return nil
+}
+
+// toJSON converts the node of an object to JSON. It rejects anything but a mapping, null or duplicate keys, and
 // null values.
 func toJSON(root *yaml.Node) ([]byte, error) {
 	if root.Kind != yaml.MappingNode {
@@ -83,10 +104,10 @@ func toJSON(root *yaml.Node) ([]byte, error) {
 	return sigsyaml.YAMLToJSONStrict(y) // strict: a safety net for key collisions that checkEntries does not see
 }
 
-// decodeObject decodes the JSON of document doc into a Cluster or a NodeGroup, strictly and case-sensitively. root is
-// the document's node, which gives the lines of the keys that errors name.
-func decodeObject(doc int, root *yaml.Node, j []byte) (any, error) {
-	label := fmt.Sprintf("document %d", doc)
+// decodeObject decodes the JSON of the object at where into a Cluster or a NodeGroup, strictly and case-sensitively.
+// root is the object's node, which gives the lines of the keys that errors name.
+func decodeObject(where string, root *yaml.Node, j []byte) (any, error) {
+	label := where
 	var tm v1alpha1.TypeMeta
 	if err := sigsjson.UnmarshalCaseSensitivePreserveInts(j, &tm); err != nil {
 		return nil, fmt.Errorf("%s: %w", label, fieldError(root, err))
@@ -103,7 +124,7 @@ func decodeObject(doc int, root *yaml.Node, j []byte) (any, error) {
 		return nil, fmt.Errorf("%s: %w", label, specError{keyLine(root, "kind"), fmt.Sprintf(
 			"unknown kind %q, want %s or %s", tm.Kind, v1alpha1.KindCluster, v1alpha1.KindNodeGroup)})
 	}
-	label = fmt.Sprintf("document %d (%s)", doc, tm.Kind)
+	label = fmt.Sprintf("%s (%s)", where, tm.Kind)
 	switch tm.APIVersion {
 	case "":
 		return nil, fmt.Errorf("%s: apiVersion is required", label)
