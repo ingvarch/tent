@@ -60,7 +60,13 @@ package is denied.
 
 ### Follow-ups
 
-- M1: the first core integration test decides where provider fakes live.
+- M1: the first core integration test decides where provider fakes live. Decided 2026-09-27: the Vultr fake is
+  `internal/cloud/vultr/vultrfake` ([ADR-0012](0012-testing-strategy.md)).
+  - Core tests may import the fake and the Vultr provider, since rule 1 exempts tests.
+  - Rule 2 covers tests too, so a core test cannot import govultr. It cannot build govultr values either, such as
+    the objects that seed the fake or the `*Req` values of its calls.
+  - The first core integration test decides between seed helpers of the fake that take tent's own types and a
+    scoped exemption from rule 2 for tests.
 - Code outside tests that imports a provider, such as an E2E helper under `test/e2e` or a Go janitor under `hack/`,
   fails lint. It gets an explicit exemption when it appears.
 - When `cmd/tent-node` exists, a test that runs `go list -deps ./cmd/tent-node` can check the binary's whole

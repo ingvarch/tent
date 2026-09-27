@@ -390,6 +390,7 @@ github.com/ingvarch/tent
 │   │   └── enginetest/  # ApplyReplan for provider task tests: apply, plan again, expect no changes
 │   ├── cloud/           # Provider / Nodes interfaces, capabilities, registry, common types
 │   │   ├── vultr/       # govultr wrapper, label codec, tasks, nodes, inventory, pricing
+│   │   │   └── vultrfake/ # in-memory fake of vultr.API for provider and core tests
 │   │   └── hetzner/     # hcloud-go wrapper, tasks, nodes, inventory, pricing, lock
 │   ├── nodeconfig/      # versioned tent <-> tent-node contract, Nomad config rendering
 │   ├── nodeup/          # tent-node phases: system, host firewall, runtime, CNI, nomad, join refresh
@@ -524,8 +525,9 @@ Behaviour:
     deadline.
 - **Errors and retries.**
   - The provider decides which errors are retryable and marks them with `engine.Retryable(err, after)`:
-    - Retryable: rate limits (honouring `Retry-After` / `RateLimit-Reset`), conflicts, `locked` and 5xx on idempotent
-      calls, and the Vultr VPC that cannot be deleted for about 20 s after its instances are gone.
+    - Retryable: rate limits (honouring `Retry-After` / `RateLimit-Reset`), conflicts, `locked`, 5xx and failed
+      connections on idempotent calls, and the Vultr VPC that cannot be deleted for about 20 s after its instances
+      are gone.
     - Permanent: `invalid_input`, `resource_unavailable` after fallbacks, `forbidden`.
   - The engine waits `after`, or a jittered backoff from 1 s doubling to 30 s, and tries again until the change's
     deadline, 5 minutes by default. Other errors fail at once.
@@ -1147,9 +1149,9 @@ GET /v2/instances/{id}/vpcs → private IP (seed lists, LB membership)
 - **VPC at creation.** The VPC is attached only at creation. Attaching later reboots the VM. cloud-init configures the
   private interface statically from metadata. MTU is 1450, and interface names vary, so interfaces are matched by MAC
   or CIDR, never by name.
-- **No duplicates.** govultr retries POST requests on 429/5xx by default. tent disables that for create and follows
-  [ADR-0015](adr/0015-idempotency-without-unique-names.md): after an ambiguous failure it searches by the `tent/op`
-  tag and only then retries.
+- **No duplicates.** govultr retries POST requests on 429/5xx by default. tent turns its retries off
+  ([11.8](#118-api-client-rate-limits-cost)) and follows [ADR-0015](adr/0015-idempotency-without-unique-names.md):
+  after an ambiguous failure it searches by the `tent/op` tag and only then retries.
 - **Readiness.** `server_status` goes through `installingbooting`. The instance is ready only when all three status
   fields read `active`, `running` and `ok`.
 - **Boot time.** Spike 2026-09-25, `vc2-1c-1gb` in `ams`, counted from the create call
@@ -1207,18 +1209,64 @@ GET /v2/instances/{id}/vpcs → private IP (seed lists, LB membership)
   no guarantee that they run on different hosts. `validate` states this.
 - **Availability preflight.** `GET /v2/regions/{id}/availability?type=vc2` returns the plans deployable right now.
   The `locations` field in `/v2/plans` does not mean "in stock".
-- **Account limits** are opaque and not exposed by the API. Create errors that mention limits are surfaced verbatim
-  with a hint to request an increase.
+- **Account limits** are opaque and not exposed by the API. Create errors that mention an account limit are surfaced
+  verbatim with a hint to request an increase.
 - **Deploy incidents recur.** E2E retries in a fallback region.
 
 ### 11.8 API client, rate limits, cost
 
-- **API client.**
-  - govultr v3, pinned.
-  - Automatic retries off for non-idempotent calls.
-  - A tent-side token bucket, 10 requests/s by default, under Vultr's 30 requests/s per IP.
-  - `Retry-After` is honoured.
-  - A small wrapper turns govultr's untyped errors (`{"error","status"}` in the message) into typed errors.
+- **API client.** `vultr.API` in `internal/cloud/vultr` lists the calls tent makes. `Client` implements it over
+  govultr v3, pinned.
+  - Lists are whole: the client follows the cursors, for at most 1,000 pages.
+  - Calls take and return govultr's types, and fail with typed errors (below).
+  - govultr's own retries are off. govultr sets them for every call at once, and it would send a POST again, which
+    may create a second object.
+  - The API key may not hold whitespace or control characters. The base URL may use `http` only for `localhost`,
+    `127.0.0.0/8` and `::1`, since the key would travel in clear text.
+- **Transport.** Every request goes through tent's own `http.RoundTripper`. It:
+  - sets the `Authorization` header. The key prints as `[redacted]`;
+  - limits the rate with a token bucket that holds one token and gets a new one every 100 ms: at most 10 requests/s
+    with no burst, under Vultr's 30 requests/s per IP;
+  - after a 429 with `Retry-After`, starts no request until that time has passed, waiting at most 1 minute;
+  - sends a GET, HEAD, PUT, PATCH or DELETE up to 4 times in all after a failed attempt, a 429 or a 5xx other than
+    501. Between attempts it waits `Retry-After`, at most 1 minute, or else 0.5 s, 1 s and 2 s;
+  - never sends a POST again. It hands a POST to net/http without `GetBody`, because Go 1.26's HTTP/2 client sends a
+    request again through `GetBody` when the server resets the stream with `PROTOCOL_ERROR`;
+  - records the last answer of each call. The client builds its errors from that record, because govultr turns 429,
+    5xx and failed connections into plain text ([platform notes §3.2](platform-notes.md#32-govultr-)).
+- **Answers.**
+  - A success with a body whose `Content-Type` is not exactly `application/json` is an error: govultr decodes no
+    other type and would return an empty result. A DELETE reads nothing from its answer, so its type does not matter.
+  - A list answer without Vultr's `meta` field is an error, since it would read as an empty list.
+  - The client follows no redirect, since one would send the API key to wherever it points.
+  - Each attempt is bounded: 30 s to connect, 30 s for TLS, 1 minute for the answer's header, and 2 minutes for the
+    whole attempt including the body. The context bounds the whole call, retries and pauses included.
+- **Errors.** A call that gets an error status or no answer fails with an `*APIError`. It holds the method, the path,
+  the status, the message (the answer's `error` field or its body, on one line, at most 512 bytes) and `RetryAfter`.
+  It matches at most one class with `errors.Is`. 401, 403, 404, 409, 423, 429 and 5xx get their class from the
+  status alone; for any other 4xx the message may decide.
+  - `ErrNotFound`: 404.
+  - `ErrRateLimited`: 429. The call was not carried out, and `RetryAfter` holds the wait the answer asked for.
+  - `ErrForbidden`: 401 or 403.
+  - `ErrInUse`: 409, 423, or a 4xx to a DELETE whose message says `are attached` or `in use`, such as the 400 that
+    a VPC delete gets for 14–20 s after its instances are gone ([platform notes §3.5](platform-notes.md#35-vpc)).
+    The object is busy or still in use, and the same request may succeed later. A create told that a name is in use
+    gets the same answer every time, so it stays `ErrInvalid`.
+  - `ErrLimitReached`: a 4xx whose message has the word `limit` or `limits`, or `reached the maximum`, and does not
+    speak of the rate limit. A limit of the account or of an object was reached, for example the account's
+    instance limit, 5 VPCs per region or 50 rules per firewall group. tent shows the message verbatim. Vultr raises
+    account limits on request ([11.7](#117-zones-placement-and-availability)); the limits of objects stay.
+  - `ErrInvalid`: 501, or a 400, 405, 413, 414, 415 or 422 whose message fits no class above. The same request
+    gets the same answer.
+  - `ErrUnavailable`: a 5xx other than 501, or no answer. For a POST the outcome is unknown, since Vultr may have
+    carried it out ([ADR-0015](adr/0015-idempotency-without-unique-names.md)). A POST whose success the client
+    cannot read, because of its type, a body that does not decode or a missing object, gets this class as well.
+    When the call's context ended, the error matches the context's error too.
+  - The provider marks `ErrInUse`, `ErrRateLimited` and, for idempotent calls, `ErrUnavailable` retryable for the
+    engine ([6](#6-reconciliation-engine)).
+- **Ids.** The client checks each id it puts into a path before the request goes out. An id must be ASCII letters,
+  digits and `-`, and not empty; a firewall rule id must be positive. Any other id fails the call: it could change
+  the path, and a delete sent to another path may answer 404, which a caller takes for success.
 - **Cost.** `GET /v2/plans` gives `monthly_cost`.
   - Hourly cost: tent computes `monthly_cost / 672` itself, because the API's `hourly_cost` divides by 730 and is
     about 8% low.
@@ -1573,13 +1621,19 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
    - the engine: golden plans, apply with fake time (`testing/synctest`);
    - rollout decisions as pure functions (cluster state → next step).
 2. **Provider tests.**
-   - Tasks and `Nodes` run against in-memory fakes of narrow SDK interfaces: govultr service interfaces and hcloud-go
-     `I*Client`.
-   - The fakes inject provider-specific failures:
-     - Vultr: duplicate-prone creates, lost responses, 429 with `Retry-After`.
-     - Hetzner: `uniqueness_error`, actions, 412.
+   - Tasks and `Nodes` run against in-memory fakes of narrow interfaces that inject provider-specific failures.
+   - Vultr: `internal/cloud/vultr/vultrfake` is an in-memory fake of `vultr.API`
+     ([11.8](#118-api-client-rate-limits-cost)). It uses the client's types, errors and id checks.
+     - A test seeds objects, sets the plans, images and region availability, reads the objects back without a call,
+       and reads the calls that reached the fake.
+     - It fails a call on a missing object with `ErrNotFound`, and a sixth VPC in a region or a rule past a group's
+       `max_rule_count` (50 by default) with `ErrLimitReached`.
+     - It injects faults into chosen calls: a lost answer after the fake carried the call out, so a lost create
+       leaves its object (`LoseResponse`); a 429 with `Retry-After` (`Throttle`); a given error (`Fail`).
+     - Core integration tests (item 3) run the real Vultr provider on this fake.
+   - Hetzner: a fake of hcloud-go's `I*Client` interfaces that injects `uniqueness_error`, actions and 412.
 3. **Integration tests without a cloud**, like kops' `tests/integration`.
-   - Full `update`, `rolling-update` and `delete` flows run against a fake provider and a fake Nomad API.
+   - Full `update`, `rolling-update` and `delete` flows run against the cloud fakes of item 2 and a fake Nomad API.
    - Golden files hold the plan and the sequence of operations.
    - Interruption tests cut a flow at every step and check that the next run converges.
    - Runs on every PR.
@@ -1611,7 +1665,8 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
   govultr 1.23+.
 - **Libraries:**
   - `spf13/cobra`;
-  - `vultr/govultr/v3` (pinned; retries off for non-idempotent calls; own limiter);
+  - `vultr/govultr/v3`, pinned at v3.33.0, with its retries off: tent's own transport retries idempotent calls and
+    limits the rate ([11.8](#118-api-client-rate-limits-cost));
   - `hetznercloud/hcloud-go/v2`;
   - `hashicorp/nomad/api` (pinned by pseudo-version);
   - `aws-sdk-go-v2` (`config`, `service/s3`) and `aws/smithy-go` for the s3 state store;

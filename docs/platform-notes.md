@@ -433,15 +433,26 @@ Facts about Nomad, Hetzner Cloud, Vultr, S3-compatible object stores and prior a
 
 ### 3.2 govultr ⏳
 
+Facts dated 2026-09-27 were read in the v3.33.0 source.
+
 - **Release.** v3.33.0 (2026-09-01), which removed VPC 2.0. `go.mod` requires Go 1.23.
-- **Retries.** go-retryablehttp with 3 retries and 500 ms waits by default. It retries 429, 5xx and connection
-  errors for **every method, POST included**, and honours `Retry-After`.
-  - `SetRetryLimit(n)` sets the retry count.
+- **Retries.** govultr wraps go-retryablehttp, with 3 retries and 500 ms waits by default. It retries 429, 5xx other
+  than 501 and connection errors for **every method, POST included**, and honours `Retry-After`.
+  - `SetRetryLimit(n)` sets the retry count for every call. There is no policy per method (2026-09-27).
   - `SetRateLimit(d)` only sets the minimum and maximum wait between retries. It is not a throttle, and the README's
     `SetRateLimit(500)` means 500 ns.
-  - An `OnRequestCompleted` hook exposes every response.
-- **Errors are untyped:** `errors.New(body)` with a `{"error","status"}` payload. `Delete`, `Halt`, `Start` and
-  `Reboot` return only an error.
+  - An `OnRequestCompleted` hook gets each response, or `nil` where the error handler below took it (2026-09-27).
+- **Errors are untyped.** `Delete`, `Halt`, `Start` and `Reboot` return only an error. In detail (2026-09-27):
+  - A 429 or a 5xx other than 501 goes through retryablehttp's error handler, even with retries at 0. The call gets
+    a `nil` response and, at retries 0, the error `gave up after 1 attempts, last error: "<body>"`.
+  - A transport error becomes text as well, so `errors.Is(err, context.Canceled)` fails.
+  - Any other non-2xx answer comes back as `errors.New(body)`, with a `{"error","status"}` payload.
+- **Requests and answers (2026-09-27).**
+  - govultr never sets `Authorization`. The `http.Client` it gets must set it, as the README's oauth2 example does.
+  - It decodes an answer only when `Content-Type` is exactly `application/json`. For any other type it returns an
+    empty result without an error.
+  - `InstanceUpdateReq` sends `tags` and `ddos_protection` even when they are unset, as `null`. Whether Vultr then
+    clears the instance's tags is not verified 🔬: check before an instance PATCH relies on it.
 - **Mocking.** The service fields (`InstanceService`, `VPCService`, `FirewallGroupService`, `LoadBalancerService`,
   and so on) are interfaces, so fakes are easy. There are no official mocks.
 
