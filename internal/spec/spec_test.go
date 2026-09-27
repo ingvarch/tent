@@ -2,6 +2,7 @@ package spec
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -217,7 +218,24 @@ func TestDecodeRejects(t *testing.T) {
 			group + "---\n" + clusterDoc,
 			"document 3 (Cluster): a second Cluster, the first is document 1",
 		},
-		{"not a mapping", clusterDoc + "---\n- a\n- b\n", "document 2: not a mapping"},
+		{"not a mapping", clusterDoc + "---\nplain\n", "document 2: not a mapping"},
+		{"list of other things", clusterDoc + "---\n- a\n- b\n", "document 2, item 1: not a mapping"},
+		{"list of lists", "- [a]\n", "document 1, item 1: not a mapping"},
+		{
+			"unknown field in a list",
+			"- " + indent(clusterDoc) + "- " + indent(groupDoc+"  sizee: 3\n"),
+			`document 1, item 2 (NodeGroup): line 18: unknown field "spec.sizee"`,
+		},
+		{
+			"duplicate key in a list",
+			"- " + indent(clusterDoc+"  channel: stable\n  channel: beta\n"),
+			`document 1, item 1: line 10: duplicate key "channel"`,
+		},
+		{
+			"second cluster in a list",
+			"- " + indent(clusterDoc) + "- " + indent(groupDoc) + "---\n- " + indent(clusterDoc),
+			"document 2, item 1 (Cluster): a second Cluster, the first is document 1, item 1",
+		},
 		{
 			"invalid YAML",
 			clusterDoc + "---\nkind: [\n",
@@ -298,6 +316,38 @@ func TestDecodeUsesYAML12Scalars(t *testing.T) {
 	if diff := cmp.Diff(o, decode(t, out)); diff != "" {
 		t.Errorf("Decode(Encode(o)) (-want +got):\n%s", diff)
 	}
+}
+
+// indent turns a document into a list item that follows "- ".
+func indent(doc string) string {
+	return strings.ReplaceAll(strings.TrimSuffix(doc, "\n"), "\n", "\n  ") + "\n"
+}
+
+// TestDecodeLists reads a document that is a list of objects, as tent get -o json prints them, as their documents.
+func TestDecodeLists(t *testing.T) {
+	want := decode(t, []byte(clusterDoc+"---\n"+groupDoc))
+	j := encodeJSONList(t, want.Cluster, want.NodeGroups[0])
+	for name, in := range map[string]string{
+		"JSON":           j,
+		"YAML":           "- " + indent(clusterDoc) + "- " + indent(groupDoc),
+		"list and a doc": "- " + indent(clusterDoc) + "---\n" + groupDoc,
+		"empty list":     "[]\n---\n" + clusterDoc + "---\n" + groupDoc,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if diff := cmp.Diff(want, decode(t, []byte(in))); diff != "" {
+				t.Errorf("Decode (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func encodeJSONList(t *testing.T, objs ...any) string {
+	t.Helper()
+	data, err := json.MarshalIndent(objs, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data) + "\n"
 }
 
 func TestDecodeSkipsEmptyDocuments(t *testing.T) {
