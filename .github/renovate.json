@@ -1,0 +1,63 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":semanticCommits", ":semanticCommitTypeAll(chore)"],
+  "timezone": "UTC",
+  "schedule": ["* 0-5 * * 1"],
+  "prConcurrentLimit": 3,
+  "labels": ["area/ci"],
+  "automerge": false,
+  "postUpdateOptions": ["gomodTidy", "gomodUpdateImportPaths"],
+  "packageRules": [
+    {
+      "description": "The Go version in go.mod is picked by hand (ADR-0013); tent has no toolchain line.",
+      "matchManagers": ["gomod"],
+      "matchDepNames": ["go"],
+      "matchDepTypes": ["golang", "toolchain"],
+      "enabled": false
+    },
+    {
+      "description": "v0.41.0 declares go 1.26.0, and go get would rewrite the go line (architecture section 16).",
+      "matchPackageNames": ["golang.org/x/mod"],
+      "allowedVersions": "<0.41.0"
+    },
+    {
+      "description": "Minor, patch and pseudo-version updates of Go modules come in one weekly PR; majors come alone.",
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "Go modules"
+    },
+    {
+      "description": "Runner images are pinned and changed by hand (ADR-0020).",
+      "matchManagers": ["github-actions"],
+      "matchDepTypes": ["github-runner"],
+      "enabled": false
+    },
+    {
+      "description": "CI and the Makefile get a new golangci-lint in one PR: internal/buildconfig keeps them equal.",
+      "matchPackageNames": ["golangci/golangci-lint"],
+      "groupName": "golangci-lint"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "The golangci-lint that make lint and fmt require; the github-actions manager finds CI's.",
+      "managerFilePatterns": ["/^Makefile$/"],
+      "matchStrings": ["GOLANGCI_LINT_VERSION := (?<currentValue>\\S+)"],
+      "depNameTemplate": "golangci-lint",
+      "packageNameTemplate": "golangci/golangci-lint",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.+)$"
+    },
+    {
+      "customType": "regex",
+      "description": "The goreleaser that CI and the release run (version-file); the asdf manager does not know it.",
+      "managerFilePatterns": ["/^\\.tool-versions$/"],
+      "matchStrings": ["goreleaser (?<currentValue>\\S+)"],
+      "depNameTemplate": "goreleaser",
+      "packageNameTemplate": "goreleaser/goreleaser",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.+)$"
+    }
+  ]
+}
