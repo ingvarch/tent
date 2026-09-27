@@ -14,6 +14,9 @@
   Still **provisional**: item 11 (Object Storage conditional writes). The context's claim that vendor data upgrades
   packages before SSH is outdated: the vendor data now sets `package_upgrade: false` itself, and tent keeps setting
   it. See [platform notes §3.16](../platform-notes.md#316-spike-runs-2026-09-25).
+
+  Amended by [ADR-0023](0023-vultr-inventory-dedupe-and-images.md) (items 1, 2 and 4: the account-wide inventory, the
+  image table, and which firewall groups a cluster has).
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0014](0014-vultr-first-provider-and-e2e.md), [ADR-0015](0015-idempotency-without-unique-names.md),

@@ -1,6 +1,7 @@
 # ADR-0015: Idempotent creation on clouds without unique names
 
-- **Status:** Accepted
+- **Status:** Accepted. Amended by [ADR-0023](0023-vultr-inventory-dedupe-and-images.md) (which copy the dedupe
+  pass keeps on Vultr).
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** extends [ADR-0003](0003-cloud-is-source-of-truth.md); [ADR-0010](0010-state-store-and-locking.md),

@@ -36,11 +36,12 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0012](0012-testing-strategy.md) | Testing strategy: fakes, golden integration tests, E2E on Hetzner | Accepted; E2E platform amended by 0014 |
 | [0013](0013-technology-stack.md) | Technology stack and release engineering | Accepted; govultr added by 0018; extended by 0020; JSON Schema generator and spec decoding libraries added by 0022 |
 | [0014](0014-vultr-first-provider-and-e2e.md) | Implement Vultr first and run the E2E suite on Vultr | Accepted |
-| [0015](0015-idempotency-without-unique-names.md) | Idempotent creation on clouds without unique names | Accepted |
+| [0015](0015-idempotency-without-unique-names.md) | Idempotent creation on clouds without unique names | Accepted; amended by 0023 |
 | [0016](0016-server-discovery-seed-and-refresh.md) | Nomad server discovery with a seed list and tent-node refresh | Accepted |
 | [0017](0017-api-driven-server-removal.md) | Remove Nomad servers through the Nomad API; ACPI shutdown is an optimization | Accepted |
-| [0018](0018-vultr-provider-design.md) | Vultr provider design | Accepted (item 11 still provisional) |
+| [0018](0018-vultr-provider-design.md) | Vultr provider design | Accepted (item 11 still provisional); amended by 0023 |
 | [0019](0019-combined-server-client-role.md) | A combined server+client role for dev and small clusters | Accepted |
 | [0020](0020-release-channels-and-ci-conventions.md) | Release channels and CI conventions | Accepted |
 | [0021](0021-import-rules.md) | Import rules that list the allowed importers | Accepted |
 | [0022](0022-json-schema-from-go-types.md) | Generate the JSON Schema from the Go types | Accepted |
+| [0023](0023-vultr-inventory-dedupe-and-images.md) | Vultr inventory, dedupe, images and firewall groups | Accepted |
