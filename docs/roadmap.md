@@ -1,12 +1,13 @@
 # Roadmap
 
-> **Current status (2026-09-27):** M0's exit criteria hold. M0 built the Go module, `tent version`, the Makefile, the
-> import rules in golangci-lint, CI on Linux, macOS and Windows, the release pipeline for `tent`, the API types with
-> defaults and validation, the spec reader and writer, the JSON Schema
+> **Current status (2026-09-27):** M0 Foundation is complete. M0 built the Go module, `tent version`, the Makefile,
+> the import rules in golangci-lint, CI on Linux, macOS and Windows, the release pipeline for `tent`, the API types
+> with defaults and validation, the spec reader and writer, the JSON Schema
 > ([ADR-0022](adr/0022-json-schema-from-go-types.md)), the state store with its `file://` and `s3://` backends,
 > version guard and cluster locks ([architecture §10](architecture.md#10-state-store-and-locking)), and the spec
-> commands of the CLI ([architecture §14](architecture.md#14-cli)). Renovate ([#9][i9]) and the release
-> prerequisites ([#10][i10], [#11][i11]) remain open in the M0 milestone.
+> commands of the CLI ([architecture §14](architecture.md#14-cli)). Renovate updates the dependencies ([#9][i9]).
+> The repository is public with the release secrets set ([#10][i10]), and the archives and packages ship third-party
+> licence notices while CI checks the licences of the modules tent links ([#11][i11]).
 >
 > - Vultr is the first provider and the E2E platform ([ADR-0014](adr/0014-vultr-first-provider-and-e2e.md)).
 > - Hetzner Cloud is second.
@@ -126,10 +127,10 @@ Work after M6 or not scheduled yet: [issues with the `later` label][later].
 - 2026-09-25: the maintainer decided all six open questions; ADR-0019 adds the `combined` role.
 - 2026-09-26: the M0 skeleton landed (ADR-0020, ADR-0021); CI is green on its first run. The roadmap's work items moved
   to GitHub milestones and issues.
-- 2026-09-27: M0's exit criteria hold. The API types, the JSON Schema (ADR-0022), the state store with cluster locks
-  and the spec commands of the CLI are built, and `cmd/tent/exit_test.go` checks the round trip, the field-path
-  errors and the serialized changes. Renovate (#9) and the release prerequisites (#10, #11) remain open in the M0
-  milestone.
+- 2026-09-27: M0 Foundation is complete. The API types, the JSON Schema (ADR-0022), the state store with cluster
+  locks and the spec commands of the CLI are built, and `cmd/tent/exit_test.go` checks the round trip, the field-path
+  errors and the serialized changes. Renovate updates the Go modules and GitHub Actions (#9), and the archives and
+  packages ship third-party licence notices, with a licence check in CI (#11).
 
 [project]: https://github.com/users/ingvarch/projects/2
 [later]: https://github.com/ingvarch/tent/issues?q=is%3Aissue%20label%3Alater

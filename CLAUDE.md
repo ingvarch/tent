@@ -12,11 +12,10 @@ Providers, in order:
 2. **Hetzner Cloud** is second.
 3. **AWS** comes later. It must remain possible without changes to the core.
 
-**Status:** M0 Foundation's exit criteria hold (2026-09-27). Renovate (#9) and the release prerequisites (#10, #11)
-remain open in the M0 milestone.
+**Status:** M0 Foundation is complete (2026-09-27).
 - The skeleton is in place: Go module, `tent version`, Makefile, lint rules, CI on Linux, macOS and Windows, and a
-  GoReleaser release pipeline. The repository is public; the pipeline needs its secrets and third-party licence
-  notices before the first tag (ADR-0020, "Before the first tag").
+  GoReleaser release pipeline. The repository is public, the release secrets are set, and the archives and packages
+  ship third-party licence notices (ADR-0020). Renovate updates the Go modules and GitHub Actions.
 - M0.2 added the API types with defaults and validation (`api/v1alpha1`), the spec file reader and writer
   (`internal/spec`) and the JSON Schema (`api/v1alpha1/tent.schema.json`, ADR-0022).
 - M0.3 added the state store (`internal/statestore`): the `file://` and `s3://` backends, the cluster layout, the
@@ -68,8 +67,8 @@ remain open in the M0 milestone.
   - Unit tests sit next to the code, with golden files under `testdata/`.
   - Every engine task needs an "apply → re-plan → no-op" test.
   - E2E tests use the `e2e` build tag and never run by default.
-- **Checks.** `make check` runs fmt, lint, test and build; `make fmt` and `make lint` need golangci-lint at the version
-  pinned in the Makefile. Releases follow ADR-0020.
+- **Checks.** `make check` runs fmt, lint, licenses, test and build; `make fmt` and `make lint` need golangci-lint at
+  the version pinned in the Makefile. Releases follow ADR-0020.
 
 ## Maintainer decisions
 
