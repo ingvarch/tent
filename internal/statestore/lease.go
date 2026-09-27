@@ -86,7 +86,7 @@ func (o leaseObject) read(ctx context.Context) (*Lease, Version, error) {
 func decodeLease(data []byte) (*Lease, error) {
 	var l Lease
 	if err := json.Unmarshal(data, &l); err != nil {
-		return nil, fmt.Errorf("invalid lease: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidLease, err)
 	}
 	return &l, nil
 }

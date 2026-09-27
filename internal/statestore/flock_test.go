@@ -570,17 +570,20 @@ func TestFlockUnreadableStaleLease(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "state")
 	writeLeaseFile(t, root, []byte("not a lease"))
 	lk := newFlock(t, openFile(t, root), mustLayout(t, "prod"))
-	if _, _, err := lk.TryLock(t.Context(), testLease("mine", time.Hour)); err == nil ||
-		errors.Is(err, statestore.ErrLocked) {
+	_, _, err := lk.TryLock(t.Context(), testLease("mine", time.Hour))
+	if errors.Is(err, statestore.ErrLocked) {
 		t.Errorf("TryLock over an unreadable lease: error = %v, want a read error", err)
 	}
+	wantInvalidLease(t, "TryLock", err)
 	if h := holder(t, lk); h != nil {
 		t.Errorf("Holder = %+v, want nil: the lock is free", h)
 	}
 	// ForceUnlock removes it anyway, and says it could not read it.
-	if removed, err := lk.ForceUnlock(t.Context()); err == nil || removed != nil {
-		t.Errorf("ForceUnlock of an unreadable lease = %+v, %v; want nil and an error", removed, err)
+	removed, err := lk.ForceUnlock(t.Context())
+	if removed != nil {
+		t.Errorf("ForceUnlock of an unreadable lease removed %+v, want nil with the error", removed)
 	}
+	wantInvalidLease(t, "ForceUnlock", err)
 	wantMissing(t, leaseFile(root))
 	tryLockFree(t, lk, testLease("mine", time.Hour))
 }
@@ -613,15 +616,16 @@ func TestFlockForceUnlockWhileHeld(t *testing.T) {
 // by a holder that cannot be named, until the holder renews its lease.
 func TestFlockHeldWithoutLease(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		spoil func(t *testing.T, root string)
+		name       string
+		spoil      func(t *testing.T, root string)
+		unreadable bool
 	}{
 		{"missing", func(t *testing.T, root string) {
 			if err := os.Remove(leaseFile(root)); err != nil {
 				t.Fatal(err)
 			}
-		}},
-		{"unreadable", func(t *testing.T, root string) { writeLeaseFile(t, root, []byte("not a lease")) }},
+		}, false},
+		{"unreadable", func(t *testing.T, root string) { writeLeaseFile(t, root, []byte("not a lease")) }, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, layout := filepath.Join(t.TempDir(), "state"), mustLayout(t, "prod")
@@ -632,6 +636,9 @@ func TestFlockHeldWithoutLease(t *testing.T) {
 
 			_, _, err := b.TryLock(t.Context(), testLease("second", time.Hour))
 			wantUnnamed(t, "TryLock", err)
+			if got := errors.Is(err, statestore.ErrInvalidLease); got != tc.unreadable {
+				t.Errorf("TryLock: errors.Is(%v, ErrInvalidLease) = %t, want %t", err, got, tc.unreadable)
+			}
 			h, err := b.Holder(t.Context())
 			wantUnnamed(t, "Holder", err)
 			if h != nil {

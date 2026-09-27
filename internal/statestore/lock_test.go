@@ -44,6 +44,28 @@ func TestLockedErrorMessage(t *testing.T) {
 	}
 }
 
+func TestLeaseString(t *testing.T) {
+	lease := statestore.Lease{
+		ID: "abc", Owner: "igor", Host: "mac", PID: 42, Operation: "update",
+		AcquiredAt: time.Date(2026, 9, 26, 14, 0, 1, 0, time.FixedZone("CEST", 2*60*60)),
+	}
+	noOp := lease
+	noOp.Operation = ""
+	for _, tc := range []struct {
+		lease statestore.Lease
+		want  string
+	}{
+		{lease, "igor@mac (pid 42) for update since 2026-09-26 12:00:01 UTC"},
+		{noOp, "igor@mac (pid 42) since 2026-09-26 12:00:01 UTC"},
+		{statestore.Lease{Operation: "delete"}, "an unknown holder for delete"},
+		{statestore.Lease{}, "an unknown holder"},
+	} {
+		if got := tc.lease.String(); got != tc.want {
+			t.Errorf("String() = %q\nwant       %q", got, tc.want)
+		}
+	}
+}
+
 // otherHolder is the lease of someone else who holds the lock in the tests with a fakeLocker.
 var otherHolder = statestore.Lease{
 	ID: "other", Owner: "igor", Host: "mac", PID: 42, Operation: "update",

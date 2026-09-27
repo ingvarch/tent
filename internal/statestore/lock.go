@@ -23,12 +23,29 @@ type Lease struct {
 	ExpiresAt  time.Time `json:"expiresAt"`
 }
 
+// String names the holder, what it does and since when: igor@mac (pid 42) for update since 2026-09-26 12:00:01 UTC.
+func (l Lease) String() string {
+	s := "an unknown holder"
+	if l.Owner != "" || l.Host != "" {
+		s = fmt.Sprintf("%s@%s (pid %d)", l.Owner, l.Host, l.PID)
+	}
+	if l.Operation != "" {
+		s += " for " + l.Operation
+	}
+	if !l.AcquiredAt.IsZero() {
+		s += " since " + l.AcquiredAt.UTC().Format("2006-01-02 15:04:05 UTC")
+	}
+	return s
+}
+
 // Errors of the lock, for errors.Is.
 var (
 	// ErrLocked means another holder has the lock. A *LockedError matches it.
 	ErrLocked = errors.New("locked")
 	// ErrLockLost means the caller no longer holds the lock: it expired and was taken over, or it was removed.
 	ErrLockLost = errors.New("lock lost")
+	// ErrInvalidLease means the stored lease cannot be read.
+	ErrInvalidLease = errors.New("invalid lease")
 )
 
 // LockedError says who holds a cluster's lock.
@@ -38,18 +55,7 @@ type LockedError struct {
 }
 
 func (e *LockedError) Error() string {
-	h := e.Holder
-	msg := "cluster " + e.Cluster + " is locked by an unknown holder"
-	if h.Owner != "" || h.Host != "" {
-		msg = fmt.Sprintf("cluster %s is locked by %s@%s (pid %d)", e.Cluster, h.Owner, h.Host, h.PID)
-	}
-	if h.Operation != "" {
-		msg += " for " + h.Operation
-	}
-	if !h.AcquiredAt.IsZero() {
-		msg += " since " + h.AcquiredAt.UTC().Format("2006-01-02 15:04:05 UTC")
-	}
-	return msg
+	return "cluster " + e.Cluster + " is locked by " + e.Holder.String()
 }
 
 // Is makes errors.Is(err, ErrLocked) hold.
