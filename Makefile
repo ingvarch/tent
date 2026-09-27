@@ -8,7 +8,7 @@ LDFLAGS = \
 	-X $(MODULE)/internal/buildinfo.date=$(DATE)
 
 # The version CI lints with; another one finds and formats other things. internal/buildconfig keeps the two equal.
-GOLANGCI_LINT_VERSION := 2.13.2
+GOLANGCI_LINT_VERSION := 2.14.0
 
 .DEFAULT_GOAL := check
 
