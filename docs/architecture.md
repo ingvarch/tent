@@ -387,6 +387,7 @@ github.com/ingvarch/tent
 │   ├── app/             # use cases; used by the CLI, e2e tests and a future controller
 │   ├── model/           # spec -> cloud-agnostic intents (network, access, groups, join)
 │   ├── engine/          # task graph: plan/apply, diff rendering, retries, concurrency
+│   │   └── enginetest/  # ApplyReplan for provider task tests: apply, plan again, expect no changes
 │   ├── cloud/           # Provider / Nodes interfaces, capabilities, registry, common types
 │   │   ├── vultr/       # govultr wrapper, label codec, tasks, nodes, inventory, pricing
 │   │   └── hetzner/     # hcloud-go wrapper, tasks, nodes, inventory, pricing, lock
@@ -426,47 +427,120 @@ github.com/ingvarch/tent
 
 ## 6. Reconciliation engine
 
-See [ADR-0002](adr/0002-direct-cloud-apis-and-own-engine.md).
+See [ADR-0002](adr/0002-direct-cloud-apis-and-own-engine.md). The main types of `internal/engine`:
 
 ```go
-// Task is one desired cloud object. Providers implement tasks;
-// the engine only orders, plans and applies them.
-type Task interface {
-	Key() Key    // stable identity, e.g. {Kind: "vultr.FirewallGroup", Name: "prod-servers"}
-	Deps() []Key // explicit edges; no reflection
+// Key identifies one desired cloud object. It prints as kind/name, e.g. vultr.FirewallGroup/prod-servers.
+type Key struct {
+	Kind string // e.g. vultr.FirewallGroup
+	Name string // deterministic, e.g. prod-servers
+}
 
-	// Plan compares the desired object with the snapshot. It must not call the cloud.
+// Change is what a task plans to do to its object.
+type Change struct {
+	Action Action      // Noop | Create | Update | Replace | Delete
+	Reason string      // e.g. networking.cidr changed
+	Diff   []FieldDiff // {Field, Old, New}, rendered by the task
+}
+
+// Object is one cloud object the cluster owns, as the snapshot saw it.
+type Object struct {
+	Key       Key
+	ID        string
+	Duplicate bool // the provider keeps another object with this key; this one goes
+}
+
+// Snapshot is every object the cluster owns, listed once per run. Tasks read the provider's own
+// snapshot type through a type assertion; the engine reads only Objects.
+type Snapshot interface{ Objects() []Object }
+
+type Env struct {
+	Snapshot Snapshot
+	Outputs  *Outputs // values that tasks produce for their dependents, such as IDs and addresses
+}
+
+// Outputs is safe for concurrent use.
+func (o *Outputs) Set(k Key, name, value string)
+func (o *Outputs) Get(k Key, name string) (value string, known bool)
+
+// Task is one desired cloud object. Providers implement tasks; the engine orders, plans and applies them.
+type Task interface {
+	Key() Key    // no two tasks of a run have the same key
+	Deps() []Key // the tasks whose changes go first, also through tasks without changes; no reflection
+
+	// Plan compares the desired object with env.Snapshot. It must not call the cloud.
 	Plan(ctx context.Context, env *Env) (Change, error)
-	// Apply executes a planned change. It must be safe to retry.
+	// Apply carries out a planned change. It must be safe to run again.
 	Apply(ctx context.Context, env *Env, ch Change) error
-	// Delete removes an owned object of this kind (used by prune and cluster deletion).
-	// Creation and deletion live in the same type so they cannot drift apart.
+	// Delete removes an owned object of the task's kind. It must be safe to run again.
 	Delete(ctx context.Context, env *Env, obj Object) error
 }
 
-type Change struct {
-	Action Action      // Noop | Create | Update | Replace | Delete
-	Diff   []FieldDiff // human readable, e.g. rules[3]: + tcp/4646 from 203.0.113.7/32
-	Reason string
+// Kind is one kind of object that tasks manage.
+type Kind struct {
+	Name    string  // the Key.Kind of its tasks and objects
+	Deleter Deleter // usually a task of the kind
 }
 
-type Env struct {
-	Snapshot *Inventory // every resource owned by the cluster, fetched once per run
-	Outputs  *Outputs   // IDs/IPs produced by applied tasks, read by dependents
-	DryRun   bool
+type Deleter interface {
+	Delete(ctx context.Context, env *Env, obj Object) error
 }
+
+// Retryable marks err as one the engine may retry: after `after` when it is positive, otherwise after a backoff.
+func Retryable(err error, after time.Duration) error
+
+func NewPlan(ctx context.Context, tasks []Task, kinds []Kind, snap Snapshot) (*Plan, error)
+func (p *Plan) Apply(ctx context.Context, opts ApplyOptions) error // Parallelism, ChangeTimeout, OnEvent
 ```
 
 Behaviour:
 
+- **Tasks and kinds.** The engine takes the tasks and a list of kinds. Each kind has a deleter, usually a task of the
+  kind, so creation and deletion stay in one type. The engine deletes an object with the deleter of its kind, so prune
+  and `delete cluster` can delete objects of kinds that no task of the run has. The order of the kinds is the deletion
+  order, so a task's kind comes before the kinds of the tasks it depends on; the engine rejects kinds in another
+  order.
 - **Snapshot instead of a lookup per task.** At the start of a run the provider lists every resource kind once:
   labelled lists on Hetzner, tag and client-side filters on Vultr. `Plan` reads only this snapshot. The number of API
   calls grows with the number of resource kinds, not resources. This is critical under Hetzner's 3600 requests per
   hour.
-- **Plan** runs sequentially in topological order. Dependents of a task that will be created see "known after apply"
-  values, as in Terraform.
-- **Apply** runs in parallel with a bounded worker pool. A task starts when its dependencies have finished. A failure
-  cancels only its dependents, and all errors are collected.
+- **Plan.** Tasks plan one at a time in topological order; ties keep the order in which the provider gives them. A
+  task plans noop, create, update or replace; deletes come only from prune. When a task plans create or replace, its
+  outputs are unknown to its dependents during the plan, and their diffs show `(known after apply)`, as in Terraform.
+- **Duplicates.** The provider's inventory marks extra copies of an object as `Duplicate`;
+  [ADR-0015](adr/0015-idempotency-without-unique-names.md) says which copy stays. The plan deletes the duplicates with
+  the reason `duplicate`.
+- **Apply.** Changes run in parallel, at most 4 at once by default. A change starts once every change it depends on,
+  directly or through tasks without changes, has succeeded. A failed change skips every change that waits for it that
+  way. The others go on, and all errors are reported together.
+- **Prune.** Prune deletes the objects that carry the cluster marker but that no task claims, and the duplicates.
+  Nodes and volumes are not engine kinds. The provider leaves them out of the snapshot and the kinds, so prune never
+  deletes them: `rollout` manages nodes, and volumes are never deleted implicitly.
+  - Prune runs after every task change has succeeded: kind by kind in the order of the kinds, the objects of one kind
+    in parallel.
+  - When a task change fails, the deletes wait for the next run.
+  - When a delete fails, the deletes of the later kinds wait for the next run; the other deletes of its kind still
+    finish. A VPC delete after a failed firewall-group delete would only fail on `attached` and retry until its
+    deadline.
+- **Errors and retries.**
+  - The provider decides which errors are retryable and marks them with `engine.Retryable(err, after)`:
+    - Retryable: rate limits (honouring `Retry-After` / `RateLimit-Reset`), conflicts, `locked` and 5xx on idempotent
+      calls, and the Vultr VPC that cannot be deleted for about 20 s after its instances are gone.
+    - Permanent: `invalid_input`, `resource_unavailable` after fallbacks, `forbidden`.
+  - The engine waits `after`, or a jittered backoff from 1 s doubling to 30 s, and tries again until the change's
+    deadline, 5 minutes by default. Other errors fail at once.
+- **Ctrl-C.** Changes that have not started are skipped; running ones see the cancel through their context.
+- **Task contract.**
+  - `Plan` sets the outputs of an object that exists. `Apply` is not called for a task without changes, so its
+    dependents see what `Plan` set.
+  - `Apply` sets the outputs again after a create or replace; the engine clears them after planning such a task.
+  - In `Apply`, a value that was unknown at plan time is read from `Outputs`, not from the change's `Diff`.
+  - After a retryable error the engine calls `Apply` again with the same `Change`. So an operation id
+    ([ADR-0015](adr/0015-idempotency-without-unique-names.md)) must stay the same across attempts: the task keeps it
+    and does not make a new one per call.
+  - The snapshot is read-only: `Apply` calls run concurrently.
+  - Tasks ignore objects marked `Duplicate`.
+  - `Delete` is safe to run again: an object that is already gone counts as deleted.
 - **Idempotency without a state file.** Deterministic names and ownership markers make every task safe to re-run.
   Detecting a create whose response was lost depends on the provider
   ([ADR-0015](adr/0015-idempotency-without-unique-names.md)):
@@ -475,20 +549,20 @@ Behaviour:
   - *No unique names (Vultr).*
     - Every create carries a client-generated operation id (`tent/op`).
     - SDK-level retries of non-idempotent calls are disabled.
-    - After an ambiguous failure, the task searches by operation id before it retries.
+    - After an ambiguous failure, the next attempt searches by operation id before it creates.
     - A dedupe pass removes accidental copies.
 - **Normalisation.** Every task normalises cloud-side values before diffing, so a plan never shows a diff forever,
-  which is a known kops bug class. Each task has an "apply, re-plan, expect no-op" test.
-- **Prune.** Resources that carry the cluster marker but that no task claims become `Delete` changes. Exceptions:
-  nodes, which `rollout` manages, and volumes, which are never deleted implicitly.
-- **Errors and retries.**
-  - Retryable: rate limits (honouring `Retry-After` / `RateLimit-Reset`), conflicts, `locked` and 5xx on idempotent
-    calls.
-  - Permanent: `invalid_input`, `resource_unavailable` after fallbacks, `forbidden`.
-  - Per-task deadlines use jittered backoff.
+  which is a known kops bug class. Each task has an "apply, re-plan, expect no-op" test that uses the helper
+  `enginetest.ApplyReplan`.
 - **Output.**
-  - A human-readable plan: `+ create`, `~ update` with field diffs, `- delete`, `-/+ replace`.
-  - `-o json` for machines.
+  - A plan for people:
+    - Each change is a line: `+` create, `~` update, `-/+` replace, `-` delete, then the key. Notes follow the key:
+      `(ID <id>)` or `(ID <id>, <reason>)` on a delete, `(<reason>)` on another change that has a reason.
+    - Its field diffs follow below it: `+ field: new`, `- field: old`, `~ field: old -> new`, and a bare `~ field`
+      for a diff with neither value, which lets a task show that a secret changed without showing it.
+    - The last line counts the changes: `Plan: N to create, N to update, N to replace, N to delete.`
+    - A plan without changes is the line `No changes.`
+  - `-o json` for machines: `{"changes": [...], "summary": {...}}`.
   - `--exit-code` returns 2 when the plan has changes, for drift detection in CI.
 
 Deliberately **not** copied from kops' `fi` framework:
@@ -518,7 +592,10 @@ type Provider interface {
 
 	// Infrastructure: cloud-agnostic intents -> tasks for the engine.
 	BuildInfra(ctx context.Context, m *model.Cluster) ([]engine.Task, error)
-	Inventory(ctx context.Context, cluster string) (*Inventory, error)
+	// Every kind that BuildInfra's tasks manage, in deletion order, whether or not this spec needs one,
+	// so that prune can delete an object the spec no longer asks for.
+	InfraKinds() []engine.Kind
+	Inventory(ctx context.Context, cluster string) (engine.Snapshot, error) // the provider's own type
 
 	Nodes() Nodes                                           // primitives for rollout
 	Join(m *model.Cluster) model.JoinStrategy               // how agents find servers
@@ -1493,6 +1570,7 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
    - Nomad config rendering (golden HCL);
    - the label codecs;
    - the address plan;
+   - the engine: golden plans, apply with fake time (`testing/synctest`);
    - rollout decisions as pure functions (cluster state → next step).
 2. **Provider tests.**
    - Tasks and `Nodes` run against in-memory fakes of narrow SDK interfaces: govultr service interfaces and hcloud-go
