@@ -1,6 +1,7 @@
 # ADR-0012: Testing strategy: fakes, golden integration tests, E2E on Hetzner
 
-- **Status:** Accepted; E2E platform amended by [ADR-0014](0014-vultr-first-provider-and-e2e.md) (Vultr)
+- **Status:** Accepted; E2E platform amended by [ADR-0014](0014-vultr-first-provider-and-e2e.md) (Vultr). Decided
+  2026-09-27: the Vultr fake is an in-memory fake of `vultr.API` in `internal/cloud/vultr/vultrfake`.
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0002](0002-direct-cloud-apis-and-own-engine.md), [ADR-0004](0004-layered-architecture.md),
