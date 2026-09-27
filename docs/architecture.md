@@ -235,9 +235,10 @@ This table is also the check that the abstraction survives several providers.
 
 - **API version.** User-facing kinds use `apiVersion: tent/v1alpha1` (group decided on 2026-09-25).
   Every stored object carries its apiVersion. Conversion functions are added when a second version appears.
-- **User spec and completed spec.** The user spec is what the operator wrote. The completed spec has every default
-  filled in and records what was last applied. The state store keeps both, and `tent get cluster --full` prints the
-  completed one.
+- **User spec and completed spec.** The user spec is what the operator wrote. The state store keeps it as given,
+  without defaults, but written in tent's field order, so comments and formatting are not kept. The completed spec
+  has every default filled in and records what was last applied; `update` writes it from M1 on. From then on,
+  `tent get --full` prints the completed spec; until then it prints the user spec with the defaults filled in.
 - **Strict decoding.** Keys are case-sensitive, and unknown fields, duplicate keys and null values are errors: an empty
   value such as `vultr:` is almost always a forgotten entry, so write `vultr: {}`. Decoding errors name the document,
   and the line when the file has the key, for example `document 2 (NodeGroup): line 37: unknown field "spec.sizee"`.
@@ -974,8 +975,8 @@ given.
 
 ### 10.4 Locking
 
-Mutating commands (`update`, `rolling-update`, `upgrade`, `delete`, `backup restore`) take a cluster lock.
-`statestore.NewLocker` picks the first mechanism that fits the store:
+Mutating commands (`create`, `replace`, `edit`, `update`, `rolling-update`, `upgrade`, `delete`, `backup restore`)
+take a cluster lock. `statestore.NewLocker` picks the first mechanism that fits the store:
 
 | Order | Mechanism | Where |
 |---|---|---|
@@ -1256,7 +1257,8 @@ afterwards.
 ### 13.1 `tent create cluster`
 
 - Generates or loads the specs and writes them to the state store without touching the cloud, as in kops.
-- `--yes` runs `update cluster --yes` right away.
+- `--yes` runs `update cluster --yes` right away. `update` comes with M1, so in M0 `create` writes only the state and
+  has no `--yes`.
 - `create -f file.yaml` loads multi-document YAML.
 
 ### 13.2 `tent update cluster [--yes]`
@@ -1361,6 +1363,10 @@ create surge node(s) → wait until registered and ready
    kops leak.
 4. Delete the state last, then release the lock.
 
+M0 has no cloud inventory yet, so `delete cluster` removes only the state (step 4). Without `--yes` it prints the
+paths it would delete. It refuses objects under the cluster that tent does not know unless `--force` is given. It
+deletes `cluster.yaml` and `tent-version` last, so a delete that stops can run again.
+
 ### 13.8 Backups
 
 - **`tent backup create`** reads `GET /v1/operator/snapshot` and stores the snapshot under `backups/`.
@@ -1372,32 +1378,106 @@ create surge node(s) → wait until registered and ready
 
 ## 14. CLI
 
-| Command | kops analogue | Purpose |
-|---|---|---|
-| `tent create cluster NAME [flags]`, `tent create -f FILE` | `create cluster` | generate or load specs into the state store |
-| `tent get clusters\|nodegroups\|nodes [-o yaml\|json] [--full]` | `get` | inspect specs and nodes |
-| `tent edit cluster\|nodegroup NAME` | `edit` | `$EDITOR` with validation and a diff before saving |
-| `tent replace -f FILE`, `tent apply -f FILE` | `replace` | GitOps; `apply` = `replace` + `update` |
-| `tent update cluster [--yes] [--exit-code]` | `update cluster` | infrastructure, node counts, day-1 configuration |
-| `tent rolling-update cluster [--yes] [--nodegroups a,b] [--force]` | `rolling-update cluster` | Nomad-aware replacement |
-| `tent upgrade cluster [--yes]` | `upgrade cluster` | version bumps from the channel |
-| `tent validate cluster [--wait 10m]` | `validate cluster` | cloud and Nomad health |
-| `tent delete cluster [--yes]` | `delete cluster` | full cleanup by ownership markers |
-| `tent export nomad [--ttl 24h]` | `export kubeconfig --admin` | short-lived operator credentials and env |
-| `tent ui` | — | local mTLS proxy for the UI and CLI |
-| `tent cost` | — | monthly and hourly cost of the cluster or plan (Vultr `/plans`, Hetzner `/pricing`) |
-| `tent backup create\|restore` | etcd-manager backups | Raft snapshots |
-| `tent toolbox dump` | `toolbox dump` | diagnostics bundle (via SSH) |
-| `tent state unlock [--force]` | — | remove a stale lock |
-| `tent version` | `version` | build info |
+The last column marks what M0 has: the spec commands, which work only on the state store. The other commands come
+with later milestones ([roadmap](roadmap.md)).
 
-- **Global flags:** `--state` (env `TENT_STATE`), `--name` (env `TENT_CLUSTER`), `-o table|yaml|json`, `-v`,
-  `--log-format text|json`.
-- **Cloud credentials:** `VULTR_API_KEY`, `HCLOUD_TOKEN`.
-- **Configuration precedence:** flags, then environment, then `~/.config/tent/config.yaml` (defaults only, never
-  secrets), then built-in defaults.
-- **Exit codes:** 0 success, 1 error, 2 "plan has changes" (only with `--exit-code`).
-- **Output:** human progress and plans, or structured JSON events with `-o json`. Logs use `log/slog`.
+| Command | kops analogue | Purpose | M0 |
+|---|---|---|---|
+| `tent create cluster [NAME] [flags]`, `tent create -f FILE` | `create cluster` | generate or load specs into the state store | yes |
+| `tent get [NAME]`, `tent get clusters\|nodegroups [NAME...]`, all with `[--full]` | `get` | print a cluster's specs, list clusters or node groups | yes |
+| `tent get nodes` | `get instances` | list the cluster's nodes | — |
+| `tent edit cluster [NAME]`, `tent edit nodegroup NAME` | `edit` | an editor, with validation and a diff before saving | yes |
+| `tent replace -f FILE` | `replace` | GitOps: replace stored specs with those of a file | yes |
+| `tent apply -f FILE` | — | `replace` + `update` | — |
+| `tent update cluster [--yes] [--exit-code]` | `update cluster` | infrastructure, node counts, day-1 configuration | — |
+| `tent rolling-update cluster [--yes] [--nodegroups a,b] [--force]` | `rolling-update cluster` | Nomad-aware replacement | — |
+| `tent upgrade cluster [--yes]` | `upgrade cluster` | version bumps from the channel | — |
+| `tent validate cluster [--wait 10m]` | `validate cluster` | cloud and Nomad health | — |
+| `tent delete cluster [NAME] [--yes] [--force]` | `delete cluster` | full cleanup by ownership markers | state only |
+| `tent export nomad [--ttl 24h]` | `export kubeconfig --admin` | short-lived operator credentials and env | — |
+| `tent ui` | — | local mTLS proxy for the UI and CLI | — |
+| `tent cost` | — | monthly and hourly cost of the cluster or plan (Vultr `/plans`, Hetzner `/pricing`) | — |
+| `tent backup create\|restore` | etcd-manager backups | Raft snapshots | — |
+| `tent toolbox dump` | `toolbox dump` | diagnostics bundle (via SSH) | — |
+| `tent state unlock [NAME] [--force]` | — | remove a stale lock | yes |
+| `tent version` | `version` | build info | yes |
+
+**Global flags and configuration**
+- `--state` (env `TENT_STATE`), `--name` (env `TENT_CLUSTER`), `-o table|yaml|json`, `-v` or `-vv`,
+  `--log-format text|json`, and `--lock-timeout` (default 5m).
+- A setting comes from its flag, then its environment variable, then the config file, then the built-in default.
+- The config file is `$XDG_CONFIG_HOME/tent/config.yaml`. When `XDG_CONFIG_HOME` is unset or not an absolute path, it
+  is `~/.config/tent/config.yaml` on every operating system, and without a home directory there is no config file. It
+  holds defaults only, never secrets: the string keys `state`, `cluster`, `output` and `logFormat`. Unknown or
+  duplicate keys and values that are not strings are errors that name the file and the line.
+- A command for one cluster takes its name from `NAME`, else from `--name`. A `NAME` and a `--name` on the command
+  line must agree. `get nodegroups` and `edit nodegroup` take the cluster from `--name`, as does `get` for a cluster
+  named `cluster`, `clusters`, `nodegroup` or `nodegroups`.
+- Cloud credentials: `VULTR_API_KEY`, `HCLOUD_TOKEN`.
+
+**Output**
+- Results go to stdout. Warnings, notices and logs go to stderr.
+- Warnings are plain lines that start with `WARNING:`, and `--log-format` does not change them. Logs use `log/slog`,
+  as text or JSON by `--log-format`; `-v` shows info logs and `-vv` debug logs. In M0 tent writes debug logs only.
+- `-o table`, the default, prints tables and lines of text, such as `node group workers created`. `-o yaml` and
+  `-o json` print the same results as data. JSON never escapes HTML characters such as `<` and `&`.
+- `tent get [NAME]` prints the Cluster and its node groups as YAML documents, the file that `create -f` and
+  `replace -f` take. With `-o json` it prints them as a list, which those commands take too. It takes one `NAME`.
+  `tent get clusters` and `tent get nodegroups` take several names and print tables, and with `-o yaml` or `-o json`
+  the specs. On an empty store `tent get clusters` also says `no clusters in <store>` on stderr, because a mistyped
+  `--state` looks like an empty store. `--full` fills in the defaults ([3.3](#33-api-rules)).
+- From M1, commands that change the cloud print their progress and plan, or structured JSON events with `-o json`.
+
+**Spec commands**
+- `create cluster` generates the Cluster and two node groups, `servers` and `workers`, or with `--combined` one
+  group `nodes`. It needs `--provider`, `--region` and `--machine-type`. The other flags are `--zones`,
+  `--worker-machine-type`, `--servers` and `--workers` (both default to 3), `--image`, `--ssh-key PATH` (a public key
+  file; repeatable), `--ssh-access` and `--api-access` (CIDRs), and `--nomad-version`. The specs hold only what the
+  flags set. `--dry-run` checks the specs and prints them without writing: it needs no state store, and with one it
+  also checks them against the store.
+- `create -f FILE` stores new objects: a Cluster with its node groups, or node groups for an existing cluster.
+  `replace -f FILE` replaces objects that exist. `-f -` reads standard input. Both write at once, as in kops.
+- `create`, `replace` and `edit` check the whole cluster that results, and `--allow-single-server` lets them accept a
+  server group of size 1. They write only the objects that differ from the stored ones and report the others as
+  `unchanged`.
+- A command that changes the state store can run again after an interruption. `create` writes `cluster.yaml` last,
+  and running it again with the same specs finishes it.
+
+**`tent edit`**
+- It opens the one object, the Cluster or one node group, in an editor: the first of `$TENT_EDITOR`, `$VISUAL` and
+  `$EDITOR` that is set, else `vi` (`notepad` on Windows). The value is a command line split at spaces, and double
+  quotes keep spaces, as in `"C:\Program Files\Editor\editor.exe" --wait`. tent waits for the editor to exit, so an
+  editor that returns at once needs its wait flag, such as `code --wait`.
+- When the file does not decode or the spec is invalid, tent opens the editor again with the errors as YAML comments
+  at the top. Saving the file unchanged, or empty, cancels.
+- tent prints a valid edit as a unified diff and asks `Save? [y/N]`; `--yes` saves without asking. It saves only if
+  the stored object has not changed since tent read it, and it refuses to rename the object.
+- When the edit fails, is interrupted, or is cancelled after errors, tent keeps the edited file if it holds changes,
+  and prints its path.
+- While the editor runs, tent ignores Ctrl-C and Ctrl-\ so that the editor handles them, as git does. SIGTERM still
+  cancels the edit, which stops when the editor exits.
+- `edit` prints text: it refuses `-o json` and `-o yaml` on the command line and ignores `output` in the config file.
+
+**Locks and interrupts**
+- A command that changes the state store takes the cluster's lock ([10.4](#104-locking)) and checks the tent version
+  ([10.2](#102-layout)). A run that finds nothing to write takes no lock.
+- While another tent holds the lock, a command waits up to `--lock-timeout` and says once who holds it, for example
+  `cluster prod is locked by igor@laptop (pid 4242) for replace since 2026-09-27 10:00:00 UTC; waiting up to 5m0s
+  (--lock-timeout)`. With `--lock-timeout 0` it fails at once.
+- It warns when the store allows only a best-effort lock, and when it takes over the lock of a holder whose lease
+  expired or whose tent ended.
+- `state unlock` removes a lock whose holder expired or ended, and with `--force` any lock that a live holder can
+  lose ([10.4](#104-locking)). For a cluster that is not locked and has nothing in the store, it fails with
+  `not found`.
+- The first Ctrl-C or SIGTERM cancels the command, which then releases its lock. A second one ends tent at once.
+
+**Warnings, errors and exit codes**
+- After `create`, `replace` or a saved `edit`, tent warns while `access.api` lets the whole internet reach the Nomad
+  API: a `/0` range, such as the default `0.0.0.0/0`.
+- An error goes to stderr after `Error: `. An invalid spec prints `Error: invalid spec:` and then one indented line
+  per problem, with the field path ([3.3](#33-api-rules)).
+- Exit codes: 0 success, 1 error, 130 when a second Ctrl-C or SIGTERM ends tent. From M1, `--exit-code` makes a plan
+  with changes exit with 2.
 
 ---
 
