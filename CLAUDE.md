@@ -12,7 +12,8 @@ Providers, in order:
 2. **Hetzner Cloud** is second.
 3. **AWS** comes later. It must remain possible without changes to the core.
 
-**Status:** M0 Foundation is in progress.
+**Status:** M0 Foundation's exit criteria hold (2026-09-27). Renovate (#9) and the release prerequisites (#10, #11)
+remain open in the M0 milestone.
 - The skeleton is in place: Go module, `tent version`, Makefile, lint rules, CI on Linux, macOS and Windows, and a
   GoReleaser release pipeline. The repository is public; the pipeline needs its secrets and third-party licence
   notices before the first tag (ADR-0020, "Before the first tag").
@@ -20,8 +21,11 @@ Providers, in order:
   (`internal/spec`) and the JSON Schema (`api/v1alpha1/tent.schema.json`, ADR-0022).
 - M0.3 added the state store (`internal/statestore`): the `file://` and `s3://` backends, the cluster layout, the
   version guard and cluster locks (`docs/architecture.md` §10). CI tests the s3 backend against Cloudflare R2.
+- M0.4 added the spec commands of the CLI (`internal/cli` over the use cases in `internal/app`): global flags, a config
+  file, `tent create`, `get`, `edit`, `replace`, `delete cluster` (state only) and `state unlock`
+  (`docs/architecture.md` §14). `cmd/tent/exit_test.go` checks the M0 exit criteria.
 - The Vultr spike has run (2026-09-25).
-- Next: the spec commands (M0.4), then M1. See `docs/roadmap.md`.
+- Next: M1 Vultr infrastructure. See `docs/roadmap.md`.
 
 ## Read before changing anything
 
