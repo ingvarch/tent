@@ -13,6 +13,7 @@ require (
 	github.com/invopop/jsonschema v0.14.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/spf13/cobra v1.10.2
+	github.com/vultr/govultr/v3 v3.33.0
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/mod v0.40.0
 	sigs.k8s.io/json v0.0.0-20260909141634-11ed52e25bc5
@@ -37,6 +38,9 @@ require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/google/go-querystring v1.2.0 // indirect
+	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
+	github.com/hashicorp/go-retryablehttp v0.7.8 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
 	github.com/sergi/go-diff v1.1.0 // indirect
