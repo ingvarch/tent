@@ -77,7 +77,7 @@ func (f *Fake) AvailablePlans(ctx context.Context, region, planType string) ([]s
 	err := f.run(ctx, r, func() error {
 		ids, ok := f.available[region]
 		if !ok {
-			// Vultr's answer to an unknown region is not verified.
+			// Matches Vultr's answer to an unknown region, checked on 2026-09-27.
 			return r.fail(http.StatusBadRequest, "Invalid region.")
 		}
 		for _, id := range ids {

@@ -1,0 +1,15 @@
++ vultr.SSHKey/prod-8ba890ed
++ vultr.VPC/prod
+    + cidr: 10.64.0.0/16
+    + region: ams
++ vultr.FirewallGroup/prod-servers
+    + rule: v4 icmp 0.0.0.0/0
+    + rule: v4 tcp 0.0.0.0/0 4646
+    + rule: v4 tcp 203.0.113.7/32 22
+    + rule: v6 icmp ::/0
++ vultr.FirewallGroup/prod-clients
+    + rule: v4 icmp 0.0.0.0/0
+    + rule: v4 tcp 203.0.113.7/32 22
+    + rule: v6 icmp ::/0
+
+Plan: 4 to create, 0 to update, 0 to replace, 0 to delete.
