@@ -1,6 +1,12 @@
 # ADR-0020: Release channels and CI conventions
 
-- **Status:** Accepted
+- **Status:** Accepted; on 2026-09-27 Renovate (`.github/renovate.json`) took over the release workflow's SHA pins,
+  the golangci-lint version and the goreleaser version, and `internal/buildconfig` checks that it still finds them;
+  on 2026-09-27 every archive and the deb and rpm packages started to ship `THIRD_PARTY_NOTICES`, and CI and
+  `make check` started to check the licences of the modules tent links (`internal/licenses`,
+  [architecture §16](../architecture.md#16-technology-stack-and-releases)); go-licenses was not used because it
+  misses modules linked only into the Windows binaries and NOTICE files, and as a tool in `go.mod` it would raise the
+  versions of modules tent shares with it
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0006](0006-two-binaries-and-nodeconfig.md), [ADR-0011](0011-nomad-only-scope-and-licensing.md),

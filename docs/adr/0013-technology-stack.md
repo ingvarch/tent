@@ -3,7 +3,8 @@
 - **Status:** Accepted; govultr added by [ADR-0018](0018-vultr-provider-design.md); extended by
   [ADR-0020](0020-release-channels-and-ci-conventions.md); JSON Schema generator and spec decoding
   libraries added by [ADR-0022](0022-json-schema-from-go-types.md); on 2026-09-26 the state store (M0.3) added
-  `github.com/gofrs/flock` and `golang.org/x/mod`, and `github.com/aws/smithy-go` as a direct dependency
+  `github.com/gofrs/flock` and `golang.org/x/mod`, and `github.com/aws/smithy-go` as a direct dependency; on
+  2026-09-27 the licence check added `github.com/google/licenseclassifier/v2`, which tent does not link
   ([architecture §16](../architecture.md#16-technology-stack-and-releases))
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch

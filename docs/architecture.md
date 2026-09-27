@@ -383,6 +383,7 @@ github.com/ingvarch/tent
 │   ├── cli/             # cobra commands, flags, output (table|yaml|json): a thin layer
 │   ├── spec/            # multi-document YAML specs: strict decoding with file lines, encoding in field order
 │   ├── apischema/       # generates api/v1alpha1/tent.schema.json (make generate); not linked into tent
+│   ├── licenses/        # licence check and THIRD_PARTY_NOTICES (make licenses, make notices); not linked into tent
 │   ├── app/             # use cases; used by the CLI, e2e tests and a future controller
 │   ├── model/           # spec -> cloud-agnostic intents (network, access, groups, join)
 │   ├── engine/          # task graph: plan/apply, diff rendering, retries, concurrency
@@ -1542,6 +1543,7 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
   - `sigs.k8s.io/yaml`;
   - `go.yaml.in/yaml/v3` and `sigs.k8s.io/json` for spec files ([ADR-0022](adr/0022-json-schema-from-go-types.md));
   - `invopop/jsonschema`, in the schema generator only;
+  - `google/licenseclassifier/v2`, in the licence check only;
   - `ProtonMail/go-crypto`;
   - `golang.org/x/sync/errgroup`;
   - `log/slog`;
@@ -1555,12 +1557,19 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
     `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` (an R2 API token limited to the bucket, Object Read & Write), and a
     lifecycle rule on the bucket that expires objects under `ci/` after 1 day, for runs cancelled before cleanup;
   - govulncheck, also weekly;
+  - the licences of every module tent links, on each platform the release builds for: each must be Apache-2.0,
+    BSD-2-Clause, BSD-3-Clause, ISC, MIT or MPL-2.0, and every licence file other than a NOTICE must name one. A
+    licence file the classifier cannot name, such as BUSL-1.1 or a proprietary text, fails even when the module has
+    another, allowed licence (`make licenses`, in the lint job);
   - a release snapshot on every pull request;
-  - `make check` runs fmt, lint, test and build locally;
+  - `make check` runs fmt, lint, licenses, test and build locally;
   - Renovate.
 - **Releases** use GoReleaser on `v*` tags:
   - `tent` for linux, darwin and windows on amd64 and arm64: archives, a Homebrew cask with signed and notarized
     macOS binaries, and deb and rpm packages;
+  - every archive and package carries `LICENSE` and `THIRD_PARTY_NOTICES`. A GoReleaser hook writes the notices
+    before the build, as `make notices` does: the licence and notice files of the Go standard library and of every
+    module tent links, with each module's version and where to download its source;
   - `tent-node` for linux on amd64 and arm64, as raw binaries, from M2;
   - `checksums.txt` with a keyless cosign signature, and an SBOM per archive;
   - tent-node's version always equals the CLI's;
