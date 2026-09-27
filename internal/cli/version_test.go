@@ -41,6 +41,18 @@ func TestVersionJSON(t *testing.T) {
 	}
 }
 
+func TestVersionTakesTheOutputFromTheConfigFile(t *testing.T) {
+	writeConfig(t, "output: json\n")
+	code, out, errOut := run(t, "version")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr %q)", code, errOut)
+	}
+	var got buildinfo.Info
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, out)
+	}
+}
+
 func TestVersionYAML(t *testing.T) {
 	code, out, errOut := run(t, "version", "-o", "yaml")
 	if code != 0 {

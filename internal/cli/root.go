@@ -2,71 +2,119 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/ingvarch/tent/api/v1alpha1"
 )
 
-// Streams are where a command writes its output.
+// Streams are where a command reads its input and writes its output.
 type Streams struct {
+	In  io.Reader
 	Out io.Writer
 	Err io.Writer
 }
 
-// Output formats accepted by -o.
-const (
-	outputTable = "table"
-	outputYAML  = "yaml"
-	outputJSON  = "json"
-)
-
-// globalOptions hold the persistent flags shared by every command.
-type globalOptions struct {
-	output string
+// Execute runs tent with args and returns the process exit code. The first Ctrl-C or SIGTERM cancels the command's
+// context; a second ends tent at once with exit code 130.
+func Execute(ctx context.Context, args []string, s Streams) int {
+	sigs, stop := notifyStopSignals()
+	defer stop()
+	return executeWithSignals(ctx, args, s, sigs, exitProcess)
 }
 
-// Execute runs tent with args and returns the process exit code.
-func Execute(args []string, s Streams) int {
-	cmd := newRootCommand(s)
+func execute(ctx context.Context, cmd *cobra.Command, args []string, stderr io.Writer) int {
 	if args == nil {
 		args = []string{} // cobra would otherwise read os.Args
 	}
 	cmd.SetArgs(args)
-	if err := cmd.Execute(); err != nil {
-		// Nowhere to report a failed write to stderr; the exit code still signals the failure.
-		_, _ = fmt.Fprintf(s.Err, "Error: %v\n", err)
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		writeError(stderr, err)
 		return 1
 	}
 	return 0
 }
 
-func newRootCommand(s Streams) *cobra.Command {
-	opts := &globalOptions{}
+// writeError writes "Error: " and the message of err. Lines after the first are indented, so that each error of a
+// joined error, and each problem of an invalid spec, is on a line of its own.
+func writeError(w io.Writer, err error) {
+	msg := err.Error()
+	if problems, ok := errors.AsType[v1alpha1.Errors](err); ok && problems.Error() == msg {
+		msg = "invalid spec:\n" + msg
+	}
+	lines := strings.Split(strings.TrimSuffix(msg, "\n"), "\n")
+	for i, line := range lines[1:] {
+		if line != "" && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			lines[i+1] = "  " + line
+		}
+	}
+	// Nowhere to report a failed write to stderr; the exit code still signals the failure.
+	_, _ = io.WriteString(w, "Error: "+strings.Join(lines, "\n")+"\n")
+}
+
+// newRootCommand returns the tent command. Its subcommands receive opts, resolved before they run.
+func newRootCommand(s Streams, opts *globalOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "tent",
 		Short:         "Provision and operate HashiCorp Nomad clusters",
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		PersistentPreRunE: func(*cobra.Command, []string) error {
-			return validateOutput(opts.output)
+		// cobra runs only the nearest PersistentPreRunE, so subcommands must not set their own.
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			if cobraCommand(cmd) {
+				return nil // needs no settings, so a broken config file does not break it
+			}
+			return opts.resolve(cmd)
 		},
 	}
+	cmd.SetIn(s.In)
 	cmd.SetOut(s.Out)
 	cmd.SetErr(s.Err)
-	cmd.PersistentFlags().StringVarP(&opts.output, "output", "o", outputTable, "output format: table, yaml or json")
-	cmd.AddCommand(newVersionCommand(opts))
+	opts.addFlags(cmd)
+	cmd.AddCommand(
+		newVersionCommand(opts), newCreateCommand(opts), newGetCommand(opts), newReplaceCommand(opts),
+		newDeleteCommand(opts), newStateCommand(opts), newEditCommand(opts),
+	)
 	return cmd
 }
 
-func validateOutput(format string) error {
-	switch format {
-	case outputTable, outputYAML, outputJSON:
-		return nil
+// groupCommand returns a command that holds subcommands only. Alone it prints its help; with an argument it fails,
+// since the argument is a subcommand it does not have.
+func groupCommand(use, short string) *cobra.Command {
+	return &cobra.Command{
+		Use:   use,
+		Short: short,
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
 	}
-	return invalidOutputError(format)
 }
 
-func invalidOutputError(format string) error {
-	return fmt.Errorf("invalid output format %q: want table, yaml or json", format)
+// nameOrSubcommand takes the one NAME of get, which also has subcommands. With more arguments, a first one close to a
+// subcommand's name is a mistyped subcommand; otherwise they name several clusters.
+func nameOrSubcommand(cmd *cobra.Command, args []string) error {
+	switch {
+	case len(args) < 2:
+		return nil
+	case len(cmd.SuggestionsFor(args[0])) > 0:
+		return fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath())
+	}
+	return errors.New("get takes one NAME; list several clusters with get clusters " + strings.Join(args, " "))
+}
+
+// cobraCommand reports whether cmd is one that cobra adds: help, completion and its scripts, or a shell's request
+// for completions.
+func cobraCommand(cmd *cobra.Command) bool {
+	for cmd.HasParent() && cmd.Parent().HasParent() {
+		cmd = cmd.Parent()
+	}
+	switch cmd.Name() {
+	case "help", "completion", cobra.ShellCompRequestCmd: // __completeNoDesc is an alias of __complete
+		return true
+	}
+	return false
 }
