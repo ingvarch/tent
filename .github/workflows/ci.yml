@@ -27,6 +27,10 @@ jobs:
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.13.2
+      # A module tent links, on any platform it ships for, may only have a licence internal/licenses allows. It runs
+      # after a lint failure too, so one failure does not hide the other; the job fails if either does.
+      - if: success() || failure()
+        run: go run ./internal/licenses/cmd/licenses ./cmd/tent
 
   test:
     name: test ${{ matrix.os }} go ${{ matrix.go }}

@@ -12,9 +12,9 @@ GOLANGCI_LINT_VERSION := 2.13.2
 
 .DEFAULT_GOAL := check
 
-.PHONY: check build test lint fmt generate dist clean golangci-lint-version
+.PHONY: check build test lint fmt licenses notices generate dist clean golangci-lint-version
 
-check: fmt lint test build
+check: fmt lint licenses test build
 
 build:
 	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/tent ./cmd/tent
@@ -40,6 +40,14 @@ lint: golangci-lint-version
 fmt: golangci-lint-version
 	golangci-lint fmt ./...
 
+# licenses fails when a module tent links, on any platform the release builds for, has a licence outside
+# internal/licenses.Allowed. notices checks the same and writes THIRD_PARTY_NOTICES, which the release ships.
+licenses:
+	go run ./internal/licenses/cmd/licenses ./cmd/tent
+
+notices:
+	go run ./internal/licenses/cmd/licenses -notices THIRD_PARTY_NOTICES ./cmd/tent
+
 generate:
 	go generate ./...
 
@@ -49,4 +57,4 @@ dist:
 	goreleaser release --snapshot --clean --skip=sign
 
 clean:
-	rm -rf bin dist
+	rm -rf bin dist THIRD_PARTY_NOTICES

@@ -3,6 +3,12 @@ version: 2
 
 project_name: tent
 
+# The licences of what tent links require their texts in every copy (ADR-0020). This also fails on a licence tent
+# does not allow.
+before:
+  hooks:
+    - go run ./internal/licenses/cmd/licenses -notices THIRD_PARTY_NOTICES ./cmd/tent
+
 builds:
   - main: ./cmd/tent
     binary: tent
@@ -31,6 +37,10 @@ archives:
       - goos: windows
         formats:
           - zip
+    files:
+      - LICENSE
+      - README.md
+      - THIRD_PARTY_NOTICES
 
 checksum:
   name_template: checksums.txt
@@ -83,6 +93,8 @@ nfpms:
     contents:
       - src: LICENSE
         dst: /usr/share/doc/tent/LICENSE
+      - src: THIRD_PARTY_NOTICES
+        dst: /usr/share/doc/tent/THIRD_PARTY_NOTICES
 
 homebrew_casks:
   - homepage: *homepage

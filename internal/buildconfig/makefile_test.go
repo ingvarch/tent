@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -30,6 +31,19 @@ func recipe(t *testing.T, target string) []string {
 	t.Fatalf("the Makefile has no target %q", target)
 	return nil
 }
+
+// oneCommand returns the only command of a Makefile target.
+func oneCommand(t *testing.T, target string) string {
+	t.Helper()
+	commands := recipe(t, target)
+	if len(commands) != 1 {
+		t.Fatalf("make %s runs %q, want one command", target, commands)
+	}
+	return commands[0]
+}
+
+// noticesFile is the third-party notices file make notices writes and the release ships.
+const noticesFile = "THIRD_PARTY_NOTICES"
 
 // makefileLintVersion is the golangci-lint version the Makefile insists on.
 func makefileLintVersion(t *testing.T) string {
@@ -134,13 +148,22 @@ func TestCIRunsTheTestsTheMakefileRuns(t *testing.T) {
 	}
 }
 
+func TestMakeCleanRemovesWhatTheBuildWrites(t *testing.T) {
+	removed := strings.Fields(oneCommand(t, "clean"))
+	for _, generated := range []string{"bin", "dist", noticesFile} {
+		if !slices.Contains(removed, generated) {
+			t.Errorf("make clean runs %q, which leaves %s", strings.Join(removed, " "), generated)
+		}
+	}
+}
+
 func TestMakefileCheckRunsEveryGate(t *testing.T) {
 	m := regexp.MustCompile(`(?m)^check: (.+)$`).FindSubmatch(repoFile(t, "Makefile"))
 	if m == nil {
 		t.Fatal("the Makefile has no check target")
 	}
-	if got := string(m[1]); got != "fmt lint test build" {
-		t.Errorf("make check runs %q, want \"fmt lint test build\"", got)
+	if got := string(m[1]); got != "fmt lint licenses test build" {
+		t.Errorf("make check runs %q, want \"fmt lint licenses test build\"", got)
 	}
 	// Plain make runs check.
 	if !regexp.MustCompile(`(?m)^\.DEFAULT_GOAL := check$`).Match(repoFile(t, "Makefile")) {
