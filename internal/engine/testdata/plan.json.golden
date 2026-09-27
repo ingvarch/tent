@@ -1,0 +1,66 @@
+{
+  "changes": [
+    {
+      "kind": "test.Thing",
+      "name": "prod-1a2b3c4d",
+      "action": "create"
+    },
+    {
+      "kind": "test.Base",
+      "name": "prod",
+      "action": "create"
+    },
+    {
+      "kind": "test.Thing",
+      "name": "prod-servers",
+      "action": "update",
+      "diff": [
+        {
+          "field": "rules",
+          "new": "tcp/4646 from 203.0.113.7/32"
+        },
+        {
+          "field": "rules",
+          "old": "tcp/22 from 0.0.0.0/0"
+        },
+        {
+          "field": "description",
+          "old": "old",
+          "new": "new"
+        }
+      ]
+    },
+    {
+      "kind": "test.Base",
+      "name": "other",
+      "action": "replace",
+      "reason": "networking.cidr changed",
+      "diff": [
+        {
+          "field": "cidr",
+          "old": "10.0.0.0/16",
+          "new": "10.1.0.0/16"
+        }
+      ]
+    },
+    {
+      "kind": "test.Thing",
+      "name": "prod-99aabbcc",
+      "id": "ssh-9",
+      "action": "delete"
+    },
+    {
+      "kind": "test.Base",
+      "name": "shared",
+      "id": "base-3",
+      "action": "delete",
+      "reason": "duplicate"
+    }
+  ],
+  "summary": {
+    "create": 2,
+    "update": 1,
+    "replace": 1,
+    "delete": 2
+  }
+}

@@ -1,0 +1,12 @@
++ test.Thing/prod-1a2b3c4d
++ test.Base/prod
+~ test.Thing/prod-servers
+    + rules: tcp/4646 from 203.0.113.7/32
+    - rules: tcp/22 from 0.0.0.0/0
+    ~ description: old -> new
+-/+ test.Base/other (networking.cidr changed)
+    ~ cidr: 10.0.0.0/16 -> 10.1.0.0/16
+- test.Thing/prod-99aabbcc (ID ssh-9)
+- test.Base/shared (ID base-3, duplicate)
+
+Plan: 2 to create, 1 to update, 1 to replace, 2 to delete.
