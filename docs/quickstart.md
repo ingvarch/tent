@@ -71,7 +71,7 @@ tent update cluster demo
 ```
 
 ```
-+ vultr.SSHKey/demo-92bb25f9
++ vultr.SSHKey/demo-7855a371
 + vultr.VPC/demo
     + cidr: 10.64.0.0/16
     + region: ams
@@ -100,15 +100,16 @@ suits scripts and CI.
 tent update cluster demo --yes
 ```
 
-tent prints the plan, then each step as it happens, then what it did:
+tent prints the plan again, then each step as it happens, then what it did. It creates the SSH key, the VPC and the
+firewall group at the same time, so their lines may come in another order:
 
 ```
-creating vultr.SSHKey/demo-92bb25f9
-creating vultr.VPC/demo
 creating vultr.FirewallGroup/demo-servers
-created vultr.SSHKey/demo-92bb25f9
+creating vultr.SSHKey/demo-7855a371
+creating vultr.VPC/demo
 created vultr.VPC/demo
 created vultr.FirewallGroup/demo-servers
+created vultr.SSHKey/demo-7855a371
 creating node demo-nodes-0
 created node demo-nodes-0 (10.64.0.3)
 creating node demo-nodes-1
@@ -120,7 +121,7 @@ Applied: 3 created, 0 updated, 0 replaced, 0 deleted. Nodes: 3 created, 0 waited
 ```
 
 - tent creates the machines one at a time and waits until Vultr reports each one running with its address in the
-  VPC. That takes about a minute per machine.
+  VPC. That takes about two minutes per machine.
 - `cluster.completed.yaml` in the state store holds the specs with every default that tent applied.
 - If the run stops halfway, because of Ctrl-C or a lost connection, run the same command again. tent finds what the
   earlier run created by the markers it put on each object, and each machine by the operation id of its create call.
@@ -158,7 +159,7 @@ tent delete cluster demo
 - node demo-nodes-2 (ID <id>)
 - vultr.FirewallGroup/demo-servers (ID <id>)
 - vultr.VPC/demo (ID <id>)
-- vultr.SSHKey/demo-92bb25f9 (ID <id>)
+- vultr.SSHKey/demo-7855a371 (ID <id>)
 - state demo/cluster.completed.yaml
 - state demo/nodegroups/nodes.yaml
 - state demo/cluster.yaml
@@ -166,6 +167,7 @@ tent delete cluster demo
 Nodes: 3 to delete.
 Plan: 0 to create, 0 to update, 0 to replace, 3 to delete.
 State: 3 objects to delete.
+run with --yes to delete them
 ```
 
 Without `--yes` this is only the plan. To delete:
@@ -174,7 +176,22 @@ Without `--yes` this is only the plan. To delete:
 tent delete cluster demo --yes
 ```
 
+tent prints the plan again, then each step, then what it deleted:
+
 ```
+deleting node demo-nodes-0 (ID <id>)
+deleted node demo-nodes-0 (ID <id>)
+deleting node demo-nodes-1 (ID <id>)
+deleted node demo-nodes-1 (ID <id>)
+deleting node demo-nodes-2 (ID <id>)
+deleted node demo-nodes-2 (ID <id>)
+deleting vultr.FirewallGroup/demo-servers (ID <id>)
+deleted vultr.FirewallGroup/demo-servers (ID <id>)
+deleting vultr.VPC/demo (ID <id>)
+deleted vultr.VPC/demo (ID <id>)
+deleting vultr.SSHKey/demo-7855a371 (ID <id>)
+deleted vultr.SSHKey/demo-7855a371 (ID <id>)
+
 Deleted: 3 nodes, 3 infrastructure objects, 3 state objects.
 ```
 
