@@ -1,6 +1,24 @@
 # ADR-0023: Vultr inventory, dedupe, images and firewall groups
 
-- **Status:** Accepted
+- **Status:** Accepted. The spike of 2026-09-27 settled decision 6
+  ([platform notes §3.16](../platform-notes.md#316-spike-runs)):
+  - Vultr accepts a second SSH key with the same key material;
+  - it lists a rule as sent, with the rule's own subnet as its `source`, and refuses a second copy of a rule;
+  - it stores VPC and firewall group descriptions of up to 255 characters and SSH key names of up to 128 verbatim.
+    The spike set them with updates: `PUT` for a VPC or a firewall group, `PATCH` for an SSH key;
+  - it deletes a firewall group that instances use (204) and leaves them without a firewall group. So tent never
+    deletes a firewall group that nodes of the cluster use: it reports a duplicate and refuses to delete a group
+    that the cluster no longer wants. This is the firewall part of the M1.4 follow-up
+    ([architecture §11.5](../architecture.md#115-firewall-and-host-firewall));
+  - Neither `GET /v2/firewalls/{id}` nor `GET /v2/firewalls` had an `instance_count` (2026-09-27 and 2026-09-28).
+    So the inventory counts the attached instances of decision 2 itself: it lists the instances with the cluster's
+    tag once, one list call more than decision 1 names, and counts those in each firewall group. It does not read
+    `instance_count`. The search by operation id lists no instances, so of several copies of a firewall group it
+    returns the oldest. Right after a create no node uses the copies yet, so the inventory keeps the oldest too.
+
+  The VPC part of the M1.4 follow-up waits for the `update cluster` and `delete cluster` work: keeping the VPC that
+  holds the cluster's nodes, and refusing to delete a VPC that nodes use. Until then Vultr refuses such a delete
+  with `ErrInUse`, the engine retries it until the change's deadline, and then the apply fails.
 - **Date:** 2026-09-27
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0015](0015-idempotency-without-unique-names.md) (the dedupe pass) and

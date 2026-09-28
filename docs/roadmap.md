@@ -49,10 +49,11 @@ New questions for the maintainer are issues with the `decision` label.
 
 ## Spike: Vultr unknowns (done)
 
-`hack/vultr-spike` measured the undocumented Vultr behaviour the provider relies on, in three runs in `ams` on
-2026-09-25. The results are in [platform notes §3.16](platform-notes.md#316-spike-runs-2026-09-25), and ADR-0018 is
-resolved except item 11 (Object Storage conditional writes, tracked as a `later` issue). How to run it:
-[`hack/vultr-spike/README.md`](../hack/vultr-spike/README.md).
+`hack/vultr-spike` measured the undocumented Vultr behaviour the provider relies on, in five runs in `ams`: three on
+2026-09-25, one on 2026-09-27 and one on 2026-09-28. The results are in
+[platform notes §3.16](platform-notes.md#316-spike-runs),
+and ADR-0018 is resolved except item 11 (Object Storage conditional writes, tracked as a `later` issue). How to run
+it: [`hack/vultr-spike/README.md`](../hack/vultr-spike/README.md).
 
 ## M1 Vultr infrastructure
 
