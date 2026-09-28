@@ -3,7 +3,8 @@ package vultr
 import (
 	"fmt"
 	"slices"
-	"strings"
+
+	"github.com/ingvarch/tent/internal/english"
 )
 
 // image is an operating system image that tent supports on Vultr.
@@ -39,14 +40,5 @@ func imageNames() string {
 	for i, im := range images {
 		names[i] = im.name
 	}
-	return andList(names)
-}
-
-// andList joins items as a sentence lists them: "a", "a and b", "a, b and c".
-func andList(items []string) string {
-	if len(items) < 2 {
-		return strings.Join(items, "")
-	}
-	last := len(items) - 1
-	return strings.Join(items[:last], ", ") + " and " + items[last]
+	return english.And(names)
 }
