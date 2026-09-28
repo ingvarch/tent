@@ -10,7 +10,6 @@ import (
 	"net/netip"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"unicode"
 )
@@ -48,7 +47,6 @@ var (
 	reservedPattern  = regexp.MustCompile(`^(con|prn|aux|nul|com[1-9]|lpt[1-9])$`) // names Windows reserves
 	channelPattern   = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 	regionPattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`) // also cloud zones and the Nomad region
-	versionPattern   = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 	nodePoolPattern  = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 	nodeClassPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 	driverPattern    = regexp.MustCompile(`^[a-z0-9_-]+$`)
@@ -69,8 +67,9 @@ var privateRanges = []netip.Prefix{
 }
 
 // Validate checks a cluster and its node groups after SetDefaults. It returns nil or Errors with every problem, so
-// the operator can fix them in one go. It checks only static rules; the provider checks the live API. Nil groups are
-// skipped; a nil cluster is an error.
+// the operator can fix them in one go. It checks only static rules; the provider checks the live API. It does not
+// check the Nomad version, which depends on the channel and is checked by tent. Nil groups are skipped; a nil cluster
+// is an error.
 func Validate(c *Cluster, groups []*NodeGroup, opts ValidateOptions) error {
 	if c == nil {
 		return errors.New("no Cluster to validate")
@@ -194,25 +193,11 @@ func parseSSHKey(key string) (data, problem string) {
 	return string(blob), ""
 }
 
+// checkClusterNomad checks the Nomad settings of the whole cluster. The versions that a cluster may run come with the
+// channel, so the version is left to whoever knows the channel.
 func checkClusterNomad(ck checker, n *ClusterNomad) {
-	if n.Version != "" {
-		checkVersion(ck, n.Version)
-	}
 	ck.requiredMatch("spec.nomad.region", n.Region, regionPattern)
 	oneOf(ck, "spec.nomad.clientIntroduction", n.ClientIntroduction, ClientIntroductions())
-}
-
-// checkVersion checks that v is X.Y.Z of Nomad 2.0 or later.
-func checkVersion(ck checker, v string) {
-	const path = "spec.nomad.version"
-	m := versionPattern.FindStringSubmatch(v)
-	if m == nil {
-		ck.add(path, "must be X.Y.Z, for example 2.0.7")
-		return
-	}
-	if major, err := strconv.Atoi(m[1]); err == nil && major < 2 {
-		ck.add(path, "must be 2.0.0 or later")
-	}
 }
 
 // checkGroup checks one node group. shared is how many groups have its name, or 0 when another group reports it.

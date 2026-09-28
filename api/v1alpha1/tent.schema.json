@@ -110,7 +110,7 @@
       "properties": {
         "version": {
           "type": "string",
-          "description": "Version of Nomad, for example 2.0.7. Empty means the version recommended by the channel."
+          "description": "Version of Nomad, for example 2.0.7. Empty means the version that the cluster was first built with; a new cluster gets the one that the channel recommends."
         },
         "region": {
           "type": "string",
@@ -142,7 +142,7 @@
       "properties": {
         "channel": {
           "type": "string",
-          "description": "Channel names the recommended Nomad versions and images. Defaults to stable."
+          "description": "Channel names the release channel, which sets the Nomad versions that the cluster may run and the version of the CNI plugins. Defaults to stable."
         },
         "cloud": {
           "$ref": "#/$defs/Cloud",

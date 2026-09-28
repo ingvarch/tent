@@ -44,7 +44,8 @@ type Cluster struct {
 
 // ClusterSpec is what the operator wants the cluster to be.
 type ClusterSpec struct {
-	// Channel names the recommended Nomad versions and images. Defaults to stable.
+	// Channel names the release channel, which sets the Nomad versions that the cluster may run and the version of the
+	// CNI plugins. Defaults to stable.
 	Channel string `json:"channel,omitempty"`
 	// Cloud says where the cluster runs.
 	Cloud Cloud `json:"cloud"`
@@ -123,7 +124,8 @@ func ClientIntroductions() []ClientIntroduction {
 
 // ClusterNomad configures the Nomad agents of the whole cluster.
 type ClusterNomad struct {
-	// Version of Nomad, for example 2.0.7. Empty means the version recommended by the channel.
+	// Version of Nomad, for example 2.0.7. Empty means the version that the cluster was first built with; a new cluster
+	// gets the one that the channel recommends.
 	Version string `json:"version,omitempty"`
 	// Region is the Nomad region. Defaults to global.
 	Region string `json:"region,omitempty"`

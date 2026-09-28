@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
+	"github.com/ingvarch/tent/internal/channels"
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/statestore"
 )
@@ -29,9 +30,13 @@ type Service struct {
 	OnWeakLock func()
 	// OnTakeover, when set, is called with the lease of a holder that expired or ended when a change takes its lock.
 	OnTakeover func(previous statestore.Lease)
-	// OnOpenAPI, when set, is called when the cluster, with its defaults, lets the whole internet reach the Nomad API:
-	// after a create, replace or save, and once before an update applies its changes.
-	OnOpenAPI func()
+	// OnWarning, when set, is called with each warning about the cluster that a change goes ahead with, such as a Nomad
+	// API that the whole internet may reach: after a create, replace or save, and before an update applies its
+	// changes. One change never calls it concurrently.
+	OnWarning func(warning string)
+	// Channels, when set, returns the release channel called name, which a cluster's spec names; it defaults to the
+	// channels embedded in tent.
+	Channels func(name string) (*channels.Channel, error)
 	// Providers returns the cloud provider that a cluster's spec names, for an update or a delete. It fails for a
 	// provider that tent does not know or cannot reach, such as one without its credentials.
 	Providers func(v1alpha1.Provider) (cloud.Provider, error)
@@ -120,4 +125,18 @@ func (s *Service) change(ctx context.Context, l statestore.Layout, op string, ap
 		}
 		return nil
 	})
+}
+
+// openAPIWarning is the warning about a cluster whose Nomad API the whole internet may reach.
+const openAPIWarning = "spec.access.api lets the whole internet reach the Nomad API (port 4646); mTLS and ACLs " +
+	"protect it; narrow it with --api-access or spec.access.api"
+
+// warn tells OnWarning each warning, when it is set.
+func (s *Service) warn(warnings ...string) {
+	if s.OnWarning == nil {
+		return
+	}
+	for _, w := range warnings {
+		s.OnWarning(w)
+	}
 }

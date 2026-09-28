@@ -8,15 +8,24 @@ import (
 	"github.com/ingvarch/tent/internal/app"
 )
 
-// TestOpenAPI tells OnOpenAPI when a change leaves a cluster whose Nomad API the whole internet may reach.
+// openAPIWarning is the warning about a cluster whose Nomad API the whole internet may reach.
+const openAPIWarning = "spec.access.api lets the whole internet reach the Nomad API (port 4646); mTLS and ACLs " +
+	"protect it; narrow it with --api-access or spec.access.api"
+
+// TestOpenAPI tells OnWarning when a change leaves a cluster whose Nomad API the whole internet may reach.
 func TestOpenAPI(t *testing.T) {
 	svc, _ := newService(t)
 	calls := 0
-	svc.OnOpenAPI = func() { calls++ }
+	svc.OnWarning = func(w string) {
+		if w != openAPIWarning {
+			t.Errorf("warning %q, want %q", w, openAPIWarning)
+		}
+		calls++
+	}
 	wantCalls := func(step string, want int) {
 		t.Helper()
 		if calls != want {
-			t.Errorf("after %s, OnOpenAPI was called %d times, want %d", step, calls, want)
+			t.Errorf("after %s, OnWarning was called %d times, want %d", step, calls, want)
 		}
 	}
 	narrow := edit(t, clusterYAML, "region: ams", "region: ams\n  access:\n    api: [203.0.113.0/24]")
@@ -53,24 +62,24 @@ func mustReplace(t *testing.T, svc *app.Service, docs ...string) {
 	}
 }
 
-// TestUpdateWarnsWhenTheAPIIsOpen tells OnOpenAPI once, before the first change, when an update applies changes to a
+// TestUpdateWarnsWhenTheAPIIsOpen tells OnWarning once, before the first change, when an update applies changes to a
 // cluster whose Nomad API the whole internet may reach.
 func TestUpdateWarnsWhenTheAPIIsOpen(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newUpdate(t) // access.api left out is 0.0.0.0/0
 		var events []string
-		svc.OnOpenAPI = func() { events = append(events, "open") }
+		svc.OnWarning = func(w string) { events = append(events, w) }
 		svc.OnProgress = func(p app.Progress) { events = append(events, progressLine(p)) }
 		wantWarnings := func(step string, want int) {
 			t.Helper()
 			n := 0
 			for _, e := range events {
-				if e == "open" {
+				if e == openAPIWarning {
 					n++
 				}
 			}
 			if n != want {
-				t.Errorf("after %s, OnOpenAPI was called %d times, want %d", step, n, want)
+				t.Errorf("after %s, the API was warned of %d times, want %d", step, n, want)
 			}
 		}
 
@@ -80,7 +89,7 @@ func TestUpdateWarnsWhenTheAPIIsOpen(t *testing.T) {
 		wantWarnings("a plan", 0)
 		mustUpdate(t, svc)
 		wantWarnings("an update that applies changes", 1)
-		if len(events) < 2 || events[0] != "open" {
+		if len(events) < 2 || events[0] != openAPIWarning {
 			t.Errorf("the events start with %q, want the warning before the first change", events[:min(2, len(events))])
 		}
 		mustUpdate(t, svc)

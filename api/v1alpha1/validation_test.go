@@ -147,6 +147,8 @@ func TestValidateAccepts(t *testing.T) {
 			},
 		},
 		{name: "no Nomad version", spec: func(o *objects) { o.Cluster.Spec.Nomad.Version = "" }},
+		// The channel, which Validate does not know, sets the versions a cluster may run.
+		{name: "any Nomad version", spec: func(o *objects) { o.Cluster.Spec.Nomad.Version = "1.10.3" }},
 		{name: "empty client group", spec: func(o *objects) { o.NodeGroups[1].Spec.Size = 0 }},
 		{
 			// drivers: [] decodes as an empty, non-nil slice, and it is still empty.
@@ -390,31 +392,6 @@ func TestValidateReportsFieldPaths(t *testing.T) {
 				o.Cluster.Spec.SSHKeys = append(o.Cluster.Spec.SSHKeys, other)
 			},
 			want: Errors{{"Cluster prod", "spec.sshKeys[1]", "duplicate key"}},
-		},
-		{
-			name: "nomad version format",
-			spec: func(o *objects) { o.Cluster.Spec.Nomad.Version = "2.0" },
-			want: Errors{{"Cluster prod", "spec.nomad.version", "must be X.Y.Z, for example 2.0.7"}},
-		},
-		{
-			name: "nomad version with a prefix",
-			spec: func(o *objects) { o.Cluster.Spec.Nomad.Version = "v2.0.7" },
-			want: Errors{{"Cluster prod", "spec.nomad.version", "must be X.Y.Z, for example 2.0.7"}},
-		},
-		{
-			name: "nomad version with a suffix",
-			spec: func(o *objects) { o.Cluster.Spec.Nomad.Version = "2.0.7-beta" },
-			want: Errors{{"Cluster prod", "spec.nomad.version", "must be X.Y.Z, for example 2.0.7"}},
-		},
-		{
-			name: "nomad version with a leading zero",
-			spec: func(o *objects) { o.Cluster.Spec.Nomad.Version = "02.0.7" },
-			want: Errors{{"Cluster prod", "spec.nomad.version", "must be X.Y.Z, for example 2.0.7"}},
-		},
-		{
-			name: "nomad version before 2.0",
-			spec: func(o *objects) { o.Cluster.Spec.Nomad.Version = "1.10.3" },
-			want: Errors{{"Cluster prod", "spec.nomad.version", "must be 2.0.0 or later"}},
 		},
 		{
 			name:      "nomad region missing",

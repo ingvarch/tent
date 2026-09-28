@@ -92,7 +92,7 @@ func editSpec(cmd *cobra.Command, opts *globalOptions, f editFlags, cluster, kin
 	if err != nil {
 		return err
 	}
-	svc.OnOpenAPI = warnOpenAPI(cmd.ErrOrStderr())
+	svc.OnWarning = warnOnce(cmd.ErrOrStderr())
 	objs, ref, err := svc.Load(cmd.Context(), cluster, kind, name)
 	if err != nil {
 		return err

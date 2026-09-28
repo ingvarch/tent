@@ -43,7 +43,7 @@ func newUpdateClusterCommand(opts *globalOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			svc.OnOpenAPI = warnOpenAPI(cmd.ErrOrStderr())
+			svc.OnWarning = warnOnce(cmd.ErrOrStderr())
 			switch {
 			case !yes:
 				return previewUpdate(cmd, opts, svc, name, exitCode)

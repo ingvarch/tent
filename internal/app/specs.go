@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
+	"github.com/ingvarch/tent/internal/channels"
+	"github.com/ingvarch/tent/internal/english"
 	"github.com/ingvarch/tent/internal/spec"
 	"github.com/ingvarch/tent/internal/statestore"
 )
@@ -240,36 +242,48 @@ func (s *Service) write(ctx context.Context, objs spec.Objects, m mode, ref Ref,
 		if objs.Cluster == nil {
 			return nil, errs // the rest needs the stored Cluster
 		}
-		return nil, cmp.Or(Check(objs, s.Validate), error(errs)) // Validate reports the names too
+		_, err := check(objs, s.Validate, s.channel)
+		return nil, cmp.Or(err, error(errs)) // Validate reports the names too
 	}
 	in, err := newInput(objs)
 	if err != nil {
 		return nil, err
 	}
 	var (
-		changes []Change
-		cluster *v1alpha1.Cluster
+		changes  []Change
+		warnings []string
 	)
 	err = s.change(ctx, in.layout, m.operation(), apply, func(ctx context.Context) ([]step, error) {
-		c, steps, rc, err := s.plan(ctx, in, m, ref.Version)
-		changes, cluster = c, rc
+		c, steps, w, err := s.plan(ctx, in, m, ref.Version)
+		changes, warnings = c, w
 		return steps, err
 	})
 	if err != nil && !Saved(err) {
 		return nil, err
 	}
-	if apply && s.OnOpenAPI != nil && openAPI(cluster) {
-		s.OnOpenAPI()
+	if apply {
+		s.warn(warnings...)
 	}
 	return changes, err
 }
 
-// openAPI reports whether a cluster, with its defaults, lets the whole internet reach the Nomad API.
-func openAPI(c *v1alpha1.Cluster) bool {
-	if c == nil {
-		return false
+// warnings returns the warnings about the cluster c, which has its defaults and the channel ch: a Nomad API that the
+// whole internet may reach, and a Nomad version that the channel allows but has not tested.
+func warnings(c *v1alpha1.Cluster, ch *channels.Channel) []string {
+	var warnings []string
+	if openAPI(c) {
+		warnings = append(warnings, openAPIWarning)
 	}
-	return slices.ContainsFunc(withDefaults(c).Spec.Access.API, func(cidr string) bool {
+	if v := c.Spec.Nomad.Version; v != "" && !ch.Tested(v) {
+		warnings = append(warnings, fmt.Sprintf("Nomad %s is not tested by this tent; channel %s tests %s", v,
+			ch.Name, english.And(ch.Nomad.Tested)))
+	}
+	return warnings
+}
+
+// openAPI reports whether the cluster c, which has its defaults, lets the whole internet reach the Nomad API.
+func openAPI(c *v1alpha1.Cluster) bool {
+	return slices.ContainsFunc(c.Spec.Access.API, func(cidr string) bool {
 		p, err := netip.ParsePrefix(cidr)
 		return err == nil && p.Bits() == 0
 	})
@@ -371,9 +385,9 @@ func groupLabel(cluster, group string) string {
 
 // plan decides what writing the input as m says does to each object, checks the cluster that results, and returns
 // the changes, the writes that carry them out (the tent version, the node groups, and the Cluster last) and the
-// resulting Cluster.
+// warnings about the resulting cluster.
 func (s *Service) plan(ctx context.Context, in input, m mode, readVersion statestore.Version) (
-	[]Change, []step, *v1alpha1.Cluster, error,
+	[]Change, []step, []string, error,
 ) {
 	st, err := s.load(ctx, in.layout)
 	if err != nil {
@@ -407,12 +421,12 @@ func (s *Service) plan(ctx context.Context, in input, m mode, readVersion states
 	if len(errs) > 0 {
 		return nil, nil, nil, errors.Join(errs...)
 	}
-	cluster, err := s.validate(st, in)
+	warnings, err := s.validate(st, in)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	if len(writes) == 0 {
-		return changes, nil, cluster, nil
+		return changes, nil, warnings, nil
 	}
 	caps, err := s.Store.Capabilities(ctx)
 	if err != nil {
@@ -440,7 +454,7 @@ func (s *Service) plan(ctx context.Context, in input, m mode, readVersion states
 			return err
 		})
 	}
-	return changes, steps, cluster, nil
+	return changes, steps, warnings, nil
 }
 
 // leftovers returns an error for each node group left from an interrupted create that the input does not have.
@@ -533,8 +547,8 @@ func isGroup(l statestore.Layout, p string) bool {
 
 // validate checks the cluster that results from storing the input: the stored objects that the input does not
 // replace, and the input. A Cluster that replaces a stored one keeps its provider and region, and the stored one must
-// decode to show them. It returns the resulting Cluster.
-func (s *Service) validate(st map[string]entry, in input) (*v1alpha1.Cluster, error) {
+// decode to show them. It returns the warnings about the resulting cluster.
+func (s *Service) validate(st map[string]entry, in input) ([]string, error) {
 	replaced := make(map[string]bool, len(in.docs))
 	for _, d := range in.docs {
 		replaced[d.path] = true
@@ -555,7 +569,8 @@ func (s *Service) validate(st map[string]entry, in input) (*v1alpha1.Cluster, er
 		objs.Cluster = in.cluster
 	}
 	objs.NodeGroups = append(objs.NodeGroups, in.groups...)
-	return objs.Cluster, withProblems(moves, Check(objs, s.Validate))
+	warnings, err := check(objs, s.Validate, s.channel)
+	return warnings, withProblems(moves, err)
 }
 
 // cloudMoves returns a problem for the provider and one for the region of the cluster c when they differ from those
@@ -571,7 +586,7 @@ func cloudMoves(stored, c *v1alpha1.Cluster) v1alpha1.Errors {
 	} {
 		if f.was != "" && f.now != "" && f.was != f.now {
 			errs = append(errs, v1alpha1.FieldError{
-				Object: v1alpha1.KindCluster + " " + c.Metadata.Name, Path: f.path,
+				Object: clusterObject(c), Path: f.path,
 				Detail: "cannot change from " + f.was + " to " + f.now + "; a cluster moves by creating a new one",
 			})
 		}
@@ -589,16 +604,38 @@ func withProblems(first v1alpha1.Errors, err error) error {
 	return append(first, more...)
 }
 
-// Check checks a cluster and its node groups on their own, without a state store: it fills in the defaults on copies
-// and validates them.
+// clusterObject names the cluster c in a problem, as v1alpha1.Validate does: Cluster prod, or Cluster (no name).
+func clusterObject(c *v1alpha1.Cluster) string {
+	return v1alpha1.KindCluster + " " + cmp.Or(c.Metadata.Name, "(no name)")
+}
+
+// Check checks a cluster and its node groups on their own, without a state store: it fills in the defaults on copies,
+// validates them, and checks the cluster's channel and Nomad version against the channels embedded in tent.
 func Check(objs spec.Objects, opts v1alpha1.ValidateOptions) error {
+	_, err := check(objs, opts, channels.Load)
+	return err
+}
+
+// channelLookup returns the release channel called name.
+type channelLookup func(name string) (*channels.Channel, error)
+
+// channel returns the release channel called name: that of Channels, or else the embedded one.
+func (s *Service) channel(name string) (*channels.Channel, error) {
+	if s.Channels != nil {
+		return s.Channels(name)
+	}
+	return channels.Load(name)
+}
+
+// check is Check with the channels that lookup finds. It returns the warnings about a valid cluster.
+func check(objs spec.Objects, opts v1alpha1.ValidateOptions, lookup channelLookup) ([]string, error) {
 	var (
 		c   *v1alpha1.Cluster
 		err error
 	)
 	if objs.Cluster != nil {
 		if c, err = clone(objs.Cluster); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	groups := make([]*v1alpha1.NodeGroup, 0, len(objs.NodeGroups))
@@ -608,12 +645,59 @@ func Check(objs spec.Objects, opts v1alpha1.ValidateOptions) error {
 		}
 		cg, err := clone(g)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		groups = append(groups, cg)
 	}
 	v1alpha1.SetDefaults(c, groups)
-	return v1alpha1.Validate(c, groups, opts)
+	ch, err := checkCluster(c, groups, opts, lookup)
+	if err != nil {
+		return nil, err
+	}
+	return warnings(c, ch), nil
+}
+
+// checkCluster checks a cluster and its node groups, all with their defaults, as v1alpha1.Validate does, and the
+// cluster's channel, which lookup finds: tent must know it, and it must allow the Nomad version that the cluster sets.
+// The problems come as one v1alpha1.Errors, the channel's first. Without problems, it returns the channel.
+func checkCluster(c *v1alpha1.Cluster, groups []*v1alpha1.NodeGroup, opts v1alpha1.ValidateOptions,
+	lookup channelLookup,
+) (*channels.Channel, error) {
+	err := v1alpha1.Validate(c, groups, opts)
+	problems, ok := errors.AsType[v1alpha1.Errors](err)
+	if err != nil && !ok {
+		return nil, err
+	}
+	ch, first := channelProblems(c, problems, lookup)
+	if err := withProblems(first, err); err != nil {
+		return nil, err
+	}
+	return ch, nil
+}
+
+// channelProblems returns the channel of the cluster c, which has its defaults, and the problems with it: tent must
+// know the channel, and the channel must allow the Nomad version that c sets. A channel name that has a problem among
+// problems already is not looked up, and then there is no channel.
+func channelProblems(c *v1alpha1.Cluster, problems v1alpha1.Errors, lookup channelLookup) (
+	*channels.Channel, v1alpha1.Errors,
+) {
+	const channelPath = "spec.channel"
+	object := clusterObject(c)
+	if slices.ContainsFunc(problems, func(p v1alpha1.FieldError) bool {
+		return p.Object == object && p.Path == channelPath
+	}) {
+		return nil, nil
+	}
+	ch, err := lookup(c.Spec.Channel)
+	if err != nil {
+		return nil, v1alpha1.Errors{{Object: object, Path: channelPath, Detail: err.Error()}}
+	}
+	if v := c.Spec.Nomad.Version; v != "" {
+		if err := ch.Allows(v); err != nil {
+			return ch, v1alpha1.Errors{{Object: object, Path: "spec.nomad.version", Detail: err.Error()}}
+		}
+	}
+	return ch, nil
 }
 
 // decodeStored decodes a cluster's stored specs except the paths in skip. The Cluster is nil when cluster.yaml is

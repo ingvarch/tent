@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
+	"github.com/ingvarch/tent/internal/channels"
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/engine"
 	"github.com/ingvarch/tent/internal/model"
@@ -58,22 +59,25 @@ func (s NodeStep) String() string {
 
 // Update brings a cluster's cloud objects to its specs: its infrastructure, such as its network, firewalls and SSH
 // keys, and its nodes, which boot a placeholder without secrets. It loads the specs from the store, fills in the
-// defaults, validates them, has the provider check them against its live API, and plans the changes. The completed
-// spec, the specs with every default as last applied, counts as a change when the stored one is missing or differs.
-// So does each of the cluster's secrets that the store lacks: the CA's key and bundle, the gossip key and the ACL
-// bootstrap secret. A stored CA key without its bundle gets a bundle signed with it; a bundle without its key, or a
-// stored secret that does not load, fails the plan, since tent never replaces a cluster's secrets. Without apply, or
-// when nothing changes, it returns the plan and writes nothing.
+// defaults, validates them, checks them against the cluster's channel, has the provider check them against its live
+// API, and plans the changes. The completed spec, the specs with every default as last applied, counts as a change
+// when the stored one is missing or differs. Its Nomad version is the one that the spec sets, else the one of the
+// stored completed spec, else the one that the channel recommends; a stored one that the channel does not allow, or a
+// stored completed spec that does not decode when its version is needed, fails the plan. Each of the cluster's
+// secrets that the store lacks counts as a change too: the CA's key and bundle, the gossip key and the ACL bootstrap
+// secret. A stored CA key without its bundle gets a bundle signed with it; a bundle without its key, or a stored
+// secret that does not load, fails the plan, since tent never replaces a cluster's secrets. Without apply, or when
+// nothing changes, it returns the plan and writes nothing.
 //
 // With apply it takes the cluster's lock and plans again under it. When that plan has changes, it calls OnUpdatePlan
-// with it, then OnOpenAPI when the whole internet may reach the cluster's Nomad API. Then it raises the tent version,
-// writes the missing secrets, and applies the plan in this order: the infrastructure's changes other than its
-// deletes; the node creates, one at a time, servers first; the waits for nodes that an interrupted update created; the
-// node deletes; and the infrastructure's deletes, so that a firewall group goes only once its nodes are gone. A create
-// or a wait may take 10 minutes. The first step that fails stops the update, and running it again finishes the job.
-// Once every step has succeeded, Update writes the completed spec when the plan says so. It returns the plan it
-// applied, made under the lock, with the error; the plan says Applied once every step has succeeded, or at once when
-// it has no changes.
+// with it, then OnWarning with each warning about the cluster, such as a Nomad API that the whole internet may reach
+// or a Nomad version that the channel has not tested. Then it raises the tent version, writes the missing secrets,
+// and applies the plan in this order: the infrastructure's changes other than its deletes; the node creates, one at a
+// time, servers first; the waits for nodes that an interrupted update created; the node deletes; and the
+// infrastructure's deletes, so that a firewall group goes only once its nodes are gone. A create or a wait may take
+// 10 minutes. The first step that fails stops the update, and running it again finishes the job. Once every step has
+// succeeded, Update writes the completed spec when the plan says so. It returns the plan it applied, made under the
+// lock, with the error; the plan says Applied once every step has succeeded, or at once when it has no changes.
 func (s *Service) Update(ctx context.Context, cluster string, apply bool) (_ UpdatePlan, err error) {
 	defer func() { err = stopped(ctx, err) }()
 	l, err := s.layout(ctx, cluster)
@@ -107,17 +111,15 @@ func (s *Service) Update(ctx context.Context, cluster string, apply bool) (_ Upd
 	return u.plan, err
 }
 
-// beginUpdate tells OnUpdatePlan the plan of u, then OnOpenAPI when the whole internet may reach the cluster's Nomad
-// API. It returns the error of OnUpdatePlan.
+// beginUpdate tells OnUpdatePlan the plan of u, then OnWarning each warning about the cluster. It returns the error
+// of OnUpdatePlan.
 func (s *Service) beginUpdate(u updateRun) error {
 	if s.OnUpdatePlan != nil {
 		if err := s.OnUpdatePlan(u.plan); err != nil {
 			return err
 		}
 	}
-	if u.openAPI && s.OnOpenAPI != nil {
-		s.OnOpenAPI()
-	}
+	s.warn(u.warnings...)
 	return nil
 }
 
@@ -128,7 +130,7 @@ type updateRun struct {
 	nodes     cloud.Nodes
 	secrets   []secretWrite // the secrets that the store lacks, with their new contents
 	completed []byte        // the completed spec
-	openAPI   bool          // the whole internet may reach the cluster's Nomad API
+	warnings  []string      // about the cluster
 }
 
 // planUpdate loads and checks a cluster's specs, as Update says, and plans the changes that bring the cloud to them.
@@ -137,7 +139,15 @@ func (s *Service) planUpdate(ctx context.Context, l statestore.Layout) (updateRu
 	if err != nil {
 		return updateRun{}, err
 	}
-	if err := v1alpha1.Validate(objs.Cluster, objs.NodeGroups, s.Validate); err != nil {
+	ch, err := checkCluster(objs.Cluster, objs.NodeGroups, s.Validate, s.channel)
+	if err != nil {
+		return updateRun{}, err
+	}
+	stored, err := s.readCompleted(ctx, l)
+	if err != nil {
+		return updateRun{}, err
+	}
+	if err := pinVersion(objs.Cluster, ch, l, stored); err != nil {
 		return updateRun{}, err
 	}
 	m, err := model.New(objs.Cluster, objs.NodeGroups)
@@ -155,10 +165,6 @@ func (s *Service) planUpdate(ctx context.Context, l statestore.Layout) (updateRu
 	if err != nil {
 		return updateRun{}, fmt.Errorf("encode the completed spec of %s: %w", clusterLabel(m.Name), err)
 	}
-	stale, err := s.completedDiffers(ctx, l, completed)
-	if err != nil {
-		return updateRun{}, err
-	}
 	secrets, err := s.planSecrets(ctx, l)
 	if err != nil {
 		return updateRun{}, err
@@ -167,23 +173,62 @@ func (s *Service) planUpdate(ctx context.Context, l statestore.Layout) (updateRu
 	if err != nil {
 		return updateRun{}, err
 	}
-	plan.Secrets, plan.Completed = relativePaths(l, secrets), stale
+	plan.Secrets, plan.Completed = relativePaths(l, secrets), !bytes.Equal(stored, completed)
 	return updateRun{
 		plan: plan, cluster: m.Name, nodes: p.Nodes(), secrets: secrets, completed: completed,
-		openAPI: openAPI(objs.Cluster),
+		warnings: warnings(objs.Cluster, ch),
 	}, nil
 }
 
-// completedDiffers reports whether the cluster's stored completed spec is missing or differs from want.
-func (s *Service) completedDiffers(ctx context.Context, l statestore.Layout, want []byte) (bool, error) {
+// readCompleted returns the cluster's stored completed spec, or nil when the store lacks it.
+func (s *Service) readCompleted(ctx context.Context, l statestore.Layout) ([]byte, error) {
 	data, _, err := s.Store.Get(ctx, l.Completed())
-	switch {
-	case errors.Is(err, statestore.ErrNotFound):
-		return true, nil
-	case err != nil:
-		return false, err
+	if errors.Is(err, statestore.ErrNotFound) {
+		return nil, nil
 	}
-	return !bytes.Equal(data, want), nil
+	return data, err
+}
+
+// pinVersion sets the Nomad version of the cluster c, which has its defaults and the channel ch, when its spec leaves
+// it out: to the one pinned in stored, the cluster's stored completed spec, or else to the one that ch recommends. A
+// pinned version that ch does not allow is an error, and so is a stored completed spec that does not decode or holds
+// no Cluster: tent does not move a cluster to another Nomad version by itself.
+func pinVersion(c *v1alpha1.Cluster, ch *channels.Channel, l statestore.Layout, stored []byte) error {
+	n := &c.Spec.Nomad
+	if n.Version != "" {
+		return nil
+	}
+	var pinned string
+	if stored != nil {
+		var err error
+		if pinned, err = pinnedVersion(stored); err != nil {
+			return fmt.Errorf("%s: %w; set spec.nomad.version to the Nomad version the cluster was built with, or fix "+
+				"%s in the state store by hand", l.Completed(), err, l.Completed())
+		}
+	}
+	if pinned == "" {
+		n.Version = ch.Nomad.Recommended
+		return nil
+	}
+	// Allows returns nil or a *VersionError.
+	if v, ok := errors.AsType[*channels.VersionError](ch.Allows(pinned)); ok {
+		return fmt.Errorf("%s is pinned to Nomad %s (%s), which %s; set spec.nomad.version to a version that the "+
+			"channel allows", clusterLabel(c.Metadata.Name), pinned, l.Completed(), v.Problem)
+	}
+	n.Version = pinned
+	return nil
+}
+
+// pinnedVersion returns the Nomad version that a stored completed spec holds.
+func pinnedVersion(completed []byte) (string, error) {
+	objs, err := spec.Decode(completed)
+	switch {
+	case err != nil:
+		return "", err
+	case objs.Cluster == nil:
+		return "", errors.New("holds no " + v1alpha1.KindCluster)
+	}
+	return objs.Cluster.Spec.Nomad.Version, nil
 }
 
 // provider returns the cloud provider called name.

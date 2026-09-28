@@ -19,6 +19,7 @@ import (
 
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/app"
+	"github.com/ingvarch/tent/internal/channels"
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/cloud/vultr"
 	"github.com/ingvarch/tent/internal/cloud/vultr/vultrfake"
@@ -226,12 +227,27 @@ func nodeSteps(action, name string) []string {
 	return []string{"node started " + action + " " + name, "node done " + action + " " + name}
 }
 
-// fullSpec returns what the completed spec holds: the test cluster's specs with every default.
+// fullSpec returns what the completed spec holds: the test cluster's specs with every default and, unless the spec
+// sets one, the Nomad version that the embedded channel stable recommends.
 func fullSpec(t *testing.T, svc *app.Service) []byte {
+	t.Helper()
+	stable, err := channels.Load("stable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return completedSpec(t, svc, stable.Nomad.Recommended)
+}
+
+// completedSpec returns the test cluster's specs with every default and, unless the spec sets one, the Nomad version
+// v. With v empty, it is the completed spec as a tent without channels wrote it.
+func completedSpec(t *testing.T, svc *app.Service, v string) []byte {
 	t.Helper()
 	objs, err := svc.Get(t.Context(), "prod", true)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
+	}
+	if n := &objs.Cluster.Spec.Nomad; n.Version == "" {
+		n.Version = v
 	}
 	data, err := spec.Encode(objs)
 	if err != nil {
@@ -456,7 +472,7 @@ func TestUpdateWritesTheCompletedSpec(t *testing.T) {
 		change func(t *testing.T, svc *app.Service)
 	}{
 		{"a spec change that touches no cloud object", func(t *testing.T, svc *app.Service) {
-			mustReplace(t, svc, keyedClusterYAML+"  nomad:\n    version: 2.0.7\n")
+			mustReplace(t, svc, keyedClusterYAML+"  nomad:\n    region: eu\n")
 		}},
 		{"an update that stopped before it wrote the completed spec", func(t *testing.T, svc *app.Service) {
 			if err := svc.Store.Delete(t.Context(), completedPath); err != nil {
