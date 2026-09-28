@@ -58,8 +58,8 @@ type CreateRequest struct {
 	MachineType string        // the provider's plan or server type
 	Image       string        // the operating system image by name, such as ubuntu-24.04
 	SpecHash    string        // the hash of the node configuration; empty for none
-	// Op is the operation id of the call, a lower-case UUID. A call with the op of an earlier one finds the machine
-	// that the earlier call created.
+	// Op is the operation id of the call, a lower-case UUID of version 4 as NewOpID makes. A call with the op of an
+	// earlier one finds the machine that the earlier call created.
 	Op       string
 	UserData UserData // what cloud-init reads on the first boot
 }
@@ -86,7 +86,8 @@ func (u UserData) LogValue() slog.Value { return slog.StringValue(u.String()) }
 func (u UserData) MarshalJSON() ([]byte, error) { return json.Marshal(u.String()) }
 
 // Validate checks that the request has what every provider needs: a cluster, group, zone, name, machine type, image
-// and operation id, and the role server, client or combined. It returns the first problem it finds.
+// and operation id, an operation id of the form that NewOpID makes, and the role server, client or combined. It
+// returns the first problem it finds.
 func (r CreateRequest) Validate() error {
 	for _, f := range []struct{ name, value string }{
 		{"cluster", r.Cluster}, {"group", r.Group}, {"zone", r.Zone}, {"name", r.Name},
@@ -95,6 +96,10 @@ func (r CreateRequest) Validate() error {
 		if f.value == "" {
 			return fmt.Errorf("create request: no %s", f.name)
 		}
+	}
+	if !ValidOpID(r.Op) {
+		return fmt.Errorf("create request: operation id %q is not one that NewOpID makes "+
+			"(a lower-case UUID of version 4)", r.Op)
 	}
 	if !slices.Contains(v1alpha1.Roles(), r.Role) {
 		return fmt.Errorf("create request: role %q is not server, client or combined", r.Role)

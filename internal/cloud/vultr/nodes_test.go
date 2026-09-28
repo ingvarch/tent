@@ -27,6 +27,13 @@ import (
 // specHash is the spec hash of the nodes that the tests create.
 const specHash = "3f9a1c0b7d2e4f68"
 
+// Operation ids of the nodes that the tests create.
+const (
+	opA = "00000000-0000-4000-8000-00000000000a"
+	opB = "00000000-0000-4000-8000-00000000000b"
+	opC = "00000000-0000-4000-8000-00000000000c"
+)
+
 // userData is the user data of the nodes that the tests create.
 var userData = []byte("#cloud-config\n")
 
@@ -118,11 +125,11 @@ func TestCreate(t *testing.T) {
 		dev := kept(t, snap.SSHKey, sshKeyOf(devFP))
 		before, start := len(x.f.Calls()), time.Now()
 
-		got := createNode(t, x.p, serverRequest("op-a"))
+		got := createNode(t, x.p, serverRequest(opA))
 
 		want := cloud.Instance{
 			ID: "instance-1", Name: "prod-servers-0", Cluster: "prod", Group: "servers", Role: v1alpha1.RoleServer,
-			Zone: "ams", SpecHash: specHash, Op: "op-a", PrivateIP: netip.MustParseAddr("10.64.0.3"),
+			Zone: "ams", SpecHash: specHash, Op: opA, PrivateIP: netip.MustParseAddr("10.64.0.3"),
 			PublicIP: netip.MustParseAddr("198.18.0.1"), Ready: true, Created: start.Truncate(time.Second),
 		}
 		if diff := cmp.Diff(want, got, equateAddrs); diff != "" {
@@ -135,7 +142,7 @@ func TestCreate(t *testing.T) {
 		wantReq := govultr.InstanceCreateReq{
 			Region: "ams", Plan: "vc2-2c-4gb", OsID: 2284, Label: "prod-servers-0", Hostname: "prod-servers-0",
 			Tags: []string{
-				"tent/cluster=prod", "tent/nodegroup=servers", "tent/op=op-a", "tent/role=server",
+				"tent/cluster=prod", "tent/nodegroup=servers", "tent/op=" + opA, "tent/role=server",
 				"tent/spec-hash=" + specHash,
 			},
 			FirewallGroupID: servers.ID, AttachVPC: []string{vpc.ID}, SSHKeys: []string{ops.ID, dev.ID},
@@ -146,7 +153,7 @@ func TestCreate(t *testing.T) {
 		}
 		// The search by operation id, the inventory, the create, then reads 5 s apart: pending, booting, ready.
 		wantCallsSince(t, x.f, before, slices.Concat(
-			[]vultrfake.Call{{Name: "ListInstances", Arg: "tent/op=op-a"}},
+			[]vultrfake.Call{{Name: "ListInstances", Arg: "tent/op=" + opA}},
 			listCalls,
 			[]vultrfake.Call{
 				{Name: "ListFirewallRules", Arg: clients.ID}, {Name: "ListFirewallRules", Arg: servers.ID},
@@ -159,7 +166,7 @@ func TestCreate(t *testing.T) {
 		}
 
 		// The next node gets the next address.
-		next := createNode(t, x.p, nodeRequest("prod-servers-1", "servers", v1alpha1.RoleServer, "op-b"))
+		next := createNode(t, x.p, nodeRequest("prod-servers-1", "servers", v1alpha1.RoleServer, opB))
 		if want := netip.MustParseAddr("10.64.0.4"); next.PrivateIP != want {
 			t.Errorf("the second node's private address is %v, want %v", next.PrivateIP, want)
 		}
@@ -180,7 +187,7 @@ func TestCreateFirewallGroupOfRole(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				x, snap := newNodesFixture(t, opsKey)
 				group := kept(t, snap.FirewallGroup, tc.want)
-				in := createNode(t, x.p, nodeRequest("prod-"+tc.group+"-0", tc.group, tc.role, "op-a"))
+				in := createNode(t, x.p, nodeRequest("prod-"+tc.group+"-0", tc.group, tc.role, opA))
 				if in.Group != tc.group || in.Role != tc.role {
 					t.Errorf("Create returned the group %q and the role %q, want %q and %q", in.Group, in.Role,
 						tc.group, tc.role)
@@ -196,17 +203,17 @@ func TestCreateFirewallGroupOfRole(t *testing.T) {
 func TestCreateAdoptsTheInstanceOfItsOp(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		x, _ := newNodesFixture(t, opsKey)
-		first := createNode(t, x.p, serverRequest("op-a"))
+		first := createNode(t, x.p, serverRequest(opA))
 		before := len(x.f.Calls())
 
-		again := createNode(t, x.p, serverRequest("op-a"))
+		again := createNode(t, x.p, serverRequest(opA))
 
 		if diff := cmp.Diff(first, again, equateAddrs); diff != "" {
 			t.Errorf("the second Create (-first +second):\n%s", diff)
 		}
 		// The search finds the instance: no inventory and no create.
 		wantCallsSince(t, x.f, before,
-			vultrfake.Call{Name: "ListInstances", Arg: "tent/op=op-a"},
+			vultrfake.Call{Name: "ListInstances", Arg: "tent/op=" + opA},
 			vultrfake.Call{Name: "GetInstance", Arg: first.ID}, vultrfake.Call{Name: "ListInstanceVPCs", Arg: first.ID})
 	})
 }
@@ -216,10 +223,10 @@ func TestCreateSkipsAnotherClustersInstanceWithItsOp(t *testing.T) {
 		f := vultrfake.New()
 		seedInfra(t, f, 16)
 		other := f.AddInstance(t, govultr.Instance{
-			Label: "staging-servers-0", Tags: []string{"tent/cluster=staging", "tent/op=op-a"},
+			Label: "staging-servers-0", Tags: []string{"tent/cluster=staging", "tent/op=" + opA},
 		})
 
-		got := createNode(t, opProvider(f), serverRequest("op-a"))
+		got := createNode(t, opProvider(f), serverRequest(opA))
 
 		if got.ID == other.ID {
 			t.Errorf("Create adopted the instance %s of cluster staging", other.ID)
@@ -242,7 +249,7 @@ func TestCreateAdoptsTheOldestInstanceOfItsOp(t *testing.T) {
 		}
 		p, log := newProvider(f)
 
-		got := createNode(t, p, serverRequest("op-a"))
+		got := createNode(t, p, serverRequest(opA))
 
 		// The oldest, then the one with the lowest id; a date that does not parse counts as the newest.
 		if got.ID != "c-older" {
@@ -254,7 +261,7 @@ func TestCreateAdoptsTheOldestInstanceOfItsOp(t *testing.T) {
 		// The others, in the order of the choice.
 		want := []map[string]string{{
 			"level": "WARN", "msg": "adopting the oldest of several Vultr instances with one operation id",
-			"cluster": "prod", "op": "op-a", "id": "c-older", "others": "d-older, b-newer, a-bad-date",
+			"cluster": "prod", "op": opA, "id": "c-older", "others": "d-older, b-newer, a-bad-date",
 		}}
 		if diff := cmp.Diff(want, logRecords(t, log)); diff != "" {
 			t.Errorf("log (-want +got):\n%s", diff)
@@ -262,18 +269,18 @@ func TestCreateAdoptsTheOldestInstanceOfItsOp(t *testing.T) {
 	})
 }
 
-// seededServer returns in as the node prod-servers-0 of cluster prod in ams, created with the operation id op-a.
+// seededServer returns in as the node prod-servers-0 of cluster prod in ams, created with the operation id opA.
 func seededServer(in govultr.Instance) govultr.Instance {
 	in.Hostname, in.Label, in.Region = "prod-servers-0", "prod-servers-0", "ams"
-	in.Tags = []string{"tent/cluster=prod", "tent/nodegroup=servers", "tent/op=op-a", "tent/role=server"}
+	in.Tags = []string{"tent/cluster=prod", "tent/nodegroup=servers", "tent/op=" + opA, "tent/role=server"}
 	return in
 }
 
 // TestCreateRefusesAnotherNodeWithItsOp checks that Create does not adopt an instance with the request's operation id
 // that is another node: the caller gave one operation id to two nodes.
 func TestCreateRefusesAnotherNodeWithItsOp(t *testing.T) {
-	const refused = "create node prod-servers-0 of cluster prod: instance inst with the operation id op-a is another " +
-		"node: %s; each node needs its own operation id"
+	const refused = "create node prod-servers-0 of cluster prod: instance inst with the operation id " + opA +
+		" is another node: %s; each node needs its own operation id"
 	for _, tc := range []struct {
 		name string
 		edit func(in *govultr.Instance)
@@ -298,7 +305,7 @@ func TestCreateRefusesAnotherNodeWithItsOp(t *testing.T) {
 				tc.edit(&in)
 				f.AddInstance(t, in, vpc.ID)
 
-				got, err := opProvider(f).Create(t.Context(), serverRequest("op-a"))
+				got, err := opProvider(f).Create(t.Context(), serverRequest(opA))
 
 				if tc.want == "" {
 					if err != nil || got.ID != "inst" {
@@ -324,7 +331,7 @@ func TestCreateLostAnswer(t *testing.T) {
 		before := len(x.f.Calls())
 		x.f.LoseResponse(t, "CreateInstance", 1)
 
-		got := createNode(t, x.p, serverRequest("op-a"))
+		got := createNode(t, x.p, serverRequest(opA))
 
 		// The search after the create finds the instance.
 		if got.ID != "instance-1" || !got.Ready || got.PrivateIP != netip.MustParseAddr("10.64.0.3") {
@@ -347,10 +354,10 @@ func TestCreateLostAnswerNotListedYet(t *testing.T) {
 		// No answer, and the search lists nothing: here Vultr did not create the instance at all.
 		x.f.Fail(t, "CreateInstance", vultr.NewNoAnswerError(http.MethodPost, "/v2/instances", nil), 1)
 
-		_, err := x.p.Create(t.Context(), serverRequest("op-a"))
+		_, err := x.p.Create(t.Context(), serverRequest(opA))
 
 		const want = "create node prod-servers-0 of cluster prod: vultr: POST /v2/instances: no answer; " +
-			"no instance with the operation id op-a is listed yet"
+			"no instance with the operation id " + opA + " is listed yet"
 		if errText(err) != want {
 			t.Errorf("Create = %v, want %q", err, want)
 		}
@@ -358,7 +365,7 @@ func TestCreateLostAnswerNotListedYet(t *testing.T) {
 			t.Errorf("errors.Is(%v, vultr.ErrUnavailable) = false", err)
 		}
 		// Called again with the same operation id, it searches, then creates the instance.
-		createNode(t, x.p, serverRequest("op-a"))
+		createNode(t, x.p, serverRequest(opA))
 		if n := len(x.f.Instances()); n != 1 {
 			t.Errorf("%d instances, want 1", n)
 		}
@@ -385,7 +392,7 @@ func TestCreateLostAnswerSearchFails(t *testing.T) {
 		p := opProvider(&afterCreate{Fake: x.f, hook: func() { x.f.Throttle(t, "ListInstances", 0, 1) }})
 		x.f.LoseResponse(t, "CreateInstance", 1)
 
-		_, err := p.Create(t.Context(), serverRequest("op-a"))
+		_, err := p.Create(t.Context(), serverRequest(opA))
 
 		const want = "create node prod-servers-0 of cluster prod: vultr: POST /v2/instances: " +
 			"vultrfake: the answer was lost; search by operation id: vultr: GET /v2/instances: " +
@@ -400,7 +407,7 @@ func TestCreateLostAnswerSearchFails(t *testing.T) {
 			}
 		}
 		// Called again with the same operation id, it finds the instance and does not create another.
-		if got := createNode(t, p, serverRequest("op-a")); got.ID != "instance-1" {
+		if got := createNode(t, p, serverRequest(opA)); got.ID != "instance-1" {
 			t.Errorf("the second Create returned %s, want instance-1", got.ID)
 		}
 		if n := countCalls(x.f, "CreateInstance"); n != 1 {
@@ -440,14 +447,14 @@ func TestCreateAnswerWithoutID(t *testing.T) {
 		{"no instance", true, nil, ""},
 		{"no id, and nothing created", false, &govultr.Instance{},
 			"create node prod-servers-0 of cluster prod: vultr: POST /v2/instances: the answer holds no instance id; " +
-				"no instance with the operation id op-a is listed yet"},
+				"no instance with the operation id " + opA + " is listed yet"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				x, _ := newNodesFixture(t, opsKey)
 				p := opProvider(&answerWithoutID{Fake: x.f, create: tc.create, answer: tc.answer})
 
-				got, err := p.Create(t.Context(), serverRequest("op-a"))
+				got, err := p.Create(t.Context(), serverRequest(opA))
 
 				if tc.want != "" {
 					if errText(err) != tc.want {
@@ -461,7 +468,7 @@ func TestCreateAnswerWithoutID(t *testing.T) {
 				if err != nil || got.ID != "instance-1" || !got.Ready {
 					t.Errorf("Create = %+v, %v; want instance-1 ready", got, err)
 				}
-				if n := searches(x.f, "op-a"); n != 2 {
+				if n := searches(x.f, opA); n != 2 {
 					t.Errorf("%d searches by operation id, want 2: before and after the create", n)
 				}
 			})
@@ -493,7 +500,7 @@ func TestCreateWaitsForAnAddress(t *testing.T) {
 		x, _ := newNodesFixture(t, opsKey)
 		start := time.Now()
 
-		got := createNode(t, opProvider(&unspecifiedAddress{Fake: x.f, n: 2}), serverRequest("op-a"))
+		got := createNode(t, opProvider(&unspecifiedAddress{Fake: x.f, n: 2}), serverRequest(opA))
 
 		// Ready on the third read at 10 s; the address comes on the fifth, at 20 s.
 		if want := netip.MustParseAddr("10.64.0.3"); got.PrivateIP != want {
@@ -515,7 +522,7 @@ func TestCreateWaitsUntilReady(t *testing.T) {
 		x.f.SetBootReads(t, 2, 4)
 		start := time.Now()
 
-		got := createNode(t, p, serverRequest("op-a"))
+		got := createNode(t, p, serverRequest(opA))
 
 		// Pending twice, booting twice, then ready: five reads a second apart, and the VPCs once it is ready.
 		if !got.Ready {
@@ -552,7 +559,7 @@ func TestCreateWaitEndsWithTheContext(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), 58*time.Second)
 				defer cancel()
 
-				_, err := opProvider(f).Create(ctx, serverRequest("op-a"))
+				_, err := opProvider(f).Create(ctx, serverRequest(opA))
 
 				const want = "create node prod-servers-0 of cluster prod: wait for instance instance-1: " +
 					"context deadline exceeded"
@@ -581,6 +588,8 @@ func TestCreateFails(t *testing.T) {
 		calls []string // the calls Create sends
 	}{
 		{"invalid request", 16, func(r *cloud.CreateRequest) { r.Op = "" }, "create request: no operation id", nil},
+		{"operation id not a UUID", 16, func(r *cloud.CreateRequest) { r.Op = "op-1" },
+			`create request: operation id "op-1" is not one that NewOpID makes (a lower-case UUID of version 4)`, nil},
 		{"unsupported image", 16, func(r *cloud.CreateRequest) { r.Image = "debian-12" },
 			`create node prod-servers-0 of cluster prod: tent supports ubuntu-24.04 and ubuntu-26.04 on Vultr, ` +
 				`not "debian-12"`, nil},
@@ -590,7 +599,7 @@ func TestCreateFails(t *testing.T) {
 			"create node prod-servers-0 of cluster prod: cluster prod has no VPC; apply its infrastructure first",
 			search},
 		{"no firewall group for the role", 16, func(r *cloud.CreateRequest) {
-			*r = nodeRequest("prod-workers-0", "workers", v1alpha1.RoleClient, "op-a")
+			*r = nodeRequest("prod-workers-0", "workers", v1alpha1.RoleClient, opA)
 		}, "create node prod-workers-0 of cluster prod: cluster prod has no firewall group prod-clients; apply its " +
 			"infrastructure first", append(search, "ListFirewallRules")},
 		{"zone outside the VPC's region", 16, func(r *cloud.CreateRequest) { r.Zone = "ewr" },
@@ -602,7 +611,7 @@ func TestCreateFails(t *testing.T) {
 			if tc.mask > 0 {
 				seedInfra(t, f, tc.mask)
 			}
-			req := serverRequest("op-a")
+			req := serverRequest(opA)
 			tc.edit(&req)
 
 			_, err := opProvider(f).Create(t.Context(), req)
@@ -658,7 +667,7 @@ func TestCreateCallFails(t *testing.T) {
 			seedInfra(t, f, 16)
 			tc.fault(t, f)
 
-			_, err := opProvider(f).Create(t.Context(), serverRequest("op-a"))
+			_, err := opProvider(f).Create(t.Context(), serverRequest(opA))
 
 			if want := "create node prod-servers-0 of cluster prod: " + tc.want; errText(err) != want {
 				t.Errorf("Create = %v, want %q", err, want)
@@ -667,7 +676,7 @@ func TestCreateCallFails(t *testing.T) {
 				t.Errorf("errors.Is(%v, %v) = false", err, tc.class)
 			}
 			// A create that got an answer is not followed by a search.
-			if n := searches(f, "op-a"); n != 1 {
+			if n := searches(f, opA); n != 1 {
 				t.Errorf("%d searches by operation id, want 1", n)
 			}
 		})
@@ -689,14 +698,14 @@ func TestList(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		x, _ := newNodesFixture(t, opsKey)
 		p, log := newProvider(x.f)
-		worker := createNode(t, p, nodeRequest("prod-workers-0", "workers", v1alpha1.RoleClient, "op-a"))
-		server := createNode(t, p, serverRequest("op-b"))
+		worker := createNode(t, p, nodeRequest("prod-workers-0", "workers", v1alpha1.RoleClient, opA))
+		server := createNode(t, p, serverRequest(opB))
 		// A node of cluster prod that is not booted, without a VPC, a spec hash or a date that parses, with a tag of
 		// its own.
 		x.f.AddInstance(t, govultr.Instance{
 			ID: "booting", Label: "prod-servers-1", Region: "ams", MainIP: "0.0.0.0", DateCreated: "yesterday",
 			Status: "pending", PowerStatus: "stopped", ServerStatus: "none",
-			Tags: []string{"tent/cluster=prod", "tent/nodegroup=servers", "tent/op=op-c", "tent/role=server", "web"},
+			Tags: []string{"tent/cluster=prod", "tent/nodegroup=servers", "tent/op=" + opC, "tent/role=server", "web"},
 		})
 		// Another cluster's instance, and one with a tag in upper case, which the tag filter lists too.
 		x.f.AddInstance(t, govultr.Instance{ID: "staging", Label: "staging-servers-0",
@@ -710,7 +719,7 @@ func TestList(t *testing.T) {
 
 		booting := cloud.Instance{
 			ID: "booting", Name: "prod-servers-1", Cluster: "prod", Group: "servers", Role: v1alpha1.RoleServer,
-			Zone: "ams", Op: "op-c",
+			Zone: "ams", Op: opC,
 		}
 		// By name, as Create returned them.
 		if diff := cmp.Diff([]cloud.Instance{server, booting, worker}, got, equateAddrs); diff != "" {
@@ -897,7 +906,7 @@ func instanceIDs(f *vultrfake.Fake) []string {
 func TestStop(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		x, _ := newNodesFixture(t, opsKey)
-		in := createNode(t, x.p, serverRequest("op-a"))
+		in := createNode(t, x.p, serverRequest(opA))
 		before := len(x.f.Calls())
 
 		if err := x.p.Stop(t.Context(), in); err != nil {
@@ -915,8 +924,8 @@ func TestStop(t *testing.T) {
 func TestDelete(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		x, _ := newNodesFixture(t, opsKey)
-		in := createNode(t, x.p, serverRequest("op-a"))
-		other := createNode(t, x.p, nodeRequest("prod-servers-1", "servers", v1alpha1.RoleServer, "op-b"))
+		in := createNode(t, x.p, serverRequest(opA))
+		other := createNode(t, x.p, nodeRequest("prod-servers-1", "servers", v1alpha1.RoleServer, opB))
 		before := len(x.f.Calls())
 
 		if err := x.p.Delete(t.Context(), in); err != nil {
@@ -947,7 +956,7 @@ func (a *recordUpdates) UpdateInstance(ctx context.Context, id string, req *govu
 func TestScrubUserData(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		x, _ := newNodesFixture(t, opsKey)
-		in := createNode(t, x.p, serverRequest("op-a"))
+		in := createNode(t, x.p, serverRequest(opA))
 		tags := instanceOf(t, x.f, in.ID).Tags
 		rec := &recordUpdates{Fake: x.f}
 		before := len(x.f.Calls())

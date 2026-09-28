@@ -2,6 +2,7 @@ package cloud
 
 import (
 	"context"
+	"errors"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/engine"
@@ -29,3 +30,21 @@ type Provider interface {
 	// Nodes returns the primitives that list, create, stop and delete machines and scrub their user data.
 	Nodes() Nodes
 }
+
+// ErrUnsupportedProvider matches the error of a provider that tent cannot manage clusters on yet, so tent has made no
+// cloud objects there.
+var ErrUnsupportedProvider = errors.New("tent cannot manage clusters on this provider yet")
+
+// UnsupportedProvider returns the error of the provider name that tent cannot manage clusters on yet: "tent cannot
+// manage clusters on <name> yet". It matches ErrUnsupportedProvider.
+func UnsupportedProvider(name v1alpha1.Provider) error { return unsupportedProvider(name) }
+
+// unsupportedProvider is the error of a provider that tent cannot manage clusters on yet.
+type unsupportedProvider v1alpha1.Provider
+
+func (e unsupportedProvider) Error() string {
+	return "tent cannot manage clusters on " + string(e) + " yet"
+}
+
+// Is reports whether target is ErrUnsupportedProvider.
+func (e unsupportedProvider) Is(target error) bool { return target == ErrUnsupportedProvider }

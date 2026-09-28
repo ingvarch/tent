@@ -3,8 +3,9 @@ package vultr
 import (
 	"bytes"
 	"log/slog"
-	"regexp"
 	"testing"
+
+	"github.com/ingvarch/tent/internal/cloud"
 )
 
 func TestProviderName(t *testing.T) {
@@ -33,41 +34,16 @@ func TestProviderOpIDs(t *testing.T) {
 	}
 }
 
-// uuidV4 matches a lower-case UUID of version 4 and of the variant of RFC 9562.
-var uuidV4 = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
-
+// TestProviderDefaultOpIDs checks that the default operation ids are new ones of the form that cloud.NewOpID makes.
 func TestProviderDefaultOpIDs(t *testing.T) {
-	const n = 1000
 	p := New(nil)
-	seen := make(map[string]bool, n)
-	chars := make([]map[byte]bool, 36) // the characters seen at each position
-	for i := range chars {
-		chars[i] = map[byte]bool{}
-	}
-	for range n {
-		id := p.opID()
-		if !uuidV4.MatchString(id) {
-			t.Fatalf("opID() = %q, want a lower-case UUID v4", id)
-		}
-		if seen[id] {
-			t.Fatalf("opID() gave %q twice", id)
-		}
-		seen[id] = true
-		for i := range len(id) {
-			chars[i][id[i]] = true
+	a, b := p.opID(), p.opID()
+	for _, id := range []string{a, b} {
+		if !cloud.ValidOpID(id) {
+			t.Errorf("opID() = %q, want a lower-case UUID v4", id)
 		}
 	}
-	// Every hex digit but the version is random, and the variant digit keeps two random bits.
-	for i, got := range chars {
-		want := 2
-		switch i {
-		case 8, 13, 14, 18, 23: // the "-" and the version, which the pattern checks
-			continue
-		case 19: // the variant: 8, 9, a or b
-			want = 4
-		}
-		if len(got) < want {
-			t.Errorf("position %d of %d ids took %d values, want at least %d", i, n, len(got), want)
-		}
+	if a == b {
+		t.Errorf("opID() gave %q twice", a)
 	}
 }

@@ -2,8 +2,6 @@ package vultr
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -78,7 +76,8 @@ func WithLogger(l *slog.Logger) ProviderOption {
 	}
 }
 
-// withOpIDs makes the provider take its operation ids from next, so that tests know them. The default is newOpID.
+// withOpIDs makes the provider take its operation ids from next, so that tests know them. The default is
+// cloud.NewOpID.
 func withOpIDs(next func() string) ProviderOption {
 	return func(p *Provider) { p.opID = next }
 }
@@ -94,7 +93,7 @@ func withPollInterval(d time.Duration) ProviderOption {
 
 // New returns a provider that calls Vultr through api.
 func New(api API, opts ...ProviderOption) *Provider {
-	p := &Provider{api: api, log: slog.Default(), opID: newOpID, pollEvery: pollInterval}
+	p := &Provider{api: api, log: slog.Default(), opID: cloud.NewOpID, pollEvery: pollInterval}
 	for _, opt := range opts {
 		opt(p)
 	}
@@ -142,15 +141,4 @@ func (p *Provider) InfraKinds() []engine.Kind {
 		kinds[i] = engine.Kind{Name: name, Deleter: deleters[name]}
 	}
 	return kinds
-}
-
-// newOpID returns a random operation id: a lower-case UUID of version 4, such as
-// 5f0c2a9e-8d1b-4c7e-9f3a-2b6d8e1c4a70.
-func newOpID() string {
-	var b [16]byte
-	_, _ = rand.Read(b[:])  // never fails: crypto/rand.Read ends the program instead
-	b[6] = b[6]&0x0f | 0x40 // version 4
-	b[8] = b[8]&0x3f | 0x80 // the variant of RFC 9562
-	h := hex.EncodeToString(b[:])
-	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
 }
