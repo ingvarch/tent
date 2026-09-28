@@ -24,6 +24,34 @@ linters:
           allow:
             - $gostd
             - github.com/ingvarch/tent/api
+        # internal/pki makes the cluster's CA and secrets with the standard library, internal/uuid and the API types
+        # alone, so it never reaches a cloud or the store. internal/uuid imports only the standard library.
+        pki-stdlib-only:
+          files: ["${base-path}/internal/pki/**", "!$test"]
+          allow:
+            - $gostd
+            - github.com/ingvarch/tent/internal/uuid$
+            - github.com/ingvarch/tent/api/v1alpha1$
+        uuid-stdlib-only:
+          files: ["${base-path}/internal/uuid/**", "!$test"]
+          allow:
+            - $gostd
+        # internal/english writes the lists of messages for every layer, so it imports only the standard library.
+        english-stdlib-only:
+          files: ["${base-path}/internal/english/**", "!$test"]
+          allow:
+            - $gostd
+        # internal/secrettest holds the checks that tests of every layer run, so it imports only the standard library.
+        secrettest-stdlib-only:
+          files: ["${base-path}/internal/secrettest/**", "!$test"]
+          allow:
+            - $gostd
+        # internal/secrettest is for tests: no code that tent runs imports it.
+        secrettest-only-in-tests:
+          files: ["$all", "!$test"]
+          deny:
+            - pkg: github.com/ingvarch/tent/internal/secrettest
+              desc: internal/secrettest is for tests only
         # Only cmd/tent imports provider packages, to register them (ADR-0021). No other package can reach a
         # provider, directly or through another package.
         providers-only-in-cmd:

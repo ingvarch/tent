@@ -25,19 +25,3 @@ func TestImageNames(t *testing.T) {
 		t.Errorf("imageNames() = %q, want %q", got, want)
 	}
 }
-
-func TestAndList(t *testing.T) {
-	for _, tc := range []struct {
-		items []string
-		want  string
-	}{
-		{nil, ""},
-		{[]string{"a"}, "a"},
-		{[]string{"a", "b"}, "a and b"},
-		{[]string{"a", "b", "c"}, "a, b and c"},
-	} {
-		if got := andList(tc.items); got != tc.want {
-			t.Errorf("andList(%q) = %q, want %q", tc.items, got, tc.want)
-		}
-	}
-}
