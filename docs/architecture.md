@@ -511,7 +511,9 @@ Behaviour:
 - **Duplicates.** The provider's inventory keeps one object per key and marks the extra copies as `Duplicate`
   ([ADR-0015](adr/0015-idempotency-without-unique-names.md)). The plan deletes the duplicates with the reason
   `duplicate`. On Vultr the inventory keeps ([ADR-0023](adr/0023-vultr-inventory-dedupe-and-images.md)):
-  - of firewall groups, the one with the most attached instances, then the oldest, then the one with the lowest id;
+  - of firewall groups, the one that the most instances with the cluster's tag use, then the oldest, then the one
+    with the lowest id. The inventory counts them in its own list of those instances, since Vultr gave no
+    `instance_count` for a group in use;
   - of the other kinds, the oldest, then the one with the lowest id.
 
   A creation date that does not parse counts as newer than any that does.
@@ -523,6 +525,9 @@ Behaviour:
   deletes them: `rollout` manages nodes, and volumes are never deleted implicitly.
   - Prune runs after every task change has succeeded: kind by kind in the order of the kinds, the objects of one kind
     in parallel.
+  - `update cluster` applies the deletes in a second pass, after it creates and removes nodes
+    ([13.2](#132-tent-update-cluster---yes)). **Not built yet:** `Plan.Apply` runs the task changes and the deletes
+    in one pass. The `update cluster` work, which comes next, adds the second pass.
   - When a task change fails, the deletes wait for the next run.
   - When a delete fails, the deletes of the later kinds wait for the next run; the other deletes of its kind still
     finish. A VPC delete after a failed firewall-group delete would only fail on `attached` and retry until its
@@ -562,6 +567,8 @@ Behaviour:
     - A create that follows a search that found nothing searches once more after it succeeds, and returns the copy
       the inventory keeps; when that search fails or finds nothing, the created one
       ([ADR-0023](adr/0023-vultr-inventory-dedupe-and-images.md)).
+    - The search lists no instances, so of several copies of a firewall group it returns the oldest. Right after a
+      create no node uses the copies yet, so the inventory keeps the oldest too.
     - Any other error of a create is retryable only when Vultr did not carry the call out, such as a rate limit.
     - A dedupe pass removes accidental copies.
 - **Normalisation.** Every task normalises cloud-side values before diffing, so a plan never shows a diff forever,
@@ -593,8 +600,8 @@ See [ADR-0004](adr/0004-layered-architecture.md).
 
 ### 7.1 Interfaces
 
-`cloud.Provider` in `internal/cloud` has the methods that checking specs and building or deleting a cluster's
-infrastructure need. `vultr.Provider` implements it.
+`cloud.Provider` in `internal/cloud` has the methods that checking specs, building or deleting a cluster's
+infrastructure and managing its machines need. `vultr.Provider` implements it.
 
 ```go
 // Provider is a cloud that tent provisions clusters on. The core reaches a cloud only through it.
@@ -613,37 +620,73 @@ type Provider interface {
 	InfraKinds() []engine.Kind
 	// Inventory lists every object the cluster owns. Tasks read it through the provider's own snapshot type.
 	Inventory(ctx context.Context, cluster string) (engine.Snapshot, error)
+	// Nodes returns the machine primitives.
+	Nodes() Nodes
 }
+
+// Nodes are the machine primitives of a provider. Drain, quorum and the order of replacements live in the core.
+type Nodes interface {
+	List(ctx context.Context, cluster string) ([]Instance, error)
+	Create(ctx context.Context, req CreateRequest) (Instance, error) // idempotent per req.Op; waits until ready
+	Stop(ctx context.Context, node Instance) error                  // hard where there is no graceful shutdown
+	Delete(ctx context.Context, node Instance) error                // even while the machine runs
+	ScrubUserData(ctx context.Context, node Instance) error         // replaces the user data with a stub
+}
+
+// Instance is one machine of a cluster as the cloud reports it.
+type Instance struct {
+	ID, Name, Cluster, Group string        // Name is <cluster>-<group>-<index>, also the hostname
+	Role                     v1alpha1.Role // the Nomad role of its node group
+	Zone, SpecHash, Op       string        // SpecHash is empty when the machine carries none
+	PrivateIP, PublicIP      netip.Addr    // the invalid Addr until the cloud reports one
+	Ready                    bool          // the cloud reports it running and booted
+	Created                  time.Time
+}
+
+// CreateRequest is one machine to create.
+type CreateRequest struct {
+	Cluster, Group string
+	Role           v1alpha1.Role
+	Zone, Name     string
+	MachineType    string   // the plan or server type
+	Image          string   // by name, such as ubuntu-24.04
+	SpecHash       string   // empty for none
+	Op             string   // the operation id, a lower-case UUID
+	UserData       UserData // may hold secrets
+}
+
+// UserData prints only its size, such as [user data, 1234 bytes], through fmt, slog and encoding/json.
+type UserData []byte
 ```
 
+- `CreateRequest.Validate` checks what every provider needs: a cluster, group, zone, name, machine type, image and
+  operation id, and the role `server`, `client` or `combined`.
+- `Create` waits until the machine is ready and has no deadline of its own: the caller gives every call one through
+  its context.
+- A machine that is gone counts as stopped, deleted or scrubbed.
+- `vultr.Provider.Nodes()` returns the provider itself. Vultr's `Nodes`: [11.3](#113-creating-a-node) to
+  [11.6](#116-user_data).
+
 **Target, not built yet.** The other methods join `Provider` with the code that first uses them:
-- `Nodes` with node creation and rollout;
 - `Join` with server discovery in tent-node;
 - `PackUserData` with NodeConfig;
 - `Locker` with the Hetzner lock firewall;
 - `Capabilities` with the first core code that depends on one;
 - `Default` with the first provider default that `v1alpha1.SetDefaults` does not fill in.
 
+`Nodes` changes with them: `Stop` is graceful where `GracefulShutdown` is set, the core calls `ScrubUserData` only
+where `MutableUserData` is set, and `CreateRequest` gets a fixed private IP with the Hetzner provider.
+
 The sketch of the target:
 
 ```go
 type Provider interface {
-	// Name, Validate, BuildInfra, InfraKinds and Inventory as above, and:
+	// Name, Validate, BuildInfra, InfraKinds, Inventory and Nodes as above, and:
 	Capabilities() Capabilities
 	Default(c *v1alpha1.Cluster, groups []*v1alpha1.NodeGroup) error // provider defaults, at spec time
-	Nodes() Nodes                                                   // primitives for rollout
 	Join(m *model.Cluster) model.JoinStrategy                       // how agents find servers
 	PackUserData(nc *nodeconfig.NodeConfig) ([]byte, error)         // encoding and size limits
 	Locker(cluster string) statestore.Locker                        // optional cloud-native mutex; may be nil
-}
-
-// Nodes are primitives only. Drain and quorum logic lives in the core (rollout).
-type Nodes interface {
-	List(ctx context.Context, cluster string) ([]Instance, error)
-	Create(ctx context.Context, req CreateRequest) (Instance, error) // group, zone, name, op id, fixed IP?, user data
-	Stop(ctx context.Context, in Instance) error                    // graceful if GracefulShutdown, else hard
-	Delete(ctx context.Context, in Instance) error
-	ScrubUserData(ctx context.Context, in Instance) error           // only if MutableUserData
 }
 
 type Capabilities struct {
@@ -1169,16 +1212,24 @@ sets where its warnings go.
 - **Markers.** `op` is the operation id of the create, a lower-case UUID
   ([ADR-0015](adr/0015-idempotency-without-unique-names.md), [6](#6-reconciliation-engine)). Each task makes one when
   `BuildInfra` builds it.
-- **Not verified 🔬** ([platform notes §3.10](platform-notes.md#310-ownership-fields-on-other-resources)): whether
-  Vultr accepts a second SSH key with the same key material, and whether it stores markers of up to 99 characters
-  verbatim.
+- **Text lengths and SSH keys** (spike 2026-09-27,
+  [platform notes §3.10](platform-notes.md#310-ownership-fields-on-other-resources)). Vultr stores 255 characters of
+  a VPC or firewall group description and 128 of an SSH key name verbatim; tent's markers reach 99. The spike set the
+  texts with updates: `PUT` for a VPC or a firewall group, `PATCH` for an SSH key. Vultr accepts a second SSH key with
+  the same key material, so two clusters can use the same operator key.
 - **Deletion order.** `InfraKinds` returns `vultr.FirewallGroup`, `vultr.VPC`, `vultr.SSHKey`: the engine deletes
   firewall groups first and SSH keys last.
 - **Inventory.** `Inventory` makes one list call each for SSH keys, VPCs and firewall groups, over the whole account,
-  then one for the rules of each firewall group it keeps ([ADR-0023](adr/0023-vultr-inventory-dedupe-and-images.md)).
+  one for the instances with the tag `tent/cluster=<cluster>`, then one for the rules of each firewall group it keeps
+  ([ADR-0023](adr/0023-vultr-inventory-dedupe-and-images.md)).
+  - Of several copies of a firewall group, it keeps the one that the most of those instances use. It counts every
+    instance that the tag filter lists, as the delete guard does ([11.5](#115-firewall-and-host-firewall)), and does
+    not read Vultr's `instance_count`.
   - An object is the cluster's when the marker in its name (an SSH key) or its description (a VPC or a firewall
     group) names the cluster, has the kind of the list it came from, and has the `fp` or `role` its kind needs.
-    Which copy of a key stays: [6](#6-reconciliation-engine). The search after a lost create uses the same rule.
+    Which copy of a key stays: [6](#6-reconciliation-engine). The search after a lost create uses the same rule,
+    but counts no instances: of several firewall groups it returns the oldest, which the inventory keeps too while
+    no node uses the copies.
   - It skips these objects with a warning, and neither adopts nor deletes them:
     - a text that starts with `tent:` and does not parse, whatever cluster it names;
     - a marker of the cluster whose kind does not match the list it came from, such as `kind=vpc` on an SSH key;
@@ -1205,9 +1256,12 @@ sets where its warnings go.
   Plan: 4 to create, 0 to update, 0 to replace, 0 to delete.
   ```
 - **Deletes.** An object that is already gone counts as deleted. Vultr refuses to delete a VPC for up to about 20 s
-  after its servers are gone, and may refuse to delete a firewall group while instances use it; the engine retries
-  both. Vultr's answer to the delete of a firewall group in use is not verified 🔬
-  ([platform notes §3.6](platform-notes.md#36-firewall-groups)).
+  after its servers are gone, and the engine retries. Vultr deletes a firewall group that instances use, so tent
+  never deletes one that nodes of the cluster use ([11.5](#115-firewall-and-host-firewall)).
+  - **VPCs that nodes use: not built yet.** The dedupe keeps the oldest VPC, which may not be the one that holds the
+    cluster's nodes, and nothing stops the delete of a VPC that nodes use. Keeping the VPC with the nodes and
+    refusing such a delete come with the `update cluster` and `delete cluster` work. Until then Vultr refuses the
+    delete with `ErrInUse`, the engine retries it until the change's deadline, and then the apply fails.
 
 ### 11.2 Server discovery: seed and refresh
 
@@ -1228,22 +1282,64 @@ tent therefore uses the generic seed-and-refresh strategy
 ### 11.3 Creating a node
 
 ```
-POST /v2/instances {region, plan, os_id, label, hostname,
-                    tags: [<canonical labels>, <tent/op=uuid>],
+GET  /v2/instances?tag=tent/op=<op>          → the cluster's instance of this op, if any: adopt it, skip to the wait
+the inventory (11.1)                         → the VPC, the firewall group of the role, the SSH keys
+POST /v2/instances {region, plan, os_id, label, hostname, tags: [<canonical labels>],
                     sshkey_id: [...], firewall_group_id, attach_vpc: [vpc],
                     user_data, backups: "disabled"}              → 202 {instance.id}
-poll GET /v2/instances/{id} until status=active, power_status=running, server_status=ok
-GET /v2/instances/{id}/vpcs → private IP (seed lists, LB membership)
+GET  /v2/instances/{id}, every 5 s           → until status=active, power_status=running, server_status=ok
+GET  /v2/instances/{id}/vpcs                 → until it lists the private IP (seed lists, LB membership)
 ```
 
+`Nodes.Create` follows [ADR-0015](adr/0015-idempotency-without-unique-names.md): Vultr's names are not unique, so a
+create that may have been carried out is never sent again.
+1. **Search.** It lists the instances with the tag `tent/op=<op>`, adopts the cluster's instance it finds and goes
+   on to step 5. Of several, it adopts the oldest, then the one with the lowest id, and logs a warning that names the
+   others; a date that does not parse counts as the newest. It skips, with a warning, an instance whose tent tags do
+   not decode or name another cluster.
+   - It fails when the instance it finds has another name, node group, role or zone than the request: the caller
+     gave one `op` to two nodes. For example: `create node prod-servers-0 of cluster prod: instance <id> with the
+     operation id <op> is another node: group dev (want servers); each node needs its own operation id`.
+2. **Infrastructure.** It reads the inventory and takes the copies that the inventory keeps: the cluster's VPC, the
+   firewall group of the node's role (`<cluster>-servers` for a server or combined node, `<cluster>-clients` for a
+   client node) and all the cluster's SSH keys. It fails before the create when the cluster has no VPC or no such
+   group, or when the zone is not the VPC's region.
+3. **Create.** One POST. The region is the zone, the plan the machine type, and `os_id` comes from the image table
+   ([11.7](#117-zones-placement-and-availability)). The label and the hostname are the node's name. The tags are the
+   canonical labels: cluster, node group, role, `op`, and the spec hash when there is one. The user data goes in
+   base64.
+4. **Lost answer.** govultr's own retries are off ([11.8](#118-api-client-rate-limits-cost)). After a create without
+   an answer (`ErrUnavailable`), or with an answer that holds no instance id, it searches by the `op` tag once more
+   and adopts what it finds. When that search fails or lists nothing yet, the error matches `ErrUnavailable`, and a
+   `Create` with the same `op` searches before it creates. Vultr listed each new instance by tag on the first request
+   after the create answer (spikes 2026-09-25 and 2026-09-27).
+5. **Readiness.** It reads the instance at once, then every 5 s. `server_status` goes through `installingbooting`.
+   The node is ready when the status fields read `active`, `running` and `ok` and `GET /v2/instances/{id}/vpcs`
+   lists its address in the VPC; `0.0.0.0` counts as no address. The wait has no deadline of its own: the caller
+   gives every `Create` one through its context, such as the 5 minutes per new node of the boot times below. When
+   the context ends first, the error matches the context's error and names the instance.
+
+- **Errors.** An invalid request fails without a call, such as `create request: no operation id`. Every other error
+  reads `create node <name> of cluster <cluster>: …`, such as
+  `create node prod-servers-0 of cluster prod: cluster prod has no VPC; apply its infrastructure first`. A refusal at
+  an account limit ends with the hint of [11.7](#117-zones-placement-and-availability).
+- **Root password.** The create answer holds the instance's root password (`default_password`), and no other answer
+  does. tent keeps only the id from it.
+- **Listing.** `Nodes.List` lists the instances with the tag `tent/cluster=<cluster>`, sorted by name, then by id,
+  and reads each one's address in its VPC with `GET /v2/instances/{id}/vpcs`.
+  - A node's name is its hostname, which only a reinstall changes and which Nomad uses as the node name, or its label
+    when it has no hostname. The label can be changed in the Vultr console.
+  - It skips, with a warning, an instance whose tent tags do not decode, such as one with a tag in upper case, which
+    the case-insensitive filter lists too, or whose cluster label names another cluster.
+  - When the address read answers 404, it reads the instance. It skips the instance only when that read answers 404
+    too: the instance was deleted after the list. Otherwise it keeps the instance without a private address, so a
+    caller does not create a second node with its name. A 404 alone does not count as gone: in the spike of
+    2026-09-28 the first read of a pending instance's addresses, 31 s after the create, answered with the address,
+    and what Vultr answers in the first 30 s is still open ([platform notes §3.5](platform-notes.md#35-vpc)).
+    `0.0.0.0` counts as no address.
 - **VPC at creation.** The VPC is attached only at creation. Attaching later reboots the VM. cloud-init configures the
   private interface statically from metadata. MTU is 1450, and interface names vary, so interfaces are matched by MAC
   or CIDR, never by name.
-- **No duplicates.** govultr retries POST requests on 429/5xx by default. tent turns its retries off
-  ([11.8](#118-api-client-rate-limits-cost)) and follows [ADR-0015](adr/0015-idempotency-without-unique-names.md):
-  after an ambiguous failure it searches by the `tent/op` tag and only then retries.
-- **Readiness.** `server_status` goes through `installingbooting`. The instance is ready only when all three status
-  fields read `active`, `running` and `ok`.
 - **Boot time.** Spike 2026-09-25, `vc2-1c-1gb` in `ams`, counted from the create call
   ([platform notes §3.4](platform-notes.md#34-user_data-metadata-and-identity)):
   - The API reports `active/running/ok` after 46–73 s, sometimes before the kernel has started. Readiness in the API
@@ -1259,7 +1355,11 @@ GET /v2/instances/{id}/vpcs → private IP (seed lists, LB membership)
 ### 11.4 Removing a node
 
 - **No graceful shutdown.** Vultr's `halt` is a hard power-off (verified 2026-09-25), and the API has no graceful
-  shutdown (`GracefulShutdown=false`). `DELETE /v2/instances/{id}` destroys a running instance immediately.
+  shutdown (`GracefulShutdown=false`).
+  - `Nodes.Stop` sends `POST /v2/instances/{id}/halt`: the node's processes get no chance to stop.
+  - `Nodes.Delete` sends `DELETE /v2/instances/{id}`, which destroys the instance at once, even while it runs.
+  - An instance that is gone (404) counts as stopped or deleted. Other errors name the node, such as
+    `stop node prod-servers-0 (<id>): …`.
 - **Servers** follow the Nomad-API removal path of [ADR-0017](adr/0017-api-driven-server-removal.md):
   1. surge;
   2. transfer leadership if needed;
@@ -1281,9 +1381,13 @@ GET /v2/instances/{id}/vpcs → private IP (seed lists, LB membership)
 - **Rule text.** tent compares rules by a text: the IP type, the protocol and the subnet, then the port when the rule
   has one and `source=<source>` when it has a source, such as `v4 tcp 203.0.113.7/32 22` or `v6 icmp ::/0`. It reads
   a rule as Vultr may write it: the IP type and the protocol in any case, an address in any of its forms, a range of
-  one port (`22:22`) as that port, and an ICMP rule with a port. tent's rules have no source, so a rule with one is
-  always extra. The form in which Vultr lists rules is not verified 🔬
-  ([platform notes §3.6](platform-notes.md#36-firewall-groups)).
+  one port (`22:22`) as that port, and an ICMP rule with a port.
+  - Vultr lists a rule created without a source with the rule's own subnet as its source, such as
+    `"source": "203.0.113.7/32"` (checked 2026-09-27, [platform notes §3.6](platform-notes.md#36-firewall-groups)).
+    A source equal to the rule's subnet is no source. tent compares the parsed prefixes, so `::/0` and
+    `0:0:0:0:0:0:0:0/0` are the same.
+  - tent's rules have no source, so a rule with any other source, such as `cloudflare`, a load balancer id or
+    another subnet, is always extra.
 - **Plan.** A missing group plans a create with a `+ rule:` line per rule ([11.1](#111-resources)). An existing group
   plans an update when its rules differ: a `+ rule:` line for each missing rule and a `- rule:` line for each rule to
   delete, sorted by the rule text. After `access.ssh` changes from `203.0.113.7/32` to `198.51.100.0/24` and
@@ -1303,11 +1407,37 @@ GET /v2/instances/{id}/vpcs → private IP (seed lists, LB membership)
     addition as over the group's limit, it deletes first.
   - A rule that is already gone counts as deleted.
   - A rule create without an answer is retryable with no search first. The retry lists the rules first and does not
-    add a listed rule again. A copy that a slow list lets through is deleted by the next run's plan.
+    add a listed rule again. When the list lags and the retry sends the create again, Vultr refuses the second copy
+    with `400 This rule is already defined`, and tent counts that as done.
 - **Rule limit.** A group holds at most its `max_rule_count` rules; tent takes 50 for a new group or one that
   reports none. The plan fails when a group needs more, for example with
   `firewall group prod-servers needs 53 rules; Vultr allows 50`. When Vultr refuses a rule create because the group
   is full, the error names that limit ([11.7](#117-zones-placement-and-availability)).
+- **Delete guard.** tent does not delete a firewall group that a node of the cluster uses. Vultr deletes such a group
+  (204) and leaves the instance without a firewall group (checked 2026-09-27,
+  [platform notes §3.6](platform-notes.md#36-firewall-groups)), and the image allows root login with a password
+  (below).
+  - Before the delete, tent lists the instances with the tag `tent/cluster=<cluster>` afresh and does not delete
+    the group while any of them has it. It names those nodes by hostname.
+  - When the cluster no longer wants the group, the delete fails, and the engine does not retry it:
+    `firewall group prod-clients (ID <id>) still protects nodes prod-workers-0 (<id>), and tent does not delete a
+    firewall group that nodes use; delete those nodes first`.
+  - A duplicate is reported instead ([ADR-0015](adr/0015-idempotency-without-unique-names.md)): tent logs a warning
+    that names the group and the nodes, and the apply goes on. Every run reports it again until those nodes are
+    replaced. The new nodes join the copy that the inventory keeps, and the next run deletes the duplicate.
+  - It counts every instance that the tag filter lists. A node whose tent tags do not decode, which `Nodes.List`
+    skips, still blocks the delete, so `delete cluster` stops at the group and names the node.
+  - It cannot see an instance without the cluster's tag in the group: one made by hand, or one of another cluster.
+    Vultr would delete the group and leave such an instance without a firewall group.
+  - The engine retries a failed list after a 429, a 5xx or no answer, and an answer to the delete that matches
+    `ErrInUse`. A 401 or a 403 on the list fails the delete at once.
+  - Prune and the removal of duplicates delete through the same guard. `delete cluster` deletes the nodes first
+    ([13.7](#137-tent-delete-cluster---yes)).
+- **Order in `update`.** Removing the last client group makes the plan delete `<cluster>-clients` while the surplus
+  clients still use it. A prune before the node scale-down would stop at the guard, and the refusal is not retried,
+  so the run would never reach the scale-down. So `update` applies the infrastructure without its deletes first,
+  creates and removes nodes, then applies the deletes in a second engine pass
+  ([13.2](#132-tent-update-cluster---yes)).
 - **Host side.** Vultr's Ubuntu 24.04 image enables ufw: deny incoming, allow 22/tcp only. That blocks Nomad ports on
   the VPC as well, so tent-node's `hostfirewall` phase must disable ufw and apply tent's nftables ruleset.
 - **SSH.** The image allows root login with a password, and password guessing from the internet starts within minutes.
@@ -1322,9 +1452,21 @@ GET /v2/instances/{id}/vpcs → private IP (seed lists, LB membership)
   `write_files` payload intact. Larger payloads are pointless and were not tested on an instance.
 - **Contents.** A cloud-config that disables package update and upgrade (Vultr's vendor data sets the same today; tent
   keeps it explicit), plus the NodeConfig.
-- **Scrubbing.** After the node registers, `Nodes.ScrubUserData` PATCHes the user data to a non-secret stub. Verified
-  2026-09-25: the metadata service serves the stub 4 s after the PATCH, and after a restart cloud-init neither re-runs
-  `runcmd` nor changes the instance-id. Per-boot modules would run from the stub, so the stub contains none.
+- **Scrubbing.** Once the node has joined the cluster, the core calls `Nodes.ScrubUserData`. It PATCHes the user
+  data to a stub that holds no secrets and no modules:
+
+  ```
+  #cloud-config
+  # tent removed this node's user data after the node joined the cluster
+  ```
+
+  - The PATCH changes nothing else. govultr sends `"tags": null` with it, and Vultr keeps the tags (spike 2026-09-27,
+    [platform notes §3.3](platform-notes.md#33-instances)).
+  - An instance that is gone counts as scrubbed. The PATCH is idempotent, so after an error that matches
+    `ErrUnavailable` the caller may send it again.
+  - Verified 2026-09-25: the metadata service serves the stub 4 s after the PATCH, and after a restart cloud-init
+    neither re-runs `runcmd` nor changes the instance-id. Per-boot modules would run from the stub, so the stub
+    contains none.
 
 ### 11.7 Zones, placement and availability
 
@@ -1388,6 +1530,9 @@ GET /v2/instances/{id}/vpcs → private IP (seed lists, LB membership)
   - A success with a body whose `Content-Type` is not exactly `application/json` is an error: govultr decodes no
     other type and would return an empty result. A DELETE reads nothing from its answer, so its type does not matter.
   - A list answer without Vultr's `meta` field is an error, since it would read as an empty list.
+  - No error shows the body of a success, since it may hold a secret, such as the root password in the answer to an
+    instance create ([11.3](#113-creating-a-node)). To a success status that govultr does not read, such as 207, it
+    returns the body as its error; the client names the status instead.
   - The client follows no redirect, since one would send the API key to wherever it points.
   - Each attempt is bounded: 30 s to connect, 30 s for TLS, 1 minute for the answer's header, and 2 minutes for the
     whole attempt including the body. The context bounds the whole call, retries and pauses included.
@@ -1416,7 +1561,8 @@ GET /v2/instances/{id}/vpcs → private IP (seed lists, LB membership)
     engine ([6](#6-reconciliation-engine)).
 - **Ids.** The client checks each id it puts into a path before the request goes out. An id must be ASCII letters,
   digits and `-`, and not empty; a firewall rule id must be positive. Any other id fails the call: it could change
-  the path, and a delete sent to another path may answer 404, which a caller takes for success.
+  the path, and a delete sent to another path may answer 404, which a caller takes for success. A list of instances
+  by an empty tag fails the same way, since it would hold every instance of the account.
 - **Cost.** `GET /v2/plans` gives `monthly_cost`.
   - Hourly cost: tent computes `monthly_cost / 672` itself, because the API's `hourly_cost` divides by 730 and is
     about 8% low.
@@ -1542,7 +1688,7 @@ afterwards.
 ```
  1. lock → load specs → defaults → validate (+ live: types, regions/locations, images, availability)
  2. ensure secrets (idempotent): CA, gossip key, ACL bootstrap token
- 3. model → provider.BuildInfra → engine plan → print → apply
+ 3. model → provider.BuildInfra → engine plan → print → apply without the deletes
     (SSH keys, network, firewalls, [placement groups], [LB]; tasks that do not depend on each other apply in parallel)
  4. servers first: create missing servers
     (Hetzner: into slots; Vultr: server-0 first, then the rest seeded with existing server IPs)
@@ -1551,11 +1697,19 @@ afterwards.
  7. clients: for each missing node → intro token → Nodes.Create (seeded with current server IPs) → wait ready
  8. Vultr: scrub user data of nodes that registered (Nodes.ScrubUserData)
  9. scale down surplus nodes: drain → stop/delete → purge
-10. validate → write cluster.completed.yaml + history → unlock
-11. report: "N nodes are out of date (reason: config diff) → run tent rolling-update cluster"
+10. apply the plan's deletes, the prune and the duplicates (a second engine pass)
+11. validate → write cluster.completed.yaml + history → unlock
+12. report: "N nodes are out of date (reason: config diff) → run tent rolling-update cluster"
 ```
 
 `update` never replaces existing nodes. It reports outdated nodes and why. Replacement is always explicit.
+
+- **Deletes come last.** An object that the plan deletes may still hold nodes that step 9 removes, such as
+  `<cluster>-clients` after the last client group is gone. Vultr's firewall guard refuses to delete a group that
+  nodes use and the engine does not retry that ([11.5](#115-firewall-and-host-firewall)), so a prune in step 3 would
+  stop the run before step 9. The deletes therefore wait for step 10.
+- **Deadlines.** `Nodes.Create` waits until the node is ready and has no deadline of its own, so `update` gives every
+  call one through its context: 5 minutes per new node on Vultr ([11.3](#113-creating-a-node)).
 
 ### 13.3 `tent rolling-update cluster [--yes]`
 
@@ -1631,9 +1785,15 @@ create surge node(s) → wait until registered and ready
 
 1. Lock, build the inventory from ownership markers, print the deletion plan.
 2. Delete in dependency order with retries, looping until the inventory is empty or a timeout expires.
-   - **Vultr:** load balancers → instances → (wait until detached) → firewall groups → VPC → SSH keys. The VPC delete
-     fails with `400 The following servers are attached…` for 14–20 s after its instances are gone, so it is
-     retried.
+   - **Vultr:** load balancers → nodes → firewall groups → VPC → SSH keys.
+     - tent deletes each node that `Nodes.List` returns with `Nodes.Delete`, and waits until `Nodes.List` returns
+       none. tent refuses to delete a firewall group that a node of the cluster uses
+       ([11.5](#115-firewall-and-host-firewall)), so the nodes go first. A node that `Nodes.List` skips, such as one
+       whose tent tags do not decode, still blocks the delete of its firewall group, and `delete cluster` stops there
+       and names it.
+     - Then the engine deletes the infrastructure in the order of `InfraKinds`: firewall groups, the VPC, the SSH
+       keys. The VPC delete fails with `400 The following servers are attached…` for 14–20 s after its instances are
+       gone, so it is retried.
    - **Hetzner:** load balancers → servers → placement groups → firewalls → network → owned SSH keys.
 3. Volumes are deleted only with `--delete-volumes`. Volumes created by CSI drivers carry no tent markers, a known
    kops leak.
@@ -1779,11 +1939,26 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
      - It fails a call on a missing object with `ErrNotFound`, and a sixth VPC in a region or a rule past a group's
        `max_rule_count` (50 by default) with `ErrLimitReached`. It answers the availability of a region it does not
        know with `400 Invalid region.`, as Vultr does.
+     - It lists a rule created without a source with the rule's own subnet as its source, and refuses a second copy
+       of a rule with `400 This rule is already defined`, as Vultr does. A seeded rule without a source is the same
+       rule as a created one.
+     - Instances boot as `GetInstance` reads them: `pending`, then `active` with `installingbooting`, then `ok`, by
+       default after 1 and 2 reads (`SetBootReads`). `ListInstances` shows an instance as the next read will and
+       does not move its boot on, so lists that run at the same time cannot change when it boots. An instance gets a
+       main IP from `198.18.0.1` on and, in each VPC, the lowest free address from the third host on, such as
+       `10.64.0.3`. Only the create answer holds a `default_password`. The tag filter is exact but ignores case, and
+       a PATCH with `"tags": null` keeps the tags.
+     - As Vultr does, it deletes a firewall group that instances use and leaves them without one, and refuses to
+       delete a VPC while instances are attached (`400 The following servers are attached to this VPC network: …`,
+       `ErrInUse`).
+     - It is simpler than Vultr in these ways. `GET /v2/instances/{id}/vpcs` lists nothing until the instance
+       shows as `active`; Vultr listed the address 6–7 s after the create. A deleted instance is gone from every call
+       at once. It deletes a VPC as soon as its instances are gone.
      - It injects faults into chosen calls: a lost answer after the fake carried the call out, so a lost create
        leaves its object (`LoseResponse`); a 429 with `Retry-After` (`Throttle`); a given error (`Fail`).
-     - The infrastructure tasks and the preflight run on this fake. Each task has an apply, re-plan, no-op test, and
-       a lost create ends with exactly one object. The plan of the cluster of [3.1](#31-kinds) is a golden file
-       ([11.1](#111-resources)).
+     - The infrastructure tasks, the preflight and `Nodes` run on this fake. Each task has an apply, re-plan, no-op
+       test, and a lost create ends with exactly one object. The plan of the cluster of [3.1](#31-kinds) is a golden
+       file ([11.1](#111-resources)). The `Nodes` tests wait for readiness with fake time (`testing/synctest`).
      - Core integration tests (item 3) run the real Vultr provider on this fake.
    - Hetzner: a fake of hcloud-go's `I*Client` interfaces that injects `uniqueness_error`, actions and 412.
 3. **Integration tests without a cloud**, like kops' `tests/integration`.

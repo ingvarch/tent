@@ -9,8 +9,8 @@ Facts about Nomad, Hetzner Cloud, Vultr, S3-compatible object stores and prior a
 > cloud-init). The confidence is high unless marked otherwise.
 >
 > Items marked 🔬 are **unverified** and are checked with `hack/vultr-spike` against a real account before code
-> depends on them. Facts marked "spike 2026-09-25" were measured by the spike runs of that day (see
-> [3.16](#316-spike-runs-2026-09-25)).
+> depends on them. Facts marked "spike 2026-09-25" or "spike 2026-09-27" were measured by the spike runs of those
+> days (see [3.16](#316-spike-runs)).
 >
 > Items marked ⏳ are **volatile**: prices, availability, versions, incidents. Re-check them before relying on them.
 > When a fact here turns out wrong, fix it and note the date.
@@ -19,7 +19,7 @@ Facts about Nomad, Hetzner Cloud, Vultr, S3-compatible object stores and prior a
 
 1. [Nomad](#1-nomad)
 2. [Hetzner Cloud](#2-hetzner-cloud)
-3. [Vultr](#3-vultr) (spike results: [3.16](#316-spike-runs-2026-09-25))
+3. [Vultr](#3-vultr) (spike results: [3.16](#316-spike-runs))
 4. [Prior art](#4-prior-art)
 5. [S3-compatible object stores](#5-s3-compatible-object-stores)
 6. [Sources](#6-sources)
@@ -451,8 +451,9 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
   - govultr never sets `Authorization`. The `http.Client` it gets must set it, as the README's oauth2 example does.
   - It decodes an answer only when `Content-Type` is exactly `application/json`. For any other type it returns an
     empty result without an error.
-  - `InstanceUpdateReq` sends `tags` and `ddos_protection` even when they are unset, as `null`. Whether Vultr then
-    clears the instance's tags is not verified 🔬: check before an instance PATCH relies on it.
+  - `InstanceUpdateReq` sends `tags` and `ddos_protection` even when they are unset, as `null`, and leaves out every
+    other empty field, `firewall_group_id` included (`omitempty`). What Vultr does with such a PATCH:
+    [3.3](#33-instances).
 - **Mocking.** The service fields (`InstanceService`, `VPCService`, `FirewallGroupService`, `LoadBalancerService`,
   and so on) are interfaces, so fakes are easy. There are no official mocks.
 
@@ -486,8 +487,8 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
   - `GET /v2/instances` filters by `tag` (one value), `label`, `hostname`, `region`, `main_ip` and
     `firewall_group_id`. **Spike 2026-09-25:** `?tag=` is an **exact but case-insensitive** match (no prefix or
     suffix matches), and `?label=` is exact (no prefix match).
-  - A new instance was listed by `?tag=` on the first request after the create response (5 of 5 instances), so a
-    search by operation tag right after a lost response finds it.
+  - A new instance was listed by `?tag=` on the first request after the create response (5 of 5 instances on
+    2026-09-25, 1 of 1 on 2026-09-27), so a search by operation tag right after a lost response finds it.
 - **`PATCH /v2/instances/{id}`** returns 202 with `job_ids`. It can change:
   - `tags` (replaces the whole set);
   - `user_data`;
@@ -497,6 +498,11 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
   - `label` (govultr and vultr-cli send it).
 
   `hostname` changes only through a reinstall.
+
+  **Spike 2026-09-27:** a PATCH with `"tags": null` and `"ddos_protection": null`, as govultr's `InstanceUpdateReq`
+  sends it, keeps the tags. That held with `user_data` and with `firewall_group_id: ""`, and the user data was
+  applied. govultr leaves out an empty `firewall_group_id` ([3.2](#32-govultr-)), so its `Instance.Update` cannot
+  detach a firewall group.
 - **Private IP and MAC:** `GET /v2/instances/{id}/vpcs` returns `vpcs[]` with `id`, `mac_address` and `ip_address`.
   The instance object also has `internal_ip` and `vpcs[]`.
 - **Power actions.** `halt`, `start` and `reboot` return 204.
@@ -507,6 +513,7 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
     - The journal of the halted boot ends mid-activity, with no shutdown messages.
     - `power_status` read `stopped` 5–9 s after the call.
     - `start` returned 204, and the instance was `running/ok` 15 s later.
+  - **Spike 2026-09-28:** a second `halt` of a stopped instance also returned 204, so halting twice is not an error.
   - `DELETE` destroys a running instance immediately.
   - **Stopped instances are billed** until they are destroyed.
 
@@ -593,6 +600,8 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
   - **Spike 2026-09-25:** `/16`, `/20` and `/24` were all accepted for `10.64.0.0`.
   - Addresses are assigned in order: the first two instances got `.3` and `.4`.
   - The instance's VPC address was visible through `GET /v2/instances/{id}/vpcs` 6–7 s after the create call.
+  - **Spike 2026-09-28:** the first read of `/vpcs`, 31 s after the create call, answered 200 with the address while
+    the instance was still `pending`. No 404 was seen, but the first 31 s were not sampled.
 - **Attaching.** At creation (`attach_vpc`), or later with `POST /v2/instances/{id}/vpcs/attach {vpc_id}` or `PATCH`.
   **Attaching later reboots the VM.**
 - **No specific private IP can be requested.** The attach call takes only `vpc_id`; VPC 2.0's `ip_address` is gone.
@@ -603,6 +612,8 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
 - **Traffic.** Ping between instances over the VPC works with the image's default host firewall (spike 2026-09-25).
 - **Deleting.** After the instances disappeared from `GET /v2/instances`, `DELETE /v2/vpcs/{id}` still failed for
   14–20 s with `400 The following servers are attached to this VPC network: <IPs>` (spike 2026-09-25). Retry it.
+  On 2026-09-28 the delete succeeded 12 s after the instance was gone, on the second request; the `<IPs>` in the
+  refusal were the instance's public address, not its VPC address.
 - **MTU and interfaces.** MTU is 1450. Private interface names vary (`enp6s0`, `enp7s0`, `enp8s0`, `ens7`), so match
   by MAC.
 - **No VPC peering API.** Cross-region connectivity is do-it-yourself, for example with WireGuard.
@@ -614,7 +625,8 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
   - `protocol`: ICMP, TCP, UDP, GRE, ESP or AH.
   - `subnet` + `subnet_size`.
   - `port`: a single port or a range `a:b`.
-  - `source`: empty, `cloudflare`, or a load balancer id.
+  - `source`: empty, `cloudflare`, or a load balancer id. Vultr lists an empty source as the rule's own subnet (see
+    below).
   - `notes`.
 - **Accept-only.** Inbound traffic that matches no rule is dropped.
 - **Limits.** Each group reports its `max_rule_count` (50 in examples). The number of groups per account is
@@ -623,12 +635,28 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
   `firewall_group_id: ""` detaches the group (202).
 - **Rule syntax that worked (spike 2026-09-25):** `{ip_type: "v4", protocol: "tcp", subnet: "0.0.0.0",
   subnet_size: 0, port: "22"}`, the same with `v6` and `::`, and `icmp` without a port.
-- **How Vultr lists rules** is not verified 🔬: whether a single port comes back as `22` or `22:22`, the case of
-  `protocol` and `ip_type`, and the form of `subnet` (such as `::` or `0:0:0:0:0:0:0:0`). tent reads all of these
-  forms as one rule.
-- **Deleting a group that instances use** is not verified 🔬. tent retries an answer that says the group is in use
-  (409, 423, or a 4xx whose message says "in use" or "are attached"), as it retries rate limits and 5xx; any other
-  answer fails the delete.
+- **How Vultr lists rules (checked 2026-09-27, `hack/vultr-spike` run `aqh7ag`).** Rules sent in tent's form come
+  back as sent: `ip_type`, `protocol`, `subnet`, `subnet_size` and `port` keep their values and case, a single port
+  stays `22`, `::` stays `::`, and an ICMP rule has the port `""`. tent also reads `22:22`, other cases and
+  `0:0:0:0:0:0:0:0` as the same rule. The listing also has these fields, of which govultr's `FirewallRule` reads
+  only `source`:
+  - `source`: the rule's own subnet when the create had no source, such as `"203.0.113.7/32"` or `"::/0"`. tent
+    reads a source equal to the rule's subnet as no source.
+  - `type`: the same as `ip_type`.
+  - `direction`: `"in"`.
+  - `loadbalancer_id`: `""`.
+- **A second copy of a rule is refused (checked 2026-09-27):** the same rule sent twice gets
+  `400 {"error":"This rule is already defined ","status":400}` the second time, with a trailing space in the text.
+  tent counts it as done.
+- **Deleting a group that an instance uses (spike 2026-09-27):** `DELETE /v2/firewalls/{id}` answers 204 and
+  deletes the group. The instance's `firewall_group_id` reads `""` right after and 15 s later, so the instance has
+  no firewall group. tent refuses to delete a group that nodes of the cluster use
+  ([architecture §11.5](architecture.md#115-firewall-and-host-firewall)). It still retries an answer that says the
+  group is in use (409, 423, or a 4xx whose message says "in use" or "are attached"), though Vultr gave none.
+- **`instance_count` (spikes 2026-09-27 and 2026-09-28):** while an instance used the group, neither
+  `GET /v2/firewalls/{id}` nor `GET /v2/firewalls` had an `instance_count` (the field was missing, for 32 s after the
+  attach). tent does not read it: the inventory counts the cluster's instances in each group itself
+  ([architecture §11.1](architecture.md#111-resources)).
 - **Scope:** "the main network interface", inbound. **Spike 2026-09-25:** a group that allowed only SSH and ICMP
   blocked public :4646 12 s after the `PATCH`, while :4646 over the VPC stayed reachable. Groups do not filter VPC
   traffic.
@@ -708,12 +736,14 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
 - **None of these is unique.** Only `GET /v2/instances` filters by tag.
 - **Spike 2026-09-25:** the VPC `description`, the SSH key `name` and the firewall group `description` stored
   `tent:cluster=…;kind=…` markers, including `:`, `=` and `;`, verbatim.
-- **The longest text stored verbatim** is not verified 🔬. The spike's markers had at most 57 characters. With `op`,
-  tent's markers for a 20-character cluster name reach 99 characters on a firewall group, 98 on an SSH key and 82 on
-  a VPC.
-- **A second SSH key with the same key material** is not verified 🔬. Hetzner refuses one
-  ([2.4](#24-servers)). If Vultr refuses too, a second cluster with the same operator key fails, and so does a
-  cluster whose key an operator uploaded by hand.
+- **The longest text stored verbatim (spike 2026-09-27):** 255 characters in a VPC or firewall group
+  `description`, 128 in an SSH key `name`. Longer text is accepted (204) and cut to that length without an error.
+  The spike set the texts with updates as govultr sends them: `PUT` for a VPC or a firewall group, `PATCH` for an
+  SSH key. With `op`, tent's markers for a 20-character cluster name reach 99 characters on a firewall group, 98 on
+  an SSH key and 82 on a VPC, so they fit.
+- **A second SSH key with the same key material is accepted (spike 2026-09-27)** under another name, and the
+  account then lists both. So two clusters can use the same operator key, and so can a cluster and a key that an
+  operator uploaded by hand.
 
 ### 3.11 Block storage and CSI
 
@@ -789,10 +819,10 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
 - **Vultr's Nomad guide** (updated 2026-04) joins servers through static private IPs in `retry_join`. That breaks
   after servers are replaced; tent uses seed-and-refresh instead.
 
-### 3.16 Spike runs 2026-09-25
+### 3.16 Spike runs
 
-All runs: region `ams`, plan `vc2-1c-1gb`, Ubuntu 24.04 (`os_id` 2284). Reports are in `hack/vultr-spike/results/`
-(git-ignored).
+All runs: region `ams`, plan `vc2-1c-1gb`, Ubuntu 24.04 (`os_id` 2284). Runs 1 to 3 ran on 2026-09-25, run 4 on
+2026-09-27. Reports are in `hack/vultr-spike/results/` (git-ignored).
 
 **Run 1 (`tt3s1g`, spike v1)** verified:
 - the tag syntax, limits and filter semantics;
@@ -828,10 +858,29 @@ did not answer yet blocked the poll loop for 75 s. The script now uses a bash `/
 fail2ban or sshguard, default `MaxStartups`), and run 2, with one connection per host, had no SSH problems. This does
 not affect tent: tent never uses SSH in the node lifecycle.
 
+**Run 4 (`aqh7ag`, spike v3, `--only sshdup,lengths,rules,fwinuse,patchtags`)** checked the facts that
+[ADR-0023](adr/0023-vultr-inventory-dedupe-and-images.md) and the node primitives rely on, with one instance. It
+verified:
+- that Vultr accepts a second SSH key with the same key material ([3.10](#310-ownership-fields-on-other-resources));
+- the longest description and SSH key name stored verbatim, and that longer text is cut without an error;
+- how Vultr lists firewall rules, and that it refuses a second copy of a rule ([3.6](#36-firewall-groups));
+- that Vultr deletes a firewall group that an instance uses; `GET /v2/firewalls/{id}` of that group had no
+  `instance_count`;
+- that the instance PATCH govultr sends keeps the tags and applies the user data ([3.3](#33-instances));
+- again, that a new instance is listable by tag at once.
+
+**Run 5 (`ekrnuo`, spike v4, `--only vpcpending,fwinuse,halttwice`)** ran one instance in a firewall group with no
+rules, since none of these checks needs SSH. It verified:
+- that an instance can be created with a firewall group, which applies from its first boot;
+- that `/vpcs` answered 200 with the address at the first read, 31 s after the create call ([3.5](#35-vpc));
+- that neither firewall group endpoint reports `instance_count` ([3.6](#36-firewall-groups));
+- that a second `halt` of a stopped instance answers 204 ([3.3](#33-instances)).
+
 **Still open:**
 - Object Storage conditional writes ([3.12](#312-object-storage-)).
 - Images other than Ubuntu 24.04 (for example 26.04) were not checked.
 - Account limits beyond 3 concurrent instances were not tested.
+- What `/vpcs` answers in the first 30 s after a create ([3.5](#35-vpc)).
 
 ---
 
