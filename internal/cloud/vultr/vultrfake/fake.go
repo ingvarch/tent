@@ -35,7 +35,8 @@ import (
 //
 // Faults change the outcome of the next calls of a vultr.API method, named as in the interface, such as CreateVPC:
 // see Fail, LoseResponse and Throttle. They apply in the order they were set: a call takes the first fault set for
-// its method, and each fault applies to as many calls as it was set for.
+// its method, and each fault applies to as many calls as it was set for. A Hook set with SetHook wraps every call, so
+// a test can act at a chosen call, such as end the context of the run that makes it.
 //
 // Seeding with AddSSHKey, AddVPC, AddFirewallGroup, AddFirewallRule and AddInstance stores objects as if they had
 // been created before, without a call. An empty id gets a new one, and an empty date_created the clock's time.
@@ -61,6 +62,7 @@ type Fake struct {
 	instances []*instance
 	faults    []*fault // in the order they were set
 	calls     []Call
+	hook      Hook // wraps every call when set
 
 	activeAfter, okAfter int // the boot reads of new instances
 	macs                 int // how many MACs were given out
@@ -204,9 +206,37 @@ func (r request) fail(status int, message string) error {
 	return vultr.NewAPIError(r.method, r.path, status, message, 0)
 }
 
-// run carries out r with do, under the lock, and returns do's error. When ctx has ended it does nothing and returns
-// the client's error for that. Otherwise it logs r, and a fault for r may replace do's outcome.
+// Hook wraps every call to the fake's API once a test sets it with SetHook. It gets the call's context, the call as
+// Calls would log it, and next, which carries the call out as the fake does without a hook: next checks the context,
+// logs the call, applies a fault and returns the call's error. What the hook returns is the call's error, and a call
+// with an error returns no value. So a hook can end the context before or after next, or lose the answer. Each call of
+// next is a new request: after the context ended, next fails as the client does and reaches nothing. A hook may
+// return nil only when a call of next returned nil. It runs on the call's goroutine, outside the fake's lock, so it
+// may read the fake's objects.
+type Hook func(ctx context.Context, c Call, next func(context.Context) error) error
+
+// SetHook makes every later call go through hook once the ids that the client would put into its path pass
+// vultr.CheckID; a call with a bad id fails before the hook. nil removes the hook.
+func (f *Fake) SetHook(hook Hook) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hook = hook
+}
+
+// run carries out r with do through the hook, when one is set, as carryOut does.
 func (f *Fake) run(ctx context.Context, r request, do func() error) error {
+	f.mu.Lock()
+	hook := f.hook
+	f.mu.Unlock()
+	if hook == nil {
+		return f.carryOut(ctx, r, do)
+	}
+	return hook(ctx, Call{Name: r.name, Arg: r.arg}, func(ctx context.Context) error { return f.carryOut(ctx, r, do) })
+}
+
+// carryOut carries out r with do, under the lock, and returns do's error. When ctx has ended it does nothing and
+// returns the client's error for that. Otherwise it logs r, and a fault for r may replace do's outcome.
+func (f *Fake) carryOut(ctx context.Context, r request, do func() error) error {
 	if err := ctx.Err(); err != nil {
 		return vultr.NewNoAnswerError(r.method, r.path, err)
 	}

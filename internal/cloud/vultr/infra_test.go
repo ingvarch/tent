@@ -157,8 +157,8 @@ func TestDeleteClusterWithNodes(t *testing.T) {
 	var x *fixture
 	synctest.Test(t, func(t *testing.T) {
 		x, _ = newNodesFixture(t, opsKey)
-		createNode(t, x.p, serverRequest("op-a"))
-		createNode(t, x.p, nodeRequest("prod-workers-0", "workers", v1alpha1.RoleClient, "op-b"))
+		createNode(t, x.p, serverRequest(opA))
+		createNode(t, x.p, nodeRequest("prod-workers-0", "workers", v1alpha1.RoleClient, opB))
 	})
 	nodes, err := x.p.List(t.Context(), "prod")
 	if err != nil || len(nodes) != 2 {

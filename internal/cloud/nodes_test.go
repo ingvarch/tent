@@ -23,6 +23,9 @@ func createRequest() cloud.CreateRequest {
 	}
 }
 
+// notOpID is the end of the error of an operation id that NewOpID does not make.
+const notOpID = "is not one that NewOpID makes (a lower-case UUID of version 4)"
+
 func TestCreateRequestValidate(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -42,11 +45,17 @@ func TestCreateRequestValidate(t *testing.T) {
 		{"no machine type", func(r *cloud.CreateRequest) { r.MachineType = "" }, "create request: no machine type"},
 		{"no image", func(r *cloud.CreateRequest) { r.Image = "" }, "create request: no image"},
 		{"no operation id", func(r *cloud.CreateRequest) { r.Op = "" }, "create request: no operation id"},
+		{"operation id not a UUID", func(r *cloud.CreateRequest) { r.Op = "OP-1" },
+			`create request: operation id "OP-1" ` + notOpID},
+		{"operation id in upper case", func(r *cloud.CreateRequest) { r.Op = strings.ToUpper(r.Op) },
+			`create request: operation id "5F0C2A9E-8D1B-4C7E-9F3A-2B6D8E1C4A70" ` + notOpID},
 		{"no role", func(r *cloud.CreateRequest) { r.Role = "" },
 			`create request: role "" is not server, client or combined`},
 		{"unknown role", func(r *cloud.CreateRequest) { r.Role = "worker" },
 			`create request: role "worker" is not server, client or combined`},
 		{"the first missing field", func(r *cloud.CreateRequest) { r.Zone, r.Op = "", "" }, "create request: no zone"},
+		{"a missing field before a bad operation id", func(r *cloud.CreateRequest) { r.Zone, r.Op = "", "OP-1" },
+			"create request: no zone"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := createRequest()
