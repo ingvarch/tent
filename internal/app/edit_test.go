@@ -206,11 +206,11 @@ func TestSaveKeepsTheCloud(t *testing.T) {
 	}
 	wantStored(t, svc.Store, clusterPath, encode(t, clusterYAML))
 
-	beta := edit(t, clusterYAML, "region: ams", "region: ams\n  channel: beta")
-	changes, err := svc.Save(t.Context(), ref, decode(t, beta), true)
+	narrow := edit(t, clusterYAML, "region: ams", "region: ams\n  access:\n    api: [203.0.113.0/24]")
+	changes, err := svc.Save(t.Context(), ref, decode(t, narrow), true)
 	if err != nil {
 		t.Fatalf("Save of another field: %v", err)
 	}
 	wantChanges(t, changes, cluster(app.Replaced))
-	wantStored(t, svc.Store, clusterPath, encode(t, beta))
+	wantStored(t, svc.Store, clusterPath, encode(t, narrow))
 }

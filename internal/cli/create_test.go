@@ -10,7 +10,9 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
+	"github.com/ingvarch/tent/internal/channels"
 	"github.com/ingvarch/tent/internal/cloud/vultr/vultrfake"
+	"github.com/ingvarch/tent/internal/english"
 )
 
 // createdProd is what creating the test cluster prints.
@@ -392,6 +394,36 @@ func TestCreateClusterSSHKeyFileOfTwoKeys(t *testing.T) {
 	crlf := writeFile(t, "id_ed25519.pub", testSSHKey+"\r\n")
 	wantResult(t, runIn(t, "", createProd(s, "--ssh-key", crlf, "--dry-run")...), 0,
 		replaced(t, prodYAML, "    vultr: {}\n", "    vultr: {}\n  sshKeys:\n    - "+testSSHKey+"\n"), "")
+}
+
+// TestCreateClusterChecksTheNomadVersion refuses a Nomad version that the channel does not allow, against the state
+// store and without one.
+func TestCreateClusterChecksTheNomadVersion(t *testing.T) {
+	const want = "Error: invalid spec:\n  Cluster prod: spec.nomad.version: 3.0.0 is newer than this tent knows; " +
+		"channel stable allows 2.x from 2.0.0\n"
+	s := newState(t)
+	wantError(t, runIn(t, "", createProd(s, "--nomad-version", "3.0.0")...), want)
+	wantError(t, runIn(t, "", createProd(s, "--dry-run", "--state", "", "--nomad-version", "3.0.0")...), want)
+	s.wantEmpty(t)
+}
+
+// TestCreateClusterYesWarnsOfAnUntestedNomad warns once of a Nomad version that the channel allows but has not
+// tested, although both the create and the update find it.
+func TestCreateClusterYesWarnsOfAnUntestedNomad(t *testing.T) {
+	stable, err := channels.Load("stable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	untested := "WARNING: Nomad 2.99.0 is not tested by this tent; channel stable tests " +
+		english.And(stable.Nomad.Tested)
+	synctest.Test(t, func(t *testing.T) {
+		s := newState(t)
+		got := runOn(t, vultrfake.New(), createProd(s, "--yes", "--nomad-version", "2.99.0")...)
+		if got.code != 0 || got.out != createdProd+built {
+			t.Errorf("exit code = %d, stdout\n%s\nwant 0 and\n%s", got.code, got.out, createdProd+built)
+		}
+		wantBuildProgress(t, got.errOut, strings.TrimSuffix(openAPIWarning, "\n"), untested)
+	})
 }
 
 // TestCreateClusterYes stores the specs, then builds the cluster as update cluster --yes does: the create's lines,

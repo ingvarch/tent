@@ -94,10 +94,10 @@ func hetznerSpec(t *testing.T) string {
 
 // Parts of vultrSpec that the checks change.
 const (
-	serversType  = "machineType: vc2-2c-4gb "
-	serversSize  = "  size: 3\n---"
-	workersSize  = "  size: 3\n  nomad:"
-	nomadVersion = "version: 2.0.7"
+	serversType = "machineType: vc2-2c-4gb "
+	serversSize = "  size: 3\n---"
+	workersSize = "  size: 3\n  nomad:"
+	nomadRegion = "region: global"
 )
 
 // edited returns s with each old string of pairs, which must occur once, replaced by the new one after it.
@@ -270,7 +270,7 @@ func TestFileBackendSerializesChanges(t *testing.T) {
 		// if the changes ran one after the other.
 		a := change{spec: edited(t, vultrSpec, serversType, "machineType: vc2-4c-8gb ", workersSize,
 			"  size: 5\n  nomad:"), alone: "cluster prod unchanged\nnode group servers replaced\n"}
-		b := change{spec: edited(t, vultrSpec, nomadVersion, "version: 2.0.8", workersSize, "  size: 1\n  nomad:"),
+		b := change{spec: edited(t, vultrSpec, nomadRegion, "region: europe", workersSize, "  size: 1\n  nomad:"),
 			alone: "cluster prod replaced\nnode group servers unchanged\n"}
 		// The test holds the lock until both wait for it, so that they contend for it once it is free.
 		held := s.holdLock(t)

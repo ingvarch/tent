@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sync"
 
 	"github.com/spf13/cobra"
 
@@ -126,7 +125,7 @@ func writeObjects(cmd *cobra.Command, opts *globalOptions, objs spec.Objects, al
 	if err != nil {
 		return err
 	}
-	svc.OnOpenAPI = warnOpenAPI(cmd.ErrOrStderr())
+	svc.OnWarning = warnOnce(cmd.ErrOrStderr())
 	changes, err := write(svc, cmd.Context(), objs, true)
 	if update && opts.output != outputTable {
 		return updateCreated(cmd, opts, svc, clusterOf(objs), changes, err)
@@ -174,15 +173,15 @@ func clusterOf(objs spec.Objects) string {
 	return ""
 }
 
-// warnOpenAPI returns an OnOpenAPI that warns on w that the whole internet may reach the Nomad API. It warns once, so
-// that a command that stores specs and then updates the cluster warns once.
-func warnOpenAPI(w io.Writer) func() {
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			_, _ = io.WriteString(w, "WARNING: spec.access.api lets the whole internet reach the Nomad API "+
-				"(port 4646); mTLS and ACLs protect it; narrow it with --api-access or spec.access.api\n")
-		})
+// warnOnce returns an OnWarning that prints each warning on w once, so that a command that stores specs and then
+// updates the cluster warns once.
+func warnOnce(w io.Writer) func(string) {
+	warned := map[string]bool{}
+	return func(warning string) {
+		if !warned[warning] {
+			warned[warning] = true
+			_, _ = io.WriteString(w, "WARNING: "+warning+"\n")
+		}
 	}
 }
 
