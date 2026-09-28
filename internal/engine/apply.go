@@ -16,17 +16,17 @@ const (
 	defaultChangeTimeout = 5 * time.Minute
 )
 
-// ApplyOptions control how Apply carries out a plan.
+// ApplyOptions control how Apply, ApplyTaskChanges and ApplyDeletes carry out a plan.
 type ApplyOptions struct {
 	// Parallelism is the most changes that run at once. Zero or less means 4.
 	Parallelism int
 	// ChangeTimeout limits each change, its retries included. Zero or less means 5 minutes.
 	ChangeTimeout time.Duration
-	// OnEvent, when set, is told what happens to each change. Apply never calls it concurrently.
+	// OnEvent, when set, is told what happens to each change. One call never calls it concurrently.
 	OnEvent func(Event)
 }
 
-// EventType is what happened to a change during Apply.
+// EventType is what happened to a change while a plan applies.
 type EventType int
 
 // Event types. A change that runs sends Started, then Retrying before each retry, then Succeeded or Failed. A change
@@ -57,7 +57,7 @@ func (t EventType) String() string {
 // MarshalText returns the event type's name, as String does.
 func (t EventType) MarshalText() ([]byte, error) { return []byte(t.String()), nil }
 
-// Event is what happened to one change during Apply.
+// Event is what happened to one change while a plan applies.
 type Event struct {
 	Type   EventType
 	Key    Key
@@ -68,7 +68,14 @@ type Event struct {
 	Cause  string        // why the change did not run, for Skipped, such as "vultr.VPC/prod failed"
 }
 
-// Apply carries out the plan's changes with the Env that the plan was made with.
+// The causes of skipped changes, besides the failure of a change they wait for.
+const (
+	causeCancelled     = "cancelled"
+	causeEarlierFailed = "an earlier change failed"
+)
+
+// Apply carries out the plan's changes with the Env that the plan was made with: its task changes, then its deletes.
+// ApplyTaskChanges and ApplyDeletes carry out one part each, so that the caller can act between the two.
 //
 // Task changes run in parallel. A change starts once every change it depends on, directly or through tasks without
 // changes, has succeeded. A failed change skips every change that waits for it that way, and the others go on.
@@ -81,32 +88,107 @@ type Event struct {
 //
 // Apply returns once every change it started has finished. Its error joins the error of each failed change in the
 // order of Changes, and ctx's error when ctx ended before every change succeeded. A plan applies once; Apply fails
-// when it is called again.
+// when the plan or one of its parts was applied before.
 func (p *Plan) Apply(ctx context.Context, opts ApplyOptions) error {
-	if p.applied.Swap(true) {
+	if !p.advance(unapplied, deletesBegun) {
 		return errors.New("the plan was applied already")
 	}
-	a := &applier{limit: opts.Parallelism, timeout: opts.ChangeTimeout, onEvent: opts.OnEvent}
-	if a.limit <= 0 {
-		a.limit = defaultParallelism
-	}
-	if a.timeout <= 0 {
-		a.timeout = defaultChangeTimeout
-	}
-	done := p.taskJobs()
-	a.run(ctx, done)
-	for _, kind := range p.deleteJobs() {
-		if slices.ContainsFunc(done, func(j *job) bool { return j.state == failed }) {
-			a.skip(kind, "an earlier change failed")
-		} else {
-			a.run(ctx, kind)
-		}
-		done = append(done, kind...)
-	}
-	return result(ctx, done)
+	a := newApplier(opts)
+	tasks := p.taskJobs()
+	a.run(ctx, tasks)
+	deletes := a.runDeletes(ctx, p.deleteJobs(), skipCause(tasks))
+	return result(ctx, append(tasks, deletes...))
 }
 
-// jobState is how far a change of an Apply got.
+// ApplyTaskChanges carries out the plan's task changes, its creates, updates and replaces, as Apply does, and none of
+// its deletes. Its error joins the error of each failed task change in order, and ctx's error when ctx ended before
+// every task change succeeded. A plan applies its task changes once; ApplyTaskChanges fails when they were applied
+// before, by it or by Apply.
+func (p *Plan) ApplyTaskChanges(ctx context.Context, opts ApplyOptions) error {
+	if !p.advance(unapplied, applyingTasks) {
+		return errors.New("the task changes of the plan were applied already")
+	}
+	jobs := p.taskJobs()
+	newApplier(opts).run(ctx, jobs)
+	p.endTasks(skipCause(jobs))
+	return result(ctx, jobs)
+}
+
+// ApplyDeletes carries out the plan's deletes as Apply does. It fails without doing anything until ApplyTaskChanges
+// has returned. When a task change failed, it skips every delete with the cause "an earlier change failed", and when
+// one was cancelled, with the cause "cancelled"; its error then says that the deletes were skipped.
+//
+// Its error joins that, the error of each failed delete in order, and ctx's error when ctx ended before every delete
+// succeeded. A plan applies its deletes once; ApplyDeletes fails when they were applied before, by it or by Apply.
+func (p *Plan) ApplyDeletes(ctx context.Context, opts ApplyOptions) error {
+	skip, err := p.beginDeletes()
+	if err != nil {
+		return err
+	}
+	jobs := newApplier(opts).runDeletes(ctx, p.deleteJobs(), skip)
+	err = result(ctx, jobs)
+	if skip != "" && len(jobs) > 0 {
+		err = errors.Join(errors.New("the deletes of the plan were skipped because a task change did not succeed"), err)
+	}
+	return err
+}
+
+// stage is how far the applying of a plan got.
+type stage int
+
+const (
+	unapplied     stage = iota // nothing has begun
+	applyingTasks              // ApplyTaskChanges runs
+	tasksApplied               // the task changes have ended, and the deletes have not begun
+	deletesBegun               // the deletes run or ran; Apply goes here at once, so that no part runs beside it
+)
+
+// advance moves the plan from stage from to stage to, and reports whether it was at stage from.
+func (p *Plan) advance(from, to stage) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stage != from {
+		return false
+	}
+	p.stage = to
+	return true
+}
+
+// endTasks records that the task changes have ended, and why the deletes are skipped: empty when they may run.
+func (p *Plan) endTasks(skipDeletes string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.stage, p.skipDeletes = tasksApplied, skipDeletes
+}
+
+// beginDeletes moves the plan to deletesBegun and returns why the deletes are skipped: empty when they may run. It
+// fails before the task changes have ended and after the deletes have begun.
+func (p *Plan) beginDeletes() (skip string, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	switch {
+	case p.stage < tasksApplied:
+		return "", errors.New("apply the task changes of the plan before its deletes")
+	case p.stage > tasksApplied:
+		return "", errors.New("the deletes of the plan were applied already")
+	}
+	p.stage = deletesBegun
+	return p.skipDeletes, nil
+}
+
+// skipCause returns why the deletes are skipped after the task jobs: causeEarlierFailed when one failed,
+// causeCancelled when one was skipped otherwise, which only a cancel does, and empty when every one succeeded.
+func skipCause(tasks []*job) string {
+	switch {
+	case anyIn(tasks, failed):
+		return causeEarlierFailed
+	case anyIn(tasks, skipped):
+		return causeCancelled
+	}
+	return ""
+}
+
+// jobState is how far a job got.
 type jobState int
 
 const (
@@ -117,7 +199,7 @@ const (
 	skipped
 )
 
-// job is one change that Apply carries out.
+// job is one change that an applier carries out.
 type job struct {
 	PlannedChange
 	do         func(ctx context.Context) error
@@ -125,6 +207,11 @@ type job struct {
 	dependents []int // the jobs that wait for this one
 	state      jobState
 	err        error // the last error of a failed job
+}
+
+// anyIn reports whether a job of jobs is in state s.
+func anyIn(jobs []*job, s jobState) bool {
+	return slices.ContainsFunc(jobs, func(j *job) bool { return j.state == s })
 }
 
 // event returns an event of type t about the job's change.
@@ -190,12 +277,42 @@ func (p *Plan) deleteJobs() [][]*job {
 	return groups
 }
 
-// applier carries out the jobs of one Apply.
+// applier carries out the jobs of one call: Apply, ApplyTaskChanges or ApplyDeletes.
 type applier struct {
 	limit   int
 	timeout time.Duration
 	mu      sync.Mutex // held while onEvent runs
 	onEvent func(Event)
+}
+
+// newApplier returns an applier with opts, their defaults filled in.
+func newApplier(opts ApplyOptions) *applier {
+	a := &applier{limit: opts.Parallelism, timeout: opts.ChangeTimeout, onEvent: opts.OnEvent}
+	if a.limit <= 0 {
+		a.limit = defaultParallelism
+	}
+	if a.timeout <= 0 {
+		a.timeout = defaultChangeTimeout
+	}
+	return a
+}
+
+// runDeletes carries out the delete jobs kind by kind and returns them in order. When skip is set, it skips every job
+// for that cause. A failed delete skips the jobs of the later kinds.
+func (a *applier) runDeletes(ctx context.Context, kinds [][]*job, skip string) []*job {
+	var jobs []*job
+	for _, kind := range kinds {
+		if skip != "" {
+			a.skip(kind, skip)
+		} else {
+			a.run(ctx, kind)
+			if anyIn(kind, failed) {
+				skip = causeEarlierFailed
+			}
+		}
+		jobs = append(jobs, kind...)
+	}
+	return jobs
 }
 
 // emit sends e to onEvent, one event at a time.
@@ -253,7 +370,7 @@ func (a *applier) run(ctx context.Context, jobs []*job) {
 		}
 		if busy == 0 {
 			if ctx.Err() != nil {
-				a.skip(jobs, "cancelled")
+				a.skip(jobs, causeCancelled)
 			}
 			return
 		}

@@ -244,9 +244,57 @@ func TestPlanSummary(t *testing.T) {
 	if got, want := string(fields["summary"]), `{"create":1,"update":2,"replace":3,"delete":4}`; got != want {
 		t.Errorf("JSON summary = %s, want %s", got, want)
 	}
+	const line = "Plan: 1 to create, 2 to update, 3 to replace, 4 to delete."
 	lines := strings.Split(strings.TrimSuffix(text(t, p), "\n"), "\n")
-	if got, want := lines[len(lines)-1], "Plan: 1 to create, 2 to update, 3 to replace, 4 to delete."; got != want {
-		t.Errorf("last line = %q, want %q", got, want)
+	if got := lines[len(lines)-1]; got != line {
+		t.Errorf("last line = %q, want %q", got, line)
+	}
+	s := p.Summary()
+	if want := (Summary{Create: 1, Update: 2, Replace: 3, Delete: 4}); s != want {
+		t.Errorf("Summary() = %+v, want %+v", s, want)
+	}
+	if got := s.String(); got != line {
+		t.Errorf("Summary().String() = %q, want %q", got, line)
+	}
+}
+
+// changesText returns what p.WriteChanges writes.
+func changesText(t *testing.T, p *Plan) string {
+	t.Helper()
+	var b strings.Builder
+	if err := p.WriteChanges(&b); err != nil {
+		t.Fatalf("WriteChanges: %v", err)
+	}
+	return b.String()
+}
+
+// TestPlanWriteChanges writes the lines of the changes as WriteText does, without the blank line and the counts.
+func TestPlanWriteChanges(t *testing.T) {
+	p := examplePlan(t)
+	all := text(t, p)
+	want, _, ok := strings.Cut(all, "\n\n")
+	if !ok {
+		t.Fatalf("WriteText has no blank line:\n%s", all)
+	}
+	if got := changesText(t, p); got != want+"\n" {
+		t.Errorf("WriteChanges wrote\n%s\nwant\n%s", got, want+"\n")
+	}
+	if got := changesText(t, planFor(t, newFakeCloud())); got != "" {
+		t.Errorf("WriteChanges of a plan without changes wrote %q, want nothing", got)
+	}
+	if got := planFor(t, newFakeCloud()).Summary(); got != (Summary{}) {
+		t.Errorf("Summary() of a plan without changes = %+v, want zeros", got)
+	}
+
+	errBroken := errors.New("broken pipe")
+	w := &failWriter{err: errBroken}
+	err := p.WriteChanges(w)
+	const broken = "writing the plan: broken pipe"
+	if err == nil || err.Error() != broken || !errors.Is(err, errBroken) {
+		t.Errorf("WriteChanges error = %v, want %q that wraps %v", err, broken, errBroken)
+	}
+	if w.writes != 1 {
+		t.Errorf("WriteChanges wrote %d times, want 1", w.writes)
 	}
 }
 
