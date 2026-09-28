@@ -48,7 +48,7 @@ export TENT_STATE="file://$HOME/.tent" VULTR_API_KEY="<your API key>"
 tent create cluster demo --provider vultr --region ams --machine-type vc2-1c-1gb --combined
 tent update cluster demo          # print the plan
 tent update cluster demo --yes    # build the VPC, a firewall group and three machines
-tent delete cluster demo --yes    # delete them and the specs
+tent delete cluster demo --yes    # delete them, the specs and the secrets
 ```
 
 The [quick start guide](docs/quickstart.md) walks through each step with its output, SSH access and the Nomad API

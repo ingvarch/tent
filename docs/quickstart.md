@@ -25,8 +25,9 @@ tent version
 
 ## 2. Set the state store and the API key
 
-tent keeps a cluster's specs in a state store. For this guide a local directory is enough; a team shares an S3
-bucket, `s3://bucket/prefix` ([architecture §10](architecture.md#10-state-store-and-locking)).
+tent keeps a cluster's specs in a state store and, from the first build, its CA key and secrets, so keep the store
+private ([architecture §10.3](architecture.md#103-secrets-at-rest)). For this guide a local directory is enough; a
+team shares an S3 bucket, `s3://bucket/prefix` ([architecture §10](architecture.md#10-state-store-and-locking)).
 
 ```sh
 export TENT_STATE="file://$HOME/.tent"
@@ -86,7 +87,7 @@ tent update cluster demo
 
 Plan: 3 to create, 0 to update, 0 to replace, 0 to delete.
 Nodes: 3 to create, 0 to wait for, 0 to delete.
-State: cluster.completed.yaml will be written.
+State: pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token and cluster.completed.yaml will be written.
 run with --yes to apply the changes
 ```
 
@@ -117,12 +118,13 @@ created node demo-nodes-1 (10.64.0.4)
 creating node demo-nodes-2
 created node demo-nodes-2 (10.64.0.5)
 
-Applied: 3 created, 0 updated, 0 replaced, 0 deleted. Nodes: 3 created, 0 waited for, 0 deleted. Wrote cluster.completed.yaml.
+Applied: 3 created, 0 updated, 0 replaced, 0 deleted. Nodes: 3 created, 0 waited for, 0 deleted. Wrote pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token and cluster.completed.yaml.
 ```
 
 - tent creates the machines one at a time and waits until Vultr reports each one running with its address in the
   VPC. That takes about two minutes per machine.
-- `cluster.completed.yaml` in the state store holds the specs with every default that tent applied.
+- `cluster.completed.yaml` in the state store holds the specs with every default that tent applied. The first build
+  also writes the cluster's CA, gossip key and ACL bootstrap secret there.
 - If the run stops halfway, because of Ctrl-C or a lost connection, run the same command again. tent finds what the
   earlier run created by the markers it put on each object, and each machine by the operation id of its create call.
   It never creates a second machine for one node.
@@ -162,11 +164,15 @@ tent delete cluster demo
 - vultr.SSHKey/demo-7855a371 (ID <id>)
 - state demo/cluster.completed.yaml
 - state demo/nodegroups/nodes.yaml
+- state demo/secrets/acl-bootstrap-token
+- state demo/secrets/gossip.key
+- state demo/pki/ca-bundle.pem
+- state demo/pki/private/ca.key
 - state demo/cluster.yaml
 
 Nodes: 3 to delete.
 Plan: 0 to create, 0 to update, 0 to replace, 3 to delete.
-State: 3 objects to delete.
+State: 7 objects to delete.
 run with --yes to delete them
 ```
 
@@ -192,12 +198,12 @@ deleted vultr.VPC/demo (ID <id>)
 deleting vultr.SSHKey/demo-7855a371 (ID <id>)
 deleted vultr.SSHKey/demo-7855a371 (ID <id>)
 
-Deleted: 3 nodes, 3 infrastructure objects, 3 state objects.
+Deleted: 3 nodes, 3 infrastructure objects, 7 state objects.
 ```
 
 tent deletes the machines first and waits until Vultr no longer lists them. Then it deletes the firewall group, the
-VPC and the SSH key, and last the specs in the state store. It finds the cloud objects by the markers it put on them,
-so it deletes only this cluster's objects.
+VPC and the SSH key, and last the specs and the secrets in the state store. It finds the cloud objects by the markers
+it put on them, so it deletes only this cluster's objects.
 
 ## Next
 

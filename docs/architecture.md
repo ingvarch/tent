@@ -407,7 +407,10 @@ github.com/ingvarch/tent
 │   ├── nomadops/        # the ONLY importer of github.com/hashicorp/nomad/api
 │   ├── rollout/         # scale up/down, rolling update, server quorum safety
 │   ├── validate/        # cloud + Nomad health checks
-│   ├── pki/             # CA, certificates, gossip key, tokens
+│   ├── pki/             # CA, node and operator certificates, gossip key, ACL bootstrap secret
+│   ├── uuid/            # random lower-case UUIDs of version 4: operation ids, the ACL bootstrap secret
+│   ├── english/         # lists as English sentences write them, "a, b and c", for messages
+│   ├── secrettest/      # tests only: looks for a secret in what tent prints or logs
 │   ├── statestore/      # Store interface, file:// and s3://, layout, locking
 │   ├── assets/          # Nomad / CNI / tent-node sources, signature and checksum verification
 │   ├── channels/        # embedded channel files: recommended versions and images
@@ -435,6 +438,10 @@ to `internal/rollout` with the drain and the quorum checks
   on a node.
 - Only `internal/nomadops` imports `github.com/hashicorp/nomad/api`. The root module `github.com/hashicorp/nomad` is
   BUSL-licensed and must never be imported.
+- `internal/pki` imports only the standard library, `internal/uuid` and `api/v1alpha1`, so the code that makes the
+  CA and the secrets never reaches a cloud or the state store. `internal/uuid`, `internal/english` and
+  `internal/secrettest` import only the standard library. The tests of these four packages are exempt
+  ([ADR-0025](adr/0025-stdlib-only-helper-packages.md)). Only tests import `internal/secrettest`.
 - Everything except `api/` is `internal/`. The project makes no compatibility promises before it has to.
 
 ---
@@ -933,22 +940,44 @@ See [ADR-0007](adr/0007-security-baseline.md) and [ADR-0008](adr/0008-node-crede
 
 ### 9.1 PKI
 
+`internal/pki` makes the CA, the certificates, the gossip key and the ACL bootstrap secret (M2.1). `update` keeps the
+CA and the secrets in the state store ([13.2](#132-tent-update-cluster---yes)); no node uses them yet. The storage and
+certificate details are in [ADR-0024](adr/0024-cluster-pki-storage-and-certificates.md).
+
 - **One CA per cluster**, ECDSA P-256, the same as `nomad tls`. The CA private key lives only in the state store and
   never reaches a node.
-- **The CA is stored as a bundle from day one** (`pki/ca-bundle.pem` plus the id of the active signer), so CA rotation
-  can be added later without migrating the storage format.
+- **The CA certificate** is self-signed, with `CN=tent <cluster> CA, O=tent`, path length 0, and the key usages
+  `CertSign` and `CRLSign`. It is valid for 10 years, until CA rotation exists (maintainer decision of 2026-09-28,
+  [18](#18-open-questions)); `nomad tls` makes 5-year CAs. It starts 5 minutes before it is made, as the leaf
+  certificates do, because a machine whose clock is behind checks the CA's validity too.
+- **The CA is stored as a bundle from day one**, so CA rotation can be added later without migrating the storage
+  format. `pki/ca-bundle.pem` holds one or more CA certificates, and `pki/private/ca.key` the key of one of them, the
+  active signer. The active signer is the first certificate of the bundle whose public key matches the key. Its id is
+  the certificate's Subject Key Identifier in hex. No file stores the id, since the key identifies the signer.
+- **Keys** are PKCS#8 PEM (`PRIVATE KEY`), which Nomad reads, and tent loads no other form. A bundle or a key with
+  anything but white space after its PEM is refused.
+- **Leaf certificates**, of nodes and operators, each get a new ECDSA P-256 key, a random serial number of up to 128
+  bits, the key usage `DigitalSignature`, and their first DNS name as the common name. Each is valid from 5 minutes
+  before it is made, for clock skew, and never ends after the active signer.
 - **Per-node certificates:**
-  - servers get `server.<region>.nomad` and clients get `client.<region>.nomad`, both plus `localhost` and
-    `127.0.0.1`;
+  - servers get `server.<region>.nomad` and clients get `client.<region>.nomad`, combined nodes both
+    ([ADR-0019](adr/0019-combined-server-client-role.md)), all plus `localhost` and `127.0.0.1`. The region is the
+    Nomad region, `spec.nomad.region` (default `global`), not the cloud region;
   - extended key usage is `serverAuth` **and** `clientAuth`, because tent-node's join refresh calls the servers' HTTP
     API with the node certificate;
   - validity is 1 year, and renewal means replacement; `tent validate` warns 30 days before expiry.
-- **No IP addresses in certificates.** The CLI connects to a server's public IP with
+- **No node IP addresses in certificates**, only `127.0.0.1`. The CLI connects to a server's public IP with
   `TLSServerName = server.<region>.nomad`, so server IPs can change freely.
-- **Operator certificates** use `cli.<region>.nomad`. They are short-lived (24 hours by default) and issued on demand
-  by `tent export nomad`.
+- **Operator certificates** use `cli.<region>.nomad`, with `clientAuth` only. They are short-lived and issued on
+  demand by `tent export nomad`, whose TTL defaults to 24 hours. `internal/pki` takes any TTL above zero.
 - **mTLS** is on for RPC and HTTP: `verify_server_hostname = true`, and `verify_https_client = true` by default.
-- **The gossip encryption key** is used on servers only.
+- **The gossip encryption key** is used on servers only. It is 32 random bytes in standard base64, as
+  `nomad operator gossip keyring generate` makes.
+- **The ACL bootstrap secret** is a random lower-case UUID of version 4 ([9.2](#92-acl-and-tokens)).
+- **Stored values are checked.** Each plan of `update` loads the stored CA. It checks that the stored gossip key is
+  standard base64 of 32 bytes, without line breaks, and that the stored ACL bootstrap secret is a UUID of that form.
+  tent never replaces them ([13.2](#132-tent-update-cluster---yes)).
+- **Keys and secrets never print.** fmt, slog and JSON show only their size, such as `[secret, 44 bytes]`.
 
 ### 9.2 ACL and tokens
 
@@ -1742,10 +1771,11 @@ updates and upgrades of the first boot.
 
 ```
  1. load specs → defaults → validate → provider.Validate (region, plans, images)
- 2. plan: inventory → provider.BuildInfra → engine plan; Nodes.List → node changes (13.4); the completed spec
+ 2. plan: inventory → provider.BuildInfra → engine plan; Nodes.List → node changes (13.4); the completed spec;
+    the missing secrets (M2.1)
  3. without --yes: print the plan and stop
  4. lock → check the tent version → steps 1 and 2 again; the plan made under the lock is the one applied
- 5. raise the tent version
+ 5. raise the tent version → write the missing secrets (M2.1)
  6. the infrastructure's task changes (Plan.ApplyTaskChanges)
  7. node creates, one at a time: server and combined groups first, then client groups, by group and index;
     each with a new operation id (cloud.NewOpID)
@@ -1773,11 +1803,12 @@ updates and upgrades of the first boot.
   every run, as every command that validates specs does.
 - **Output.**
   - The plan goes to stdout: the infrastructure's lines as the engine writes them ([6](#6-reconciliation-engine)),
-    one line per node change, a blank line, and a line of counts per part that changes. The last line is
-    `State: cluster.completed.yaml will be written.` when the plan writes the completed spec. Operation ids do not
-    show. A plan without changes is `No changes.`, and a plan with changes adds `run with --yes to apply the
-    changes` on stderr. An example with every kind of node change (`internal/app/testdata/update_plan.golden`, its
-    infrastructure lines left out):
+    one line per node change, a blank line, and a line of counts per part that changes. The last line names the
+    objects that the plan writes to the state store, in write order: the missing secrets, then the completed spec,
+    such as `State: secrets/gossip.key and cluster.completed.yaml will be written.` A plan that writes only state is
+    that line alone. Operation ids and the secrets' contents do not show. A plan without changes is `No changes.`,
+    and a plan with changes adds `run with --yes to apply the changes` on stderr. An example with every kind of node
+    change (`internal/app/testdata/update_plan.golden`, its infrastructure lines left out):
 
     ```
     + node prod-servers-2 (server, vc2-2c-4gb, ams)
@@ -1789,17 +1820,38 @@ updates and upgrades of the first boot.
 
     Plan: 2 to create, 1 to update, 0 to replace, 1 to delete.
     Nodes: 2 to create, 1 to wait for, 3 to delete.
-    State: cluster.completed.yaml will be written.
+    State: pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token and cluster.completed.yaml will be written.
     ```
   - With `--yes`, tent prints the plan made under the lock (step 4), applies it with each step on stderr as it
     happens ([14](#14-cli)), and then prints a blank line and one line in the past tense, each part only when it
     changed, such as `Applied: 4 created, 0 updated, 0 replaced, 0 deleted. Nodes: 5 created, 0 waited for, 0
-    deleted. Wrote cluster.completed.yaml.` A cluster without changes prints `cluster prod is up to date`.
+    deleted. Wrote pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token and
+    cluster.completed.yaml.` The writes to the state store print no progress lines. A cluster without changes prints
+    `cluster prod is up to date`.
   - `-o json` and `-o yaml` print the plan as data: `{"infrastructure": <the engine's plan>, "nodes": [...],
-    "completedSpec": true}`, the node changes in the order they run. With `--yes` they print only the plan that was
-    applied, with `"applied": true`.
+    "secrets": ["pki/private/ca.key", ...], "completedSpec": true}`, the node changes in the order they run and the
+    secrets in the order they are written. `secrets` is left out when the store holds them all. With `--yes` they
+    print only the plan that was applied, with `"applied": true`.
 - **`--exit-code`.** Without `--yes`, a plan with changes makes tent exit with 2 and print no error, for drift
   detection in CI. With `--yes` it is refused.
+
+**Built in M2.1.** Step 2 of the target below, ensure secrets, runs after tent raises the tent version and before the
+infrastructure (step 5 above). The secrets are the CA's key and bundle, the gossip key and the ACL bootstrap secret
+([9.1](#91-pki), [10.2](#102-layout)).
+- **Plan.** Each plan, also without `--yes`, reads which of the four objects the store holds and makes the missing
+  ones in memory. A cluster built before M2.1 gets its secrets on its next `update --yes`.
+- **Writes.** The order is `pki/private/ca.key`, `pki/ca-bundle.pem`, `secrets/gossip.key`,
+  `secrets/acl-bootstrap-token`. Where the store has conditional puts, each write uses `IfNoneMatch`: a secret that
+  another run wrote meanwhile stays, and the run stops with `<path> was written meanwhile; run the command again`.
+  Elsewhere the writes are plain puts under a best-effort lock ([10.4](#104-locking)). Two runs that both hold it
+  can interleave their puts and leave a key and a bundle of different CAs. Every later plan then fails with
+  `CA key: matches no certificate of the CA bundle`. While no node trusts the CA yet, delete both objects by hand
+  and run `update` again ([ADR-0024](adr/0024-cluster-pki-storage-and-certificates.md)).
+- **A key without a bundle**, left by a run cut between the two writes, stays: the next plan signs a new CA
+  certificate with it, and the run writes that as the bundle.
+- **A bundle without a key, a key that matches no certificate of the bundle, or a stored gossip key or ACL bootstrap
+  secret that does not check** fails the plan, and the error names the paths. tent never replaces them: a new CA
+  would cut off every node that trusts the old one.
 
 **Target, with Nomad.** The whole flow:
 
@@ -1820,8 +1872,9 @@ updates and upgrades of the first boot.
 12. report: "N nodes are out of date (reason: config diff) → run tent rolling-update cluster"
 ```
 
-- The secrets (step 2), the NodeConfig with the seed of server addresses and the intro tokens (steps 4 and 7), the
-  ACL bootstrap (step 5), the day-1 configuration (step 6) and the scrub (step 8) come with Nomad in M2.
+- The secrets (step 2) are built (M2.1, above), but no node uses them yet. The NodeConfig with the seed of server
+  addresses and the intro tokens (steps 4 and 7), the ACL bootstrap (step 5), the day-1 configuration (step 6) and
+  the scrub (step 8) come with Nomad in M2.
 - The drain and the purge (step 9), `validate` and the history (step 11) and the report of outdated nodes (step 12)
   are not built yet.
 
@@ -1928,7 +1981,7 @@ planner is in `internal/app`, and it moves to `internal/rollout` with the drain 
 4. delete every node, one at a time, by name (Nodes.Delete)
 5. list the nodes every 5 s until the cloud lists none, for up to 5 minutes; while it lists some, say once how many
 6. a fresh inventory → the engine deletes the infrastructure in the order of InfraKinds (Plan.Apply)
-7. delete the state, cluster.yaml and tent-version last → unlock
+7. delete the state: the secrets next to last, cluster.yaml and tent-version last → unlock
 ```
 
 - **The cloud.** tent decodes the stored `cluster.yaml` as it is, without validating the specs or checking them
@@ -1950,12 +2003,15 @@ planner is in `internal/app`, and it moves to `internal/rollout` with the drain 
   tent tags do not decode, still blocks the delete of its firewall group, and `delete cluster` stops there and names
   it. The engine deletes the firewall groups, the VPC, then the SSH keys. The VPC delete fails with
   `400 The following servers are attached…` for 14–20 s after its instances are gone, so it is retried.
-- **State.** The state is `tent-version`, the specs and the completed spec. Other objects under the cluster in the
-  store make tent refuse before it calls the cloud, unless `--force` is given; then they are deleted with the rest.
-  The lock's lease goes when the lock is released.
+- **State.** The state is `tent-version`, the specs, the completed spec, and since M2.1 the four secrets: the CA's
+  key and bundle, the gossip key and the ACL bootstrap secret ([10.2](#102-layout)). Other objects under the cluster
+  in the store, such as another object under `pki/`, make tent refuse before it calls the cloud, unless `--force` is
+  given; then they are deleted with the rest. The lock's lease goes when the lock is released.
 - **Failures.** The first step that fails stops the delete. The state stays until the cloud's part has succeeded, so
   the next run still finds the cluster and finishes the job. `cluster.yaml` and `tent-version` go last, so a delete
-  that stops while it deletes the state can run again too.
+  that stops while it deletes the state can run again too. The secrets go just before them, in the reverse of their
+  write order ([13.2](#132-tent-update-cluster---yes)). So a delete cut among them never leaves a CA bundle without
+  its key; at worst it leaves a key without its bundle, which `update` completes.
 - **Output.** The plan goes to stdout, in the order of deletion, with a line of counts per part that deletes
   anything (`internal/app/testdata/delete_plan.golden`):
 
@@ -1967,17 +2023,21 @@ planner is in `internal/app`, and it moves to `internal/rollout` with the drain 
   - vultr.SSHKey/prod-99aabbcc (ID ssh-9)
   - state prod/cluster.completed.yaml
   - state prod/nodegroups/servers.yaml
+  - state prod/secrets/acl-bootstrap-token
+  - state prod/secrets/gossip.key
+  - state prod/pki/ca-bundle.pem
+  - state prod/pki/private/ca.key
   - state prod/cluster.yaml
   - state prod/tent-version
 
   Nodes: 2 to delete.
   Plan: 0 to create, 0 to update, 0 to replace, 3 to delete.
-  State: 4 objects to delete.
+  State: 8 objects to delete.
   ```
 
   - Without `--yes`, a hint follows on stderr: `run with --yes to delete them`, or `--yes --force` with `--force`.
   - With `--yes`, tent prints the plan made under the lock (step 3), deletes with each step on stderr as it happens
-    ([14](#14-cli)), and then prints a blank line and a line such as `Deleted: 5 nodes, 4 infrastructure objects, 5
+    ([14](#14-cli)), and then prints a blank line and a line such as `Deleted: 2 nodes, 3 infrastructure objects, 8
     state objects.`
   - `-o json` and `-o yaml` print the plan as data: `{"nodes": [...], "infrastructure": <the engine's plan>,
     "state": [...]}`, with `"cloudUnknown": true` or `"unsupportedProvider": "hetzner"` when tent deletes only the
@@ -2072,8 +2132,8 @@ The last column names the milestone that built the command. The spec commands of
     the lines that start with `{`. The logs are text unless `--log-format json` makes them JSON objects too; they
     carry `level` and `msg`, which progress lines never have.
 - Then `-o table` prints a blank line and one line in the past tense on stdout: `Applied: …`, `Nodes: …` and
-  `Wrote cluster.completed.yaml.` for `update`, and `Deleted: …` for `delete`. `-o yaml` and `-o json` print the
-  plan that was applied instead, with `"applied": true`.
+  `Wrote …` (the objects written to the state store) for `update`, and `Deleted: …` for `delete`. `-o yaml` and
+  `-o json` print the plan that was applied instead, with `"applied": true`.
 
 **Spec commands**
 - `create cluster` generates the Cluster and two node groups, `servers` and `workers`, or with `--combined` one
@@ -2306,6 +2366,7 @@ Decided on 2026-09-28:
 
 7. **A cluster's cloud:** its `cloud.provider` and `cloud.region` never change. A cluster moves by creating a new one
    ([3.3](#33-api-rules)).
+8. **CA validity:** 10 years, until CA rotation exists ([9.1](#91-pki)).
 
 ---
 

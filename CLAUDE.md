@@ -58,6 +58,9 @@ Providers, in order:
   - `internal/nodeup` (the tent-node agent) never imports `internal/cloud/...`.
   - Only `internal/nomadops` imports `github.com/hashicorp/nomad/api`.
   - Never import the root module `github.com/hashicorp/nomad`; it is BUSL-licensed.
+  - `internal/pki` imports only the standard library, `internal/uuid` and `api/v1alpha1`; `internal/uuid`,
+    `internal/english` and `internal/secrettest` import only the standard library. Their tests are exempt (ADR-0025).
+  - Only tests import `internal/secrettest`.
 - **Visibility.** Everything is under `internal/` except the public API types in `api/`.
 - **Weakest primitives.** Core mechanisms assume the weakest cloud primitives: non-unique names, no fixed IPs, no
   graceful shutdown. Richer primitives are optimizations behind `Capabilities` (ADR-0015 to ADR-0017).
@@ -85,7 +88,8 @@ Decided on 2026-09-25 and 2026-09-28 (`docs/architecture.md` §18, the table in 
 - the default OS image is `ubuntu-24.04`; E2E also runs on `ubuntu-26.04`;
 - Consul and Vault are out of v1;
 - tent is licensed under Apache-2.0;
-- a cluster's provider and region never change; a cluster moves by creating a new one (decided on 2026-09-28).
+- a cluster's provider and region never change; a cluster moves by creating a new one (decided on 2026-09-28);
+- the cluster CA is valid for 10 years, until CA rotation exists (decided on 2026-09-28).
 
 Anything else that only the maintainer can decide goes into `docs/architecture.md` §18. Ask before implementing it.
 
