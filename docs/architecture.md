@@ -237,8 +237,9 @@ This table is also the check that the abstraction survives several providers.
   Every stored object carries its apiVersion. Conversion functions are added when a second version appears.
 - **User spec and completed spec.** The user spec is what the operator wrote. The state store keeps it as given,
   without defaults, but written in tent's field order, so comments and formatting are not kept. The completed spec
-  has every default filled in and records what was last applied; `update` writes it from M1 on. From then on,
-  `tent get --full` prints the completed spec; until then it prints the user spec with the defaults filled in.
+  has every default filled in and records what was last applied; `update` writes it from M1 on
+  ([13.2](#132-tent-update-cluster---yes)). `tent get --full` does not read it yet: it prints the user spec with the
+  defaults filled in.
 - **Strict decoding.** Keys are case-sensitive, and unknown fields, duplicate keys and null values are errors: an empty
   value such as `vultr:` is almost always a forgotten entry, so write `vultr: {}`. Decoding errors name the document,
   and the line when the file has the key, for example `document 2 (NodeGroup): line 37: unknown field "spec.sizee"`.
@@ -261,6 +262,14 @@ This table is also the check that the abstraction survives several providers.
   or location, and the image architecture matches. Images are given by name (`ubuntu-24.04`), and the provider
   resolves them (Vultr: numeric `os_id`).
 - **Server groups.** v1 allows exactly one server group, of size 1, 3 or 5. Size 1 requires `--allow-single-server`.
+- **Fixed cloud.** A cluster's `cloud.provider` and `cloud.region` never change (decided on 2026-09-28,
+  [18](#18-open-questions)). tent made the cluster's cloud objects on that provider and in that region, so a change
+  would leave them there: `update` would build the cluster again elsewhere, and `delete cluster` could miss them.
+  `replace` and `edit` refuse the change with a field error, such as `Cluster prod: spec.cloud.provider: cannot change
+  from vultr to hetzner; a cluster moves by creating a new one`. They compare the values with their defaults. A stored
+  `cluster.yaml` that does not decode cannot be replaced, since its cloud is unknown. Every command that reads it then
+  fails and says how to repair it: fix the file in the state store by hand and keep its `spec.cloud.provider` and
+  `spec.cloud.region`, since deleting the file would leave the cluster's cloud objects behind.
 - **Zones.** A group's `zones` must be a subset of the cluster zones and defaults to all of them. Nodes are spread so
   that per-zone counts stay balanced. On Vultr, `cloud.zones` left out defaults to `[cloud.region]`, the only value it
   accepts, and `validate` warns that the cluster has a single failure domain. On Hetzner, `cloud.zones` lists
@@ -409,6 +418,10 @@ github.com/ingvarch/tent
 └── docs/                # this document, ADRs, platform notes, roadmap
 ```
 
+The node planner of M1, which scales node groups without Nomad ([13.4](#134-scaling)), is in `internal/app`. It moves
+to `internal/rollout` with the drain and the quorum checks
+([ADR-0005](adr/0005-immutable-nodes-and-nomad-aware-rollouts.md)).
+
 `depguard` in golangci-lint enforces the dependency rules ([ADR-0021](adr/0021-import-rules.md)):
 
 - `api/...` imports only the standard library and other `api/` packages, so third parties can use the types. Its
@@ -491,7 +504,11 @@ type Deleter interface {
 func Retryable(err error, after time.Duration) error
 
 func NewPlan(ctx context.Context, tasks []Task, kinds []Kind, snap Snapshot) (*Plan, error)
-func (p *Plan) Apply(ctx context.Context, opts ApplyOptions) error // Parallelism, ChangeTimeout, OnEvent
+
+// ApplyOptions: Parallelism, ChangeTimeout, OnEvent. A plan applies once: each part runs once.
+func (p *Plan) ApplyTaskChanges(ctx context.Context, opts ApplyOptions) error // creates, updates, replaces
+func (p *Plan) ApplyDeletes(ctx context.Context, opts ApplyOptions) error     // prune and duplicates, after the above
+func (p *Plan) Apply(ctx context.Context, opts ApplyOptions) error            // both parts in one call
 ```
 
 Behaviour:
@@ -525,9 +542,12 @@ Behaviour:
   deletes them: `rollout` manages nodes, and volumes are never deleted implicitly.
   - Prune runs after every task change has succeeded: kind by kind in the order of the kinds, the objects of one kind
     in parallel.
-  - `update cluster` applies the deletes in a second pass, after it creates and removes nodes
-    ([13.2](#132-tent-update-cluster---yes)). **Not built yet:** `Plan.Apply` runs the task changes and the deletes
-    in one pass. The `update cluster` work, which comes next, adds the second pass.
+  - A plan applies in two parts: `Plan.ApplyTaskChanges` carries out the task changes, and `Plan.ApplyDeletes` the
+    deletes; `Plan.Apply` does both. `ApplyDeletes` fails before the task changes have been applied. When a task
+    change failed or was cancelled, it skips every delete and returns an error that says so.
+  - `update cluster` applies the task changes, creates and deletes nodes, and then applies the deletes
+    ([13.2](#132-tent-update-cluster---yes)). `delete cluster` calls `Apply` on a plan without tasks, so every
+    object of the inventory is a delete ([13.7](#137-tent-delete-cluster---yes)).
   - When a task change fails, the deletes wait for the next run.
   - When a delete fails, the deletes of the later kinds wait for the next run; the other deletes of its kind still
     finish. A VPC delete after a failed firewall-group delete would only fail on `attached` and retry until its
@@ -582,6 +602,8 @@ Behaviour:
       for a diff with neither value, which lets a task show that a secret changed without showing it.
     - The last line counts the changes: `Plan: N to create, N to update, N to replace, N to delete.`
     - A plan without changes is the line `No changes.`
+    - `update cluster` and `delete cluster` put the lines of the changes (`Plan.WriteChanges`) and the counts
+      (`Plan.Summary`) into their own plans ([13.2](#132-tent-update-cluster---yes)).
   - `-o json` for machines: `{"changes": [...], "summary": {...}}`.
   - `--exit-code` returns 2 when the plan has changes, for drift detection in CI.
 
@@ -651,7 +673,7 @@ type CreateRequest struct {
 	MachineType    string   // the plan or server type
 	Image          string   // by name, such as ubuntu-24.04
 	SpecHash       string   // empty for none
-	Op             string   // the operation id, a lower-case UUID
+	Op             string   // the operation id, a lower-case UUID of version 4 from NewOpID
 	UserData       UserData // may hold secrets
 }
 
@@ -660,12 +682,24 @@ type UserData []byte
 ```
 
 - `CreateRequest.Validate` checks what every provider needs: a cluster, group, zone, name, machine type, image and
-  operation id, and the role `server`, `client` or `combined`.
+  operation id, the role `server`, `client` or `combined`, and an operation id of the form that `cloud.NewOpID`
+  makes.
+- `cloud.NewOpID` makes an operation id: a random lower-case UUID of version 4, such as
+  `5f0c2a9e-8d1b-4c7e-9f3a-2b6d8e1c4a70`. `cloud.ValidOpID` checks that a text has that form. The Vultr tasks make
+  one id per object and keep it across retries ([ADR-0015](adr/0015-idempotency-without-unique-names.md)).
+  `update cluster` makes one per node create, and waits for a listed node with the id that the node carries.
 - `Create` waits until the machine is ready and has no deadline of its own: the caller gives every call one through
-  its context.
+  its context. `update cluster` gives each call 10 minutes ([13.2](#132-tent-update-cluster---yes)).
 - A machine that is gone counts as stopped, deleted or scrubbed.
 - `vultr.Provider.Nodes()` returns the provider itself. Vultr's `Nodes`: [11.3](#113-creating-a-node) to
   [11.6](#116-user_data).
+- **Providers of a command.** `cmd/tent` gives the CLI a function (`cli.WithProviders`) that returns the provider a
+  cluster's spec names. For `vultr` it builds the provider with the API key in `VULTR_API_KEY`, which it reads only
+  then, and fails when the key is not set. For another provider that the API lists, such as `hetzner`, it fails with
+  `cloud.UnsupportedProvider(name)`: `tent cannot manage clusters on hetzner yet`, an error that matches
+  `cloud.ErrUnsupportedProvider`. tent has made no cloud objects on such a provider, so `delete cluster` deletes only
+  the state ([13.7](#137-tent-delete-cluster---yes)). Any other name, such as an empty one or a typo in a stored
+  spec, fails with `unknown cloud provider "<name>"`, and `delete cluster` then deletes nothing.
 
 **Target, not built yet.** The other methods join `Provider` with the code that first uses them:
 - `Join` with server discovery in tent-node;
@@ -1259,9 +1293,10 @@ sets where its warnings go.
   after its servers are gone, and the engine retries. Vultr deletes a firewall group that instances use, so tent
   never deletes one that nodes of the cluster use ([11.5](#115-firewall-and-host-firewall)).
   - **VPCs that nodes use: not built yet.** The dedupe keeps the oldest VPC, which may not be the one that holds the
-    cluster's nodes, and nothing stops the delete of a VPC that nodes use. Keeping the VPC with the nodes and
-    refusing such a delete come with the `update cluster` and `delete cluster` work. Until then Vultr refuses the
-    delete with `ErrInUse`, the engine retries it until the change's deadline, and then the apply fails.
+    cluster's nodes, and nothing stops the delete of a VPC that nodes use. `delete cluster` deletes the VPC only
+    after every node is gone ([13.7](#137-tent-delete-cluster---yes)), so this matters for a duplicate VPC that
+    holds nodes during `update cluster`. Vultr refuses that delete with `ErrInUse`, the engine retries it until the
+    change's deadline, and then the apply fails.
 
 ### 11.2 Server discovery: seed and refresh
 
@@ -1316,9 +1351,16 @@ create that may have been carried out is never sent again.
 5. **Readiness.** It reads the instance at once, then every 5 s. `server_status` goes through `installingbooting`.
    The node is ready when the status fields read `active`, `running` and `ok` and `GET /v2/instances/{id}/vpcs`
    lists its address in the VPC; `0.0.0.0` counts as no address. The wait has no deadline of its own: the caller
-   gives every `Create` one through its context, such as the 5 minutes per new node of the boot times below. When
-   the context ends first, the error matches the context's error and names the instance.
+   gives every `Create` one through its context. `update cluster` gives 10 minutes to each call, search, inventory
+   and wait included ([13.2](#132-tent-update-cluster---yes)); the API reported new instances ready after 46–73 s
+   (below). When the context ends first, the error matches the context's error and names the instance.
 
+- **Time before the POST.** Steps 1 and 2 are list calls, one after another: the search, then the inventory's lists
+  of SSH keys, VPCs, firewall groups, the cluster's instances and the rules of each firewall group, 7 calls for a
+  cluster with both groups. Each Vultr list call took 0.9–2 s on 2026-09-28
+  ([platform notes §3.1](platform-notes.md#31-api-basics-and-access-control)), so `Create` took 8–10 s before its
+  POST. `update cluster` creates nodes one at a time, and each `Create` reads its own inventory; one inventory for
+  several nodes would save that time, and is not built.
 - **Errors.** An invalid request fails without a call, such as `create request: no operation id`. Every other error
   reads `create node <name> of cluster <cluster>: …`, such as
   `create node prod-servers-0 of cluster prod: cluster prod has no VPC; apply its infrastructure first`. A refusal at
@@ -1679,11 +1721,87 @@ afterwards.
 ### 13.1 `tent create cluster`
 
 - Generates or loads the specs and writes them to the state store without touching the cloud, as in kops.
-- `--yes` runs `update cluster --yes` right away. `update` comes with M1, so in M0 `create` writes only the state and
-  has no `--yes`.
+- `create cluster --yes` and `create -f FILE --yes` then build the cluster in the cloud, as `update cluster --yes`
+  does ([13.2](#132-tent-update-cluster---yes)). `create -f` with node groups only builds the cluster they belong
+  to.
+  - With `-o table` tent prints the lines of the create, such as `cluster prod created`, then what
+    `update cluster --yes` prints.
+  - With `-o json` or `-o yaml` it prints one document: `{"changes": [...], "update": <the plan it applied>}`.
+    `update` is left out when the update failed.
+  - When the create fails, the update does not run. Running the same command again finishes an interrupted build:
+    the create reports the stored objects as `unchanged`, and the update goes on.
+- `create cluster --dry-run --yes` is refused: `--dry-run writes nothing, so it takes no --yes`. `replace` has no
+  `--yes`.
 - `create -f file.yaml` loads multi-document YAML.
 
 ### 13.2 `tent update cluster [--yes]`
+
+**Built in M1.** `update cluster` brings the cluster's infrastructure and the sizes of its node groups to the specs.
+The nodes are empty machines. They boot a placeholder cloud-config without secrets, which turns off the package
+updates and upgrades of the first boot.
+
+```
+ 1. load specs → defaults → validate → provider.Validate (region, plans, images)
+ 2. plan: inventory → provider.BuildInfra → engine plan; Nodes.List → node changes (13.4); the completed spec
+ 3. without --yes: print the plan and stop
+ 4. lock → check the tent version → steps 1 and 2 again; the plan made under the lock is the one applied
+ 5. raise the tent version
+ 6. the infrastructure's task changes (Plan.ApplyTaskChanges)
+ 7. node creates, one at a time: server and combined groups first, then client groups, by group and index;
+    each with a new operation id (cloud.NewOpID)
+ 8. waits for listed nodes that are not ready yet, by name: Create again with the node's operation id
+ 9. node deletes, one at a time, by name: duplicates, surplus nodes, nodes of groups not in the spec
+10. the infrastructure's deletes: prune and duplicates (Plan.ApplyDeletes)
+11. write cluster.completed.yaml → unlock
+```
+
+- **Failures.** The first step that fails stops the run, and the next run finishes the job. A run cut after a
+  create's POST leaves an instance with its operation id. The next run counts it, and while it is not ready yet,
+  plans `~ node prod-workers-1 (ID <id>, wait until it is ready)` and waits for it. No second instance is created.
+- **Completed spec.** `cluster.completed.yaml` holds the specs with every default filled in
+  ([3.3](#33-api-rules)). It counts as a change when the stored one is missing or differs, so the first run writes
+  it, and so does a run after a spec change that changes nothing in the cloud. It is written only after every other
+  step has succeeded.
+- **Deletes come last.** An object that the plan deletes may still hold nodes that step 9 removes, such as
+  `<cluster>-clients` after the last client group is gone. Vultr's firewall guard refuses to delete a group that
+  nodes use and the engine does not retry that ([11.5](#115-firewall-and-host-firewall)), so a delete in step 6
+  would stop the run before step 9. The deletes therefore wait for step 10.
+- **Deadlines.** `Nodes.Create` has no deadline of its own ([11.3](#113-creating-a-node)), so `update` gives each
+  create and each wait 10 minutes. The engine gives each infrastructure change 5 minutes
+  ([6](#6-reconciliation-engine)).
+- **Single server.** `update` validates the specs, so a cluster with one server needs `--allow-single-server` on
+  every run, as every command that validates specs does.
+- **Output.**
+  - The plan goes to stdout: the infrastructure's lines as the engine writes them ([6](#6-reconciliation-engine)),
+    one line per node change, a blank line, and a line of counts per part that changes. The last line is
+    `State: cluster.completed.yaml will be written.` when the plan writes the completed spec. Operation ids do not
+    show. A plan without changes is `No changes.`, and a plan with changes adds `run with --yes to apply the
+    changes` on stderr. An example with every kind of node change (`internal/app/testdata/update_plan.golden`, its
+    infrastructure lines left out):
+
+    ```
+    + node prod-servers-2 (server, vc2-2c-4gb, ams)
+    + node prod-workers-1 (client, vc2-4c-8gb, ams)
+    ~ node prod-servers-1 (ID instance-2, wait until it is ready)
+    - node prod-old-0 (ID instance-7, not in the spec)
+    - node prod-workers-0 (ID instance-5, duplicate)
+    - node prod-workers-3 (ID instance-8, surplus)
+
+    Plan: 2 to create, 1 to update, 0 to replace, 1 to delete.
+    Nodes: 2 to create, 1 to wait for, 3 to delete.
+    State: cluster.completed.yaml will be written.
+    ```
+  - With `--yes`, tent prints the plan made under the lock (step 4), applies it with each step on stderr as it
+    happens ([14](#14-cli)), and then prints a blank line and one line in the past tense, each part only when it
+    changed, such as `Applied: 4 created, 0 updated, 0 replaced, 0 deleted. Nodes: 5 created, 0 waited for, 0
+    deleted. Wrote cluster.completed.yaml.` A cluster without changes prints `cluster prod is up to date`.
+  - `-o json` and `-o yaml` print the plan as data: `{"infrastructure": <the engine's plan>, "nodes": [...],
+    "completedSpec": true}`, the node changes in the order they run. With `--yes` they print only the plan that was
+    applied, with `"applied": true`.
+- **`--exit-code`.** Without `--yes`, a plan with changes makes tent exit with 2 and print no error, for drift
+  detection in CI. With `--yes` it is refused.
+
+**Target, with Nomad.** The whole flow:
 
 ```
  1. lock → load specs → defaults → validate (+ live: types, regions/locations, images, availability)
@@ -1702,14 +1820,12 @@ afterwards.
 12. report: "N nodes are out of date (reason: config diff) → run tent rolling-update cluster"
 ```
 
-`update` never replaces existing nodes. It reports outdated nodes and why. Replacement is always explicit.
+- The secrets (step 2), the NodeConfig with the seed of server addresses and the intro tokens (steps 4 and 7), the
+  ACL bootstrap (step 5), the day-1 configuration (step 6) and the scrub (step 8) come with Nomad in M2.
+- The drain and the purge (step 9), `validate` and the history (step 11) and the report of outdated nodes (step 12)
+  are not built yet.
 
-- **Deletes come last.** An object that the plan deletes may still hold nodes that step 9 removes, such as
-  `<cluster>-clients` after the last client group is gone. Vultr's firewall guard refuses to delete a group that
-  nodes use and the engine does not retry that ([11.5](#115-firewall-and-host-firewall)), so a prune in step 3 would
-  stop the run before step 9. The deletes therefore wait for step 10.
-- **Deadlines.** `Nodes.Create` waits until the node is ready and has no deadline of its own, so `update` gives every
-  call one through its context: 5 minutes per new node on Vultr ([11.3](#113-creating-a-node)).
+`update` never replaces existing nodes. With Nomad it reports outdated nodes and why. Replacement is always explicit.
 
 ### 13.3 `tent rolling-update cluster [--yes]`
 
@@ -1749,6 +1865,25 @@ create surge node(s) → wait until registered and ready
 
 ### 13.4 Scaling
 
+**Built in M1.** `update` plans the node changes from `Nodes.List` ([13.2](#132-tent-update-cluster---yes)). Only
+instances with the cluster's label count. A node group's nodes are the instances whose group label names it. The
+planner is in `internal/app`, and it moves to `internal/rollout` with the drain and the quorum checks
+([ADR-0005](adr/0005-immutable-nodes-and-nomad-aware-rollouts.md)).
+- **Scale up.** A missing node gets the lowest free index: its name `<cluster>-<group>-<index>` is one that no listed
+  instance of the cluster has, whatever its group. It goes into the group's zone with the fewest nodes, the zone
+  listed first on a tie.
+- **Scale down.** A group with more nodes than its size loses the newest ones, by creation time, then by id. Until
+  tent runs Nomad there is no drain: `update` deletes the machines, servers included, without a quorum check.
+- **Zones.** A node in a zone that its group no longer lists counts toward the group's size and stays. New nodes go
+  only into the listed zones.
+- **Duplicates.** Of instances with one name, the oldest stays and the others are deleted as `duplicate`.
+- **Groups not in the spec.** An instance whose group label names no group of the spec, or is empty, is deleted as
+  `not in the spec`.
+- **Nodes that are not ready.** A node that is not ready yet, left by an interrupted run, counts, and `update` waits
+  for it by calling `Create` with its operation id. A node without a valid operation id counts, and nothing waits
+  for it.
+
+**Target, with Nomad.**
 - **Scale up** is part of `update`.
 - **Scale down** is also part of `update`. It is always shown in the plan and always drains first. Victims are
   chosen in this order:
@@ -1783,25 +1918,76 @@ create surge node(s) → wait until registered and ready
 
 ### 13.7 `tent delete cluster [--yes]`
 
-1. Lock, build the inventory from ownership markers, print the deletion plan.
-2. Delete in dependency order with retries, looping until the inventory is empty or a timeout expires.
-   - **Vultr:** load balancers → nodes → firewall groups → VPC → SSH keys.
-     - tent deletes each node that `Nodes.List` returns with `Nodes.Delete`, and waits until `Nodes.List` returns
-       none. tent refuses to delete a firewall group that a node of the cluster uses
-       ([11.5](#115-firewall-and-host-firewall)), so the nodes go first. A node that `Nodes.List` skips, such as one
-       whose tent tags do not decode, still blocks the delete of its firewall group, and `delete cluster` stops there
-       and names it.
-     - Then the engine deletes the infrastructure in the order of `InfraKinds`: firewall groups, the VPC, the SSH
-       keys. The VPC delete fails with `400 The following servers are attached…` for 14–20 s after its instances are
-       gone, so it is retried.
-   - **Hetzner:** load balancers → servers → placement groups → firewalls → network → owned SSH keys.
-3. Volumes are deleted only with `--delete-volumes`. Volumes created by CSI drivers carry no tent markers, a known
-   kops leak.
-4. Delete the state last, then release the lock.
+**Built in M1.**
 
-M0 has no cloud inventory yet, so `delete cluster` removes only the state (step 4). Without `--yes` it prints the
-paths it would delete. It refuses objects under the cluster that tent does not know unless `--force` is given. It
-deletes `cluster.yaml` and `tent-version` last, so a delete that stops can run again.
+```
+1. plan: the paths of the state; the cloud that the stored cluster.yaml names;
+   Nodes.List → a delete per node; the inventory → an engine plan without tasks, which deletes every object
+2. without --yes: print the plan and stop
+3. lock → check the tent version → step 1 again
+4. delete every node, one at a time, by name (Nodes.Delete)
+5. list the nodes every 5 s until the cloud lists none, for up to 5 minutes; while it lists some, say once how many
+6. a fresh inventory → the engine deletes the infrastructure in the order of InfraKinds (Plan.Apply)
+7. delete the state, cluster.yaml and tent-version last → unlock
+```
+
+- **The cloud.** tent decodes the stored `cluster.yaml` as it is, without validating the specs or checking them
+  against the cloud. So a cluster that is half built or whose specs are invalid can still be deleted, and the command
+  takes no `--allow-single-server`.
+  - A cluster on Vultr needs `VULTR_API_KEY` even without `--yes`, since the plan lists the nodes and the inventory.
+  - A cluster without `cluster.yaml`, such as one left by an interrupted create, has no known cloud. tent deletes
+    only its state and warns: `WARNING: cluster prod has no cluster.yaml, so tent cannot tell its cloud; deleting its
+    state only`.
+  - On a provider that tent cannot manage yet, such as `hetzner`, tent has made no cloud objects
+    ([7.1](#71-interfaces)). It deletes only the state and warns with the provider's name.
+  - A provider name that tent does not know, such as a typo in the stored `cluster.yaml`, is an error:
+    `unknown cloud provider "<name>"`. tent deletes nothing.
+  - A stored `cluster.yaml` that does not decode is an error that says to fix the file by hand and keep its provider
+    and region ([3.3](#33-api-rules)). Deleting the file instead would make the delete remove the state alone and
+    leave the cloud objects running.
+- **Vultr.** tent refuses to delete a firewall group that a node of the cluster uses
+  ([11.5](#115-firewall-and-host-firewall)), so the nodes go first. A node that `Nodes.List` skips, such as one whose
+  tent tags do not decode, still blocks the delete of its firewall group, and `delete cluster` stops there and names
+  it. The engine deletes the firewall groups, the VPC, then the SSH keys. The VPC delete fails with
+  `400 The following servers are attached…` for 14–20 s after its instances are gone, so it is retried.
+- **State.** The state is `tent-version`, the specs and the completed spec. Other objects under the cluster in the
+  store make tent refuse before it calls the cloud, unless `--force` is given; then they are deleted with the rest.
+  The lock's lease goes when the lock is released.
+- **Failures.** The first step that fails stops the delete. The state stays until the cloud's part has succeeded, so
+  the next run still finds the cluster and finishes the job. `cluster.yaml` and `tent-version` go last, so a delete
+  that stops while it deletes the state can run again too.
+- **Output.** The plan goes to stdout, in the order of deletion, with a line of counts per part that deletes
+  anything (`internal/app/testdata/delete_plan.golden`):
+
+  ```
+  - node prod-servers-0 (ID instance-1)
+  - node prod-workers-0 (ID instance-4)
+  - vultr.FirewallGroup/prod-servers (ID fw-1)
+  - vultr.VPC/prod (ID vpc-1)
+  - vultr.SSHKey/prod-99aabbcc (ID ssh-9)
+  - state prod/cluster.completed.yaml
+  - state prod/nodegroups/servers.yaml
+  - state prod/cluster.yaml
+  - state prod/tent-version
+
+  Nodes: 2 to delete.
+  Plan: 0 to create, 0 to update, 0 to replace, 3 to delete.
+  State: 4 objects to delete.
+  ```
+
+  - Without `--yes`, a hint follows on stderr: `run with --yes to delete them`, or `--yes --force` with `--force`.
+  - With `--yes`, tent prints the plan made under the lock (step 3), deletes with each step on stderr as it happens
+    ([14](#14-cli)), and then prints a blank line and a line such as `Deleted: 5 nodes, 4 infrastructure objects, 5
+    state objects.`
+  - `-o json` and `-o yaml` print the plan as data: `{"nodes": [...], "infrastructure": <the engine's plan>,
+    "state": [...]}`, with `"cloudUnknown": true` or `"unsupportedProvider": "hetzner"` when tent deletes only the
+    state. With `--yes` they print only the plan that was applied, with `"applied": true`.
+
+**Target.**
+- Load balancers go before the nodes on Vultr. On Hetzner the order is load balancers → servers → placement groups
+  → firewalls → network → owned SSH keys.
+- Volumes are deleted only with `--delete-volumes`. Volumes created by CSI drivers carry no tent markers, a known
+  kops leak.
 
 ### 13.8 Backups
 
@@ -1814,29 +2000,30 @@ deletes `cluster.yaml` and `tent-version` last, so a delete that stops can run a
 
 ## 14. CLI
 
-The last column marks what M0 has: the spec commands, which work only on the state store. The other commands come
-with later milestones ([roadmap](roadmap.md)).
+The last column names the milestone that built the command. The spec commands of M0 work only on the state store;
+`update cluster` and `delete cluster` of M1 reach the cloud. The other commands come with later milestones
+([roadmap](roadmap.md)).
 
-| Command | kops analogue | Purpose | M0 |
+| Command | kops analogue | Purpose | Built |
 |---|---|---|---|
-| `tent create cluster [NAME] [flags]`, `tent create -f FILE` | `create cluster` | generate or load specs into the state store | yes |
-| `tent get [NAME]`, `tent get clusters\|nodegroups [NAME...]`, all with `[--full]` | `get` | print a cluster's specs, list clusters or node groups | yes |
+| `tent create cluster [NAME] [flags] [--yes]`, `tent create -f FILE [--yes]` | `create cluster` | generate or load specs into the state store; with `--yes` also build the cluster ([13.1](#131-tent-create-cluster)) | M0; `--yes` in M1 |
+| `tent get [NAME]`, `tent get clusters\|nodegroups [NAME...]`, all with `[--full]` | `get` | print a cluster's specs, list clusters or node groups | M0 |
 | `tent get nodes` | `get instances` | list the cluster's nodes | — |
-| `tent edit cluster [NAME]`, `tent edit nodegroup NAME` | `edit` | an editor, with validation and a diff before saving | yes |
-| `tent replace -f FILE` | `replace` | GitOps: replace stored specs with those of a file | yes |
+| `tent edit cluster [NAME]`, `tent edit nodegroup NAME` | `edit` | an editor, with validation and a diff before saving | M0 |
+| `tent replace -f FILE` | `replace` | GitOps: replace stored specs with those of a file | M0 |
 | `tent apply -f FILE` | — | `replace` + `update` | — |
-| `tent update cluster [--yes] [--exit-code]` | `update cluster` | infrastructure, node counts, day-1 configuration | — |
+| `tent update cluster [NAME] [--yes] [--exit-code]` | `update cluster` | infrastructure, node counts, day-1 configuration ([13.2](#132-tent-update-cluster---yes)) | M1, without Nomad |
 | `tent rolling-update cluster [--yes] [--nodegroups a,b] [--force]` | `rolling-update cluster` | Nomad-aware replacement | — |
 | `tent upgrade cluster [--yes]` | `upgrade cluster` | version bumps from the channel | — |
 | `tent validate cluster [--wait 10m]` | `validate cluster` | cloud and Nomad health | — |
-| `tent delete cluster [NAME] [--yes] [--force]` | `delete cluster` | full cleanup by ownership markers | state only |
+| `tent delete cluster [NAME] [--yes] [--force]` | `delete cluster` | full cleanup by ownership markers ([13.7](#137-tent-delete-cluster---yes)) | M1 |
 | `tent export nomad [--ttl 24h]` | `export kubeconfig --admin` | short-lived operator credentials and env | — |
 | `tent ui` | — | local mTLS proxy for the UI and CLI | — |
 | `tent cost` | — | monthly and hourly cost of the cluster or plan (Vultr `/plans`, Hetzner `/pricing`) | — |
 | `tent backup create\|restore` | etcd-manager backups | Raft snapshots | — |
 | `tent toolbox dump` | `toolbox dump` | diagnostics bundle (via SSH) | — |
-| `tent state unlock [NAME] [--force]` | — | remove a stale lock | yes |
-| `tent version` | `version` | build info | yes |
+| `tent state unlock [NAME] [--force]` | — | remove a stale lock | M0 |
+| `tent version` | `version` | build info | M0 |
 
 **Global flags and configuration**
 - `--state` (env `TENT_STATE`), `--name` (env `TENT_CLUSTER`), `-o table|yaml|json`, `-v` or `-vv`,
@@ -1849,12 +2036,16 @@ with later milestones ([roadmap](roadmap.md)).
 - A command for one cluster takes its name from `NAME`, else from `--name`. A `NAME` and a `--name` on the command
   line must agree. `get nodegroups` and `edit nodegroup` take the cluster from `--name`, as does `get` for a cluster
   named `cluster`, `clusters`, `nodegroup` or `nodegroups`.
-- Cloud credentials: `VULTR_API_KEY`, `HCLOUD_TOKEN`.
+- Cloud credentials come from the environment. tent reads `VULTR_API_KEY` only when a command reaches a cluster on
+  Vultr: `update cluster`, `delete cluster` and `create --yes` ([7.1](#71-interfaces)). `HCLOUD_TOKEN` comes with
+  the Hetzner provider.
 
 **Output**
-- Results go to stdout. Warnings, notices and logs go to stderr.
+- Results go to stdout. Warnings, notices, progress and logs go to stderr.
 - Warnings are plain lines that start with `WARNING:`, and `--log-format` does not change them. Logs use `log/slog`,
-  as text or JSON by `--log-format`; `-v` shows info logs and `-vv` debug logs. In M0 tent writes debug logs only.
+  as text or JSON by `--log-format`; `-v` shows info logs and `-vv` debug logs. tent's own logs are debug logs. The
+  Vultr provider logs its warnings at the level `WARN`, which shows without `-v`, such as an object that it skips
+  because its marker does not parse.
 - `-o table`, the default, prints tables and lines of text, such as `node group workers created`. `-o yaml` and
   `-o json` print the same results as data. JSON never escapes HTML characters such as `<` and `&`.
 - `tent get [NAME]` prints the Cluster and its node groups as YAML documents, the file that `create -f` and
@@ -1862,7 +2053,27 @@ with later milestones ([roadmap](roadmap.md)).
   `tent get clusters` and `tent get nodegroups` take several names and print tables, and with `-o yaml` or `-o json`
   the specs. On an empty store `tent get clusters` also says `no clusters in <store>` on stderr, because a mistyped
   `--state` looks like an empty store. `--full` fills in the defaults ([3.3](#33-api-rules)).
-- From M1, commands that change the cloud print their progress and plan, or structured JSON events with `-o json`.
+- `update cluster` and `delete cluster` print their plan on stdout ([13.2](#132-tent-update-cluster---yes),
+  [13.7](#137-tent-delete-cluster---yes)). A plan with changes, without `--yes`, adds a hint on stderr, such as
+  `run with --yes to apply the changes`. With `--yes` and `-o table` they print the plan made under the lock, just
+  before the first change.
+- With `--yes` they print each step on stderr as it happens: a line of text, or with `-o json` a JSON object on one
+  line.
+  - Lines: `creating vultr.VPC/prod`, `created node prod-servers-0 (10.64.0.3)`, `waiting for node prod-workers-1`,
+    `deleted node prod-workers-3 (ID <id>)`, `retrying vultr.VPC/prod in 1.2s: <error>`,
+    `skipped deleting vultr.VPC/prod (ID <id>): an earlier change failed`, `failed to create node prod-servers-0:
+    <error>`, and `waiting for 3 nodes to go` once when a delete waits for the cloud to stop listing the nodes it
+    deleted.
+  - JSON: `{"type":"infrastructure","event":"started","kind":"vultr.VPC","name":"prod","action":"create"}` with
+    `id`, `wait`, `cause` and `error` when they apply,
+    `{"type":"node","step":"done","action":"create","name":"prod-servers-0","id":"<id>","address":"10.64.0.3"}` with
+    `error` for a failed step, and `{"type":"wait","nodes":3}` for the wait of a delete.
+  - With `-o json`, stderr mixes the JSON progress lines with plain `WARNING:` lines and the logs. A program reads
+    the lines that start with `{`. The logs are text unless `--log-format json` makes them JSON objects too; they
+    carry `level` and `msg`, which progress lines never have.
+- Then `-o table` prints a blank line and one line in the past tense on stdout: `Applied: …`, `Nodes: …` and
+  `Wrote cluster.completed.yaml.` for `update`, and `Deleted: …` for `delete`. `-o yaml` and `-o json` print the
+  plan that was applied instead, with `"applied": true`.
 
 **Spec commands**
 - `create cluster` generates the Cluster and two node groups, `servers` and `workers`, or with `--combined` one
@@ -1873,9 +2084,10 @@ with later milestones ([roadmap](roadmap.md)).
   also checks them against the store.
 - `create -f FILE` stores new objects: a Cluster with its node groups, or node groups for an existing cluster.
   `replace -f FILE` replaces objects that exist. `-f -` reads standard input. Both write at once, as in kops.
+  `create --yes` then builds the cluster in the cloud ([13.1](#131-tent-create-cluster)).
 - `create`, `replace` and `edit` check the whole cluster that results, and `--allow-single-server` lets them accept a
   server group of size 1. They write only the objects that differ from the stored ones and report the others as
-  `unchanged`.
+  `unchanged`. `replace` and `edit` refuse to change a cluster's provider or region ([3.3](#33-api-rules)).
 - A command that changes the state store can run again after an interruption. `create` writes `cluster.yaml` last,
   and running it again with the same specs finishes it.
 
@@ -1895,8 +2107,8 @@ with later milestones ([roadmap](roadmap.md)).
 - `edit` prints text: it refuses `-o json` and `-o yaml` on the command line and ignores `output` in the config file.
 
 **Locks and interrupts**
-- A command that changes the state store takes the cluster's lock ([10.4](#104-locking)) and checks the tent version
-  ([10.2](#102-layout)). A run that finds nothing to write takes no lock.
+- A command that changes the state store or the cloud takes the cluster's lock ([10.4](#104-locking)) and checks the
+  tent version ([10.2](#102-layout)). A run that finds nothing to change takes no lock.
 - While another tent holds the lock, a command waits up to `--lock-timeout` and says once who holds it, for example
   `cluster prod is locked by igor@laptop (pid 4242) for replace since 2026-09-27 10:00:00 UTC; waiting up to 5m0s
   (--lock-timeout)`. With `--lock-timeout 0` it fails at once.
@@ -1908,12 +2120,13 @@ with later milestones ([roadmap](roadmap.md)).
 - The first Ctrl-C or SIGTERM cancels the command, which then releases its lock. A second one ends tent at once.
 
 **Warnings, errors and exit codes**
-- After `create`, `replace` or a saved `edit`, tent warns while `access.api` lets the whole internet reach the Nomad
-  API: a `/0` range, such as the default `0.0.0.0/0`.
+- tent warns while `access.api` lets the whole internet reach the Nomad API, a `/0` range such as the default
+  `0.0.0.0/0`: after `create`, `replace` or a saved `edit`, and before `update cluster --yes` applies changes. A
+  command warns once, `create --yes` included.
 - An error goes to stderr after `Error: `. An invalid spec prints `Error: invalid spec:` and then one indented line
   per problem, with the field path ([3.3](#33-api-rules)).
-- Exit codes: 0 success, 1 error, 130 when a second Ctrl-C or SIGTERM ends tent. From M1, `--exit-code` makes a plan
-  with changes exit with 2.
+- Exit codes: 0 success, 1 error, 2 when `update cluster --exit-code` finds a plan with changes, and 130 when a
+  second Ctrl-C or SIGTERM ends tent. Exit code 2 prints no error.
 
 ---
 
@@ -1955,7 +2168,9 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
        shows as `active`; Vultr listed the address 6–7 s after the create. A deleted instance is gone from every call
        at once. It deletes a VPC as soon as its instances are gone.
      - It injects faults into chosen calls: a lost answer after the fake carried the call out, so a lost create
-       leaves its object (`LoseResponse`); a 429 with `Retry-After` (`Throttle`); a given error (`Fail`).
+       leaves its object (`LoseResponse`); a 429 with `Retry-After` (`Throttle`); a given error (`Fail`). A hook
+       (`SetHook`) wraps every call, so a test can act at a chosen call, such as end the context of the run that
+       makes it.
      - The infrastructure tasks, the preflight and `Nodes` run on this fake. Each task has an apply, re-plan, no-op
        test, and a lost create ends with exactly one object. The plan of the cluster of [3.1](#31-kinds) is a golden
        file ([11.1](#111-resources)). The `Nodes` tests wait for readiness with fake time (`testing/synctest`).
@@ -1966,6 +2181,22 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
    - Golden files hold the plan and the sequence of operations.
    - Interruption tests cut a flow at every step and check that the next run converges.
    - Runs on every PR.
+   - **Built in M1** for `update cluster` and `delete cluster`, without Nomad (`internal/app/integration_test.go`,
+     `internal/app/interrupt_test.go`). They run the use cases with the real Vultr provider on `vultrfake` and a
+     `file://` state store, in `testing/synctest` bubbles, on the cluster of [3.1](#31-kinds) with 2 workers.
+     - Golden files (`internal/app/testdata/flow_*.golden`) hold the plans and the calls that reach Vultr, for the
+       build on an empty cloud, the scale from 2 to 3 workers and the delete. Operation ids show as `<op1>`,
+       `<op2>` and so on. The engine runs changes in parallel, so the calls of one engine run come grouped by object
+       in the order of the plan.
+     - Cuts: the context of a run ends at each call of an uninterrupted build or delete, once just before the call,
+       which then reaches nothing, and once just after the fake carried it out, when the call loses its answer, as a
+       request in flight does. The cut run leaves the state store as it was and the lock free. After the next run,
+       a build leaves the cloud as an uninterrupted build does, with one copy of every object, and a plan after it
+       has no changes; a delete leaves no object with the cluster's markers and no state.
+     - Lost answers: for each create call of the build, the fake carries the call out and the call gets no answer.
+       The same run finds what the call made by its operation id, or lists the rules again, and ends with one copy
+       of every object and one instance per node.
+     - The fake's hook (`SetHook`) makes the cuts and the lost answers.
 4. **tent-node tests.** Phases run with an abstracted filesystem and exec. Occasionally they run in a
    systemd-enabled container or a VM.
 5. **E2E on Vultr** (`//go:build e2e`, black box):
@@ -2070,6 +2301,11 @@ Questions that only the maintainer can decide go here. The six initial questions
 4. **Default OS image:** `ubuntu-24.04`. E2E also runs on `ubuntu-26.04`.
 5. **Consul and Vault:** out of v1 ([ADR-0011](adr/0011-nomad-only-scope-and-licensing.md)).
 6. **Licence of tent:** Apache-2.0, like kops, and compatible with MPL-2.0 dependencies.
+
+Decided on 2026-09-28:
+
+7. **A cluster's cloud:** its `cloud.provider` and `cloud.region` never change. A cluster moves by creating a new one
+   ([3.3](#33-api-rules)).
 
 ---
 

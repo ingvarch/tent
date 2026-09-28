@@ -12,7 +12,7 @@ Providers, in order:
 2. **Hetzner Cloud** is second.
 3. **AWS** comes later. It must remain possible without changes to the core.
 
-**Status:** M0 Foundation is complete (2026-09-27).
+**Status:** M0 Foundation (2026-09-27) and M1 Vultr infrastructure (2026-09-28) are complete.
 - The skeleton is in place: Go module, `tent version`, Makefile, lint rules, CI on Linux, macOS and Windows, and a
   GoReleaser release pipeline. The repository is public, the release secrets are set, and the archives and packages
   ship third-party licence notices (ADR-0020). Renovate updates the Go modules and GitHub Actions.
@@ -24,7 +24,12 @@ Providers, in order:
   file, `tent create`, `get`, `edit`, `replace`, `delete cluster` (state only) and `state unlock`
   (`docs/architecture.md` §14). `cmd/tent/exit_test.go` checks the M0 exit criteria.
 - The Vultr spike has run (2026-09-25).
-- Next: M1 Vultr infrastructure. See `docs/roadmap.md`.
+- M1 added the reconciliation engine (`internal/engine`, M1.1), the Vultr API client, the label codec and the fake
+  `vultrfake` (M1.2), the model, the provider interface and the Vultr infrastructure tasks (M1.3), the Vultr node
+  primitives (M1.4), and `tent update cluster`, `tent delete cluster` and `create --yes` (M1.5,
+  `docs/architecture.md` §13). The nodes are empty machines without Nomad. The exit criteria were met in the
+  integration tests (`internal/app/integration_test.go`, `interrupt_test.go`) and on a real Vultr account.
+- Next: M2 Nomad bootstrap. See `docs/roadmap.md`.
 
 ## Read before changing anything
 
@@ -72,14 +77,15 @@ Providers, in order:
 
 ## Maintainer decisions
 
-Decided on 2026-09-25 (`docs/architecture.md` §18, the table in `docs/roadmap.md`):
+Decided on 2026-09-25 and 2026-09-28 (`docs/architecture.md` §18, the table in `docs/roadmap.md`):
 
 - labels use the prefix `tent/`, and the API group is `tent/v1alpha1`;
 - `access.api` defaults to `[0.0.0.0/0]` (mTLS + ACL), with a loud warning while it is open;
 - node group roles are `server`, `client` and `combined` (ADR-0019);
 - the default OS image is `ubuntu-24.04`; E2E also runs on `ubuntu-26.04`;
 - Consul and Vault are out of v1;
-- tent is licensed under Apache-2.0.
+- tent is licensed under Apache-2.0;
+- a cluster's provider and region never change; a cluster moves by creating a new one (decided on 2026-09-28).
 
 Anything else that only the maintainer can decide goes into `docs/architecture.md` §18. Ask before implementing it.
 

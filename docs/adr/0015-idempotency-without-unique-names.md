@@ -1,7 +1,7 @@
 # ADR-0015: Idempotent creation on clouds without unique names
 
 - **Status:** Accepted. Amended by [ADR-0023](0023-vultr-inventory-dedupe-and-images.md) (which copy the dedupe
-  pass keeps on Vultr).
+  pass keeps on Vultr). The follow-ups are done.
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** extends [ADR-0003](0003-cloud-is-source-of-truth.md); [ADR-0010](0010-state-store-and-locking.md),
@@ -67,8 +67,14 @@ Vultr has no such guard:
 
 ### Follow-ups
 
-- The label codec and operation-id helpers in `internal/cloud/vultr` (M1).
-- Fake-provider tests that drop create responses and assert that exactly one resource exists afterwards (M1).
+- The label codec and operation-id helpers (M1). Done: the label codec is in `internal/cloud/vultr`, and the
+  operation-id helpers are `cloud.NewOpID` and `cloud.ValidOpID` in `internal/cloud`.
+- Fake-provider tests that drop create responses and assert that exactly one resource exists afterwards (M1). Done:
+  on the Vultr fake, the integration tests in `internal/app` make each create of a build, in a run of its own, lose
+  its answer, and cut a build at every call; each ends with exactly one copy of every object
+  ([architecture §15](../architecture.md#15-testing)). On 2026-09-28 a real Vultr run interrupted a node create after
+  its POST, and the next run waited for that instance and created no second one
+  ([platform notes §3.16](../platform-notes.md#316-spike-runs)).
 
 ## Alternatives considered
 

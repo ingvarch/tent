@@ -1,17 +1,24 @@
 # Roadmap
 
-> **Current status (2026-09-27):** M0 Foundation is complete. M0 built the Go module, `tent version`, the Makefile,
-> the import rules in golangci-lint, CI on Linux, macOS and Windows, the release pipeline for `tent`, the API types
-> with defaults and validation, the spec reader and writer, the JSON Schema
-> ([ADR-0022](adr/0022-json-schema-from-go-types.md)), the state store with its `file://` and `s3://` backends,
-> version guard and cluster locks ([architecture §10](architecture.md#10-state-store-and-locking)), and the spec
-> commands of the CLI ([architecture §14](architecture.md#14-cli)). Renovate updates the dependencies ([#9][i9]).
+> **Current status (2026-09-28):** M0 Foundation and M1 Vultr infrastructure are complete.
+>
+> M0 built the Go module, `tent version`, the Makefile, the import rules in golangci-lint, CI on Linux, macOS and
+> Windows, the release pipeline for `tent`, the API types with defaults and validation, the spec reader and writer,
+> the JSON Schema ([ADR-0022](adr/0022-json-schema-from-go-types.md)), the state store with its `file://` and `s3://`
+> backends, version guard and cluster locks ([architecture §10](architecture.md#10-state-store-and-locking)), and the
+> spec commands of the CLI ([architecture §14](architecture.md#14-cli)). Renovate updates the dependencies ([#9][i9]).
 > The repository is public with the release secrets set ([#10][i10]), and the archives and packages ship third-party
 > licence notices while CI checks the licences of the modules tent links ([#11][i11]).
 >
+> M1 built the reconciliation engine ([architecture §6](architecture.md#6-reconciliation-engine)), the Vultr API
+> client and its fake, the Vultr infrastructure tasks and node primitives
+> ([architecture §11](architecture.md#11-vultr-provider)), and `tent update cluster` and `tent delete cluster`
+> ([architecture §13.2](architecture.md#132-tent-update-cluster---yes),
+> [§13.7](architecture.md#137-tent-delete-cluster---yes)). The nodes are empty machines without Nomad.
+>
 > - Vultr is the first provider and the E2E platform ([ADR-0014](adr/0014-vultr-first-provider-and-e2e.md)).
 > - Hetzner Cloud is second.
-> - **Next:** M1 Vultr infrastructure.
+> - **Next:** M2 Nomad bootstrap.
 >
 > **Work items live in GitHub:** each milestone below links to its GitHub milestone, and the
 > [tent roadmap project][project] shows the open issues. This file keeps the goals and exit criteria; close issues as
@@ -22,7 +29,8 @@ and, from M2 on, in the E2E suite on Vultr.
 
 ## Maintainer decisions
 
-These come from [architecture §18](architecture.md#18-open-questions). All six were decided on 2026-09-25.
+These come from [architecture §18](architecture.md#18-open-questions). The first six were decided on 2026-09-25, and
+the seventh on 2026-09-28.
 
 | # | Question | Decision |
 |---|---|---|
@@ -32,6 +40,7 @@ These come from [architecture §18](architecture.md#18-open-questions). All six 
 | 4 | Default OS image | `ubuntu-24.04`; E2E also runs on `ubuntu-26.04` |
 | 5 | Consul and Vault | out of v1 |
 | 6 | Licence of tent | Apache-2.0 |
+| 7 | A cluster's provider and region | never change; a cluster moves by creating a new one |
 
 New questions for the maintainer are issues with the `decision` label.
 
@@ -65,6 +74,17 @@ it: [`hack/vultr-spike/README.md`](../hack/vultr-spike/README.md).
 - `tent update cluster --yes` creates the VPC, the firewall groups and N empty VMs on Vultr, and a re-run is a no-op.
 - A simulated lost create response never produces a duplicate VM.
 - `tent delete cluster --yes` leaves nothing that carries the cluster markers.
+
+**Status:** done. All three criteria hold in CI, where the integration tests run the Vultr provider on its fake
+([architecture §15](architecture.md#15-testing)), and held on a real Vultr account on 2026-09-28
+([platform notes §3.16](platform-notes.md#316-spike-runs)):
+- `create cluster --yes`, which runs `update cluster --yes`, built the VPC, both firewall groups and two VMs, and
+  `update cluster --exit-code` then found no changes.
+- In CI, each create, in a run of its own, loses its answer, and a build is cut before and after each of its calls;
+  each ends with one instance per node. On the real account, an `update --yes` interrupted after a VM's create call left
+  one VM, which the next run waited for instead of creating another.
+- `delete cluster --yes` deleted the VMs, the firewall groups, the VPC and the state, and the API then listed nothing
+  with the cluster's markers.
 
 ## M2 Nomad bootstrap
 
@@ -132,6 +152,9 @@ Work after M6 or not scheduled yet: [issues with the `later` label][later].
   locks and the spec commands of the CLI are built, and `cmd/tent/exit_test.go` checks the round trip, the field-path
   errors and the serialized changes. Renovate updates the Go modules and GitHub Actions (#9), and the archives and
   packages ship third-party licence notices, with a licence check in CI (#11).
+- 2026-09-28: M1 Vultr infrastructure is complete. The engine, the Vultr provider, `tent update cluster` and
+  `tent delete cluster` are built; the integration tests on the Vultr fake and a run on a real account met the exit
+  criteria.
 
 [project]: https://github.com/users/ingvarch/projects/2
 [later]: https://github.com/ingvarch/tent/issues?q=is%3Aissue%20label%3Alater
