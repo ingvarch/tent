@@ -1,18 +1,12 @@
 package cloud_test
 
 import (
-	"bytes"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
-	"fmt"
-	"io"
-	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/cloud"
+	"github.com/ingvarch/tent/internal/secrettest"
 )
 
 // createRequest returns a request for the first server of cluster prod with every field that Validate checks.
@@ -74,43 +68,17 @@ func TestUserDataNeverPrints(t *testing.T) {
 	const secret = "gossip-key-Zm9vYmFyYmF6"
 	r := createRequest()
 	r.UserData = cloud.UserData("#cloud-config\nsecret: " + secret + "\n")
-	const size = "[user data, 46 bytes]"
-	// Every form the secret could take in the output: as it is, hex in either case, and base64.
-	forms := []string{
-		secret, hex.EncodeToString([]byte(secret)), strings.ToUpper(hex.EncodeToString([]byte(secret))),
-		base64.StdEncoding.EncodeToString(r.UserData), "cloud-config",
+	outputs := map[string]string{"String": r.UserData.String(), "GoString": r.UserData.GoString()}
+	for name, out := range secrettest.Printed(t, r) {
+		outputs[name+" of the request"] = out
 	}
-	outputs := map[string]string{}
-	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d", "%10.3s"} {
-		outputs["Sprintf "+verb+" of the request"] = fmt.Sprintf(verb, r)
-		outputs["Sprintf "+verb+" of a pointer to the request"] = fmt.Sprintf(verb, &r)
-		outputs["Sprintf "+verb+" of the user data"] = fmt.Sprintf(verb, r.UserData)
+	for name, out := range secrettest.Printed(t, r.UserData) {
+		outputs[name+" of the user data"] = out
 	}
-	outputs["String"], outputs["GoString"] = r.UserData.String(), r.UserData.GoString()
-	b, err := json.Marshal(r)
-	if err != nil {
-		t.Fatalf("json.Marshal: %v", err)
-	}
-	outputs["JSON"] = string(b)
-	for name, h := range map[string]func(w io.Writer) slog.Handler{
-		"slog JSON": func(w io.Writer) slog.Handler { return slog.NewJSONHandler(w, nil) },
-		"slog text": func(w io.Writer) slog.Handler { return slog.NewTextHandler(w, nil) },
-	} {
-		var buf bytes.Buffer
-		slog.New(h(&buf)).Info("create", "request", r, "pointer", &r, "user_data", r.UserData)
-		outputs[name] = buf.String()
-	}
-
-	for name, out := range outputs {
-		for _, form := range forms {
-			if strings.Contains(out, form) {
-				t.Errorf("%s shows the user data (%q): %s", name, form, out)
-			}
-		}
-		if !strings.Contains(out, size) {
-			t.Errorf("%s = %s, want the size %q", name, out, size)
-		}
-	}
+	secrettest.CheckHidden(t, outputs, map[string][]byte{
+		"the secret in the user data": []byte(secret), "the user data": r.UserData,
+		"the cloud-config": []byte("cloud-config"),
+	}, "[user data, 46 bytes]")
 	// The value itself stays the bytes that the provider sends.
 	if got := string(r.UserData); !strings.Contains(got, secret) {
 		t.Errorf("string(UserData) = %q, want the bytes as given", got)
