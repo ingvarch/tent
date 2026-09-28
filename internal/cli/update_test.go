@@ -18,6 +18,7 @@ import (
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/cloud/vultr"
 	"github.com/ingvarch/tent/internal/cloud/vultr/vultrfake"
+	"github.com/ingvarch/tent/internal/secrettest"
 	"github.com/ingvarch/tent/internal/statestore"
 )
 
@@ -41,7 +42,7 @@ const updatePlan = `+ vultr.VPC/prod
 
 Plan: 3 to create, 0 to update, 0 to replace, 0 to delete.
 Nodes: 6 to create, 0 to wait for, 0 to delete.
-State: cluster.completed.yaml will be written.
+State: pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token and cluster.completed.yaml will be written.
 `
 
 // applyHint is what update cluster prints on stderr after a plan with changes.
@@ -51,7 +52,13 @@ const applyHint = "run with --yes to apply the changes\n"
 // then a line that sums up what it did.
 const built = updatePlan + "\n" +
 	"Applied: 3 created, 0 updated, 0 replaced, 0 deleted. Nodes: 6 created, 0 waited for, 0 deleted. " +
-	"Wrote cluster.completed.yaml.\n"
+	"Wrote pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token and " +
+	"cluster.completed.yaml.\n"
+
+// secretPaths are the test cluster's secrets in the store, in the order an update writes them.
+var secretPaths = []string{
+	"prod/pki/private/ca.key", "prod/pki/ca-bundle.pem", "prod/secrets/gossip.key", "prod/secrets/acl-bootstrap-token",
+}
 
 // nodeNames are the nodes of the test cluster in the order an update creates them.
 var nodeNames = []string{
@@ -141,6 +148,7 @@ type planJSON struct {
 	Nodes []struct {
 		Action, Name, Group, Role string
 	}
+	Secrets       []string
 	CompletedSpec bool
 }
 
@@ -182,6 +190,13 @@ func wantPlanJSON(t *testing.T, p planJSON) {
 	}
 	if diff := cmp.Diff(want, nodes); diff != "" {
 		t.Errorf("the node changes (-want +got):\n%s", diff)
+	}
+	want = nil
+	for _, secret := range secretPaths {
+		want = append(want, strings.TrimPrefix(secret, "prod/"))
+	}
+	if diff := cmp.Diff(want, p.Secrets); diff != "" {
+		t.Errorf("the secrets (-want +got):\n%s", diff)
 	}
 	if !p.CompletedSpec {
 		t.Error("the plan does not write the completed spec")
@@ -268,6 +283,61 @@ func TestUpdateClusterApply(t *testing.T) {
 		}
 
 		wantOK(t, runOn(t, f, update(s, "--yes")...), "cluster prod is up to date\n")
+	})
+}
+
+// wantNoSecrets fails the test unless the store s holds the test cluster's secrets and text shows none of them, in
+// any of the forms that secrettest.Shows looks for. Its messages name the secret, never its content.
+func wantNoSecrets(t *testing.T, s state, what, text string) {
+	t.Helper()
+	objs := s.objects(t)
+	secrets := map[string][]byte{}
+	for _, p := range secretPaths {
+		secret, ok := objs[p]
+		if !ok {
+			t.Fatalf("the store holds no %s", p)
+		}
+		secrets[p] = []byte(secret)
+	}
+	secrettest.CheckHidden(t, map[string]string{what: text}, secrets, "")
+}
+
+// TestUpdateClusterShowsNoSecrets builds the test cluster in each output format with debug logs, then plans an update
+// and a delete of it: neither stdout nor stderr shows a secret that the build wrote.
+func TestUpdateClusterShowsNoSecrets(t *testing.T) {
+	for _, format := range []string{"table", "json", "yaml"} {
+		t.Run(format, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				s := withCluster(t)
+				f := vultrfake.New()
+				for _, args := range [][]string{
+					update(s, "--yes", "-o", format, "-vv"),
+					update(s, "-o", format, "-vv", "--log-format", "json"),
+					{"delete", "cluster", "prod", "-o", format, "-vv", "--state", s.url},
+				} {
+					got := runOn(t, f, args...)
+					if got.code != 0 {
+						t.Fatalf("%s: exit code %d\n%s", strings.Join(args, " "), got.code, got.errOut)
+					}
+					if !strings.Contains(got.errOut, "opened the state store") {
+						t.Errorf("%s: stderr holds no debug log:\n%s", strings.Join(args, " "), got.errOut)
+					}
+					wantNoSecrets(t, s, strings.Join(args, " "), got.out+got.errOut)
+				}
+			})
+		})
+	}
+}
+
+// TestUpdateClusterExitCodeSeesAMissingSecret exits with 2 when the plan writes only a secret that the store lacks.
+func TestUpdateClusterExitCodeSeesAMissingSecret(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, f := builtCluster(t)
+		if err := s.open(t).Delete(t.Context(), "prod/secrets/gossip.key"); err != nil {
+			t.Fatal(err)
+		}
+		wantResult(t, runOn(t, f, update(s, "--exit-code")...), 2, "State: secrets/gossip.key will be written.\n",
+			applyHint)
 	})
 }
 
@@ -707,6 +777,8 @@ func TestUpdateClusterHelp(t *testing.T) {
 	for _, want := range []string{
 		"Usage:\n  tent update cluster [NAME] [flags]\n",
 		"--yes", "--exit-code", "--allow-single-server", "VULTR_API_KEY",
+		"It also makes the cluster's missing CA, gossip key and ACL bootstrap secret in the state store, and never " +
+			"replaces them.",
 	} {
 		if got.code != 0 || !strings.Contains(got.out, want) {
 			t.Errorf("exit code = %d, stdout\n%s\nwant 0 and it to hold %q", got.code, got.out, want)

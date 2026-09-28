@@ -38,6 +38,10 @@ func TestLayoutPaths(t *testing.T) {
 		{"NodeGroups", l.NodeGroups(), "prod/nodegroups/"},
 		{"Completed", l.Completed(), "prod/cluster.completed.yaml"},
 		{"Lock", l.Lock(), "prod/lock"},
+		{"CAKey", l.CAKey(), "prod/pki/private/ca.key"},
+		{"CABundle", l.CABundle(), "prod/pki/ca-bundle.pem"},
+		{"GossipKey", l.GossipKey(), "prod/secrets/gossip.key"},
+		{"ACLBootstrapSecret", l.ACLBootstrapSecret(), "prod/secrets/acl-bootstrap-token"},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s() = %q, want %q", tc.name, tc.got, tc.want)
@@ -45,11 +49,30 @@ func TestLayoutPaths(t *testing.T) {
 	}
 }
 
+// TestLayoutSecrets checks that Secrets lists the PKI and secret objects in the order they are written.
+func TestLayoutSecrets(t *testing.T) {
+	l := mustLayout(t, "prod")
+	want := []string{
+		"prod/pki/private/ca.key", "prod/pki/ca-bundle.pem", "prod/secrets/gossip.key",
+		"prod/secrets/acl-bootstrap-token",
+	}
+	if diff := cmp.Diff(want, l.Secrets()); diff != "" {
+		t.Errorf("Secrets() (-want +got):\n%s", diff)
+	}
+	// Each call returns a new slice, so a caller cannot change the next one.
+	l.Secrets()[0] = "changed"
+	if diff := cmp.Diff(want, l.Secrets()); diff != "" {
+		t.Errorf("Secrets() after a caller changed an earlier result (-want +got):\n%s", diff)
+	}
+}
+
 // TestLayoutPathsInStore checks that the store accepts the paths of a layout and finds them under its prefixes.
 func TestLayoutPathsInStore(t *testing.T) {
 	s := openFile(t, t.TempDir())
 	l := mustLayout(t, "prod")
-	objects := []string{l.TentVersion(), l.ClusterSpec(), mustNodeGroup(t, l, "workers"), l.Completed(), l.Lock()}
+	objects := append(
+		[]string{l.TentVersion(), l.ClusterSpec(), mustNodeGroup(t, l, "workers"), l.Completed(), l.Lock()},
+		l.Secrets()...)
 	for _, p := range objects {
 		mustPut(t, s, p)
 	}
@@ -58,7 +81,8 @@ func TestLayoutPathsInStore(t *testing.T) {
 		want   []string
 	}{
 		{l.Prefix(), []string{"prod/cluster.completed.yaml", "prod/cluster.yaml", "prod/lock",
-			"prod/nodegroups/workers.yaml", "prod/tent-version"}},
+			"prod/nodegroups/workers.yaml", "prod/pki/ca-bundle.pem", "prod/pki/private/ca.key",
+			"prod/secrets/acl-bootstrap-token", "prod/secrets/gossip.key", "prod/tent-version"}},
 		{l.NodeGroups(), []string{"prod/nodegroups/workers.yaml"}},
 	} {
 		got, err := s.List(t.Context(), tc.prefix)

@@ -44,8 +44,14 @@ func newBuilt(t *testing.T) (*app.Service, *vultrfake.Fake) {
 	return svc, f
 }
 
-// allState is every object of the test cluster, in the order DeleteCluster deletes them.
+// allState is every object of the test cluster as newCluster stores it, in the order DeleteCluster deletes them.
 var allState = []string{completedPath, serversPath, workersPath, clusterPath, versionPath}
+
+// builtState is every object of the test cluster as newBuilt leaves it, with its secrets, in the order DeleteCluster
+// deletes them.
+var builtState = []string{
+	completedPath, serversPath, workersPath, aclPath, gossipPath, caBundlePath, caKeyPath, clusterPath, versionPath,
+}
 
 // builtNodes are the node deletes of the test cluster as newBuilt builds it.
 var builtNodes = []app.NodeChange{
@@ -146,7 +152,7 @@ func deletesIn(calls []vultrfake.Call) []vultrfake.Call {
 func wantNoWrites(t *testing.T, calls []vultrfake.Call) {
 	t.Helper()
 	for _, c := range calls {
-		if !strings.HasPrefix(c.Name, "List") && !strings.HasPrefix(c.Name, "Get") {
+		if !strings.HasPrefix(c.Name, "List") && !strings.HasPrefix(c.Name, "Get") && c.Name != "AvailablePlans" {
 			t.Errorf("a call that writes: %s %s", c.Name, c.Arg)
 		}
 	}
@@ -206,6 +212,52 @@ func TestDeleteClusterUnknownState(t *testing.T) {
 	wantDeletePlan(t, plan, err, nil, nil, want)
 	plan, err = svc.DeleteCluster(t.Context(), "prod", true, true)
 	wantDeletePlan(t, plan, err, nil, nil, want)
+	wantPaths(t, svc.Store)
+}
+
+// Store paths of the test cluster's secrets.
+const (
+	caKeyPath    = "prod/pki/private/ca.key"
+	caBundlePath = "prod/pki/ca-bundle.pem"
+	gossipPath   = "prod/secrets/gossip.key"
+	aclPath      = "prod/secrets/acl-bootstrap-token"
+)
+
+// secretPaths are the test cluster's secrets in the order an update writes them.
+var secretPaths = []string{caKeyPath, caBundlePath, gossipPath, aclPath}
+
+// secretDeletes are the test cluster's secrets in the order DeleteCluster deletes them: the reverse of their writes,
+// so that the CA bundle goes before its key.
+var secretDeletes = []string{aclPath, gossipPath, caBundlePath, caKeyPath}
+
+// TestDeleteClusterSecrets deletes the cluster's CA, gossip key and ACL bootstrap secret without force, after the
+// node groups and the completed spec and before cluster.yaml and the tent version.
+func TestDeleteClusterSecrets(t *testing.T) {
+	svc, _ := newCluster(t)
+	for _, p := range secretPaths {
+		put(t, svc.Store, p, []byte("?"))
+	}
+	want := slices.Concat([]string{completedPath, serversPath, workersPath}, secretDeletes,
+		[]string{clusterPath, versionPath})
+	for _, apply := range []bool{false, true} {
+		plan, err := svc.DeleteCluster(t.Context(), "prod", apply, false)
+		wantDeletePlan(t, plan, err, nil, nil, want)
+	}
+	wantPaths(t, svc.Store)
+}
+
+// TestDeleteClusterUnknownObjectNextToTheSecrets refuses an object under pki/ that is not one of the secrets.
+func TestDeleteClusterUnknownObjectNextToTheSecrets(t *testing.T) {
+	const unknown = "prod/pki/private/old.key"
+	svc, _ := newCluster(t)
+	for _, p := range append(slices.Clone(secretPaths), unknown) {
+		put(t, svc.Store, p, []byte("?"))
+	}
+	_, err := svc.DeleteCluster(t.Context(), "prod", true, false)
+	wantError(t, err, "cluster prod holds objects tent does not know: "+unknown+"; delete them yourself or use --force")
+	plan, err := svc.DeleteCluster(t.Context(), "prod", true, true)
+	wantDeletePlan(t, plan, err, nil, nil, slices.Concat([]string{completedPath, serversPath, workersPath, unknown},
+		secretDeletes, []string{clusterPath, versionPath}))
 	wantPaths(t, svc.Store)
 }
 
@@ -328,7 +380,7 @@ func TestDeleteClusterPlan(t *testing.T) {
 
 		plan, err := svc.DeleteCluster(t.Context(), "prod", false, false)
 
-		wantDeletePlan(t, plan, err, builtNodes, builtInfra, allState)
+		wantDeletePlan(t, plan, err, builtNodes, builtInfra, builtState)
 		if plan.Applied {
 			t.Error("the plan says it was applied")
 		}
@@ -379,14 +431,14 @@ func TestDeleteCluster(t *testing.T) {
 		var progress []string
 		svc.OnProgress = func(p app.Progress) {
 			progress = append(progress, progressLine(p))
-			if n := len(list(t, svc.Store, "prod/")); n != len(allState) {
-				t.Errorf("%d objects of the state are left during the cloud's deletes, want all %d", n, len(allState))
+			if n := len(list(t, svc.Store, "prod/")); n != len(builtState) {
+				t.Errorf("%d objects of the state are left during the cloud's deletes, want all %d", n, len(builtState))
 			}
 		}
 
 		plan := mustDelete(t, svc)
 
-		wantDeletePlan(t, plan, nil, builtNodes, builtInfra, allState)
+		wantDeletePlan(t, plan, nil, builtNodes, builtInfra, builtState)
 		want := []vultrfake.Call{
 			{Name: "DeleteInstance", Arg: "instance-1"}, {Name: "DeleteInstance", Arg: "instance-2"},
 			{Name: "DeleteInstance", Arg: "instance-3"}, {Name: "DeleteInstance", Arg: "instance-4"},
@@ -469,7 +521,7 @@ func TestDeleteClusterTellsThePlan(t *testing.T) {
 			t.Fatalf("OnDeletePlan was called %d times, and the events start with %q; want once, first", len(told),
 				events[:min(2, len(events))])
 		}
-		wantDeletePlan(t, told[0], nil, builtNodes, builtInfra, allState)
+		wantDeletePlan(t, told[0], nil, builtNodes, builtInfra, builtState)
 		if told[0].Applied {
 			t.Error("the plan told before the changes says it was applied")
 		}
@@ -655,7 +707,7 @@ func TestDeleteClusterStopsAtAFailedNodeDelete(t *testing.T) {
 		wantLockFree(t, svc.Store)
 
 		plan = mustDelete(t, svc)
-		wantDeletePlan(t, plan, nil, builtNodes, builtInfra, allState)
+		wantDeletePlan(t, plan, nil, builtNodes, builtInfra, builtState)
 		if left := owned(f, "prod"); len(left) != 0 {
 			t.Errorf("the cloud still holds objects of cluster prod: %v", left)
 		}

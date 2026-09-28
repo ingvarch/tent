@@ -2,12 +2,14 @@ package app_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -160,14 +162,29 @@ func wantPaths(t *testing.T, s statestore.Store, want ...string) {
 	}
 }
 
-// snapshot returns every object in the store with its content.
+// snapshot returns every object in the store with its content. A secret of a cluster shows as its size and digest,
+// which change with it, so that a failure message never shows it.
 func snapshot(t *testing.T, s statestore.Store) map[string]string {
 	t.Helper()
 	objs := map[string]string{}
 	for _, p := range list(t, s, "") {
 		objs[p] = string(get(t, s, p))
+		if isSecret(p) {
+			objs[p] = hidden(objs[p])
+		}
 	}
 	return objs
+}
+
+// isSecret reports whether p is the path of one of a cluster's secrets.
+func isSecret(p string) bool {
+	_, rest, _ := strings.Cut(p, "/")
+	return slices.Contains(secretNames, rest)
+}
+
+// hidden returns a secret's size and SHA-256 digest, which a failure message may show.
+func hidden(secret string) string {
+	return fmt.Sprintf("[secret, %d bytes, sha256 %x]", len(secret), sha256.Sum256([]byte(secret)))
 }
 
 // wantSnapshot fails the test unless the store holds exactly the objects of want.

@@ -19,4 +19,4 @@
 
 Plan: 4 to create, 0 to update, 0 to replace, 0 to delete.
 Nodes: 5 to create, 0 to wait for, 0 to delete.
-State: cluster.completed.yaml will be written.
+State: pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token and cluster.completed.yaml will be written.

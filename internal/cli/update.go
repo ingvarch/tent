@@ -24,10 +24,12 @@ func newUpdateClusterCommand(opts *globalOptions) *cobra.Command {
 		Short: "Bring a cluster's cloud objects to its specs",
 		Long: "Bring the cloud objects of the cluster named by NAME or --name to its specs in the state store: its " +
 			"network, firewalls and SSH keys, and its nodes, which are created or deleted until each node group " +
-			"has its size. In this version the nodes are empty machines without Nomad. Without --yes it prints " +
-			"the plan and changes nothing. With --yes it prints the plan, applies it, prints each step on stderr " +
-			"as it goes, and then prints what it did; with -o json or -o yaml it prints the plan it applied. tent " +
-			"reads the cloud's credentials from the environment: VULTR_API_KEY for Vultr.",
+			"has its size. It also makes the cluster's missing CA, gossip key and ACL bootstrap secret in the " +
+			"state store, and never replaces them. In this version the nodes are empty machines without Nomad. " +
+			"Without --yes it prints the plan and changes nothing. With --yes it prints the plan, applies it, " +
+			"prints each step on stderr as it goes, and then prints what it did; with -o json or -o yaml it " +
+			"prints the plan it applied. tent reads the cloud's credentials from the environment: VULTR_API_KEY " +
+			"for Vultr.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if yes && exitCode {

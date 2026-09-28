@@ -1,9 +1,11 @@
 package app_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/ingvarch/tent/internal/cloud/vultr"
 	"github.com/ingvarch/tent/internal/cloud/vultr/vultrfake"
+	"github.com/ingvarch/tent/internal/secrettest"
 	"github.com/ingvarch/tent/internal/statestore"
 )
 
@@ -120,10 +123,13 @@ func eachCut(t *testing.T, calls []string, test func(t *testing.T, c cutCase)) {
 // runCut runs a use case on f with a context that ends at the call of c: just before the call reaches the fake, or
 // just after the fake carried it out, when the call fails as the client fails for an ended context and loses its
 // answer, as a request in flight does when tent is interrupted. It fails the test unless the run made the call and
-// stopped with an error that matches context.Canceled, and changed nothing in the store s.
-func runCut(t *testing.T, f *vultrfake.Fake, s statestore.Store, c cutCase, run func(context.Context) error) {
+// stopped with an error that matches context.Canceled, and changed nothing in the store s but for writing secrets that
+// s lacked, as an update does before the infrastructure. It returns the secrets that the run wrote.
+func runCut(t *testing.T, f *vultrfake.Fake, s statestore.Store, c cutCase, run func(context.Context) error) (
+	wrote map[string][]byte,
+) {
 	t.Helper()
-	stored := snapshot(t, s)
+	stored, before := snapshot(t, s), secretsOf(t, s)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	var cut atomic.Bool
@@ -143,27 +149,148 @@ func runCut(t *testing.T, f *vultrfake.Fake, s statestore.Store, c cutCase, run 
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("the run cut at %s returned %v, want an error that matches context.Canceled", c.key, err)
 	}
+	wrote = map[string][]byte{}
+	for p, data := range secretsOf(t, s) {
+		if _, ok := before[p]; !ok {
+			wrote[p], stored[p] = data, hidden(string(data))
+		}
+	}
 	wantSnapshot(t, s, stored)
 	wantLockFree(t, s)
+	return wrote
+}
+
+// wantSecretsKept fails the test unless the store s holds the test cluster's four secrets, with a CA bundle of one
+// certificate that matches the CA key, and holds the secrets of kept byte for byte. Its messages show the paths, never
+// the secrets.
+func wantSecretsKept(t *testing.T, s statestore.Store, kept map[string][]byte) {
+	t.Helper()
+	got := secretsOf(t, s)
+	if len(got) != len(secretPaths) {
+		t.Fatalf("the store holds %d secrets, want %d", len(got), len(secretPaths))
+	}
+	storedCA(t, s)
+	for p, data := range kept {
+		if !bytes.Equal(got[p], data) {
+			t.Errorf("%s is not the one that the cut run wrote", p)
+		}
+	}
 }
 
 // TestUpdateCutAtEveryCall builds the example cluster with a run cut at each of the calls of an uninterrupted build,
 // just before it and just after it. The next run, with a fresh context, leaves the cloud as the uninterrupted build
-// does, without a second copy of any object, and a run after it has nothing to change.
+// does, without a second copy of any object, keeps the secrets that the cut run wrote, and a run after it has nothing
+// to change.
 func TestUpdateCutAtEveryCall(t *testing.T) {
 	_, calls, want := buildExample(t)
 	_, template := exampleStore(t)
 	eachCut(t, calls, func(t *testing.T, c cutCase) {
 		svc, f := newExampleFrom(t, template)
-		runCut(t, f, svc.Store, c, func(ctx context.Context) error {
+		wrote := runCut(t, f, svc.Store, c, func(ctx context.Context) error {
 			_, err := svc.Update(ctx, "prod", true)
 			return err
 		})
 		mustUpdate(t, svc)
 		wantView(t, f, want)
+		wantSecretsKept(t, svc.Store, wrote)
 		wantConverged(t, svc)
 		wantLockFree(t, svc.Store)
 	})
+}
+
+// errCut is why a put or a delete that a test cut failed.
+var errCut = errors.New("the test cut the call")
+
+// cutStore fails the first put or delete of path: just before the call reaches the store, or just after the store
+// carried it out, as a call whose answer is lost. It records the secrets it receives.
+type cutStore struct {
+	statestore.Store
+	sent
+	path  string
+	after bool
+	cut   atomic.Bool
+}
+
+func (s *cutStore) Put(ctx context.Context, p string, data []byte, opts statestore.PutOptions) (
+	statestore.Version, error,
+) {
+	s.record(p, data)
+	var v statestore.Version
+	err := s.call("put", p, func() (err error) {
+		v, err = s.Store.Put(ctx, p, data, opts)
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
+	return v, nil
+}
+
+func (s *cutStore) Delete(ctx context.Context, p string) error {
+	return s.call("delete", p, func() error { return s.Store.Delete(ctx, p) })
+}
+
+// call carries out the call op of p, or cuts it when it is the first call of the store's path.
+func (s *cutStore) call(op, p string, carry func() error) error {
+	if p != s.path || s.cut.Swap(true) {
+		return carry()
+	}
+	if s.after {
+		if err := carry(); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("%s %q: %w", op, p, errCut)
+}
+
+// TestUpdateCutAtEverySecretWrite builds the example cluster with a run cut at each write of a secret, just before
+// the store writes it and just after, when the answer is lost. The cut run stops before the infrastructure, with an
+// error that shows none of the secrets it made. The next run leaves the cloud as an uninterrupted build does, with one
+// CA, one gossip key and one ACL bootstrap secret, and keeps each secret that the cut run wrote byte for byte.
+func TestUpdateCutAtEverySecretWrite(t *testing.T) {
+	_, _, want := buildExample(t)
+	_, template := exampleStore(t)
+	for _, after := range []bool{false, true} {
+		when := "before"
+		if after {
+			when = "after"
+		}
+		for _, p := range secretPaths {
+			t.Run(when+" "+path.Base(p), func(t *testing.T) {
+				t.Parallel()
+				synctest.Test(t, func(t *testing.T) {
+					svc, f := newExampleFrom(t, template)
+					store := svc.Store
+					cut := &cutStore{Store: store, path: p, after: after}
+					svc.Store = cut
+
+					_, err := svc.Update(t.Context(), "prod", true)
+					if err == nil {
+						t.Fatal("the cut run succeeded")
+					}
+					shown := map[string]string{"the error": err.Error()}
+					if secrettest.CheckHidden(t, shown, cut.received(t, p), ""); t.Failed() {
+						t.FailNow() // the error would show a secret
+					}
+					if !errors.Is(err, errCut) {
+						t.Fatalf("the cut run returned %v, want an error that matches %v", err, errCut)
+					}
+					wantOnlyReads(t, f)
+					wantLockFree(t, cut)
+					wrote := secretsOf(t, store)
+					if _, ok := wrote[p]; ok != after {
+						t.Errorf("the cut run wrote %s: %t, want %t", p, ok, after)
+					}
+
+					svc.Store = store
+					mustUpdate(t, svc)
+					wantView(t, f, want)
+					wantSecretsKept(t, store, wrote)
+					wantConverged(t, svc)
+				})
+			})
+		}
+	}
 }
 
 // TestDeleteCutAtEveryCall deletes the built example cluster with a run cut at each of the calls of an uninterrupted
@@ -188,6 +315,70 @@ func TestDeleteCutAtEveryCall(t *testing.T) {
 		_, err := svc.DeleteCluster(t.Context(), "prod", false, false)
 		wantError(t, err, notFound(svc, "cluster prod"))
 	})
+}
+
+// TestDeleteCutAtEveryStateDelete deletes the built test cluster with a run cut at each delete of its state, just
+// before the store deletes the object and just after, when the answer is lost. The cut run has deleted the objects
+// before the cut, in the order of deletion, and never leaves a CA bundle without its key. When it leaves the CA key
+// without its bundle, an update, once the node groups are back, signs a new bundle for the stored key and keeps the
+// key. The next delete deletes the rest.
+func TestDeleteCutAtEveryStateDelete(t *testing.T) {
+	for _, after := range []bool{false, true} {
+		when := "before"
+		if after {
+			when = "after"
+		}
+		for i, p := range builtState {
+			t.Run(when+" "+path.Base(p), func(t *testing.T) {
+				t.Parallel()
+				synctest.Test(t, func(t *testing.T) {
+					svc, f := newBuilt(t)
+					store := svc.Store
+					cut := &cutStore{Store: store, path: p, after: after}
+					svc.Store = cut
+
+					if _, err := svc.DeleteCluster(t.Context(), "prod", true, false); !errors.Is(err, errCut) {
+						t.Fatalf("the cut run returned %v, want an error that matches %v", err, errCut)
+					}
+					wantLockFree(t, cut)
+					left := builtState[i:]
+					if after {
+						left = builtState[i+1:]
+					}
+					wantPaths(t, store, slices.Sorted(slices.Values(left))...)
+					stored := list(t, store, "")
+					hasKey, hasBundle := slices.Contains(stored, caKeyPath), slices.Contains(stored, caBundlePath)
+					if hasBundle && !hasKey {
+						t.Error("the cut run left the CA bundle without its key")
+					}
+
+					svc.Store = store
+					if hasKey && !hasBundle {
+						key := get(t, store, caKeyPath)
+						mustCreate(t, svc, serversYAML, workersYAML)
+						plan := mustUpdate(t, svc)
+						if diff := cmp.Diff(secretNames[1:], plan.Secrets); diff != "" {
+							t.Errorf("the update's secrets (-want +got):\n%s", diff)
+						}
+						if !bytes.Equal(get(t, store, caKeyPath), key) {
+							t.Error("the update replaced the CA key")
+						}
+						storedCA(t, store)
+					}
+					if len(stored) == 0 {
+						_, err := svc.DeleteCluster(t.Context(), "prod", true, false)
+						wantError(t, err, notFound(svc, "cluster prod"))
+						return
+					}
+					mustDelete(t, svc)
+					wantPaths(t, store)
+					if objs := owned(f, "prod"); len(objs) != 0 {
+						t.Errorf("the cloud still holds objects of cluster prod: %v", objs)
+					}
+				})
+			})
+		}
+	}
 }
 
 // errLost is why a call whose answer a test lost got none.

@@ -5,9 +5,13 @@
 - vultr.SSHKey/prod-99aabbcc (ID ssh-9)
 - state prod/cluster.completed.yaml
 - state prod/nodegroups/servers.yaml
+- state prod/secrets/acl-bootstrap-token
+- state prod/secrets/gossip.key
+- state prod/pki/ca-bundle.pem
+- state prod/pki/private/ca.key
 - state prod/cluster.yaml
 - state prod/tent-version
 
 Nodes: 2 to delete.
 Plan: 0 to create, 0 to update, 0 to replace, 3 to delete.
-State: 4 objects to delete.
+State: 8 objects to delete.

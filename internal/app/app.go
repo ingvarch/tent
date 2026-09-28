@@ -45,6 +45,16 @@ type Service struct {
 	// OnDeletePlan, when set, is called with the plan of a delete, made under the cluster's lock, just before the
 	// delete applies it. When it returns an error, the delete stops before it changes anything and returns that error.
 	OnDeletePlan func(DeletePlan) error
+	// Now, when set, returns the current time for new CA certificates; it defaults to time.Now.
+	Now func() time.Time
+}
+
+// now returns the current time for new CA certificates: that of Now, or else time.Now.
+func (s *Service) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
 
 // Action is what a use case did to one object.
