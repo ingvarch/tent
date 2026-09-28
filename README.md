@@ -1,4 +1,13 @@
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-dark.png">
+  <img src="docs/images/logo-light.png" alt="tent" width="112">
+</picture>
+
 # tent
+
+</div>
 
 **tent** is a command-line tool that provisions and operates [HashiCorp Nomad](https://developer.hashicorp.com/nomad)
 clusters on cloud providers. It aims to be what [kops](https://github.com/kubernetes/kops) is for Kubernetes. A nomad
@@ -62,3 +71,6 @@ tent is licensed under the [Apache License 2.0](LICENSE).
 tent installs official Nomad binaries from `releases.hashicorp.com` on the machines it creates. Nomad itself is
 licensed by HashiCorp under the Business Source License 1.1. By using tent to install Nomad you accept HashiCorp's
 terms for Nomad. tent does not redistribute Nomad.
+
+Nomad is a trademark of HashiCorp. tent is an independent project and is not affiliated with or endorsed by
+HashiCorp.
