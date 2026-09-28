@@ -419,6 +419,9 @@ Facts about Nomad, Hetzner Cloud, Vultr, S3-compatible object stores and prior a
   - Live responses also carry undocumented `X-RateLimit-*` headers. Treat them as informational.
 - **Pagination.** Cursor-based: `per_page` (default 100, maximum 500), `cursor`, `meta.links.next/prev`,
   `meta.total`.
+- **Latency ⏳.** In the M1 exit run of 2026-09-28 ([3.16](#316-spike-runs)), each list call that tent made took
+  0.9–2 s. A node create makes 7 list calls, one after another, before its POST in a cluster with both firewall
+  groups, so it spent 8–10 s before the POST ([architecture §11.3](architecture.md#113-creating-a-node)).
 - **Keys and users.**
   - Keys belong to users. A user may have several named keys, each with an optional expiry.
   - User ACLs: abuse, activity_logs, alerts, billing, dns, firewall, loadbalancer, manage_users, objstore,
@@ -822,7 +825,8 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
 ### 3.16 Spike runs
 
 All runs: region `ams`, plan `vc2-1c-1gb`, Ubuntu 24.04 (`os_id` 2284). Runs 1 to 3 ran on 2026-09-25, run 4 on
-2026-09-27. Reports are in `hack/vultr-spike/results/` (git-ignored).
+2026-09-27 and run 5 on 2026-09-28. Reports are in `hack/vultr-spike/results/` (git-ignored). The M1 exit run below
+was not a spike run.
 
 **Run 1 (`tt3s1g`, spike v1)** verified:
 - the tag syntax, limits and filter semantics;
@@ -875,6 +879,19 @@ rules, since none of these checks needs SSH. It verified:
 - that `/vpcs` answered 200 with the address at the first read, 31 s after the create call ([3.5](#35-vpc));
 - that neither firewall group endpoint reports `instance_count` ([3.6](#36-firewall-groups));
 - that a second `halt` of a stopped instance answers 204 ([3.3](#33-instances)).
+
+**M1 exit run (2026-09-28)** was tent itself against the API, in `ams` with `vc2-1c-1gb`: a cluster with one server
+and one worker, then two workers.
+- `tent create cluster … --allow-single-server --yes` built the VPC, both firewall groups and two nodes, whose VPC
+  addresses were `10.64.0.3` and `10.64.0.4`. `tent update cluster --exit-code --allow-single-server` then printed
+  `No changes.` and exited with 0, so the firewall rules read back from Vultr without a diff.
+- With the workers raised to 2, an `update --yes` was interrupted with SIGINT 20 s after `creating node …-workers-1`:
+  after the POST, while tent waited for the node to be ready. The next `update --yes` planned
+  `~ node …-workers-1 (ID …, wait until it is ready)` and created no instance, and a further `--exit-code` run had no
+  changes. Vultr listed exactly three instances.
+- `tent delete cluster --yes` deleted the three nodes, both firewall groups, the VPC and the four state objects. The
+  API then listed no instance, VPC, firewall group or SSH key with the cluster's marker.
+- Each list call took 0.9–2 s ([3.1](#31-api-basics-and-access-control)).
 
 **Still open:**
 - Object Storage conditional writes ([3.12](#312-object-storage-)).
