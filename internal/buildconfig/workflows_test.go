@@ -2,6 +2,10 @@ package buildconfig_test
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -35,6 +39,7 @@ type workflow struct {
 type job struct {
 	file, name string // where the job is, for failure messages
 
+	If       string `json:"if"`
 	RunsOn   string `json:"runs-on"`
 	Strategy struct {
 		Matrix map[string]any `json:"matrix"`
@@ -417,4 +422,126 @@ func TestWorkflowsUseActionsThatAreStillThere(t *testing.T) {
 			}
 		}
 	}
+}
+
+// onlineRun is how CI runs the tests that read public release sites: only tests named ...Online, and never from the
+// cache, which says nothing about the sites today.
+const onlineRun = "go test -count=1 -run 'Online$' ./..."
+
+func TestCIRunsTheOnlineTestsWeeklyAndByHand(t *testing.T) {
+	// The online tests check that the releases tent pins still verify and that HashiCorp's release key embedded in
+	// tent has half a year left. Pull requests do not wait for the release sites; a maintainer can run them by hand,
+	// say after embedding a renewed key.
+	on := loadWorkflow(t, "ci.yml").triggers()
+	for _, event := range []string{"schedule", "workflow_dispatch"} {
+		if !slices.Contains(on, event) {
+			t.Errorf("ci.yml runs on %q, not on %s", on, event)
+		}
+	}
+	j := workflowJob(t, "ci.yml", "online")
+	if want := "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"; j.If != want {
+		t.Errorf("%s runs if %q, want %q", j.where(), j.If, want)
+	}
+	var runs []string
+	for _, s := range j.Steps {
+		if s.Env["TENT_TEST_ONLINE"] == "1" {
+			runs = append(runs, s.Run)
+		}
+	}
+	if len(runs) != 1 || runs[0] != onlineRun {
+		t.Errorf("%s runs %q with TENT_TEST_ONLINE=1, want %q", j.where(), runs, onlineRun)
+	}
+}
+
+func TestCIRunsOnlyTheOnlineJobByHand(t *testing.T) {
+	// A run by hand is for the online tests: the other jobs run on pushes, pull requests and the weekly schedule, and
+	// macOS and Windows minutes are expensive on a private repository.
+	const want = "github.event_name != 'workflow_dispatch'"
+	for name, j := range loadWorkflow(t, "ci.yml").Jobs {
+		if name != "online" && j.If != want {
+			t.Errorf("%s runs if %q, want %q", j.where(), j.If, want)
+		}
+	}
+}
+
+// triggerLine matches an event of a workflow's on: block, which the file writes as a mapping.
+var triggerLine = regexp.MustCompile(`^  ([a-z_]+):`)
+
+// triggers returns the events the workflow runs on, read from its text: sigs.k8s.io/yaml reads the key on as true,
+// as YAML 1.1 does.
+func (w workflow) triggers() []string {
+	var events []string
+	in := false
+	for line := range strings.Lines(string(w.text)) {
+		switch {
+		case line == "on:\n":
+			in = true
+		case in && strings.TrimSpace(line) != "" && !strings.HasPrefix(line, " "):
+			return events
+		case in:
+			if m := triggerLine.FindStringSubmatch(line); m != nil {
+				events = append(events, m[1])
+			}
+		}
+	}
+	return events
+}
+
+func TestOnlineTestsAreNamedForTheOnlineJob(t *testing.T) {
+	// A test that reads TENT_TEST_ONLINE runs only in the online job, which picks tests by name.
+	names := onlineTests(t)
+	if len(names) == 0 {
+		t.Fatal("no test reads TENT_TEST_ONLINE")
+	}
+	for _, name := range names {
+		if !strings.HasSuffix(name, "Online") {
+			t.Errorf("%s reads TENT_TEST_ONLINE, and CI runs it only when its name ends in Online", name)
+		}
+	}
+}
+
+// onlineTests returns the test functions of the repository, as file:name, that read TENT_TEST_ONLINE.
+func onlineTests(t *testing.T) []string {
+	t.Helper()
+	root := filepath.Join("..", "..")
+	var names []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && strings.HasPrefix(d.Name(), ".") && path != root {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || !strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, path, src, parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || !strings.HasPrefix(fn.Name.Name, "Test") {
+				continue
+			}
+			body := src[fset.Position(fn.Body.Pos()).Offset:fset.Position(fn.Body.End()).Offset]
+			if strings.Contains(string(body), `Getenv("TENT_TEST_ONLINE")`) {
+				rel, err := filepath.Rel(root, path)
+				if err != nil {
+					return err
+				}
+				names = append(names, filepath.ToSlash(rel)+":"+fn.Name.Name)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("reading the tests: %v", err)
+	}
+	return names
 }

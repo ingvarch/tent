@@ -46,6 +46,15 @@ linters:
           files: ["${base-path}/internal/secrettest/**", "!$test"]
           allow:
             - $gostd
+        # internal/channels reads the embedded channel files with the decoder of the specs, compares versions with
+        # x/mod/semver and imports nothing else.
+        channels-stdlib-and-yaml:
+          files: ["${base-path}/internal/channels/**", "!$test"]
+          allow:
+            - $gostd
+            - sigs.k8s.io/yaml$
+            - sigs.k8s.io/json$
+            - golang.org/x/mod/semver$
         # internal/secrettest is for tests: no code that tent runs imports it.
         secrettest-only-in-tests:
           files: ["$all", "!$test"]
@@ -78,6 +87,18 @@ linters:
               desc: tent-node never touches cloud APIs
             - pkg: github.com/ingvarch/tent/internal/cloud/
               desc: tent-node never touches cloud APIs
+        # tent-node gets its assets, versions and sha256s, in NodeConfig: node code imports neither the package that
+        # checks PGP signatures nor the channels, directly or through NodeConfig (ADR-0006, ADR-0026).
+        node-no-assets:
+          files:
+            - "${base-path}/internal/nodeup/**"
+            - "${base-path}/internal/nodeconfig/**"
+            - "${base-path}/cmd/tent-node/**"
+          deny:
+            - pkg: github.com/ingvarch/tent/internal/assets$
+              desc: tent-node carries no PGP code; its assets come in NodeConfig (ADR-0006, ADR-0026)
+            - pkg: github.com/ingvarch/tent/internal/channels$
+              desc: tent-node reads versions from NodeConfig, not from the channels (ADR-0006, ADR-0026)
         # Only internal/nomadops talks to Nomad (ADR-0011).
         nomad-only-in-nomadops:
           files: ["$all", "!${base-path}/internal/nomadops/**"]
@@ -101,6 +122,12 @@ linters:
               desc: the JSON Schema libraries are used only by internal/apischema (ADR-0022)
             - pkg: github.com/santhosh-tekuri/jsonschema
               desc: the JSON Schema libraries are used only by internal/apischema (ADR-0022)
+        # Only internal/assets checks OpenPGP signatures, so tent-node carries no PGP code (ADR-0006, ADR-0026).
+        gocrypto-only-in-assets:
+          files: ["$all", "!${base-path}/internal/assets/**"]
+          deny:
+            - pkg: github.com/ProtonMail/go-crypto
+              desc: only internal/assets checks OpenPGP signatures (ADR-0006, ADR-0026)
         # The licence classifier only checks the dependencies and writes the release's notices (ADR-0020).
         licenseclassifier-only-in-licenses:
           files: ["$all", "!${base-path}/internal/licenses/**"]
