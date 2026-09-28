@@ -1,7 +1,8 @@
 # ADR-0007: Security baseline: PKI, mTLS, ACL, client introduction
 
 - **Status:** Accepted; the `access.api` default was decided on 2026-09-25 (see below); combined nodes get both
-  certificate names ([ADR-0019](0019-combined-server-client-role.md))
+  certificate names ([ADR-0019](0019-combined-server-client-role.md)); amended by
+  [ADR-0024](0024-cluster-pki-storage-and-certificates.md) (the active signer, the CA's validity, certificate details)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0008](0008-node-credential-delivery.md), [architecture §9](../architecture.md#9-security)

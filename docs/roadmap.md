@@ -30,7 +30,7 @@ and, from M2 on, in the E2E suite on Vultr.
 ## Maintainer decisions
 
 These come from [architecture §18](architecture.md#18-open-questions). The first six were decided on 2026-09-25, and
-the seventh on 2026-09-28.
+the seventh and the eighth on 2026-09-28.
 
 | # | Question | Decision |
 |---|---|---|
@@ -41,6 +41,7 @@ the seventh on 2026-09-28.
 | 5 | Consul and Vault | out of v1 |
 | 6 | Licence of tent | Apache-2.0 |
 | 7 | A cluster's provider and region | never change; a cluster moves by creating a new one |
+| 8 | CA validity | 10 years, until CA rotation exists |
 
 New questions for the maintainer are issues with the `decision` label.
 

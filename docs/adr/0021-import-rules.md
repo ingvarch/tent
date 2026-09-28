@@ -1,6 +1,7 @@
 # ADR-0021: Import rules that list the allowed importers
 
-- **Status:** Accepted
+- **Status:** Accepted; extended by [ADR-0025](0025-stdlib-only-helper-packages.md) (standard-library-only helper
+  packages)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0004](0004-layered-architecture.md), [ADR-0006](0006-two-binaries-and-nodeconfig.md),
