@@ -1,6 +1,7 @@
 # ADR-0006: Two binaries and a versioned NodeConfig contract
 
-- **Status:** Accepted
+- **Status:** Accepted; extended by [ADR-0026](0026-channels-and-release-assets.md) (how the CLI checks Nomad, the
+  CNI plugins and tent-node, and which builds count as development builds)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md), [ADR-0008](0008-node-credential-delivery.md),

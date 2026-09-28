@@ -29,7 +29,13 @@ Providers, in order:
   primitives (M1.4), and `tent update cluster`, `tent delete cluster` and `create --yes` (M1.5,
   `docs/architecture.md` §13). The nodes are empty machines without Nomad. The exit criteria were met in the
   integration tests (`internal/app/integration_test.go`, `interrupt_test.go`) and on a real Vultr account.
-- Next: M2 Nomad bootstrap. See `docs/roadmap.md`.
+- M2 Nomad bootstrap is in progress, in parts M2.1 to M2.9 (`docs/roadmap.md`).
+  - M2.1 added the cluster PKI and secrets (`internal/pki`, ADR-0024): `update` makes the CA, the gossip key and the
+    ACL bootstrap secret once and keeps them in the state store; `delete` removes them.
+  - M2.2 added the release channels and assets (`internal/channels`, `internal/assets`, ADR-0026): the embedded
+    `stable` channel, the Nomad version pin in `cluster.completed.yaml`, and Nomad, CNI and tent-node downloads
+    verified by signature or sha256. Nothing downloads on nodes yet.
+  - Next: M2.3 NodeConfig.
 
 ## Read before changing anything
 
@@ -61,6 +67,11 @@ Providers, in order:
   - `internal/pki` imports only the standard library, `internal/uuid` and `api/v1alpha1`; `internal/uuid`,
     `internal/english` and `internal/secrettest` import only the standard library. Their tests are exempt (ADR-0025).
   - Only tests import `internal/secrettest`.
+  - Only `internal/assets` imports `github.com/ProtonMail/go-crypto`, tests included (ADR-0026).
+  - `internal/nodeup`, `internal/nodeconfig` and `cmd/tent-node`, tests included, import neither `internal/assets`
+    nor `internal/channels`; tent-node gets its assets in NodeConfig (ADR-0026).
+  - `internal/channels` imports only the standard library, `sigs.k8s.io/yaml`, `sigs.k8s.io/json` and
+    `golang.org/x/mod/semver`; its tests are exempt (ADR-0026).
 - **Visibility.** Everything is under `internal/` except the public API types in `api/`.
 - **Weakest primitives.** Core mechanisms assume the weakest cloud primitives: non-unique names, no fixed IPs, no
   graceful shutdown. Richer primitives are optimizations behind `Capabilities` (ADR-0015 to ADR-0017).

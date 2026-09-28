@@ -30,7 +30,7 @@ and, from M2 on, in the E2E suite on Vultr.
 ## Maintainer decisions
 
 These come from [architecture §18](architecture.md#18-open-questions). The first six were decided on 2026-09-25, and
-the seventh and the eighth on 2026-09-28.
+the seventh to the eleventh on 2026-09-28.
 
 | # | Question | Decision |
 |---|---|---|
@@ -42,6 +42,9 @@ the seventh and the eighth on 2026-09-28.
 | 6 | Licence of tent | Apache-2.0 |
 | 7 | A cluster's provider and region | never change; a cluster moves by creating a new one |
 | 8 | CA validity | 10 years, until CA rotation exists |
+| 9 | Nomad's sha256s | checked at run time against the signed `SHA256SUMS`, with HashiCorp's key embedded in tent ([ADR-0026](adr/0026-channels-and-release-assets.md)) |
+| 10 | Nomad version of a spec without one | the channel's recommended one, pinned in `cluster.completed.yaml` by the first `update`; any release from the channel's minimum up to the next major is allowed, and untested ones get a warning |
+| 11 | What a channel holds | Nomad and the CNI plugins only; images stay in the provider's table and the API default |
 
 New questions for the maintainer are issues with the `decision` label.
 

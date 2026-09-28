@@ -1,7 +1,9 @@
 # ADR-0011: Nomad-only scope for v1 and licensing boundaries
 
 - **Status:** Accepted. The maintainer confirmed on 2026-09-25 that Consul and Vault are out of v1 and that tent is
-  licensed under Apache-2.0.
+  licensed under Apache-2.0. Extended by [ADR-0026](0026-channels-and-release-assets.md): a channel allows any
+  Nomad release from its minimum up to the next major version, and its tested versions only decide whether tent
+  warns.
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0006](0006-two-binaries-and-nodeconfig.md), [ADR-0013](0013-technology-stack.md),
