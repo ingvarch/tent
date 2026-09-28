@@ -9,8 +9,8 @@ import (
 )
 
 // Provider is a cloud that tent provisions clusters on. The core reaches a cloud only through it. It has the methods
-// that checking specs and building or deleting a cluster's infrastructure need; the methods for nodes, server
-// discovery, user data and capabilities join it with the code that first uses them.
+// that checking specs, building or deleting a cluster's infrastructure and managing its machines need; the methods
+// for server discovery, user data and capabilities join it with the code that first uses them.
 type Provider interface {
 	// Name returns the provider's name as specs give it, such as vultr.
 	Name() string
@@ -26,4 +26,6 @@ type Provider interface {
 	// Inventory lists every object the cluster owns in the cloud. Tasks read it through the provider's own snapshot
 	// type.
 	Inventory(ctx context.Context, cluster string) (engine.Snapshot, error)
+	// Nodes returns the primitives that list, create, stop and delete machines and scrub their user data.
+	Nodes() Nodes
 }

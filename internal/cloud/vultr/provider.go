@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"time"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/cloud"
@@ -54,11 +55,12 @@ func firewallGroupKey(cluster, role string) engine.Key {
 	return engine.Key{Kind: engineKindFirewallGroup, Name: cluster + "-" + firewallGroupNames[role]}
 }
 
-// Provider provisions a cluster's infrastructure on Vultr. It reaches Vultr only through an API.
+// Provider provisions a cluster's infrastructure and its machines on Vultr. It reaches Vultr only through an API.
 type Provider struct {
-	api  API
-	log  *slog.Logger
-	opID func() string // returns a new operation id for a create
+	api       API
+	log       *slog.Logger
+	opID      func() string // returns a new operation id for a create
+	pollEvery time.Duration // the wait between two reads of an instance that is not ready yet
 }
 
 var _ cloud.Provider = (*Provider)(nil)
@@ -81,9 +83,18 @@ func withOpIDs(next func() string) ProviderOption {
 	return func(p *Provider) { p.opID = next }
 }
 
+// pollInterval is how long the provider waits between two reads of an instance that is not ready yet.
+const pollInterval = 5 * time.Second
+
+// withPollInterval makes the provider wait d between two reads of an instance that is not ready yet. The default is
+// pollInterval.
+func withPollInterval(d time.Duration) ProviderOption {
+	return func(p *Provider) { p.pollEvery = d }
+}
+
 // New returns a provider that calls Vultr through api.
 func New(api API, opts ...ProviderOption) *Provider {
-	p := &Provider{api: api, log: slog.Default(), opID: newOpID}
+	p := &Provider{api: api, log: slog.Default(), opID: newOpID, pollEvery: pollInterval}
 	for _, opt := range opts {
 		opt(p)
 	}
@@ -115,11 +126,14 @@ func onVultr(m *model.Cluster) error {
 	return nil
 }
 
+// Nodes returns the provider itself: its List, Create, Stop, Delete and ScrubUserData are the machine primitives.
+func (p *Provider) Nodes() cloud.Nodes { return p }
+
 // InfraKinds returns the kinds of the objects that the tasks of BuildInfra manage: firewall groups, VPCs and SSH
 // keys, in the order to delete them.
 func (p *Provider) InfraKinds() []engine.Kind {
 	deleters := map[string]engine.Deleter{
-		engineKindFirewallGroup: &firewallTask{api: p.api},
+		engineKindFirewallGroup: &firewallTask{api: p.api, log: p.log},
 		engineKindVPC:           &vpcTask{api: p.api},
 		engineKindSSHKey:        &sshKeyTask{api: p.api},
 	}

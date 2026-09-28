@@ -1,11 +1,15 @@
 package vultr_test
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +18,7 @@ import (
 	"github.com/vultr/govultr/v3"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
+	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/cloud/vultr"
 	"github.com/ingvarch/tent/internal/cloud/vultr/vultrfake"
 	"github.com/ingvarch/tent/internal/engine"
@@ -110,7 +115,8 @@ func firewallTasks(t *testing.T, x *fixture, c *v1alpha1.Cluster, groups []*v1al
 }
 
 // firewallGroup is a firewall group as the tests check it: its description and its rules, each as
-// "<ip_type> <protocol> <subnet>/<subnet_size>", then the port and "source=<source>" when the rule has them.
+// "<ip_type> <protocol> <subnet>/<subnet_size>", then the port when the rule has one and "source=<source>" when it has
+// a source other than its own subnet.
 type firewallGroup struct {
 	Description string
 	Rules       []string
@@ -137,11 +143,12 @@ func wantFirewallGroups(t *testing.T, f *vultrfake.Fake, want ...firewallGroup) 
 func ruleTexts(rules []govultr.FirewallRule) []string {
 	texts := make([]string, 0, len(rules))
 	for _, r := range rules {
-		s := fmt.Sprintf("%s %s %s/%d", r.IPType, r.Protocol, r.Subnet, r.SubnetSize)
+		subnet := fmt.Sprintf("%s/%d", r.Subnet, r.SubnetSize)
+		s := r.IPType + " " + r.Protocol + " " + subnet
 		if r.Port != "" {
 			s += " " + r.Port
 		}
-		if r.Source != "" {
+		if r.Source != "" && r.Source != subnet { // the fake lists a rule without a source with its subnet
 			s += " source=" + r.Source
 		}
 		texts = append(texts, s)
@@ -326,8 +333,11 @@ func TestFirewallTaskDeletesRulesItDoesNotWant(t *testing.T) {
 		r.ID = id
 		return r
 	}
-	fromCloudflare := ruleOf(t, "v4 tcp 203.0.113.7/32 22")
-	fromCloudflare.Source = "cloudflare"
+	withSource := func(text, source string) govultr.FirewallRule {
+		r := ruleOf(t, text)
+		r.Source = source
+		return r
+	}
 	for _, tc := range []struct {
 		name    string
 		rules   []govultr.FirewallRule // the group's rules in Vultr, in the order Vultr lists them
@@ -341,7 +351,8 @@ func TestFirewallTaskDeletesRulesItDoesNotWant(t *testing.T) {
 			deleted: []string{"firewall-1/5"},
 		},
 		{
-			// The copy with the lowest ID stays, whatever the order of the list.
+			// Vultr refuses a second copy of a rule, so only seeding makes one here. The copy with the lowest ID
+			// stays, whatever the order of the list.
 			name: "a second copy of a wanted rule",
 			rules: []govultr.FirewallRule{
 				withID(ruleOf(t, "v4 icmp 0.0.0.0/0"), 2), withID(ruleOf(t, "v4 tcp 0.0.0.0/0 4646"), 3),
@@ -364,9 +375,26 @@ func TestFirewallTaskDeletesRulesItDoesNotWant(t *testing.T) {
 			// A rule with a source opens the port to that source only, such as Cloudflare's addresses.
 			name: "a wanted rule with a source",
 			rules: append(rulesOf(t, "v4 icmp 0.0.0.0/0", "v4 tcp 0.0.0.0/0 4646", "v6 icmp ::/0"),
-				fromCloudflare),
+				withSource("v4 tcp 203.0.113.7/32 22", "cloudflare")),
 			diff: "    + rule: v4 tcp 203.0.113.7/32 22\n" +
 				"    - rule: v4 tcp 203.0.113.7/32 22 source=cloudflare\n",
+			deleted: []string{"firewall-1/4"},
+		},
+		{
+			name: "a wanted rule with a load balancer as its source",
+			rules: append(rulesOf(t, "v4 icmp 0.0.0.0/0", "v4 tcp 0.0.0.0/0 4646", "v6 icmp ::/0"),
+				withSource("v4 tcp 203.0.113.7/32 22", "cb676a46-66fd-4dfb-b839-443f2e6c0b60")),
+			diff: "    + rule: v4 tcp 203.0.113.7/32 22\n" +
+				"    - rule: v4 tcp 203.0.113.7/32 22 source=cb676a46-66fd-4dfb-b839-443f2e6c0b60\n",
+			deleted: []string{"firewall-1/4"},
+		},
+		{
+			// Only a source equal to the rule's own subnet is no source.
+			name: "a wanted rule with another network as its source",
+			rules: append(rulesOf(t, "v4 icmp 0.0.0.0/0", "v4 tcp 0.0.0.0/0 4646", "v6 icmp ::/0"),
+				withSource("v4 tcp 203.0.113.7/32 22", "203.0.113.0/24")),
+			diff: "    + rule: v4 tcp 203.0.113.7/32 22\n" +
+				"    - rule: v4 tcp 203.0.113.7/32 22 source=203.0.113.0/24\n",
 			deleted: []string{"firewall-1/4"},
 		},
 	} {
@@ -470,17 +498,58 @@ func TestFirewallTaskReadsRulesAsVultrWritesThem(t *testing.T) {
 	x := newFirewallFixture(t, exampleCluster(), combinedGroups())
 	g := seedServersGroup(t, x.f,
 		govultr.FirewallRule{IPType: "V4", Protocol: "ICMP", Subnet: "0.0.0.0", Port: "0"},
-		govultr.FirewallRule{IPType: "v4", Protocol: "TCP", Subnet: "0.0.0.0", Port: "4646"},
+		// A source that is the rule's own subnet, in any of its forms, is no source.
+		govultr.FirewallRule{IPType: "v4", Protocol: "TCP", Subnet: "0.0.0.0", Port: "4646", Source: "0.0.0.0/0"},
 		// A range of one port is that port.
 		govultr.FirewallRule{IPType: "v4", Protocol: "tcp", Subnet: "203.0.113.7", SubnetSize: 32, Port: "22:22"},
-		govultr.FirewallRule{IPType: "v6", Protocol: "icmp", Subnet: "0:0:0:0:0:0:0:0"},
+		govultr.FirewallRule{IPType: "v6", Protocol: "icmp", Subnet: "0:0:0:0:0:0:0:0", Source: "::/0"},
 	)
 	x.wantAdopted(t, g.ID, "CreateFirewallGroup")
-	for _, call := range []string{"CreateFirewallRule", "DeleteFirewallRule"} {
-		if got := countCalls(x.f, call); got != 0 {
-			t.Errorf("%d %s calls, want none", got, call)
+	wantNoRuleCalls(t, x.f)
+}
+
+// wantNoRuleCalls checks that no CreateFirewallRule or DeleteFirewallRule call reached f.
+func wantNoRuleCalls(t *testing.T, f *vultrfake.Fake) {
+	t.Helper()
+	if calls := ruleCalls(f); len(calls) != 0 {
+		t.Errorf("rule calls %v, want none", calls)
+	}
+}
+
+// listedRules are the rules of the example cluster's servers as Vultr lists them after tent created them: each has
+// its own subnet as its source, and a type, which govultr does not read.
+const listedRules = `[
+  {"id": 1, "type": "v4", "ip_type": "v4", "action": "accept", "protocol": "tcp", "port": "22",
+   "subnet": "203.0.113.7", "subnet_size": 32, "source": "203.0.113.7/32", "notes": "", "direction": "in",
+   "loadbalancer_id": ""},
+  {"id": 3, "type": "v4", "ip_type": "v4", "action": "accept", "protocol": "icmp", "port": "",
+   "subnet": "0.0.0.0", "subnet_size": 0, "source": "0.0.0.0/0", "notes": "", "direction": "in",
+   "loadbalancer_id": ""},
+  {"id": 4, "type": "v6", "ip_type": "v6", "action": "accept", "protocol": "icmp", "port": "",
+   "subnet": "::", "subnet_size": 0, "source": "::/0", "notes": "", "direction": "in", "loadbalancer_id": ""},
+  {"id": 5, "type": "v4", "ip_type": "v4", "action": "accept", "protocol": "tcp", "port": "4646",
+   "subnet": "0.0.0.0", "subnet_size": 0, "source": "0.0.0.0/0", "notes": "", "direction": "in",
+   "loadbalancer_id": ""}
+]`
+
+func TestFirewallTaskAdoptsRulesAsVultrListsThem(t *testing.T) {
+	var rules []govultr.FirewallRule
+	if err := json.Unmarshal([]byte(listedRules), &rules); err != nil {
+		t.Fatalf("decode the listed rules: %v", err)
+	}
+	x := newFirewallFixture(t, exampleCluster(), exampleGroups())
+	seedServersGroup(t, x.f, rules...)
+	clients := x.f.AddFirewallGroup(t, govultr.FirewallGroup{Description: firewallDescription("client", "op-earlier")})
+	for _, r := range rules {
+		if r.Port != "4646" { // the Nomad API is open on the servers only
+			x.f.AddFirewallRule(t, clients.ID, r)
 		}
 	}
+	if got := planText(t, x); got != "No changes.\n" {
+		t.Errorf("the plan of the rules as Vultr lists them:\n%s\nwant no changes", got)
+	}
+	enginetest.ApplyReplan(t, x.tasks, x.kinds, x.inventory)
+	wantNoRuleCalls(t, x.f)
 }
 
 // sshFrom returns the example cluster with SSH open to n networks, 198.51.100.0/32 and so on.
@@ -626,6 +695,55 @@ func TestFirewallTaskRetries(t *testing.T) {
 	}
 }
 
+// laggingRules is a fake whose first list of a group's rules after a rule create without an answer does not show
+// the created rule yet, as a list that lags behind the create.
+type laggingRules struct {
+	*vultrfake.Fake
+	mu    sync.Mutex
+	stale map[string][]govultr.FirewallRule // by group id: the rules that the next list returns
+}
+
+func (a *laggingRules) CreateFirewallRule(ctx context.Context, groupID string, req *govultr.FirewallRuleReq) (
+	*govultr.FirewallRule, error) {
+	before := a.FirewallRules(groupID)
+	r, err := a.Fake.CreateFirewallRule(ctx, groupID, req)
+	if errors.Is(err, vultr.ErrUnavailable) {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		a.stale[groupID] = before
+	}
+	return r, err
+}
+
+func (a *laggingRules) ListFirewallRules(ctx context.Context, groupID string) ([]govultr.FirewallRule, error) {
+	rules, err := a.Fake.ListFirewallRules(ctx, groupID)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if stale, ok := a.stale[groupID]; ok && err == nil {
+		delete(a.stale, groupID)
+		return stale, nil
+	}
+	return rules, err
+}
+
+// TestFirewallTaskLostRuleCreateAndLaggingList checks that a retried create of a rule that exists counts as done:
+// Vultr refuses it as already defined.
+func TestFirewallTaskLostRuleCreateAndLaggingList(t *testing.T) {
+	x := newFixture()
+	x.p = opProvider(&laggingRules{Fake: x.f, stale: map[string][]govultr.FirewallRule{}})
+	x.tasks = firewallTasks(t, x, exampleCluster(), combinedGroups())
+	x.kinds = x.p.InfraKinds()
+	events := x.applyWithFaults(t, func(tb testing.TB) { x.f.LoseResponse(tb, "CreateFirewallRule", 1) })
+	if n := countEvents(events, engine.Retrying); n != 1 {
+		t.Errorf("the engine retried %d times, want once", n)
+	}
+	const icmp = "CreateFirewallRule firewall-1 v4 icmp 0.0.0.0/0"
+	if calls := ruleCalls(x.f); len(calls) < 2 || !slices.Equal(calls[:2], []string{icmp, icmp}) {
+		t.Errorf("the rule calls are %v, want the ICMP rule's create twice first", calls)
+	}
+	wantFirewallGroups(t, x.f, firewallGroup{Description: firewallDescription("server", "op-2"), Rules: serverRules})
+}
+
 func TestFirewallTaskOutputs(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -663,6 +781,45 @@ func TestFirewallTaskDeleteOfAGoneRule(t *testing.T) {
 	}
 }
 
+func TestFirewallTaskRuleAlreadyDefined(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		message string // Vultr's answer to the first rule create, with the status 400
+		creates int    // the CreateFirewallRule calls
+		want    string // the apply's error; empty for success
+	}{
+		// The rule exists, so the task goes on with the next one.
+		{name: "Vultr's answer as it came", message: "This rule is already defined ", creates: 4},
+		{name: "in another case", message: "this rule is ALREADY defined", creates: 4},
+		{
+			name: "another answer", message: "Invalid port.", creates: 1,
+			want: "vultr.FirewallGroup/prod-servers: add rule v4 icmp 0.0.0.0/0: " +
+				"vultr: POST /v2/firewalls/firewall-1/rules: 400 Bad Request: Invalid port.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			x := newFirewallFixture(t, exampleCluster(), combinedGroups())
+			events, err := x.applyInBubble(t, func(tb testing.TB) {
+				answer := vultr.NewAPIError(http.MethodPost, "/v2/firewalls/firewall-1/rules", http.StatusBadRequest,
+					tc.message, 0)
+				x.f.Fail(tb, "CreateFirewallRule", answer, 1)
+			})
+			switch {
+			case tc.want == "" && err != nil:
+				t.Errorf("apply: %v, want success", err)
+			case tc.want != "" && (err == nil || err.Error() != tc.want):
+				t.Errorf("apply error = %v, want %q", err, tc.want)
+			}
+			if n := countEvents(events, engine.Retrying); n != 0 {
+				t.Errorf("the engine retried %d times, want never", n)
+			}
+			if got := countCalls(x.f, "CreateFirewallRule"); got != tc.creates {
+				t.Errorf("%d CreateFirewallRule calls, want %d", got, tc.creates)
+			}
+		})
+	}
+}
+
 func TestFirewallTaskGroupHoldsItsMostRules(t *testing.T) {
 	x := newFirewallFixture(t, exampleCluster(), combinedGroups())
 	events, err := x.applyInBubble(t, func(tb testing.TB) {
@@ -686,11 +843,12 @@ func TestFirewallTaskGroupHoldsItsMostRules(t *testing.T) {
 	}
 }
 
-func TestFirewallGroupDeleteWhileInstancesAttached(t *testing.T) {
+func TestFirewallGroupDeleteInUse(t *testing.T) {
 	x := newFixture()
 	x.kinds = x.p.InfraKinds()
 	g := seedServersGroup(t, x.f, rulesOf(t, serverRules...)...)
-	// What Vultr answers here is not verified; any answer that matches vultr.ErrInUse is retried.
+	// Vultr deletes a group that instances use, so this answer is not one it is known to give; any answer that
+	// matches vultr.ErrInUse is retried.
 	attached := vultr.NewAPIError(http.MethodDelete, "/v2/firewalls/"+g.ID, http.StatusConflict,
 		"Firewall group has attached instances", 0)
 	events := x.applyWithFaults(t, func(tb testing.TB) { x.f.Fail(tb, "DeleteFirewallGroup", attached, 2) })
@@ -716,9 +874,269 @@ func TestFirewallGroupDeleteWhileInstancesAttached(t *testing.T) {
 func TestFirewallGroupDeleteOfAGoneGroup(t *testing.T) {
 	f := vultrfake.New()
 	p, _ := newProvider(f)
+	env := &engine.Env{Snapshot: inventory(t, p)}
+	before := len(f.Calls())
 	obj := engine.Object{Key: serversKey, ID: "firewall-9"}
-	if err := deleterOf(t, p, "vultr.FirewallGroup").Delete(t.Context(), &engine.Env{}, obj); err != nil {
+	if err := deleterOf(t, p, "vultr.FirewallGroup").Delete(t.Context(), env, obj); err != nil {
 		t.Errorf("Delete of a firewall group that is gone: %v, want success", err)
 	}
-	wantCalls(t, f, vultrfake.Call{Name: "DeleteFirewallGroup", Arg: "firewall-9"})
+	wantCallsSince(t, f, before, vultrfake.Call{Name: "ListInstances", Arg: "tent/cluster=prod"},
+		vultrfake.Call{Name: "DeleteFirewallGroup", Arg: "firewall-9"})
+}
+
+// seedNode stores a node of cluster prod with the label name in the firewall group groupID, without a call, and
+// returns it.
+func seedNode(t *testing.T, f *vultrfake.Fake, name, groupID string) govultr.Instance {
+	t.Helper()
+	return f.AddInstance(t, govultr.Instance{
+		Label: name, FirewallGroupID: groupID,
+		Tags: []string{"tent/cluster=prod", "tent/nodegroup=servers", "tent/role=server"},
+	})
+}
+
+// wantPlannedChanges plans the fixture's tasks against a fresh inventory and checks the plan's changes.
+func wantPlannedChanges(t *testing.T, x *fixture, want ...engine.PlannedChange) {
+	t.Helper()
+	p, err := x.plan(t)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if diff := cmp.Diff(want, p.Changes()); diff != "" {
+		t.Errorf("changes (-want +got):\n%s", diff)
+	}
+}
+
+// TestFirewallGroupDeleteReportsADuplicateThatNodesUse checks that tent never deletes a firewall group that a node
+// uses: Vultr would delete it and leave the node without a firewall, and its image allows root login with a password.
+// A duplicate that nodes use is reported with a warning, the apply goes on, and every run reports it again until
+// those nodes are replaced.
+func TestFirewallGroupDeleteReportsADuplicateThatNodesUse(t *testing.T) {
+	x := newFirewallFixture(t, exampleCluster(), combinedGroups())
+	// Two copies of the servers' group, each with a node: the older one is kept, and the newer one is a duplicate.
+	dup := x.f.AddFirewallGroup(t, govultr.FirewallGroup{
+		Description: firewallDescription("server", "op-b"), DateCreated: sept25,
+	})
+	kept := x.f.AddFirewallGroup(t, govultr.FirewallGroup{
+		Description: firewallDescription("server", "op-a"), DateCreated: sept20,
+	})
+	for _, r := range rulesOf(t, serverRules...) {
+		x.f.AddFirewallRule(t, kept.ID, r)
+	}
+	node := seedNode(t, x.f, "prod-servers-0", dup.ID)
+	other := seedNode(t, x.f, "prod-servers-1", kept.ID)
+	deleteDup := engine.PlannedChange{
+		Key: serversKey, ID: dup.ID, Change: engine.Change{Action: engine.Delete, Reason: "duplicate"},
+	}
+	wantPlannedChanges(t, x, deleteDup)
+
+	events, err := x.applyInBubble(t, func(testing.TB) {})
+
+	if err != nil {
+		t.Errorf("apply: %v, want success", err)
+	}
+	if n := countEvents(events, engine.Retrying); n != 0 {
+		t.Errorf("the engine retried %d times, want never", n)
+	}
+	if n := countCalls(x.f, "DeleteFirewallGroup"); n != 0 {
+		t.Errorf("%d DeleteFirewallGroup calls, want none", n)
+	}
+	wantFirewallGroups(t, x.f, firewallGroup{Description: dup.Description},
+		firewallGroup{Description: kept.Description, Rules: serverRules})
+	if got := instanceOf(t, x.f, node.ID).FirewallGroupID; got != dup.ID {
+		t.Errorf("the node's firewall group is %q, want %q", got, dup.ID)
+	}
+	want := []map[string]string{{
+		"level": "WARN", "msg": "keeping a duplicate Vultr firewall group that nodes use; replace those nodes, " +
+			"and a later run deletes the group",
+		"cluster": "prod", "group": "prod-servers", "id": dup.ID, "nodes": "prod-servers-0 (instance-1)",
+	}}
+	if diff := cmp.Diff(want, logRecords(t, x.log)); diff != "" {
+		t.Errorf("log (-want +got):\n%s", diff)
+	}
+	// The next run plans the delete again.
+	wantPlannedChanges(t, x, deleteDup)
+
+	// Once the node is gone, the same prune deletes the duplicate, and the other node keeps its group.
+	if err := x.p.Delete(t.Context(), cloud.Instance{ID: node.ID, Name: node.Label}); err != nil {
+		t.Fatalf("Delete %s: %v", node.ID, err)
+	}
+	x.applyWithFaults(t, func(testing.TB) {})
+	wantFirewallGroups(t, x.f, firewallGroup{Description: kept.Description, Rules: serverRules})
+	if got := instanceOf(t, x.f, other.ID).FirewallGroupID; got != kept.ID {
+		t.Errorf("the other node's firewall group is %q, want %q", got, kept.ID)
+	}
+}
+
+// TestFirewallGroupDeleteRefusesAnUnwantedGroupThatNodesUse checks that the delete of a firewall group that the
+// cluster no longer wants fails while nodes use it, such as the clients' group while the last clients still run.
+// The engine does not retry the refusal: the nodes must go first.
+func TestFirewallGroupDeleteRefusesAnUnwantedGroupThatNodesUse(t *testing.T) {
+	x := newFirewallFixture(t, exampleCluster(), combinedGroups())
+	servers := seedServersGroup(t, x.f, rulesOf(t, serverRules...)...)
+	clients := x.f.AddFirewallGroup(t, govultr.FirewallGroup{Description: firewallDescription("client", "op-a")})
+	node := seedNode(t, x.f, "prod-workers-0", clients.ID)
+	wantPlannedChanges(t, x, engine.PlannedChange{
+		Key: clientsKey, ID: clients.ID, Change: engine.Change{Action: engine.Delete},
+	})
+
+	events, err := x.applyInBubble(t, func(testing.TB) {})
+
+	const wantErr = "vultr.FirewallGroup/prod-clients (ID firewall-2): firewall group prod-clients (ID firewall-2) " +
+		"still protects nodes prod-workers-0 (instance-1), and tent does not delete a firewall group that nodes " +
+		"use; delete those nodes first"
+	if errText(err) != wantErr {
+		t.Errorf("apply error = %v, want %q", err, wantErr)
+	}
+	if n := countEvents(events, engine.Retrying); n != 0 {
+		t.Errorf("the engine retried %d times, want never", n)
+	}
+	if n := countCalls(x.f, "DeleteFirewallGroup"); n != 0 {
+		t.Errorf("%d DeleteFirewallGroup calls, want none", n)
+	}
+	wantFirewallGroups(t, x.f, firewallGroup{Description: servers.Description, Rules: serverRules},
+		firewallGroup{Description: clients.Description})
+	if got := instanceOf(t, x.f, node.ID).FirewallGroupID; got != clients.ID {
+		t.Errorf("the node's firewall group is %q, want %q", got, clients.ID)
+	}
+	if got := logRecords(t, x.log); len(got) != 0 {
+		t.Errorf("log = %v, want none", got)
+	}
+}
+
+func TestFirewallGroupDeleteNamesEveryNodeInTheGroup(t *testing.T) {
+	f := vultrfake.New()
+	p, _ := newProvider(f)
+	g := seedServersGroup(t, f)
+	clients := f.AddFirewallGroup(t, govultr.FirewallGroup{Description: firewallDescription("client", "op-earlier")})
+	seedNode(t, f, "prod-servers-1", g.ID)
+	seedNode(t, f, "prod-workers-0", clients.ID)
+	seedNode(t, f, "prod-servers-0", g.ID)
+	// A node whose label was changed in the console: its name is its hostname.
+	f.AddInstance(t, govultr.Instance{Hostname: "prod-servers-2", Label: "db primary", FirewallGroupID: g.ID,
+		Tags: []string{"tent/cluster=prod", "tent/nodegroup=servers", "tent/role=server"}})
+	// An instance of another cluster in the group: tent looks for the cluster's nodes only.
+	f.AddInstance(t, govultr.Instance{Label: "staging-servers-0", FirewallGroupID: g.ID,
+		Tags: []string{"tent/cluster=staging"}})
+	env := &engine.Env{Snapshot: inventory(t, p)}
+
+	err := deleterOf(t, p, "vultr.FirewallGroup").Delete(t.Context(), env, engine.Object{Key: serversKey, ID: g.ID})
+
+	// By name.
+	const want = "firewall group prod-servers (ID firewall-1) still protects nodes prod-servers-0 (instance-3), " +
+		"prod-servers-1 (instance-1), prod-servers-2 (instance-4), and tent does not delete a firewall group that " +
+		"nodes use; delete those nodes first"
+	if errText(err) != want {
+		t.Errorf("Delete = %v, want %q", err, want)
+	}
+}
+
+// TestFirewallGroupDeleteSeesNodesThatListSkips checks that a node whose tent tags do not decode, which Nodes.List
+// skips, still keeps its firewall group: delete cluster stops at the group and names the node.
+func TestFirewallGroupDeleteSeesNodesThatListSkips(t *testing.T) {
+	f := vultrfake.New()
+	p, _ := newProvider(f)
+	g := seedServersGroup(t, f)
+	f.AddInstance(t, govultr.Instance{ID: "upper", Hostname: "prod-servers-0", FirewallGroupID: g.ID,
+		Tags: []string{"tent/cluster=PROD", "tent/nodegroup=servers", "tent/role=server"}})
+	if nodes, err := p.List(t.Context(), "prod"); err != nil || len(nodes) != 0 {
+		t.Fatalf("List = %+v, %v; want no node", nodes, err)
+	}
+	env := &engine.Env{Snapshot: inventory(t, p)}
+
+	err := deleterOf(t, p, "vultr.FirewallGroup").Delete(t.Context(), env, engine.Object{Key: serversKey, ID: g.ID})
+
+	const want = "firewall group prod-servers (ID firewall-1) still protects nodes prod-servers-0 (upper), and tent " +
+		"does not delete a firewall group that nodes use; delete those nodes first"
+	if errText(err) != want {
+		t.Errorf("Delete = %v, want %q", err, want)
+	}
+	if n := countCalls(f, "DeleteFirewallGroup"); n != 0 {
+		t.Errorf("%d DeleteFirewallGroup calls, want none", n)
+	}
+}
+
+// TestFirewallGroupDeleteNodeListFails checks which failures of the node list the engine retries: a rate limit, a 5xx
+// and no answer, but not a refused API key.
+func TestFirewallGroupDeleteNodeListFails(t *testing.T) {
+	fail := func(err error) func(tb testing.TB, f *vultrfake.Fake) {
+		return func(tb testing.TB, f *vultrfake.Fake) { f.Fail(tb, "ListInstances", err, 1) }
+	}
+	answer := func(status int, msg string) error {
+		return vultr.NewAPIError(http.MethodGet, "/v2/instances", status, msg, 0)
+	}
+	for _, tc := range []struct {
+		name  string
+		fault func(tb testing.TB, f *vultrfake.Fake)
+		want  string // the apply's error; "" when the engine retries and the delete succeeds
+	}{
+		{"429", func(tb testing.TB, f *vultrfake.Fake) { f.Throttle(tb, "ListInstances", time.Second, 1) }, ""},
+		{"503", fail(answer(http.StatusServiceUnavailable, "Try again later")), ""},
+		{"no answer", fail(vultr.NewNoAnswerError(http.MethodGet, "/v2/instances", nil)), ""},
+		{"401", fail(answer(http.StatusUnauthorized, "Invalid API token.")),
+			"401 Unauthorized: Invalid API token."},
+		{"403", fail(answer(http.StatusForbidden, "Unauthorized IP address")),
+			"403 Forbidden: Unauthorized IP address"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			x := newFixture()
+			x.kinds = x.p.InfraKinds()
+			seedServersGroup(t, x.f, rulesOf(t, serverRules...)...)
+			if tc.want == "" {
+				events := x.applyWithFaults(t, func(tb testing.TB) { tc.fault(tb, x.f) })
+				if n := countEvents(events, engine.Retrying); n != 1 {
+					t.Errorf("the engine retried %d times, want once", n)
+				}
+				wantFirewallGroups(t, x.f)
+				return
+			}
+			events, err := x.applyInBubble(t, func(tb testing.TB) { tc.fault(tb, x.f) })
+			want := "vultr.FirewallGroup/prod-servers (ID firewall-1): firewall group prod-servers (ID firewall-1): " +
+				"list the nodes of cluster prod: vultr: GET /v2/instances: " + tc.want
+			if errText(err) != want {
+				t.Errorf("apply error = %v, want %q", err, want)
+			}
+			if n := countEvents(events, engine.Retrying); n != 0 {
+				t.Errorf("the engine retried %d times, want never", n)
+			}
+			wantFirewallGroups(t, x.f, firewallGroup{Description: firewallDescription("server", "op-earlier"),
+				Rules: serverRules})
+		})
+	}
+}
+
+func TestFirewallGroupDeleteRetriesAFailedNodeList(t *testing.T) {
+	x := newFixture()
+	x.kinds = x.p.InfraKinds()
+	seedServersGroup(t, x.f, rulesOf(t, serverRules...)...)
+	events := x.applyWithFaults(t, func(tb testing.TB) {
+		x.f.Fail(tb, "ListInstances", vultr.NewAPIError(http.MethodGet, "/v2/instances",
+			http.StatusInternalServerError, "Internal error", 0), 1)
+	})
+	var retries []string
+	for _, e := range events {
+		if e.Type == engine.Retrying {
+			retries = append(retries, errText(e.Err))
+		}
+	}
+	want := []string{"firewall group prod-servers (ID firewall-1): list the nodes of cluster prod: " +
+		"vultr: GET /v2/instances: 500 Internal Server Error: Internal error"}
+	if diff := cmp.Diff(want, retries); diff != "" {
+		t.Errorf("the errors the engine retried after (-want +got):\n%s", diff)
+	}
+	wantFirewallGroups(t, x.f)
+}
+
+func TestFirewallGroupDeleteWithoutInventory(t *testing.T) {
+	f := vultrfake.New()
+	p, _ := newProvider(f)
+	obj := engine.Object{Key: serversKey, ID: "firewall-9"}
+
+	err := deleterOf(t, p, "vultr.FirewallGroup").Delete(t.Context(), &engine.Env{}, obj)
+
+	const want = "firewall group prod-servers (ID firewall-9): the snapshot names no cluster, so tent cannot tell " +
+		"which nodes use the group"
+	if errText(err) != want {
+		t.Errorf("Delete = %v, want %q", err, want)
+	}
+	wantCalls(t, f)
 }

@@ -85,6 +85,31 @@ var apiCalls = []apiCall{
 		_, err := a.ListOS(ctx)
 		return err
 	}},
+	{"ListInstances", "GET", "/v2/instances", func(ctx context.Context, a vultr.API) error {
+		_, err := a.ListInstances(ctx, "tent/cluster=prod")
+		return err
+	}},
+	{"GetInstance", "GET", "/v2/instances/instance-1", func(ctx context.Context, a vultr.API) error {
+		_, err := a.GetInstance(ctx, "instance-1")
+		return err
+	}},
+	{"CreateInstance", "POST", "/v2/instances", func(ctx context.Context, a vultr.API) error {
+		_, err := a.CreateInstance(ctx, &govultr.InstanceCreateReq{Region: "ams", Plan: "vc2-1c-1gb", OsID: 2284})
+		return err
+	}},
+	{"DeleteInstance", "DELETE", "/v2/instances/instance-1", func(ctx context.Context, a vultr.API) error {
+		return a.DeleteInstance(ctx, "instance-1")
+	}},
+	{"HaltInstance", "POST", "/v2/instances/instance-1/halt", func(ctx context.Context, a vultr.API) error {
+		return a.HaltInstance(ctx, "instance-1")
+	}},
+	{"UpdateInstance", "PATCH", "/v2/instances/instance-1", func(ctx context.Context, a vultr.API) error {
+		return a.UpdateInstance(ctx, "instance-1", &govultr.InstanceUpdateReq{UserData: "c3R1Ygo="})
+	}},
+	{"ListInstanceVPCs", "GET", "/v2/instances/instance-1/vpcs", func(ctx context.Context, a vultr.API) error {
+		_, err := a.ListInstanceVPCs(ctx, "instance-1")
+		return err
+	}},
 }
 
 func TestAPICallsCoverTheAPI(t *testing.T) {
@@ -102,8 +127,8 @@ func TestAPICallsCoverTheAPI(t *testing.T) {
 	}
 }
 
-// newSeeded returns a fake with the SSH key ssh-key-1, the VPC vpc-1, and the firewall group firewall-1 with the
-// rule 1.
+// newSeeded returns a fake with the SSH key ssh-key-1, the VPC vpc-1, the firewall group firewall-1 with the rule 1,
+// and the instance instance-1 with the tag tent/cluster=prod, which uses no VPC.
 func newSeeded(t *testing.T) *vultrfake.Fake {
 	t.Helper()
 	f := newFake()
@@ -111,6 +136,7 @@ func newSeeded(t *testing.T) *vultrfake.Fake {
 	f.AddVPC(t, govultr.VPC{Region: "ams"})
 	f.AddFirewallGroup(t, govultr.FirewallGroup{})
 	f.AddFirewallRule(t, "firewall-1", govultr.FirewallRule{IPType: "v4", Protocol: "icmp"})
+	f.AddInstance(t, govultr.Instance{Region: "ams", Tags: []string{"tent/cluster=prod"}})
 	return f
 }
 
@@ -129,10 +155,13 @@ func TestEveryCallTakesFaults(t *testing.T) {
 				"vultr: "+c.method+" "+c.path+": 429 Too Many Requests: Rate limit exceeded")
 			wantAPIError(t, c.call(ctx, f), vultr.ErrUnavailable,
 				"vultr: "+c.method+" "+c.path+": vultrfake: the answer was lost")
-			// The faults are used up. A delete finds its object gone: the call whose answer was lost deleted it.
+			// The faults are used up. A delete finds its object gone, and a rule create its rule defined: the call whose
+			// answer was lost carried it out.
 			err := c.call(ctx, f)
 			gone := strings.HasPrefix(c.name, "Delete") && errors.Is(err, vultr.ErrNotFound)
-			if err != nil && !gone {
+			defined := c.name == "CreateFirewallRule" && err != nil &&
+				strings.HasSuffix(err.Error(), ": This rule is already defined")
+			if err != nil && !gone && !defined {
 				t.Errorf("after the faults: %v, want success", err)
 			}
 			want := slices.Repeat([]string{c.name}, 4)

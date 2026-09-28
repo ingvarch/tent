@@ -9,6 +9,9 @@ import (
 // WithOpIDs makes the provider take its operation ids from next, for tests.
 var WithOpIDs = withOpIDs
 
+// WithPollInterval sets how long the provider waits between two reads of an instance that is not ready, for tests.
+var WithPollInterval = withPollInterval
+
 // Snapshot is the type of the snapshots that Inventory returns, for tests.
 type Snapshot = snapshot
 

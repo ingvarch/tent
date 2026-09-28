@@ -49,6 +49,21 @@ type API interface {
 	ListPlans(ctx context.Context, planType string) ([]govultr.Plan, error)
 	// ListOS returns every operating system image.
 	ListOS(ctx context.Context) ([]govultr.OS, error)
+	// ListInstances returns every instance with the tag, which Vultr matches exactly but in any case. The tag must not
+	// be empty.
+	ListInstances(ctx context.Context, tag string) ([]govultr.Instance, error)
+	// GetInstance returns an instance.
+	GetInstance(ctx context.Context, id string) (*govultr.Instance, error)
+	// CreateInstance creates an instance. The answer, and only it, holds the instance's root password.
+	CreateInstance(ctx context.Context, req *govultr.InstanceCreateReq) (*govultr.Instance, error)
+	// DeleteInstance destroys an instance at once, even a running one.
+	DeleteInstance(ctx context.Context, id string) error
+	// HaltInstance powers an instance off hard, without a shutdown. Halting an instance twice is harmless.
+	HaltInstance(ctx context.Context, id string) error
+	// UpdateInstance changes an instance. Vultr keeps its tags when req.Tags is nil.
+	UpdateInstance(ctx context.Context, id string, req *govultr.InstanceUpdateReq) error
+	// ListInstanceVPCs returns the VPCs an instance is attached to, each with the instance's address and MAC in it.
+	ListInstanceVPCs(ctx context.Context, id string) ([]govultr.VPCInfo, error)
 }
 
 // Client is the API over govultr. It sends its requests through the transport, which spaces them, gives each attempt
@@ -58,7 +73,7 @@ type API interface {
 // error matches the context's error too. A success that the client cannot read fails with an error that names the
 // request; for a POST it is an *APIError that matches ErrUnavailable, since the object may exist. A list answer
 // without Vultr's meta field is such a success. A call with an id in its path that is empty or holds anything but
-// ASCII letters, digits and "-" fails without sending a request.
+// ASCII letters, digits and "-" fails without sending a request, and so does ListInstances with an empty tag.
 type Client struct {
 	gv *govultr.Client
 }
@@ -187,7 +202,7 @@ func (c *Client) ListSSHKeys(ctx context.Context) ([]govultr.SSHKey, error) {
 
 // CreateSSHKey sends POST /v2/ssh-keys.
 func (c *Client) CreateSSHKey(ctx context.Context, req *govultr.SSHKeyReq) (*govultr.SSHKey, error) {
-	return create(ctx, req, c.gv.SSHKey.Create)
+	return object(ctx, req, c.gv.SSHKey.Create)
 }
 
 // DeleteSSHKey sends DELETE /v2/ssh-keys/{id}.
@@ -206,7 +221,7 @@ func (c *Client) ListVPCs(ctx context.Context) ([]govultr.VPC, error) {
 
 // CreateVPC sends POST /v2/vpcs.
 func (c *Client) CreateVPC(ctx context.Context, req *govultr.VPCReq) (*govultr.VPC, error) {
-	return create(ctx, req, c.gv.VPC.Create)
+	return object(ctx, req, c.gv.VPC.Create)
 }
 
 // DeleteVPC sends DELETE /v2/vpcs/{id}.
@@ -226,7 +241,7 @@ func (c *Client) ListFirewallGroups(ctx context.Context) ([]govultr.FirewallGrou
 // CreateFirewallGroup sends POST /v2/firewalls.
 func (c *Client) CreateFirewallGroup(ctx context.Context, req *govultr.FirewallGroupReq) (*govultr.FirewallGroup,
 	error) {
-	return create(ctx, req, c.gv.FirewallGroup.Create)
+	return object(ctx, req, c.gv.FirewallGroup.Create)
 }
 
 // DeleteFirewallGroup sends DELETE /v2/firewalls/{id}.
@@ -255,7 +270,7 @@ func (c *Client) CreateFirewallRule(ctx context.Context, groupID string, req *go
 	if err := CheckID("POST /v2/firewalls/{groupID}/rules", "groupID", groupID); err != nil {
 		return nil, err
 	}
-	return create(ctx, req, func(ctx context.Context, req *govultr.FirewallRuleReq) (*govultr.FirewallRule,
+	return object(ctx, req, func(ctx context.Context, req *govultr.FirewallRuleReq) (*govultr.FirewallRule,
 		*http.Response, error) {
 		return c.gv.FirewallRule.Create(ctx, groupID, req)
 	})
@@ -303,6 +318,75 @@ func (c *Client) ListOS(ctx context.Context) ([]govultr.OS, error) {
 	return list(ctx, c.gv.OS.List)
 }
 
+// ListInstances gets GET /v2/instances?tag={tag}, every page.
+func (c *Client) ListInstances(ctx context.Context, tag string) ([]govultr.Instance, error) {
+	if err := CheckTag(tag); err != nil {
+		return nil, err
+	}
+	return list(ctx, func(ctx context.Context, o *govultr.ListOptions) ([]govultr.Instance, *govultr.Meta,
+		*http.Response, error) {
+		opts := *o
+		opts.Tag = tag
+		return c.gv.Instance.List(ctx, &opts)
+	})
+}
+
+// GetInstance gets GET /v2/instances/{id}.
+func (c *Client) GetInstance(ctx context.Context, id string) (*govultr.Instance, error) {
+	if err := CheckID("GET /v2/instances/{id}", "id", id); err != nil {
+		return nil, err
+	}
+	return object(ctx, id, c.gv.Instance.Get)
+}
+
+// CreateInstance sends POST /v2/instances.
+func (c *Client) CreateInstance(ctx context.Context, req *govultr.InstanceCreateReq) (*govultr.Instance, error) {
+	return object(ctx, req, c.gv.Instance.Create)
+}
+
+// DeleteInstance sends DELETE /v2/instances/{id}.
+func (c *Client) DeleteInstance(ctx context.Context, id string) error {
+	if err := CheckID("DELETE /v2/instances/{id}", "id", id); err != nil {
+		return err
+	}
+	_, err := call(ctx, func(ctx context.Context) error { return c.gv.Instance.Delete(ctx, id) })
+	return err
+}
+
+// HaltInstance sends POST /v2/instances/{id}/halt. The POST has no body, so Go 1.26's HTTP/2 client may send it
+// again after the server resets the stream; a second halt of a stopped instance answers 204, so that is harmless.
+func (c *Client) HaltInstance(ctx context.Context, id string) error {
+	if err := CheckID("POST /v2/instances/{id}/halt", "id", id); err != nil {
+		return err
+	}
+	_, err := call(ctx, func(ctx context.Context) error { return c.gv.Instance.Halt(ctx, id) })
+	return err
+}
+
+// UpdateInstance sends PATCH /v2/instances/{id}. govultr sends "tags" and "ddos_protection" as null when they are
+// unset, and omits every other empty field, so an empty firewall group id, label or user data changes nothing.
+func (c *Client) UpdateInstance(ctx context.Context, id string, req *govultr.InstanceUpdateReq) error {
+	if err := CheckID("PATCH /v2/instances/{id}", "id", id); err != nil {
+		return err
+	}
+	_, err := call(ctx, func(ctx context.Context) error {
+		_, _, err := c.gv.Instance.Update(ctx, id, req)
+		return err
+	})
+	return err
+}
+
+// ListInstanceVPCs gets GET /v2/instances/{id}/vpcs, every page.
+func (c *Client) ListInstanceVPCs(ctx context.Context, id string) ([]govultr.VPCInfo, error) {
+	if err := CheckID("GET /v2/instances/{id}/vpcs", "id", id); err != nil {
+		return nil, err
+	}
+	return list(ctx, func(ctx context.Context, o *govultr.ListOptions) ([]govultr.VPCInfo, *govultr.Meta,
+		*http.Response, error) {
+		return c.gv.Instance.ListVPCInfo(ctx, id, o)
+	})
+}
+
 // idPattern matches an id that goes into a path as it is: Vultr's ids are UUIDs, and its regions are like ams.
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
 
@@ -315,6 +399,15 @@ func CheckID(route, name, id string) error {
 		return nil
 	}
 	return fmt.Errorf("vultr: %s: invalid %s %q", route, name, id)
+}
+
+// CheckTag fails when a tag to list instances by is empty, with the error the client gives for it: such a list would
+// hold every instance of the account.
+func CheckTag(tag string) error {
+	if tag != "" {
+		return nil
+	}
+	return errors.New(`vultr: GET /v2/instances: invalid tag ""`)
 }
 
 // CheckRuleID fails when a firewall rule id is not positive, with the error the client gives for such an id. route
@@ -364,9 +457,8 @@ func list[T any](ctx context.Context,
 	}
 }
 
-// create sends a create request with f and returns the object that the answer holds. It fails when the answer holds
-// none.
-func create[R, T any](ctx context.Context, req R, f func(context.Context, R) (*T, *http.Response, error)) (*T, error) {
+// object sends a request with f and returns the object that the answer holds. It fails when the answer holds none.
+func object[R, T any](ctx context.Context, req R, f func(context.Context, R) (*T, *http.Response, error)) (*T, error) {
 	var out *T
 	rec, err := call(ctx, func(ctx context.Context) (err error) {
 		out, _, err = f(ctx, req)
@@ -400,7 +492,9 @@ func call(ctx context.Context, f func(context.Context) error) (*callRecord, erro
 // callError turns the error of a govultr call into the client's:
 //   - the *APIError of the record when the call got an answer with an error status, or none;
 //   - an *APIError without a class for an answer that is neither a success nor an error, such as a redirect;
-//   - the error of unreadable for a success that govultr could not read;
+//   - the error of unreadable for a success that govultr could not read. For a success status that govultr does not
+//     read at all, such as 207, it names the status: govultr's error is then the body, which may hold a secret, such
+//     as the root password in the answer to an instance create;
 //   - err with "no request sent" when govultr failed before sending one.
 func callError(rec *callRecord, err error) error {
 	if rec.method == "" {
@@ -412,7 +506,21 @@ func callError(rec *callRecord, err error) error {
 	if rec.status < http.StatusOK || rec.status >= http.StatusMultipleChoices {
 		return NewAPIError(rec.method, rec.path, rec.status, message(rec.body), 0)
 	}
+	if !govultrReads(rec.status) {
+		return unreadable(rec, fmt.Errorf("a success with the status %d, which the client does not read", rec.status))
+	}
 	return unreadable(rec, err)
+}
+
+// govultrReads reports whether govultr reads a success with status. To any other success it gives the body as its
+// error.
+func govultrReads(status int) bool {
+	switch status {
+	case http.StatusOK, http.StatusCreated, http.StatusAccepted, http.StatusNonAuthoritativeInfo,
+		http.StatusNoContent, http.StatusResetContent, http.StatusPartialContent:
+		return true
+	}
+	return false
 }
 
 // unreadable returns the error of a success that the client cannot read because of cause. For a GET or DELETE it is

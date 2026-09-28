@@ -5,18 +5,21 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/vultr/govultr/v3"
 
+	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/engine"
 )
 
 // snapshot is what Inventory found of one cluster. The engine reads Objects; each task reads the copy of its object
 // that the snapshot keeps. Nothing changes it once Inventory returns it.
 type snapshot struct {
+	cluster string                               // the cluster whose objects it holds
 	objects []engine.Object                      // every owned object, duplicates included, in the order of Objects
 	sshKeys map[engine.Key]govultr.SSHKey        // the kept SSH key of each key
 	vpcs    map[engine.Key]govultr.VPC           // the kept VPC of each key
@@ -32,6 +35,17 @@ func (s *snapshot) Objects() []engine.Object { return slices.Clone(s.objects) }
 func (s *snapshot) sshKey(k engine.Key) (govultr.SSHKey, bool) {
 	key, ok := s.sshKeys[k]
 	return key, ok
+}
+
+// sshKeyIDs returns the ids of the SSH keys that the snapshot keeps, in the order of their keys' names.
+func (s *snapshot) sshKeyIDs() []string {
+	var ids []string
+	for _, k := range slices.SortedFunc(maps.Keys(s.sshKeys), func(a, b engine.Key) int {
+		return strings.Compare(a.Name, b.Name)
+	}) {
+		ids = append(ids, s.sshKeys[k].ID)
+	}
+	return ids
 }
 
 // vpc returns the VPC that the snapshot keeps for k.
@@ -51,13 +65,17 @@ func (s *snapshot) firewallRules(groupID string) []govultr.FirewallRule {
 	return slices.Clone(s.rules[groupID])
 }
 
-// Inventory lists the SSH keys, VPCs and firewall groups that the cluster owns, with one list call for each, and the
-// rules of each firewall group it keeps. An object is the cluster's when the marker in its name (an SSH key) or its
-// description (a VPC or a firewall group) names the cluster.
+// Inventory lists the SSH keys, VPCs and firewall groups that the cluster owns, with one list call for each, the
+// instances with the cluster's tag, with one more, and the rules of each firewall group it keeps. An object is the
+// cluster's when the marker in its name (an SSH key) or its description (a VPC or a firewall group) names the
+// cluster.
 //
 // Of the owned objects with one key it keeps one, and marks the others as duplicates for the engine to delete: the
-// firewall group with the most instances; else, and for SSH keys and VPCs, the oldest; else the one with the lowest
-// ID. A creation date that does not parse counts as newer than any that does.
+// firewall group that the most instances with the cluster's tag use; else, and for SSH keys and VPCs, the oldest;
+// else the one with the lowest ID. A creation date that does not parse counts as newer than any that does. It counts
+// every instance that Vultr's tag filter lists, as the firewall group's delete guard does, and does not read the
+// instance_count that Vultr may report: Vultr gave none for a group in use, and it would count other clusters'
+// instances too.
 //
 // It skips these objects with a warning, so tent neither adopts nor deletes them:
 //   - a text that starts with "tent:" and does not parse, whatever cluster it names;
@@ -86,10 +104,15 @@ func (p *Provider) inventory(ctx context.Context, cluster string) (*snapshot, er
 	if err != nil {
 		return nil, err
 	}
-	s := &snapshot{rules: map[string][]govultr.FirewallRule{}}
+	used, err := p.firewallGroupUse(ctx, cluster)
+	if err != nil {
+		return nil, err
+	}
+	s := &snapshot{cluster: cluster, rules: map[string][]govultr.FirewallRule{}}
 	s.sshKeys = keepOne(claim(ctx, p.log, cluster, keys, sshKeyType), sshKeyType, &s.objects)
 	s.vpcs = keepOne(claim(ctx, p.log, cluster, vpcs, vpcType), vpcType, &s.objects)
-	s.groups = keepOne(claim(ctx, p.log, cluster, groups, firewallGroupType), firewallGroupType, &s.objects)
+	groupType := firewallGroupTypeUsedBy(used)
+	s.groups = keepOne(claim(ctx, p.log, cluster, groups, groupType), groupType, &s.objects)
 	slices.SortFunc(s.objects, compareObjects)
 	for _, o := range s.objects {
 		if o.Key.Kind != engineKindFirewallGroup || o.Duplicate {
@@ -100,6 +123,22 @@ func (p *Provider) inventory(ctx context.Context, cluster string) (*snapshot, er
 		}
 	}
 	return s, nil
+}
+
+// firewallGroupUse lists the instances with the cluster's tag and returns how many of them use each firewall group, by
+// the group's ID.
+func (p *Provider) firewallGroupUse(ctx context.Context, cluster string) (map[string]int, error) {
+	instances, err := instancesByLabel(ctx, p.api, cloud.LabelCluster, cluster)
+	if err != nil {
+		return nil, err
+	}
+	used := map[string]int{}
+	for _, in := range instances {
+		if in.FirewallGroupID != "" {
+			used[in.FirewallGroupID]++
+		}
+	}
+	return used, nil
 }
 
 // objectType tells the inventory how to read one type of Vultr object.
@@ -141,21 +180,30 @@ var vpcType = objectType[govultr.VPC]{
 	},
 }
 
-var firewallGroupType = objectType[govultr.FirewallGroup]{
-	name: "firewall group",
-	kind: KindFirewall,
-	text: func(g govultr.FirewallGroup) string { return g.Description },
-	id:   func(g govultr.FirewallGroup) string { return g.ID },
-	key: func(cluster string, m Marker) (engine.Key, string) {
-		if _, ok := firewallGroupNames[m.Role]; !ok {
-			return engine.Key{}, "role is not server or client"
-		}
-		return firewallGroupKey(cluster, m.Role), ""
-	},
-	keep: func(a, b govultr.FirewallGroup) int {
-		return cmp.Or(cmp.Compare(b.InstanceCount, a.InstanceCount), compareCreated(a.DateCreated, b.DateCreated),
-			strings.Compare(a.ID, b.ID))
-	},
+// firewallGroupType reads firewall groups without knowing which instances use them, so its keep rule counts none. The
+// search after a lost create uses it: the copies it finds are new, and nodes join a group only after the cluster's
+// infrastructure is applied.
+var firewallGroupType = firewallGroupTypeUsedBy(nil)
+
+// firewallGroupTypeUsedBy returns the type of firewall groups whose keep rule prefers the group that the most
+// instances use: used[id] instances use the group with that ID.
+func firewallGroupTypeUsedBy(used map[string]int) objectType[govultr.FirewallGroup] {
+	return objectType[govultr.FirewallGroup]{
+		name: "firewall group",
+		kind: KindFirewall,
+		text: func(g govultr.FirewallGroup) string { return g.Description },
+		id:   func(g govultr.FirewallGroup) string { return g.ID },
+		key: func(cluster string, m Marker) (engine.Key, string) {
+			if _, ok := firewallGroupNames[m.Role]; !ok {
+				return engine.Key{}, "role is not server or client"
+			}
+			return firewallGroupKey(cluster, m.Role), ""
+		},
+		keep: func(a, b govultr.FirewallGroup) int {
+			return cmp.Or(cmp.Compare(used[b.ID], used[a.ID]), compareCreated(a.DateCreated, b.DateCreated),
+				strings.Compare(a.ID, b.ID))
+		},
+	}
 }
 
 // keyOf reads the marker in an object's text, and returns it with the object's key when the cluster owns the object:

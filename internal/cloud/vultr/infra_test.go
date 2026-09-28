@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/vultr/govultr/v3"
@@ -148,4 +149,40 @@ func TestDeleteInfra(t *testing.T) {
 	if diff := cmp.Diff(want, deletes); diff != "" {
 		t.Errorf("deletes (-want +got):\n%s", diff)
 	}
+}
+
+// TestDeleteClusterWithNodes deletes a cluster in the order of delete cluster: the nodes that List gives, then every
+// object of the infrastructure.
+func TestDeleteClusterWithNodes(t *testing.T) {
+	var x *fixture
+	synctest.Test(t, func(t *testing.T) {
+		x, _ = newNodesFixture(t, opsKey)
+		createNode(t, x.p, serverRequest("op-a"))
+		createNode(t, x.p, nodeRequest("prod-workers-0", "workers", v1alpha1.RoleClient, "op-b"))
+	})
+	nodes, err := x.p.List(t.Context(), "prod")
+	if err != nil || len(nodes) != 2 {
+		t.Fatalf("List = %+v, %v; want the two nodes", nodes, err)
+	}
+	for _, n := range nodes {
+		if err := x.p.Delete(t.Context(), n); err != nil {
+			t.Fatalf("Delete %s: %v", n.Name, err)
+		}
+	}
+
+	// A plan without tasks deletes every object of the cluster.
+	x.tasks = nil
+	events := x.applyWithFaults(t, func(testing.TB) {})
+
+	// The fake frees a VPC as soon as its instances are gone, so nothing is retried. Vultr refuses the VPC delete for
+	// up to 20 s more, and the engine retries it.
+	if n := countEvents(events, engine.Retrying); n != 0 {
+		t.Errorf("the engine retried %d times, want never", n)
+	}
+	if ids := instanceIDs(x.f); len(ids) != 0 {
+		t.Errorf("instances %v are left, want none", ids)
+	}
+	wantSSHKeys(t, x.f)
+	wantVPCs(t, x.f)
+	wantFirewallGroups(t, x.f)
 }

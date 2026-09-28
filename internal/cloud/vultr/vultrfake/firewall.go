@@ -76,7 +76,8 @@ func (f *Fake) CreateFirewallGroup(ctx context.Context, req *govultr.FirewallGro
 	return result(out, err)
 }
 
-// DeleteFirewallGroup deletes a firewall group and its rules.
+// DeleteFirewallGroup deletes a firewall group and its rules. Like Vultr, it deletes a group that instances use, and
+// they are left without a firewall group.
 func (f *Fake) DeleteFirewallGroup(ctx context.Context, id string) error {
 	if err := vultr.CheckID("DELETE /v2/firewalls/{id}", "id", id); err != nil {
 		return err
@@ -85,6 +86,11 @@ func (f *Fake) DeleteFirewallGroup(ctx context.Context, id string) error {
 	return f.run(ctx, r, func() error {
 		if !remove(&f.groups, id, func(g *firewallGroup) string { return g.ID }) {
 			return r.fail(http.StatusNotFound, noGroup)
+		}
+		for _, in := range f.instances {
+			if in.FirewallGroupID == id {
+				in.FirewallGroupID = ""
+			}
 		}
 		return nil
 	})
@@ -110,8 +116,11 @@ func (f *Fake) ListFirewallRules(ctx context.Context, groupID string) ([]govultr
 	return result(out, err)
 }
 
-// CreateFirewallRule adds an accept rule to a firewall group, with the next id of the group, counting from 1. It
-// fails with vultr.ErrInvalid without an ip_type or a protocol, and with vultr.ErrLimitReached when the group holds
+// CreateFirewallRule adds an accept rule to a firewall group, with the next id of the group, counting from 1. A rule
+// without a source gets its own subnet as the source, such as 203.0.113.7/32, as Vultr lists it. The create fails
+// with vultr.ErrInvalid without an ip_type or a protocol, and with a 400 "This rule is already defined", also
+// vultr.ErrInvalid, when the group holds a rule with the same ip_type, protocol, subnet, subnet_size, port and
+// source; an empty source counts as the rule's own subnet. It fails with vultr.ErrLimitReached when the group holds
 // its most rules.
 func (f *Fake) CreateFirewallRule(ctx context.Context, groupID string, req *govultr.FirewallRuleReq) (
 	*govultr.FirewallRule, error) {
@@ -123,6 +132,11 @@ func (f *Fake) CreateFirewallRule(ctx context.Context, groupID string, req *govu
 		name: "CreateFirewallRule", arg: ruleArg(groupID, in), method: http.MethodPost,
 		path: "/v2/firewalls/" + groupID + "/rules",
 	}
+	rule := govultr.FirewallRule{
+		IPType: in.IPType, Protocol: in.Protocol, Port: in.Port, Subnet: in.Subnet, SubnetSize: in.SubnetSize,
+		Source: in.Source, Notes: in.Notes,
+	}
+	rule.Source = source(rule)
 	var out *govultr.FirewallRule
 	err := f.run(ctx, r, func() error {
 		g := f.group(groupID)
@@ -133,17 +147,28 @@ func (f *Fake) CreateFirewallRule(ctx context.Context, groupID string, req *govu
 			return r.fail(http.StatusBadRequest, "Invalid ip_type.")
 		case in.Protocol == "":
 			return r.fail(http.StatusBadRequest, "Invalid protocol.")
+		case slices.ContainsFunc(g.rules, func(o govultr.FirewallRule) bool { return sameRule(o, rule) }):
+			return r.fail(http.StatusBadRequest, "This rule is already defined")
 		case len(g.rules) >= g.MaxRuleCount:
 			return r.fail(http.StatusBadRequest, "You have reached the maximum number of rules for this firewall group.")
 		}
-		rule := g.addRule(govultr.FirewallRule{
-			IPType: in.IPType, Protocol: in.Protocol, Port: in.Port, Subnet: in.Subnet, SubnetSize: in.SubnetSize,
-			Source: in.Source, Notes: in.Notes,
-		})
-		out = &rule
+		added := g.addRule(rule)
+		out = &added
 		return nil
 	})
 	return result(out, err)
+}
+
+// sameRule reports whether a and b have the same ip_type, protocol, subnet, subnet_size, port and source. An empty
+// source counts as the rule's own subnet, as Vultr lists it, so a seeded rule without one matches a created rule.
+func sameRule(a, b govultr.FirewallRule) bool {
+	return a.IPType == b.IPType && a.Protocol == b.Protocol && a.Subnet == b.Subnet && a.SubnetSize == b.SubnetSize &&
+		a.Port == b.Port && source(a) == source(b)
+}
+
+// source returns the source of r as Vultr lists it: r's own subnet, such as 203.0.113.7/32, when r has none.
+func source(r govultr.FirewallRule) string {
+	return cmp.Or(r.Source, r.Subnet+"/"+strconv.Itoa(r.SubnetSize))
 }
 
 // ruleArg returns the Call.Arg of a CreateFirewallRule call, such as "firewall-1 v4 tcp 0.0.0.0/0 22".

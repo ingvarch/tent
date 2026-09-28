@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
+	"net/http"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/vultr/govultr/v3"
 
+	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/engine"
 	"github.com/ingvarch/tent/internal/model"
 )
@@ -24,6 +27,7 @@ const maxRulesPerGroup = 50
 // from the internet reach its nodes. The group's description is its marker.
 type firewallTask struct {
 	api      API
+	log      *slog.Logger // where Delete reports a duplicate that nodes use
 	cluster  string
 	role     string                          // roleServer or roleClient
 	rules    map[string]govultr.FirewallRule // the rules the group must hold, by their text
@@ -41,7 +45,7 @@ func (p *Provider) firewallTasks(m *model.Cluster) []engine.Task {
 	tasks := make([]engine.Task, 0, len(roles))
 	for _, role := range roles {
 		tasks = append(tasks, &firewallTask{
-			api: p.api, cluster: m.Name, role: role, rules: wantedRules(m.Access, role), op: p.opID(),
+			api: p.api, log: p.log, cluster: m.Name, role: role, rules: wantedRules(m.Access, role), op: p.opID(),
 		})
 	}
 	return tasks
@@ -80,12 +84,16 @@ func reaches(target model.Target, role string) bool {
 // when the rule has one and "source=<source>" when it has a source, such as "v4 tcp 203.0.113.7/32 22" or
 // "v6 icmp ::/0". It reads a rule as Vultr may write it: the IP type and the protocol in any case, an address in any
 // of its forms, a range of one port, such as 22:22, as that port, and an ICMP rule with a port, which ICMP does not
-// have.
+// have. Vultr lists a rule created without a source with its own subnet as the source, such as "203.0.113.7/32", so
+// a source equal to the rule's subnet, in any form, is no source.
 func ruleText(r govultr.FirewallRule) string {
 	protocol := strings.ToLower(r.Protocol)
-	subnet := r.Subnet
+	subnet, source := r.Subnet, r.Source
 	if a, err := netip.ParseAddr(r.Subnet); err == nil {
 		subnet = a.String()
+		if src, err := netip.ParsePrefix(r.Source); err == nil && src == netip.PrefixFrom(a, r.SubnetSize) {
+			source = ""
+		}
 	}
 	port := r.Port
 	if first, last, ok := strings.Cut(port, ":"); ok && first == last {
@@ -95,8 +103,8 @@ func ruleText(r govultr.FirewallRule) string {
 	if port != "" && protocol != model.ProtocolICMP {
 		s += " " + port
 	}
-	if r.Source != "" {
-		s += " source=" + r.Source
+	if source != "" {
+		s += " source=" + source
 	}
 	return s
 }
@@ -263,23 +271,90 @@ func (t *firewallTask) deleteRules(ctx context.Context, id string, extra []govul
 	return nil
 }
 
-// addRule adds the rule r to the firewall group id. Vultr refuses the create with ErrLimitReached when the group holds
-// its most rules, a limit that it does not raise on request.
+// addRule adds the rule r to the firewall group id. A rule that the group holds already counts as added. Vultr
+// refuses the create with ErrLimitReached when the group holds its most rules, a limit that it does not raise on
+// request.
 func (t *firewallTask) addRule(ctx context.Context, id string, r govultr.FirewallRule) error {
 	_, err := t.api.CreateFirewallRule(ctx, id, &govultr.FirewallRuleReq{
 		IPType: r.IPType, Protocol: r.Protocol, Subnet: r.Subnet, SubnetSize: r.SubnetSize, Port: r.Port,
 	})
+	if ruleDefined(err) {
+		return nil
+	}
 	if errors.Is(err, ErrLimitReached) {
 		limit := fmt.Sprintf("firewall group %s may already hold the most rules Vultr allows in a group", t.Key().Name)
 		return &objectLimitError{limit: limit, err: err}
 	}
-	// A rule create is not idempotent, but it is retried as if it were: a second copy of a rule is harmless, and
-	// reconcile lists the rules before it adds one, so it does not add a listed rule again.
+	// A rule create is retried as if it were idempotent: Vultr refuses a second copy of a rule, and reconcile lists
+	// the rules before it adds one, so it does not add a listed rule again.
 	return markRetryable(err, true)
 }
 
-// Delete deletes the firewall group obj. A group that is gone counts as deleted. While instances still use the group,
-// Vultr may refuse the delete with ErrInUse, and the engine tries it again.
-func (t *firewallTask) Delete(ctx context.Context, _ *engine.Env, obj engine.Object) error {
-	return deleted(t.api.DeleteFirewallGroup(ctx, obj.ID))
+// ruleDefinedMessage is Vultr's answer, with the status 400, to the create of a rule that the group holds already.
+const ruleDefinedMessage = "This rule is already defined"
+
+// ruleDefined reports whether err is Vultr's answer to the create of a rule that the group holds already.
+func ruleDefined(err error) bool {
+	e, ok := errors.AsType[*APIError](err)
+	return ok && e.Status == http.StatusBadRequest && strings.EqualFold(strings.TrimSpace(e.Message), ruleDefinedMessage)
+}
+
+// Delete deletes the firewall group obj. A group that is gone counts as deleted, and an answer that matches ErrInUse
+// is retried.
+//
+// Vultr deletes a group that instances use and leaves them without a firewall, so Delete first lists the instances
+// with the tag of the cluster that the snapshot names, afresh, and never deletes a group that any of them uses:
+//   - For a duplicate, it logs a warning that names the group and those nodes and returns nil, so the apply goes on
+//     and every later run reports the group again. The replacements of those nodes join the kept copy, and a later
+//     run deletes the duplicate.
+//   - For a group that the cluster no longer wants, it fails. That error is not retried: the nodes must go first, as
+//     delete cluster does.
+//
+// It counts every instance that Vultr's tag filter lists, so a node whose tent tags do not decode, such as one with a
+// tag in upper case, which Nodes.List skips, still keeps the group, and Delete names it. It cannot see an instance
+// without the cluster's tag: one made by hand, or one of another cluster, in the group. The engine retries a failed
+// list after a 429, a 5xx or no answer; a 401 or a 403 fails the delete at once.
+func (t *firewallTask) Delete(ctx context.Context, env *engine.Env, obj engine.Object) error {
+	s, err := snapshotOf(env)
+	if err != nil {
+		return err
+	}
+	group := fmt.Sprintf("firewall group %s (ID %s)", obj.Key.Name, obj.ID)
+	users, err := t.groupUsers(ctx, s.cluster, obj.ID)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%s: %w", group, err)
+	case len(users) == 0:
+		return deleted(t.api.DeleteFirewallGroup(ctx, obj.ID))
+	case obj.Duplicate:
+		t.log.WarnContext(ctx, "keeping a duplicate Vultr firewall group that nodes use; replace those nodes, "+
+			"and a later run deletes the group", "cluster", s.cluster, "group", obj.Key.Name, "id", obj.ID,
+			"nodes", strings.Join(users, ", "))
+		return nil
+	}
+	return fmt.Errorf("%s still protects nodes %s, and tent does not delete a firewall group that nodes use; "+
+		"delete those nodes first", group, strings.Join(users, ", "))
+}
+
+// groupUsers returns the instances with the tag of the cluster that use the firewall group with id, each as
+// "<name> (<id>)", sorted by name, then by id. It fails without a cluster to list, and when the list fails; that
+// error is marked retryable as that of an idempotent call.
+func (t *firewallTask) groupUsers(ctx context.Context, cluster, id string) ([]string, error) {
+	if cluster == "" {
+		return nil, errors.New("the snapshot names no cluster, so tent cannot tell which nodes use the group")
+	}
+	instances, err := instancesByLabel(ctx, t.api, cloud.LabelCluster, cluster)
+	if err != nil {
+		return nil, fmt.Errorf("list the nodes of cluster %s: %w", cluster, markRetryable(err, true))
+	}
+	slices.SortFunc(instances, func(a, b govultr.Instance) int {
+		return cmp.Or(strings.Compare(instanceName(a), instanceName(b)), strings.Compare(a.ID, b.ID))
+	})
+	var users []string
+	for _, in := range instances {
+		if in.FirewallGroupID == id {
+			users = append(users, fmt.Sprintf("%s (%s)", instanceName(in), in.ID))
+		}
+	}
+	return users, nil
 }

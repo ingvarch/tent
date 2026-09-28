@@ -41,14 +41,18 @@ const (
 	sept27 = "2026-09-27T10:00:00+00:00"
 )
 
-// listCalls are the calls of an inventory before it lists the rules of firewall groups.
-var listCalls = []vultrfake.Call{{Name: "ListSSHKeys"}, {Name: "ListVPCs"}, {Name: "ListFirewallGroups"}}
+// listCalls are the calls of an inventory of cluster prod before it lists the rules of firewall groups.
+var listCalls = []vultrfake.Call{
+	{Name: "ListSSHKeys"}, {Name: "ListVPCs"}, {Name: "ListFirewallGroups"},
+	{Name: "ListInstances", Arg: "tent/cluster=prod"},
+}
 
-// newProvider returns a provider on f, with opts, that writes its log to the returned buffer as JSON.
-func newProvider(f *vultrfake.Fake, opts ...vultr.ProviderOption) (*vultr.Provider, *bytes.Buffer) {
+// newProvider returns a provider on api, such as a fake, with opts, that writes its log to the returned buffer as
+// JSON.
+func newProvider(api vultr.API, opts ...vultr.ProviderOption) (*vultr.Provider, *bytes.Buffer) {
 	var log bytes.Buffer
 	opts = append([]vultr.ProviderOption{vultr.WithLogger(slog.New(slog.NewJSONHandler(&log, nil)))}, opts...)
-	return vultr.New(f, opts...), &log
+	return vultr.New(api, opts...), &log
 }
 
 // inventory takes the inventory of cluster prod with p. It stops the test when the inventory fails.
@@ -246,7 +250,9 @@ func TestInventorySkipsMarkersTentDoesNotWrite(t *testing.T) {
 type objectCopy struct {
 	id        string
 	created   string // date_created
-	instances int    // a firewall group's instance_count
+	instances int    // how many nodes of cluster prod use a firewall group
+	others    int    // how many instances of cluster staging use a firewall group
+	apiCount  int    // a firewall group's instance_count, which the inventory does not read
 }
 
 // dedupeKind is a kind of object in the dedupe tests: the key of its copies, how to seed a copy, and the ID of the
@@ -286,8 +292,14 @@ var dedupeKinds = []dedupeKind{
 		key:  serversKey,
 		add: func(t *testing.T, f *vultrfake.Fake, c objectCopy) {
 			f.AddFirewallGroup(t, govultr.FirewallGroup{
-				ID: c.id, Description: serversMarker, DateCreated: c.created, InstanceCount: c.instances,
+				ID: c.id, Description: serversMarker, DateCreated: c.created, InstanceCount: c.apiCount,
 			})
+			for range c.instances {
+				f.AddInstance(t, govultr.Instance{FirewallGroupID: c.id, Tags: []string{"tent/cluster=prod"}})
+			}
+			for range c.others {
+				f.AddInstance(t, govultr.Instance{FirewallGroupID: c.id, Tags: []string{"tent/cluster=staging"}})
+			}
 		},
 		kept: func(s *vultr.Snapshot) (string, bool) {
 			g, ok := s.FirewallGroup(serversKey)
@@ -339,7 +351,7 @@ func TestInventoryKeepsTheOldestCopy(t *testing.T) {
 	}
 }
 
-func TestInventoryKeepsTheFirewallGroupWithTheMostInstances(t *testing.T) {
+func TestInventoryKeepsTheFirewallGroupThatTheMostNodesUse(t *testing.T) {
 	k := dedupeKinds[slices.IndexFunc(dedupeKinds, func(k dedupeKind) bool { return k.key == serversKey })]
 	for _, tc := range []dedupeCase{
 		{
@@ -369,6 +381,26 @@ func TestInventoryKeepsTheFirewallGroupWithTheMostInstances(t *testing.T) {
 			name: "a date that does not parse comes last",
 			copies: []objectCopy{
 				{id: "a", created: "yesterday", instances: 2}, {id: "b", created: sept27, instances: 2},
+			},
+			keep: "b",
+		},
+		{
+			name:   "the newer copy that a node uses",
+			copies: []objectCopy{{id: "a", created: sept20}, {id: "b", created: sept27, instances: 1}},
+			keep:   "b",
+		},
+		{
+			// Vultr gave no instance_count on GET /v2/firewalls/{id}, and it would count other clusters' instances.
+			name: "the API's instance_count does not count",
+			copies: []objectCopy{
+				{id: "a", created: sept20, apiCount: 5}, {id: "b", created: sept27, instances: 1},
+			},
+			keep: "b",
+		},
+		{
+			name: "instances of another cluster do not count",
+			copies: []objectCopy{
+				{id: "a", created: sept27, others: 3}, {id: "b", created: sept20}, {id: "c", created: sept25},
 			},
 			keep: "b",
 		},
@@ -436,6 +468,7 @@ func TestInventoryListErrors(t *testing.T) {
 		{"ListSSHKeys", "/v2/ssh-keys"},
 		{"ListVPCs", "/v2/vpcs"},
 		{"ListFirewallGroups", "/v2/firewalls"},
+		{"ListInstances", "/v2/instances"},
 		{"ListFirewallRules", "/v2/firewalls/fw-servers/rules"},
 	} {
 		t.Run(tc.call, func(t *testing.T) {

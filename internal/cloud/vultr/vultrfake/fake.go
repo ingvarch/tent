@@ -23,16 +23,25 @@ import (
 // matches the context's error. Every other call reaches the fake's API: Calls logs it, and it is carried out unless a
 // fault applies. Its errors are *vultr.APIError values with the method, path, status and class that the client
 // gives; a missing id, for example, is vultr.ErrNotFound. Lists are whole and in creation order, and every value the
-// fake returns is a copy. New objects get ids such as ssh-key-1, vpc-1 and firewall-1; no id is given out twice.
+// fake returns is a copy. New objects get ids such as ssh-key-1, vpc-1, firewall-1 and instance-1; no id is given
+// out twice. A new instance boots as GetInstance reads it: see SetBootReads.
+//
+// The fake is simpler than Vultr in these ways:
+//   - ListInstanceVPCs lists nothing until the instance shows as active. Vultr listed the address 6–7 s after the
+//     create, long before the instance was active.
+//   - A deleted instance is gone from every call at once.
+//   - DeleteVPC deletes a VPC as soon as no instance is attached to it. Vultr refuses for 14–20 s more.
+//   - CreateVPC assigns no subnet when the request has none.
 //
 // Faults change the outcome of the next calls of a vultr.API method, named as in the interface, such as CreateVPC:
 // see Fail, LoseResponse and Throttle. They apply in the order they were set: a call takes the first fault set for
 // its method, and each fault applies to as many calls as it was set for.
 //
-// Seeding with AddSSHKey, AddVPC, AddFirewallGroup and AddFirewallRule stores objects as if they had been created
-// before, without a call. An empty id gets a new one, and an empty date_created the clock's time. Seeding checks no
-// other field and no limit, and returns the object as stored. SSHKeys, VPCs, FirewallGroups and FirewallRules read
-// the objects back without a call: Calls does not log them, and no fault applies to them.
+// Seeding with AddSSHKey, AddVPC, AddFirewallGroup, AddFirewallRule and AddInstance stores objects as if they had
+// been created before, without a call. An empty id gets a new one, and an empty date_created the clock's time.
+// Seeding checks no other field, no limit and no second copy of a rule, and returns the object as stored. SSHKeys,
+// VPCs, FirewallGroups, FirewallRules, Instances, UserData and CreateRequest read the objects back without a call:
+// Calls does not log them, and no fault applies to them.
 //
 // The fault and seeding methods take the test's testing.TB. They fail the test on a bug of the test, such as a name
 // that is not a vultr.API method or an id that is taken, at the line of the wrong call, rather than return an error
@@ -49,8 +58,13 @@ type Fake struct {
 	plans     []govultr.Plan
 	images    []govultr.OS
 	available map[string][]string // the plans each known region can deploy now
-	faults    []*fault            // in the order they were set
+	instances []*instance
+	faults    []*fault // in the order they were set
 	calls     []Call
+
+	activeAfter, okAfter int // the boot reads of new instances
+	macs                 int // how many MACs were given out
+	mainIPs              int // how many main IPs were given out
 }
 
 var _ vultr.API = (*Fake)(nil)
@@ -73,12 +87,14 @@ func New(opts ...Option) *Fake {
 		ids = append(ids, p.ID)
 	}
 	f := &Fake{
-		now:       time.Now,
-		ids:       map[string]bool{},
-		next:      map[string]int{},
-		plans:     plans,
-		images:    defaultOS(),
-		available: map[string][]string{defaultRegion: ids},
+		now:         time.Now,
+		ids:         map[string]bool{},
+		next:        map[string]int{},
+		plans:       plans,
+		images:      defaultOS(),
+		available:   map[string][]string{defaultRegion: ids},
+		activeAfter: defaultActiveAfter,
+		okAfter:     defaultOKAfter,
 	}
 	for _, opt := range opts {
 		opt(f)
@@ -90,11 +106,14 @@ func New(opts ...Option) *Fake {
 type Call struct {
 	Name string // the vultr.API method, such as CreateVPC
 	// Arg is the call's main argument:
-	//   - for a create, the name of the SSH key or the description of the VPC or firewall group;
+	//   - for a create, the name of the SSH key or the label of the instance, or the description of the VPC or
+	//     firewall group;
 	//   - for CreateFirewallRule, the group's id and the rule: ip_type, protocol, subnet/subnet_size, then the port
 	//     and source=<source> when they are set, such as "firewall-1 v4 tcp 0.0.0.0/0 22";
 	//   - for a delete, the id; for a firewall rule, the group's id and "/" and the rule's id, such as firewall-1/3;
-	//   - the group's id for ListFirewallRules, the region for AvailablePlans, and the type for ListPlans.
+	//   - the instance's id for GetInstance, HaltInstance, UpdateInstance and ListInstanceVPCs;
+	//   - the group's id for ListFirewallRules, the region for AvailablePlans, the type for ListPlans, and the tag for
+	//     ListInstances.
 	// It is empty for the other lists.
 	Arg string
 }
@@ -138,6 +157,40 @@ func (f *Fake) FirewallRules(groupID string) []govultr.FirewallRule {
 		return clone(g.rules)
 	}
 	return nil
+}
+
+// Instances returns every instance, as GetInstance shows it now, in creation order, without a call and without
+// counting a read.
+func (f *Fake) Instances() []govultr.Instance {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []govultr.Instance
+	for _, in := range f.instances {
+		out = append(out, in.view())
+	}
+	return out
+}
+
+// UserData returns the user data of an instance, base64 as sent, without a call. It returns "" for an unknown
+// instance, as for one without user data.
+func (f *Fake) UserData(id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if in := f.instance(id); in != nil {
+		return in.userData
+	}
+	return ""
+}
+
+// CreateRequest returns the request that created an instance, without a call. It reports false for an unknown or a
+// seeded instance.
+func (f *Fake) CreateRequest(id string) (govultr.InstanceCreateReq, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if in := f.instance(id); in != nil && in.req != nil {
+		return cloneCreateReq(*in.req), true
+	}
+	return govultr.InstanceCreateReq{}, false
 }
 
 // request is a call as the client would send it.
