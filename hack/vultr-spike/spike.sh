@@ -3,17 +3,19 @@
 # (docs/adr/0018-vultr-provider-design.md, "provisional" items; docs/platform-notes.md §3, items marked 🔬).
 #
 # It creates REAL, BILLED resources in your Vultr account (at most 3 instances at a time, 4 in total,
-# one VPC, one firewall group, one SSH key) and deletes them on exit unless --keep is given.
+# one VPC, up to three firewall groups, up to two SSH keys) and deletes them on exit unless --keep is given.
 # Usage and details: hack/vultr-spike/README.md
 #
-# Portable bash (3.2+, macOS default), requires: curl, jq 1.6+, ssh, ssh-keygen, awk.
+# Portable bash (3.2+, macOS default), requires: curl, jq 1.6+, ssh, ssh-keygen, awk, od.
 set -euo pipefail
 
-readonly SPIKE_VERSION="2"
+readonly SPIKE_VERSION="4"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 readonly SCRIPT_DIR
 readonly API_BASE="${VULTR_API_BASE:-https://api.vultr.com/v2}"
-readonly ALL_CHECKS="boot,inside,metadata,network,firewall,alias,tags,markers,userdata,scrub,halt,objstore"
+readonly ALL_CHECKS="boot,inside,metadata,network,firewall,alias,tags,markers,userdata,scrub,halt,sshdup,lengths,rules,fwinuse,patchtags,vpcpending,halttwice,objstore"
+# The checks that log in to an instance over SSH. Without them, instance A gets a firewall group with no rules.
+readonly SSH_CHECKS="boot inside metadata network firewall alias scrub halt"
 
 REGION="${REGION:-ams}"
 PLAN="${PLAN:-vc2-1c-1gb}"
@@ -57,10 +59,17 @@ RUN_TAG=""
 SECRET_MARKER=""
 SSH_KEY=""
 SSH_KEY_ID=""
+SSH_FP=""
 SSH_OPTS=()
 VPC_ID=""
 VPC_MASK=""
 FG_ID=""
+FG_TRIED=""
+NEW_FG=""
+FG_COUNTS=""    # set by fg_counts
+LOCK_FG=""      # the firewall group without rules that instances get when no check needs SSH
+NEED_SSH=1
+INST_STATE=""   # set by read_state
 HOURLY=""
 UD_BYTES=""
 PAYLOAD_SHA=""
@@ -95,8 +104,13 @@ Options:
   --yes              Do not ask for confirmation before creating billed resources.
   --keep             Do not delete resources on exit (you must delete them yourself).
   --only LIST        Comma-separated subset of checks (default: all):
-                     boot,inside,metadata,network,firewall,alias,tags,markers,userdata,scrub,halt,objstore
-                     ("--only objstore" needs no Vultr API key and creates no instances)
+                     boot,inside,metadata,network,firewall,alias,tags,markers,userdata,scrub,halt,
+                     sshdup,lengths,rules,fwinuse,patchtags,vpcpending,halttwice,objstore
+                     ("--only objstore" needs no Vultr API key and creates no instances;
+                     sshdup, lengths and rules create no instance; fwinuse, patchtags, vpcpending and
+                     halttwice need only instance A. Unless a check that needs SSH is selected (boot,
+                     inside, metadata, network, firewall, alias, scrub, halt), A gets a firewall group
+                     with no rules at creation and the checks start once the API reports A ready)
   --region ID        Vultr region (default: ams; env REGION).
   --plan ID          Instance plan (default: vc2-1c-1gb; env PLAN).
   --out DIR          Report directory (default: hack/vultr-spike/results, git-ignored; env OUT_DIR).
@@ -133,8 +147,17 @@ sha256() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'; else shasum -a 256 | awk '{print $1}'; fi
 }
 
-# rand_alnum N: N random [A-Za-z0-9] characters (tr gets SIGPIPE from head; that is expected).
-rand_alnum() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c "$1" || true; }
+# rand_chars SET N: N random characters of the tr set SET (tr gets SIGPIPE from head; that is expected).
+rand_chars() { LC_ALL=C tr -dc "$1" </dev/urandom 2>/dev/null | head -c "$2" || true; }
+rand_alnum() { rand_chars 'A-Za-z0-9' "$1"; }
+
+# uuid4: a lower-case UUID of version 4, the form of tent's operation ids.
+uuid4() {
+  local h v
+  h=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+  v=$(printf '%x' $(((0x${h:16:2} & 0x3f) | 0x80)))
+  printf '%s-%s-4%s-%s%s-%s' "${h:0:8}" "${h:8:4}" "${h:13:3}" "$v" "${h:18:2}" "${h:20:12}"
+}
 
 # ---------------------------------------------------------------------------------------------------------------
 # Report
@@ -201,6 +224,11 @@ api() { # api METHOD PATH [BODY_FILE]
 
 api_ok() { case "$API_STATUS" in 200 | 201 | 202 | 204) return 0 ;; *) return 1 ;; esac; }
 api_err() { jq -r '.error // empty' "$API_BODY" 2>/dev/null | tr '\n' ' ' | head -c 300 || true; }
+answer() { # the last answer as "HTTP <status>[ <error>]"
+  local e
+  e=$(api_err | sed 's/[[:space:]]*$//')
+  printf 'HTTP %s%s' "$API_STATUS" "${e:+ $e}"
+}
 jqb() { jq -r "$1" "$API_BODY"; }
 
 record_resource() { printf '%s %s\n' "$1" "$2" >>"$STATE"; }
@@ -234,7 +262,7 @@ port_open() { # port_open IP: TCP connect to port 22 within 5 s (macOS nc -w doe
 }
 
 ssh_reason() { # ssh_reason IP: why the last master connection failed
-  cat "$SOCK_DIR/$1.broken" 2>/dev/null || oneline 200 <"$WORK/ssh-master-$1.err" 2>/dev/null || true
+  cat "$SOCK_DIR/$1.broken" 2>/dev/null || oneline 200 2>/dev/null <"$WORK/ssh-master-$1.err" || true
 }
 ssh_unknown() { printf 'unknown (ssh failed: %s)' "$(ssh_reason "$1")"; }
 ssh_reset() { rm -f "$SOCK_DIR/$1.broken" "$SOCK_DIR/$1.fails"; }
@@ -315,6 +343,9 @@ create_ssh_key() {
   local body="$WORK/body-sshkey.json"
   ssh-keygen -t ed25519 -N '' -q -f "$WORK/id_ed25519" -C "$RUN_TAG"
   SSH_KEY="$WORK/id_ed25519"
+  # fp as tent computes it: the first 8 hex digits of the SHA-256 of the key data.
+  SSH_FP=$(awk '{print $2}' "$SSH_KEY.pub" | b64dec | sha256 | cut -c1-8)
+  SSH_MARKER="tent:cluster=$RUN_TAG;kind=ssh-key;fp=$SSH_FP;op=$(uuid4)"
   SSH_NAME_USED="$SSH_MARKER"
   jq -n --arg n "$SSH_MARKER" --rawfile k "$SSH_KEY.pub" '{name: $n, ssh_key: ($k | rtrimstr("\n"))}' >"$body"
   api POST /ssh-keys "$body"
@@ -482,10 +513,11 @@ create_instance() { # create_instance NAME [USERDATA_FILE] -> sets NAME_ID, NAME
   op="$RUN_TAG-op-$(lower "$name")"
   if [ -n "$ud" ]; then b64enc <"$ud" >"$WORK/ud-$name.b64"; else : >"$WORK/ud-$name.b64"; fi
   jq -n --arg r "$REGION" --arg p "$PLAN" --argjson os "$OS_ID" --arg l "$label" --arg t "$RUN_TAG" --arg op "$op" \
-    --arg k "$SSH_KEY_ID" --arg v "$VPC_ID" --rawfile ud "$WORK/ud-$name.b64" \
+    --arg k "$SSH_KEY_ID" --arg v "$VPC_ID" --arg fg "$LOCK_FG" --rawfile ud "$WORK/ud-$name.b64" \
     '{region: $r, plan: $p, os_id: $os, label: $l, hostname: $l, tags: [$t, $op], sshkey_id: [$k], attach_vpc: [$v],
       backups: "disabled", activation_email: false}
-     + (if $ud != "" then {user_data: ($ud | rtrimstr("\n"))} else {} end)' >"$body"
+     + (if $ud != "" then {user_data: ($ud | rtrimstr("\n"))} else {} end)
+     + (if $fg != "" then {firewall_group_id: $fg} else {} end)' >"$body"
   setv "${name}_T0" "$(now)"
   api POST /instances "$body"
   if ! api_ok; then
@@ -520,32 +552,47 @@ delete_instance_now() { # delete_instance_now ID ; waits until it is gone (keeps
 # Boot timing (A and B: package upgrade disabled, as tent does; V: no user_data, Vultr's vendor defaults) - also
 # discovers IPs. Port 22 and SSH are touched at most once per POLL_INTERVAL per instance.
 
+read_state() { # read_state NAME: sets INST_STATE to status/power_status/server_status (or the HTTP error); the first
+  # time it reads active/running/ok, records NAME_T_OK and NAME_PUB
+  local n="$1"
+  api GET "/instances/$(getv "${n}_ID")"
+  if api_ok; then
+    INST_STATE=$(jqb '.instance.status + "/" + .instance.power_status + "/" + .instance.server_status' 2>/dev/null || echo '?')
+  else
+    INST_STATE="HTTP $API_STATUS"
+  fi
+  if [ "$INST_STATE" = "active/running/ok" ] && [ -z "$(getv "${n}_T_OK")" ]; then
+    setv "${n}_T_OK" "$(($(now) - $(getv "${n}_T0")))"
+    setv "${n}_PUB" "$(jqb '.instance.main_ip')"
+  fi
+}
+
+note_vpc_ip() { # note_vpc_ip NAME: if the last answer (GET /instances/{id}/vpcs) lists an address other than 0.0.0.0,
+  # records NAME_T_IP, NAME_VPC_IP and NAME_VPC_MAC and returns 0
+  local n="$1" ip="" mac=""
+  read -r ip mac <<<"$(jq -r '[.vpcs[]? | select((.ip_address // "") != "" and .ip_address != "0.0.0.0")][0] // empty
+    | "\(.ip_address) \(.mac_address // "")"' "$API_BODY" 2>/dev/null || true)"
+  [ -n "$ip" ] || return 1
+  setv "${n}_T_IP" "$(($(now) - $(getv "${n}_T0")))"
+  setv "${n}_VPC_IP" "$ip"
+  setv "${n}_VPC_MAC" "$mac"
+}
+
 poll_instance() { # poll_instance NAME ; returns 0 when every milestone is reached
-  local n="$1" id t0 ip mac ci pub last pending=0
+  local n="$1" id t0 ci pub last pending=0
   id=$(getv "${n}_ID")
   [ -n "$id" ] || return 0
   t0=$(getv "${n}_T0")
   if [ -z "$(getv "${n}_T_OK")" ]; then
-    api GET "/instances/$id"
-    if api_ok && [ "$(jqb '.instance.status + "/" + .instance.power_status + "/" + .instance.server_status')" = "active/running/ok" ]; then
-      setv "${n}_T_OK" "$(($(now) - t0))"
-      setv "${n}_PUB" "$(jqb '.instance.main_ip')"
-    else
-      pending=1
-    fi
+    read_state "$n"
+    [ -n "$(getv "${n}_T_OK")" ] || pending=1
   fi
   if [ -z "$(getv "${n}_T_IP")" ]; then
     api GET "/instances/$id/vpcs"
-    ip=$(jq -r '.vpcs[0].ip_address // empty' "$API_BODY" 2>/dev/null || true)
-    mac=$(jq -r '.vpcs[0].mac_address // empty' "$API_BODY" 2>/dev/null || true)
-    if [ -n "$ip" ] && [ "$ip" != "0.0.0.0" ]; then
-      setv "${n}_T_IP" "$(($(now) - t0))"
-      setv "${n}_VPC_IP" "$ip"
-      setv "${n}_VPC_MAC" "$mac"
-    else
-      pending=1
-    fi
+    note_vpc_ip "$n" || pending=1
   fi
+  # A locked-down instance (no check needs SSH) has no milestones beyond the API.
+  [ "$NEED_SSH" = 1 ] || return "$pending"
   pub=$(getv "${n}_PUB")
   last=$(getv "${n}_LAST")
   if [ -z "$pub" ] || [ $(($(now) - ${last:-0})) -lt "$POLL_INTERVAL" ]; then
@@ -600,6 +647,12 @@ measure_boot() {
   if want boot; then
     boot_row A "Boot A (package_upgrade: false, ${UD_BYTES}-byte user_data)"
     if [ -n "$B_ID" ]; then boot_row B "Boot B (same user_data as A)"; fi
+  fi
+  if [ "$NEED_SSH" = 0 ]; then
+    [ -n "$A_T_OK" ] || die "instance A never became active/running/ok"
+    row "Instance A without SSH" "api ok ${A_T_OK}s, VPC IP ${A_T_IP:-?}s; firewall_group_id \`$(a_fg)\` (the group with no rules: \`$LOCK_FG\`)" \
+      "no selected check needs SSH, so A takes no inbound traffic"
+    return 0
   fi
   [ -n "$A_PUB" ] && [ -n "$A_T_SSH" ] || die "instance A never became reachable over SSH: $(ssh_reason "$A_PUB")"
 }
@@ -724,16 +777,51 @@ add_fw_rule() { # add_fw_rule IPTYPE PROTO SUBNET SIZE [PORT] ; prints the outco
   if api_ok; then printf '%s %s %s/%s %s: ok' "$1" "$proto" "$3" "$4" "${5:-}"; else printf '%s %s %s/%s %s: %s %s' "$1" "$proto" "$3" "$4" "${5:-}" "$API_STATUS" "$(api_err)"; fi
 }
 
+create_fg() { # create_fg DESCRIPTION -> sets NEW_FG and records it for cleanup at once
+  local body="$WORK/body-fw.json"
+  NEW_FG=""
+  jq -n --arg d "$1" '{description: $d}' >"$body"
+  api POST /firewalls "$body"
+  api_ok || return 1
+  NEW_FG=$(jqb '.firewall_group.id')
+  record_resource firewall "$NEW_FG"
+}
+
+# The lockdown group: no rules, so no inbound traffic, and the instances' root password login stays unreachable.
+# Only when no selected check needs SSH; this script does not know the machine's public IP to allow it alone.
+create_lockdown_fg() {
+  create_fg "$RUN_TAG-lockdown" || die "cannot create the firewall group for instance A: $API_STATUS $(api_err)"
+  LOCK_FG="$NEW_FG"
+  log "firewall group without rules for the instances: $LOCK_FG"
+}
+
+relock_a() { # attaches the lockdown group to A again right after each check that detaches or deletes A's group
+  local body="$WORK/body-relock.json"
+  [ -n "$LOCK_FG" ] || return 0
+  jq -n --arg f "$LOCK_FG" '{firewall_group_id: $f}' >"$body"
+  api PATCH "/instances/$A_ID" "$body"
+  api_ok || row "Attach the group with no rules to A again" "failed: $API_STATUS $(api_err)" "A takes inbound traffic until cleanup"
+}
+
+ensure_fg() { # the run's firewall group FG_ID for the checks without instances; one create attempt, never retried
+  [ -z "$FG_ID" ] || return 0
+  [ -z "$FG_TRIED" ] || return 1
+  FG_TRIED=1
+  if create_fg "$FG_MARKER"; then
+    FG_ID="$NEW_FG"
+    return 0
+  fi
+  row "Firewall group create" "failed: $API_STATUS $(api_err)" "check account/ACL"
+  return 1
+}
+
 check_firewall_group() {
   local body="$WORK/body-fw.json" deadline t0 pub vpc ssh_state waited rules before
-  jq -n --arg d "$FG_MARKER" '{description: $d}' >"$body"
-  api POST /firewalls "$body"
-  if ! api_ok; then
+  if ! create_fg "$FG_MARKER"; then
     row "Firewall group create" "failed: $API_STATUS $(api_err)" "check account/ACL"
     return 0
   fi
-  FG_ID=$(jqb '.firewall_group.id')
-  record_resource firewall "$FG_ID"
+  FG_ID="$NEW_FG"
   rules="$(add_fw_rule v4 tcp 0.0.0.0 0 22); $(add_fw_rule v6 tcp :: 0 22); $(add_fw_rule v4 icmp 0.0.0.0 0)"
   row "Firewall group rules" "$rules" "rule syntax for the provider"
   before=$(http_from_here "$A_PUB")
@@ -1010,6 +1098,374 @@ check_halt() {
   row "Metadata user_data after restart" "\`$ud_after\`" "scrub persists across reboots?"
 }
 
+# ---------------------------------------------------------------------------------------------------------------
+# ADR-0023 facts and the node primitives (docs/platform-notes.md §3.3, §3.5, §3.6, §3.10). sshdup, lengths and rules
+# need no instance; fwinuse, patchtags, vpcpending and halttwice need only instance A and no SSH.
+
+check_sshdup() { # a second SSH key with the same key material under another name; its name carries RUN_TAG, so
+  # cleanup finds it by name when the answer had no usable id
+  local body="$WORK/body-sshdup.json" name id res copies impact="a second cluster with the same operator key"
+  if [ "$SSH_NAME_USED" = "$SSH_MARKER" ]; then
+    name="tent:cluster=$RUN_TAG;kind=ssh-key;fp=$SSH_FP;op=$(uuid4)"
+  else
+    name="$RUN_TAG-dup"
+  fi
+  jq -n --arg n "$name" --rawfile k "$SSH_KEY.pub" '{name: $n, ssh_key: ($k | rtrimstr("\n"))}' >"$body"
+  api POST /ssh-keys "$body"
+  if ! api_ok; then
+    row "Second SSH key, same key material" "refused: $API_STATUS $(api_err)" "$impact"
+    return 0
+  fi
+  id=$(jqb '.ssh_key.id // empty' 2>/dev/null || true)
+  if [ -n "$id" ] && [ "$id" != "$SSH_KEY_ID" ]; then record_resource ssh-key "$id"; fi
+  api GET "/ssh-keys?per_page=500"
+  copies=$(jq -r --arg d "$(awk '{print $2}' "$SSH_KEY.pub")" \
+    '[.ssh_keys[]? | select(((.ssh_key // "") | split(" ") | .[1] // "") == $d)] | length' "$API_BODY" 2>/dev/null || echo '?')
+  if [ "$id" = "$SSH_KEY_ID" ]; then res="accepted, but returned the first key's id"; else res="accepted: second key ${id:-without id}"; fi
+  row "Second SSH key, same key material" "$res; the account lists $copies key(s) with this material" "$impact"
+}
+
+# marker_text KIND EXTRA N: a tent marker (20-character cluster, EXTRA fields, op) and a trailing ";name=" field of
+# lower-case letters, cut to N characters.
+marker_text() {
+  local t
+  t="tent:cluster=$RUN_TAG-ln;kind=$1$2;op=$(uuid4);name=$(rand_chars 'a-z' "$3")"
+  printf '%s' "${t:0:$3}"
+}
+
+check_lengths() { # the longest text stored verbatim in a VPC description, a firewall group description, an SSH key name
+  local kind title id path method key get extra orig n text got prev st res longest first all
+  local body="$WORK/body-text.json"
+  ensure_fg || true
+  for kind in vpc firewall ssh-key; do
+    # The methods and bodies govultr v3.33.0 sends: VPC and firewall group PUT, SSH key PATCH.
+    case "$kind" in
+      vpc) title="VPC description" id="$VPC_ID" method=PUT key=description get=.vpc.description extra="" orig="$VPC_MARKER" ;;
+      firewall) title="firewall group description" id="$FG_ID" method=PUT key=description get=.firewall_group.description extra=";role=server" orig="$FG_MARKER" ;;
+      ssh-key) title="SSH key name" id="$SSH_KEY_ID" method=PATCH key=name get=.ssh_key.name extra=";fp=$SSH_FP" orig="$SSH_NAME_USED" ;;
+    esac
+    if [ -z "$id" ]; then
+      row "Longest $title stored verbatim" "skipped (no object)" ""
+      continue
+    fi
+    case "$kind" in vpc) path="/vpcs/$id" ;; firewall) path="/firewalls/$id" ;; ssh-key) path="/ssh-keys/$id" ;; esac
+    longest="none" first="" all="" prev="$orig"
+    for n in 64 99 128 200 255 256 512; do
+      text=$(marker_text "$kind" "$extra" "$n")
+      jq -n --arg k "$key" --arg t "$text" '{($k): $t}' >"$body"
+      api "$method" "$path" "$body"
+      st="$API_STATUS"
+      got=""
+      if ! api_ok; then
+        res="rejected: $st $(api_err)"
+      else
+        api GET "$path"
+        got=$(jqb "$get // empty" 2>/dev/null || true)
+        if [ "$got" = "$text" ]; then
+          res="verbatim"
+        elif [ "$got" = "$prev" ]; then
+          res="accepted ($st) but not changed"
+        elif [ -n "$got" ] && [ "${text:0:${#got}}" = "$got" ]; then
+          res="accepted ($st), truncated to ${#got}"
+        else
+          res="accepted ($st), stored ${#got} other characters"
+        fi
+        prev="$got"
+      fi
+      all="$all$n: $res
+"
+      case "$res" in accepted*) all="$all  sent:   $text
+  stored: $got
+" ;; esac
+      if [ "$res" = "verbatim" ]; then longest="$n" first=""; elif [ -z "$first" ]; then first="$n: $res"; fi
+    done
+    jq -n --arg k "$key" --arg t "$orig" '{($k): $t}' >"$body"
+    api "$method" "$path" "$body"
+    api_ok || row "Restore the $title marker" "failed: $API_STATUS $(api_err)" "the markers check reads it"
+    row "Longest $title stored verbatim (64-512)" "$longest${first:+; first longer: $first}" "markers with op reach 99 characters"
+    printf '%s' "$all" | detail "lengths: $title ($id)"
+  done
+}
+
+check_rules() { # how Vultr lists rules sent as tent sends them, and whether it takes the same rule twice
+  # tent's form (internal/cloud/vultr/firewall.go): lower-case protocol, the port as text, no port for ICMP, no notes.
+  local sent='[
+    {"ip_type": "v4", "protocol": "tcp", "subnet": "203.0.113.7", "subnet_size": 32, "port": "22"},
+    {"ip_type": "v6", "protocol": "tcp", "subnet": "2001:db8::", "subnet_size": 48, "port": "22"},
+    {"ip_type": "v4", "protocol": "icmp", "subnet": "0.0.0.0", "subnet_size": 0},
+    {"ip_type": "v6", "protocol": "icmp", "subnet": "::", "subnet_size": 0},
+    {"ip_type": "v4", "protocol": "tcp", "subnet": "0.0.0.0", "subnet_size": 0, "port": "4646"}]'
+  local body="$WORK/body-rule.json" listed="$WORK/rules-listed.json" i=0 n text res st copies ids=()
+  local impact="tent compares rules as text; a listed form it does not normalise plans an update every run"
+  if ! ensure_fg; then
+    row "Rule listing" "skipped (no firewall group)" "$impact"
+    return 0
+  fi
+  n=$(jq -n --argjson s "$sent" '$s | length')
+  while [ "$i" -lt "$n" ]; do
+    jq -n --argjson s "$sent" --argjson i "$i" '$s[$i]' >"$body"
+    api POST "/firewalls/$FG_ID/rules" "$body"
+    if api_ok; then ids[i]=$(jqb '.firewall_rule.id // empty' 2>/dev/null || true); else ids[i]="refused: $API_STATUS $(api_err)"; fi
+    i=$((i + 1))
+  done
+  api GET "/firewalls/$FG_ID/rules?per_page=500"
+  cp "$API_BODY" "$listed"
+  { jq . "$listed" 2>/dev/null || cat "$listed"; } | detail "firewall rules as Vultr lists them (group $FG_ID)"
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    text=$(jq -rn --argjson s "$sent" --argjson i "$i" \
+      '$s[$i] | "\(.ip_type) \(.protocol) \(.subnet)/\(.subnet_size)" + (if .port then " \(.port)" else "" end)')
+    case "${ids[i]}" in
+      refused:*) res="create ${ids[i]}" ;;
+      *)
+        # Match by the created id, or by position when the create answer had none.
+        res=$(jq -r --argjson s "$sent" --argjson i "$i" --arg id "${ids[i]}" '
+          $s[$i] as $w
+          | (if $id != "" then [.firewall_rules[]? | select((.id | tostring) == $id)][0] else .firewall_rules[$i] end) as $l
+          | if $l == null then "not listed"
+            else ["ip_type", "protocol", "subnet", "subnet_size", "port"]
+              | map(. as $k | {k: $k, w: ($w[$k] // "" | tostring), l: ($l[$k] // "" | tostring)})
+              | (map("\(.k)=\(.l)") | join(" ")) + "; "
+                + ([.[] | select(.w != .l) | "\(.k) \(.w) -> \(.l)"]
+                   | if length == 0 then "same as sent" else "DIFFERS: " + join(", ") end)
+            end' "$listed" 2>/dev/null || echo "listing is not JSON (HTTP $API_STATUS)")
+        ;;
+    esac
+    row "Rule listed: $text" "$res" "$impact"
+    i=$((i + 1))
+  done
+  jq -n --argjson s "$sent" '$s[0]' >"$body"
+  api POST "/firewalls/$FG_ID/rules" "$body"
+  st="$API_STATUS"
+  if api_ok; then
+    api GET "/firewalls/$FG_ID/rules?per_page=500"
+    copies=$(jq -r '[.firewall_rules[]? | select(.subnet == "203.0.113.7")] | length' "$API_BODY" 2>/dev/null || echo '?')
+    res="accepted ($st); the group lists $copies rule(s) from 203.0.113.7"
+  else
+    res="refused: $(answer) (tent counts it as done: $(rule_defined))"
+  fi
+  row "Same rule added twice (v4 tcp 203.0.113.7/32 22)" "$res" \
+    "tent counts 400 \"This rule is already defined\" as done, so a retried rule create succeeds; any other refusal fails it"
+}
+
+rule_defined() { # does the last answer match tent's ruleDefined (400, "This rule is already defined" in any case)?
+  local msg
+  msg=$(jq -r '(.error // "") | gsub("^\\s+|\\s+$"; "") | ascii_downcase' "$API_BODY" 2>/dev/null || true)
+  if [ "$API_STATUS" = "400" ] && [ "$msg" = "this rule is already defined" ]; then echo yes; else echo no; fi
+}
+
+a_fg() { api GET "/instances/$A_ID"; jqb '.instance.firewall_group_id' 2>/dev/null || echo '?'; }
+
+in_use_rule() { # does the last DELETE answer match tent's ErrInUse (409, 423, or a 4xx saying "are attached"/"in use")?
+  local msg
+  case "$API_STATUS" in
+    409 | 423) echo yes; return 0 ;;
+    5??) echo "no (5xx: retried as unavailable)"; return 0 ;;
+  esac
+  msg=$(api_err)
+  if grep -Eiq '(^|[^[:alnum:]_])(are attached|in use)([^[:alnum:]_]|$)' <<<"$msg"; then echo yes; else echo no; fi
+}
+
+fg_count() { # fg_count FILE LABEL: instance_count of the group object in FILE: a number, null, "missing", or LABEL
+  jq -r --arg l "$2" 'if type != "object" then $l elif has("instance_count") then (.instance_count | tostring) else "missing" end' \
+    "$1" 2>/dev/null || echo '?'
+}
+
+fg_counts() { # fg_counts ID: sets FG_COUNTS to the group's instance_count in GET /firewalls and GET /firewalls/{id};
+  # returns 0 when both are at least 1. Leaves the group's JSON from each in $WORK/fg-list.json and $WORK/fg-one.json
+  local list one
+  api GET "/firewalls?per_page=500"
+  jq --arg id "$1" '[.firewall_groups[]? | select(.id == $id)][0]' "$API_BODY" >"$WORK/fg-list.json" 2>/dev/null ||
+    cp "$API_BODY" "$WORK/fg-list.json"
+  if api_ok; then list=$(fg_count "$WORK/fg-list.json" "not listed"); else list="HTTP $API_STATUS"; fi
+  api GET "/firewalls/$1"
+  jq '.firewall_group' "$API_BODY" >"$WORK/fg-one.json" 2>/dev/null || cp "$API_BODY" "$WORK/fg-one.json"
+  if api_ok; then one=$(fg_count "$WORK/fg-one.json" "no firewall_group"); else one="HTTP $API_STATUS"; fi
+  FG_COUNTS="GET /firewalls $list, GET /firewalls/{id} $one"
+  case "$list/$one" in [1-9]*/[1-9]*) return 0 ;; *) return 1 ;; esac
+}
+
+check_fwinuse() { # Vultr's answer to the delete of a firewall group that instance A uses
+  local body="$WORK/body-fwinuse.json" id t0 deadline attached="not shown within 120 s" counts first="" del in_use fg1 fg2 left
+  local impact="tent retries ErrInUse (409, 423, a 4xx that says attached or in use); anything else fails the delete"
+  if ! create_fg "tent:cluster=$RUN_TAG;kind=firewall;role=client;op=$(uuid4)"; then
+    row "Delete a firewall group in use" "skipped: group create failed: $API_STATUS $(api_err)" "$impact"
+    return 0
+  fi
+  id="$NEW_FG"
+  jq -n --arg f "$id" '{firewall_group_id: $f}' >"$body"
+  t0=$(now)
+  api PATCH "/instances/$A_ID" "$body"
+  if ! api_ok; then
+    row "Delete a firewall group in use" "skipped: attach failed: $API_STATUS $(api_err)" "$impact"
+    return 0
+  fi
+  deadline=$((t0 + 120))
+  while [ "$(now)" -lt "$deadline" ]; do
+    if [ "$(a_fg)" = "$id" ]; then
+      attached="shown after $(($(now) - t0))s"
+      break
+    fi
+    sleep 3
+  done
+  # instance_count may lag the attach: read it for up to 30 s until both answers count A.
+  t0=$(now)
+  deadline=$((t0 + 30))
+  until fg_counts "$id" || [ "$(now)" -ge "$deadline" ]; do
+    [ -n "$first" ] || first="$FG_COUNTS"
+    sleep 3
+  done
+  if [ -z "$first" ]; then
+    counts="$FG_COUNTS"
+  elif [ "$first" = "$FG_COUNTS" ]; then
+    counts="$FG_COUNTS (the same for $(($(now) - t0))s)"
+  else
+    counts="at first $first; after $(($(now) - t0))s $FG_COUNTS"
+  fi
+  row "Firewall group attached to A" "attach $attached; instance_count: $counts" \
+    "the dedupe's keep rule counts instances per group (ADR-0023)"
+  {
+    printf 'GET /firewalls?per_page=500, the entry of this group:\n'
+    jq . "$WORK/fg-list.json" 2>/dev/null || cat "$WORK/fg-list.json"
+    printf '\nGET /firewalls/%s, .firewall_group:\n' "$id"
+    jq . "$WORK/fg-one.json" 2>/dev/null || cat "$WORK/fg-one.json"
+  } | detail "firewall group $id while instance A uses it"
+  api DELETE "/firewalls/$id"
+  del="HTTP $API_STATUS"
+  in_use="n/a"
+  if ! api_ok; then
+    del="$del $(api_err)"
+    in_use=$(in_use_rule)
+  fi
+  fg1=$(a_fg)
+  api GET "/firewalls/$id"
+  left="$API_STATUS"
+  if api_ok; then
+    row "Delete a firewall group in use" "$del (matches tent's ErrInUse: $in_use); the group still exists" "$impact"
+    jq -n '{firewall_group_id: ""}' >"$body"
+    api PATCH "/instances/$A_ID" "$body"
+    row "Detach the group from A (PATCH firewall_group_id \"\")" "HTTP $API_STATUS $(api_err)" "cleanup deletes the group"
+  else
+    sleep 15
+    fg2=$(a_fg)
+    row "Delete a firewall group in use" "$del, deleted while attached (GET group: HTTP $left); A's firewall_group_id then \`$fg1\`, after 15 s \`$fg2\`" "$impact"
+  fi
+}
+
+a_state() { # tags, features and firewall group of instance A, as compact JSON
+  api GET "/instances/$A_ID"
+  jq -c '.instance | {tags, features, firewall_group_id}' "$API_BODY" 2>/dev/null || echo 'null'
+}
+
+patch_probe() { # patch_probe TITLE BODY_FILE BEFORE_JSON: PATCH A, then compare its state with BEFORE after 15 s
+  local st first later verdict seen impact="tent's scrub and firewall PATCHes must send the current tags if null clears them"
+  api PATCH "/instances/$A_ID" "$2"
+  st="$API_STATUS"
+  if ! api_ok; then
+    row "$1" "refused: $st $(api_err)" "$impact"
+    return 0
+  fi
+  first=$(a_state)
+  sleep 15
+  later=$(a_state)
+  verdict=$(jq -rn --argjson b "$3" --argjson a "$later" '
+    (if (($a.tags // []) | sort) == (($b.tags // []) | sort) then "tags kept"
+     elif (($a.tags // []) | length) == 0 then "tags CLEARED" else "tags CHANGED" end)
+    + ", " + (if $a.features == $b.features then "features unchanged" else "features CHANGED" end)' 2>/dev/null || echo '?')
+  if [ "$first" = "$later" ]; then seen="after \`$later\`"; else seen="right after \`$first\`, after 15 s \`$later\`"; fi
+  row "$1" "HTTP $st; $verdict. Before \`$3\`, $seen" "$impact"
+}
+
+check_patchtags() { # does the PATCH govultr sends ("tags": null, "ddos_protection": null) clear A's tags?
+  local body="$WORK/body-patchtags.json" stub="$WORK/ud-patchtags.txt" tags before ud
+  tags=$(jq -cn --arg r "$RUN_TAG" --arg op "$(uuid4)" '[$r, "tent/cluster=\($r)", "tent/op=\($op)"]')
+  set_tags "$tags"
+  if ! api_ok; then
+    row "PATCH as govultr sends it" "skipped: setting tags failed: $API_STATUS $(api_err)" ""
+    return 0
+  fi
+  before=$(a_state)
+  printf '#cloud-config\n# tent spike patchtags\n' >"$stub"
+  # govultr's InstanceUpdateReq has no omitempty on tags and ddos_protection: unset, they go out as null.
+  jq -n --arg u "$(b64enc <"$stub")" '{tags: null, ddos_protection: null, user_data: $u}' >"$body"
+  patch_probe "PATCH {tags: null, ddos_protection: null, user_data} (govultr, user_data only)" "$body" "$before"
+  api GET "/instances/$A_ID/user-data"
+  if [ "$(jqb '.user_data.data // empty' 2>/dev/null | b64dec 2>/dev/null || true)" = "$(cat "$stub")" ]; then ud="applied"; else ud="NOT applied"; fi
+  row "user_data after that PATCH" "$ud" ""
+  set_tags "$tags"
+  before=$(a_state)
+  jq -n '{tags: null, ddos_protection: null, firewall_group_id: ""}' >"$body"
+  patch_probe "PATCH {tags: null, ddos_protection: null, firewall_group_id: \"\"} (firewall group only)" "$body" "$before"
+  # cleanup's tag fallback looks for RUN_TAG
+  set_tags "$(jq -cn --arg r "$RUN_TAG" '[$r]')"
+  api_ok || row "Restore A's tags" "failed: $API_STATUS $(api_err)" "cleanup deletes A by its recorded id"
+}
+
+# What GET /instances/{A}/vpcs answers while A boots, from right after the create answer until it lists an address
+# other than 0.0.0.0 (at most 120 s). Records each distinct answer with the instance's state and the seconds since
+# the create request. Sets A's VPC IP milestone (and A's API milestone, if reached), so measure_boot keeps them.
+check_vpcpending() {
+  local deadline=$((A_T0 + 120)) t ans cur last="" seq="" got404="no" found=0 addr
+  local raw="$WORK/vpcpending.txt"
+  : >"$raw"
+  while :; do
+    api GET "/instances/$A_ID/vpcs"
+    t=$(($(now) - A_T0))
+    if api_ok; then
+      ans="HTTP $API_STATUS $(jq -r 'if (.vpcs | type) != "array" then "no vpcs array"
+        elif (.vpcs | length) == 0 then "vpcs []" else "ip " + ([.vpcs[] | .ip_address // "null"] | join(",")) end' \
+        "$API_BODY" 2>/dev/null || echo 'not JSON')"
+    else
+      ans=$(answer)
+    fi
+    [ "$API_STATUS" != "404" ] || got404="yes"
+    if note_vpc_ip A; then found=1; fi
+    printf '%ss: %s\n' "$t" "$(oneline 400 <"$API_BODY")" >"$WORK/vpcpending-last.txt"
+    read_state A
+    cur="$ans, instance $INST_STATE"
+    if [ "$cur" != "$last" ]; then
+      seq="$seq${seq:+; }${t}s $cur"
+      { cat "$WORK/vpcpending-last.txt"; printf '  instance: %s\n' "$INST_STATE"; } >>"$raw"
+      last="$cur"
+    fi
+    [ "$found" = 0 ] || break
+    [ "$(now)" -lt "$deadline" ] || break
+    sleep 1
+  done
+  if [ "$found" = 1 ]; then addr="address after ${A_T_IP}s"; else addr="no address within 120 s"; fi
+  row "GET /instances/{id}/vpcs while A boots" "404 before the address: $got404; $addr. Answers: $seq" \
+    "tent's List must not treat a 404 on /vpcs as a deleted instance"
+  detail "GET /instances/$A_ID/vpcs while A boots (seconds since the create request)" <"$raw"
+}
+
+# Halts A, waits until it is stopped (at most 60 s), and halts it again. Leaves A stopped: it runs last.
+check_halttwice() {
+  local t0 deadline first second stopped="not stopped within 60 s" after
+  local impact="Stop sends a bodyless POST that Go 1.26's HTTP/2 client may send twice; a second halt must not be an error"
+  [ -z "$A_PUB" ] || ssh_close "$A_PUB"
+  t0=$(now)
+  api POST "/instances/$A_ID/halt"
+  first=$(answer)
+  if ! api_ok; then
+    row "Halt A twice" "first halt refused: $first" "$impact"
+    return 0
+  fi
+  deadline=$((t0 + 60))
+  while [ "$(now)" -lt "$deadline" ]; do
+    api GET "/instances/$A_ID"
+    if [ "$(jqb '.instance.power_status' 2>/dev/null || true)" = "stopped" ]; then
+      stopped="stopped after $(($(now) - t0))s"
+      break
+    fi
+    sleep 2
+  done
+  api POST "/instances/$A_ID/halt"
+  second=$(answer)
+  api GET "/instances/$A_ID"
+  after=$(jqb '.instance.status + "/" + .instance.power_status + "/" + .instance.server_status' 2>/dev/null || echo '?')
+  row "Halt A twice" "first halt $first; $stopped; second halt $second; then $after" "$impact"
+}
+
 check_objstore() {
   local conf="$WORK/s3.conf" url c1 c2 c3 c4 c5 etag
   if [ -z "$S3_ENDPOINT" ] || [ -z "$S3_BUCKET" ] || [ -z "$S3_ACCESS_KEY" ] || [ -z "$S3_SECRET_KEY" ]; then
@@ -1094,6 +1550,13 @@ cleanup() {
           done
         done <"$STATE"
       done
+      # Fallback: SSH keys whose name carries the run tag but whose id was not recorded (sshdup's second key when
+      # the create answer had no usable id).
+      api GET "/ssh-keys?per_page=500"
+      for id in $(jq -r --arg t "$RUN_TAG" '.ssh_keys[]? | select((.name // "") | contains($t)) | .id' "$API_BODY" 2>/dev/null); do
+        api DELETE "/ssh-keys/$id"
+        row "Unrecorded SSH key with the run tag" "deleted $id: $(answer)" "sshdup: the create answer had no usable id"
+      done
       log "cleanup done"
       write_report
     fi
@@ -1127,22 +1590,26 @@ main() {
     case ",$ALL_CHECKS," in *",$c,"*) ;; *) die "unknown check: $c" ;; esac
   done
 
-  for c in curl jq awk base64 tr; do need_cmd "$c"; done
-  local needs_instances=0
-  for c in boot inside metadata network firewall alias tags markers userdata scrub halt; do
+  for c in curl jq awk base64 tr od; do need_cmd "$c"; done
+  # needs_api: the run creates resources (SSH key, VPC); needs_instances: it also creates instance A.
+  local needs_api=0 needs_instances=0
+  for c in tags markers userdata fwinuse patchtags vpcpending halttwice $SSH_CHECKS; do
     if want "$c"; then needs_instances=1; fi
   done
-  if [ "$MODE" = "run" ] && [ "$needs_instances" = 1 ]; then
-    for c in ssh ssh-keygen; do need_cmd "$c"; done
-  fi
+  needs_api="$needs_instances"
+  for c in sshdup lengths rules; do if want "$c"; then needs_api=1; fi; done
+  NEED_SSH=0
+  for c in $SSH_CHECKS; do if want "$c"; then NEED_SSH=1; fi; done
+  if [ "$MODE" = "run" ] && [ "$needs_api" = 1 ]; then need_cmd ssh-keygen; fi
+  if [ "$MODE" = "run" ] && [ "$NEED_SSH" = 1 ]; then need_cmd ssh; fi
   jq -n --rawfile x /dev/null '1' >/dev/null 2>&1 || die "jq 1.6+ is required (--rawfile)"
 
   RUN=$(lower "$(rand_alnum 6)")
   RUN_TAG="tent-spike-$RUN"
   SECRET_MARKER=$(rand_alnum 24)
-  VPC_MARKER="tent:cluster=$RUN_TAG;kind=vpc"
-  SSH_MARKER="tent:cluster=$RUN_TAG;kind=ssh-key;fp=00000000"
-  FG_MARKER="tent:cluster=$RUN_TAG;kind=firewall;role=servers"
+  # Markers as tent writes them (internal/cloud/vultr/labels.go); create_ssh_key sets SSH_MARKER with the key's fp.
+  VPC_MARKER="tent:cluster=$RUN_TAG;kind=vpc;op=$(uuid4)"
+  FG_MARKER="tent:cluster=$RUN_TAG;kind=firewall;role=server;op=$(uuid4)"
   WORK=$(mktemp -d "${TMPDIR:-/tmp}/tent-spike.XXXXXX")
   mkdir -p "$OUT_DIR"
   REPORT="$OUT_DIR/vultr-spike-$(date -u +%Y%m%d-%H%M%S)-$REGION-$RUN.md"
@@ -1158,27 +1625,44 @@ main() {
   log "tent Vultr spike v$SPIKE_VERSION, run $RUN, region $REGION, plan $PLAN"
   preflight
   [ "$MODE" = "preflight" ] && { log "preflight only: done"; return 0; }
-  if [ "$needs_instances" = 0 ]; then
+  if [ "$needs_api" = 0 ]; then
     if [ "$MODE" = "run" ] && want objstore; then check_objstore; fi
-    log "no instance checks selected: done"
+    log "no Vultr resource checks selected: done"
     return 0
   fi
 
-  local needs_b=0 needs_v=0 instances=1 cost fw_note="" keep_note=""
-  for c in network firewall alias; do if want "$c"; then needs_b=1; fi; done
-  if want boot; then needs_v=1; fi
-  instances=$((instances + needs_b + needs_v))
-  if want userdata; then instances=$((instances + 1)); fi
-  if want firewall; then fw_note=", 1 firewall group"; fi
-  if [ "$KEEP" = 1 ]; then keep_note=" (NOT deleted: --keep given)"; fi
+  local needs_b=0 needs_v=0 instances=0 keys=1 groups=0 cost billed duration keep_note="" lock_note=""
+  if [ "$needs_instances" = 1 ]; then
+    for c in network firewall alias; do if want "$c"; then needs_b=1; fi; done
+    if want boot; then needs_v=1; fi
+    instances=$((1 + needs_b + needs_v))
+    if want userdata; then instances=$((instances + 1)); fi
+  fi
+  if want sshdup; then keys=2; fi
+  if want firewall; then groups=$((groups + 1)); fi
+  if want lengths || want rules; then groups=$((groups + 1)); fi
+  if want fwinuse; then groups=$((groups + 1)); fi
+  if [ "$needs_instances" = 1 ] && [ "$NEED_SSH" = 0 ]; then
+    groups=$((groups + 1))
+    lock_note="
+  - no selected check needs SSH: the instances get a firewall group with no rules (no inbound traffic)"
+  fi
   cost=$(awk -v h="$HOURLY" -v n="$instances" 'BEGIN { printf "%.3f", h * n }')
+  case "$instances" in
+    0) billed="no instances (nothing billed)" duration="1-3 minutes" ;;
+    1) billed="1 instance of $PLAN, 1 hour minimum: about \$$cost" duration="5-15 minutes" ;;
+    *) billed="$instances instances of $PLAN (at most 3 at a time), 1 hour minimum each: about \$$cost" duration="20-45 minutes" ;;
+  esac
+  # Without SSH the checks start once the API reports A ready, about a minute after the create.
+  if [ "$instances" -gt 0 ] && [ "$NEED_SSH" = 0 ]; then duration="5-10 minutes"; fi
+  if [ "$KEEP" = 1 ]; then keep_note=" (NOT deleted: --keep given)"; fi
   cat >&2 <<EOF
 
-This run creates BILLED resources in your Vultr account ($REGION):
-  - $instances instance(s) of $PLAN (at most 3 at a time), 1 hour minimum each: about \$$cost
-  - 1 VPC (plus short-lived test VPCs for mask checks), 1 SSH key$fw_note
+This run creates resources in your Vultr account ($REGION):
+  - $billed
+  - 1 VPC (plus short-lived test VPCs for mask checks), $keys SSH key(s), $groups firewall group(s)$lock_note
   - all tagged/marked with $RUN_TAG and deleted on exit$keep_note
-Expected duration: 20-45 minutes. Report: $REPORT
+Expected duration: $duration. Report: $REPORT
 
 EOF
   [ "$MODE" = "dry-run" ] && { log "dry run: nothing created"; return 0; }
@@ -1200,11 +1684,22 @@ EOF
 
   if want objstore; then check_objstore; fi
   create_ssh_key
-  ssh_init
   create_vpc
+  # Checks without instances, before any instance exists.
+  if want sshdup; then check_sshdup; fi
+  if want lengths; then check_lengths; fi
+  if want rules; then check_rules; fi
+  if [ "$needs_instances" = 0 ]; then
+    log "no instance checks selected: done"
+    return 0
+  fi
 
+  ssh_init
   build_user_data
+  if [ "$NEED_SSH" = 0 ]; then create_lockdown_fg; fi
   create_instance A "$WORK/cc-ab.yaml" || die "cannot create instance A: $API_STATUS $(api_err)"
+  # Right after A's create answer, before B and V: B's and V's timings count from their own create requests.
+  if want vpcpending; then check_vpcpending; fi
   if [ "$needs_b" = 1 ]; then
     if ! create_instance B "$WORK/cc-ab.yaml"; then
       row "Second instance" "create failed: $API_STATUS $(api_err)" "account instance limit? B-dependent checks skipped"
@@ -1237,7 +1732,21 @@ EOF
   if want scrub; then check_scrub; fi
   poll_vendor
   if want halt; then check_halt; fi
+  poll_vendor
+  # Late: they change A's user_data, tags and firewall group. Each removes A's group, so A gets the group with no
+  # rules back right after it.
+  if want patchtags; then
+    check_patchtags
+    relock_a
+  fi
+  poll_vendor
+  if want fwinuse; then
+    check_fwinuse
+    relock_a
+  fi
   finish_vendor
+  # Last: it leaves A stopped.
+  if want halttwice; then check_halttwice; fi
   log "all checks finished"
 }
 
