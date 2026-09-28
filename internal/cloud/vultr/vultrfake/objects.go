@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"slices"
+	"strings"
 
 	"github.com/vultr/govultr/v3"
 
@@ -102,16 +103,23 @@ func (f *Fake) countVPCs(region string) int {
 	return n
 }
 
-// DeleteVPC deletes a VPC.
+// DeleteVPC deletes a VPC. While instances are attached to it, it fails with vultr.ErrInUse and Vultr's 400 "The
+// following servers are attached to this VPC network: " and their addresses. Unlike Vultr, which refuses for some
+// seconds more, it deletes the VPC as soon as they are gone.
 func (f *Fake) DeleteVPC(ctx context.Context, id string) error {
 	if err := vultr.CheckID("DELETE /v2/vpcs/{id}", "id", id); err != nil {
 		return err
 	}
 	r := request{name: "DeleteVPC", arg: id, method: http.MethodDelete, path: "/v2/vpcs/" + id}
 	return f.run(ctx, r, func() error {
-		if !remove(&f.vpcs, id, func(v govultr.VPC) string { return v.ID }) {
+		if _, ok := f.findVPC(id); !ok {
 			return r.fail(http.StatusNotFound, "Invalid VPC ID.")
 		}
+		if ips := f.attachedIPs(id); len(ips) > 0 {
+			return r.fail(http.StatusBadRequest,
+				"The following servers are attached to this VPC network: "+strings.Join(ips, ", "))
+		}
+		remove(&f.vpcs, id, func(v govultr.VPC) string { return v.ID })
 		return nil
 	})
 }

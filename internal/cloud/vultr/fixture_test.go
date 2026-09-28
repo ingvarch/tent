@@ -1,6 +1,7 @@
 package vultr_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 type fixture struct {
 	f     *vultrfake.Fake
 	p     *vultr.Provider
+	log   *bytes.Buffer // the provider's log, as JSON
 	tasks []engine.Task
 	kinds []engine.Kind
 }
@@ -30,12 +32,23 @@ type fixture struct {
 // and so on.
 func newFixture() *fixture {
 	f := vultrfake.New()
+	p, log := newOpProvider(f)
+	return &fixture{f: f, p: p, log: log}
+}
+
+// opProvider returns a provider on api whose operation ids are op-1, op-2 and so on.
+func opProvider(api vultr.API) *vultr.Provider {
+	p, _ := newOpProvider(api)
+	return p
+}
+
+// newOpProvider returns what opProvider does, and the buffer that the provider writes its log to as JSON.
+func newOpProvider(api vultr.API) (*vultr.Provider, *bytes.Buffer) {
 	n := 0
-	p, _ := newProvider(f, vultr.WithOpIDs(func() string {
+	return newProvider(api, vultr.WithOpIDs(func() string {
 		n++
 		return fmt.Sprintf("op-%d", n)
 	}))
-	return &fixture{f: f, p: p}
 }
 
 func (x *fixture) inventory(ctx context.Context) (engine.Snapshot, error) {

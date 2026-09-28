@@ -60,8 +60,8 @@ func (f *Fake) AddFirewallGroup(tb testing.TB, g govultr.FirewallGroup) govultr.
 }
 
 // AddFirewallRule stores a rule of the firewall group groupID without a call, and returns it as stored. An id of 0
-// gets the group's next one, and an empty action "accept". It fails the test when the group does not exist, or the
-// id is negative or taken in the group.
+// gets the group's next one, and an empty action "accept"; the source stays as given, even when empty. It fails the
+// test when the group does not exist, or the id is negative or taken in the group.
 func (f *Fake) AddFirewallRule(tb testing.TB, groupID string, r govultr.FirewallRule) govultr.FirewallRule {
 	tb.Helper()
 	f.mu.Lock()
@@ -78,6 +78,35 @@ func (f *Fake) AddFirewallRule(tb testing.TB, groupID string, r govultr.Firewall
 		return g.addRule(r)
 	}
 	return govultr.FirewallRule{}
+}
+
+// AddInstance stores an instance without a call, attached to the VPCs with vpcIDs in order, and returns it as stored.
+// Empty status fields read active, running and ok, and the instance keeps its status fields however often it is read.
+// In each VPC it gets an address and a MAC as a created instance does, and ListInstanceVPCs lists them at once. It
+// fails the test when a VPC does not exist, or the id holds more than ASCII letters, digits and "-", or is taken.
+func (f *Fake) AddInstance(tb testing.TB, in govultr.Instance, vpcIDs ...string) govultr.Instance {
+	tb.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, id := range vpcIDs {
+		if _, ok := f.findVPC(id); !ok {
+			tb.Fatalf("vultrfake: AddInstance: no VPC %q", id)
+			return govultr.Instance{}
+		}
+	}
+	id, ok := f.seedID(tb, "AddInstance", "instance", in.ID)
+	if !ok {
+		return govultr.Instance{}
+	}
+	in.ID, in.DateCreated = id, f.dateOr(in.DateCreated)
+	in.Status = cmp.Or(in.Status, "active")
+	in.PowerStatus = cmp.Or(in.PowerStatus, "running")
+	in.ServerStatus = cmp.Or(in.ServerStatus, "ok")
+	in.Tags, in.Features = slices.Clone(in.Tags), slices.Clone(in.Features)
+	inst := &instance{Instance: in}
+	f.instances = append(f.instances, inst)
+	f.attach(inst, vpcIDs)
+	return inst.view()
 }
 
 // seedID returns the id of an object to seed: id, or a new id of kind when id is empty. It fails the test and returns

@@ -113,6 +113,28 @@ func newTestClient(t *testing.T, srv *httptest.Server) *Client {
 // auth is the Authorization header of every request.
 const auth = "Bearer " + testKey
 
+// An instance as Vultr lists it once it is ready, and the create request of a node.
+const (
+	instanceJSON = `{"id":"i1","region":"ams","plan":"vc2-1c-1gb","label":"prod-servers-0",` +
+		`"hostname":"prod-servers-0","tags":["tent/cluster=prod"],"os_id":2284,"firewall_group_id":"g1",` +
+		`"status":"active","power_status":"running","server_status":"ok","main_ip":"198.51.100.7",` +
+		`"internal_ip":"","date_created":"2026-09-27T10:00:00+00:00"}`
+	password = "x7#Qv9pL2m" // the root password that only the create answer holds
+)
+
+var (
+	readyInstance = govultr.Instance{
+		ID: "i1", Region: "ams", Plan: "vc2-1c-1gb", Label: "prod-servers-0", Hostname: "prod-servers-0",
+		Tags: []string{"tent/cluster=prod"}, OsID: 2284, FirewallGroupID: "g1", Status: "active",
+		PowerStatus: "running", ServerStatus: "ok", MainIP: "198.51.100.7", DateCreated: "2026-09-27T10:00:00+00:00",
+	}
+	createInstanceReq = govultr.InstanceCreateReq{
+		Region: "ams", Plan: "vc2-1c-1gb", Label: "prod-servers-0", Hostname: "prod-servers-0",
+		Tags: []string{"tent/cluster=prod", "tent/op=op-1"}, OsID: 2284, FirewallGroupID: "g1",
+		AttachVPC: []string{"v1"}, SSHKeys: []string{"k1"}, Backups: "disabled", UserData: "I2Nsb3VkLWNvbmZpZwo=",
+	}
+)
+
 func TestClientCalls(t *testing.T) {
 	const (
 		created = "2026-09-27T10:00:00+00:00"
@@ -291,6 +313,78 @@ func TestClientCalls(t *testing.T) {
 			answer: `{"os":[{"id":2284,"name":"Ubuntu 24.04 LTS x64","arch":"x64","family":"ubuntu"}],` + noNext + `}`,
 			result: []govultr.OS{{ID: 2284, Name: "Ubuntu 24.04 LTS x64", Arch: "x64", Family: "ubuntu"}},
 		},
+		{
+			name:   "ListInstances",
+			call:   func(ctx context.Context, c API) (any, error) { return c.ListInstances(ctx, "tent/cluster=prod") },
+			want:   gotRequest{Method: "GET", Path: "/v2/instances", Query: "per_page=500&tag=tent%2Fcluster%3Dprod"},
+			status: 200,
+			answer: `{"instances":[` + instanceJSON + `],` + noNext + `}`,
+			result: []govultr.Instance{readyInstance},
+		},
+		{
+			name:   "GetInstance",
+			call:   func(ctx context.Context, c API) (any, error) { return c.GetInstance(ctx, "i1") },
+			want:   gotRequest{Method: "GET", Path: "/v2/instances/i1"},
+			status: 200,
+			answer: `{"instance":` + instanceJSON + `}`,
+			result: &readyInstance,
+		},
+		{
+			name: "CreateInstance",
+			call: func(ctx context.Context, c API) (any, error) { return c.CreateInstance(ctx, &createInstanceReq) },
+			want: gotRequest{
+				Method: "POST", Path: "/v2/instances",
+				Body: `{"region":"ams","plan":"vc2-1c-1gb","label":"prod-servers-0","hostname":"prod-servers-0",` +
+					`"tags":["tent/cluster=prod","tent/op=op-1"],"os_id":2284,"firewall_group_id":"g1",` +
+					`"attach_vpc":["v1"],"sshkey_id":["k1"],"backups":"disabled","user_data":"I2Nsb3VkLWNvbmZpZwo=",` +
+					`"block_devices":null}`,
+			},
+			status: 202,
+			answer: `{"instance":{"id":"i1","region":"ams","plan":"vc2-1c-1gb","label":"prod-servers-0",` +
+				`"hostname":"prod-servers-0","tags":["tent/cluster=prod","tent/op=op-1"],"os_id":2284,` +
+				`"firewall_group_id":"g1","status":"pending","power_status":"stopped","server_status":"none",` +
+				`"main_ip":"0.0.0.0","internal_ip":"","date_created":"` + created + `","default_password":"` + password +
+				`"}}`,
+			result: &govultr.Instance{
+				ID: "i1", Region: "ams", Plan: "vc2-1c-1gb", Label: "prod-servers-0", Hostname: "prod-servers-0",
+				Tags: []string{"tent/cluster=prod", "tent/op=op-1"}, OsID: 2284, FirewallGroupID: "g1", Status: "pending",
+				PowerStatus: "stopped", ServerStatus: "none", MainIP: "0.0.0.0", DateCreated: created,
+				DefaultPassword: password,
+			},
+		},
+		{
+			name:   "DeleteInstance",
+			call:   func(ctx context.Context, c API) (any, error) { return nil, c.DeleteInstance(ctx, "i1") },
+			want:   gotRequest{Method: "DELETE", Path: "/v2/instances/i1"},
+			status: 204,
+		},
+		{
+			name:   "HaltInstance",
+			call:   func(ctx context.Context, c API) (any, error) { return nil, c.HaltInstance(ctx, "i1") },
+			want:   gotRequest{Method: "POST", Path: "/v2/instances/i1/halt"},
+			status: 204,
+		},
+		{
+			name: "UpdateInstance",
+			call: func(ctx context.Context, c API) (any, error) {
+				return nil, c.UpdateInstance(ctx, "i1", &govultr.InstanceUpdateReq{UserData: "c3R1Ygo="})
+			},
+			// govultr sends tags and ddos_protection even when they are unset; Vultr then keeps them.
+			want: gotRequest{
+				Method: "PATCH", Path: "/v2/instances/i1",
+				Body: `{"tags":null,"ddos_protection":null,"user_data":"c3R1Ygo="}`,
+			},
+			status: 202,
+			answer: `{"job_ids":["j1"]}`,
+		},
+		{
+			name:   "ListInstanceVPCs",
+			call:   func(ctx context.Context, c API) (any, error) { return c.ListInstanceVPCs(ctx, "i1") },
+			want:   gotRequest{Method: "GET", Path: "/v2/instances/i1/vpcs", Query: "per_page=500"},
+			status: 200,
+			answer: `{"vpcs":[{"id":"v1","mac_address":"5a:00:04:aa:bb:cc","ip_address":"10.64.0.3"}],` + noNext + `}`,
+			result: []govultr.VPCInfo{{ID: "v1", MacAddress: "5a:00:04:aa:bb:cc", IPAddress: "10.64.0.3"}},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := newAPIServer(t, answer(tc.status, tc.answer))
@@ -369,6 +463,17 @@ func TestClientListsFollowCursors(t *testing.T) {
 			"ListOS", func(ctx context.Context, c API) (any, error) { return c.ListOS(ctx) },
 			"/v2/os", nil, "os", [3]string{`{"id":1}`, `{"id":2}`, `{"id":3}`},
 			[]govultr.OS{{ID: 1}, {ID: 2}, {ID: 3}},
+		},
+		{
+			"ListInstances", func(ctx context.Context, c API) (any, error) { return c.ListInstances(ctx, "tent/op=op-1") },
+			"/v2/instances", url.Values{"tag": {"tent/op=op-1"}}, "instances",
+			[3]string{`{"id":"a"}`, `{"id":"b"}`, `{"id":"c"}`},
+			[]govultr.Instance{{ID: "a"}, {ID: "b"}, {ID: "c"}},
+		},
+		{
+			"ListInstanceVPCs", func(ctx context.Context, c API) (any, error) { return c.ListInstanceVPCs(ctx, "i1") },
+			"/v2/instances/i1/vpcs", nil, "vpcs", [3]string{`{"id":"a"}`, `{"id":"b"}`, `{"id":"c"}`},
+			[]govultr.VPCInfo{{ID: "a"}, {ID: "b"}, {ID: "c"}},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -507,6 +612,19 @@ func TestClientErrors(t *testing.T) {
 			_, err := c.ListSSHKeys(ctx)
 			return err
 		}
+		deleteInstance = func(ctx context.Context, c API) error { return c.DeleteInstance(ctx, "i1") }
+		createInstance = func(ctx context.Context, c API) error {
+			_, err := c.CreateInstance(ctx, &createInstanceReq)
+			return err
+		}
+		getInstance = func(ctx context.Context, c API) error {
+			_, err := c.GetInstance(ctx, "i1")
+			return err
+		}
+		haltInstance   = func(ctx context.Context, c API) error { return c.HaltInstance(ctx, "i1") }
+		updateInstance = func(ctx context.Context, c API) error {
+			return c.UpdateInstance(ctx, "i1", &govultr.InstanceUpdateReq{UserData: "c3R1Ygo="})
+		}
 	)
 	for _, tc := range []struct {
 		name    string
@@ -574,6 +692,13 @@ func TestClientErrors(t *testing.T) {
 			as:      new(*json.SyntaxError),
 		},
 		{
+			name:    "a success status that govultr does not read",
+			call:    listKeys,
+			handler: answer(207, `{"ssh_keys":[],"meta":{"total":0,"links":{"next":"","prev":""}}}`),
+			text:    "vultr: GET /v2/ssh-keys: a success with the status 207, which the client does not read",
+			calls:   []string{"GET"},
+		},
+		{
 			name: "a success that is not JSON",
 			call: listKeys,
 			handler: func(w http.ResponseWriter, _ *http.Request) {
@@ -614,6 +739,49 @@ func TestClientErrors(t *testing.T) {
 			api:   &APIError{Method: "POST", Path: "/v2/vpcs", Status: 201},
 			text:  `vultr: POST /v2/vpcs: an answer of type "text/html", not application/json`,
 			calls: []string{"POST"},
+		},
+		{
+			name:    "404 on an instance delete",
+			call:    deleteInstance,
+			handler: answer(404, `{"error":"Invalid instance ID.","status":404}`),
+			kind:    ErrNotFound,
+			api:     &APIError{Method: "DELETE", Path: "/v2/instances/i1", Status: 404, Message: "Invalid instance ID."},
+			text:    "vultr: DELETE /v2/instances/i1: 404 Not Found: Invalid instance ID.",
+			calls:   []string{"DELETE"},
+		},
+		{
+			name:    "500 on an instance create is sent once",
+			call:    createInstance,
+			handler: answer(500, `{"error":"Internal error.","status":500}`),
+			kind:    ErrUnavailable,
+			api:     &APIError{Method: "POST", Path: "/v2/instances", Status: 500, Message: "Internal error."},
+			text:    "vultr: POST /v2/instances: 500 Internal Server Error: Internal error.",
+			calls:   []string{"POST"},
+		},
+		{
+			name:    "500 on a halt is sent once",
+			call:    haltInstance,
+			handler: answer(500, `{"error":"Internal error.","status":500}`),
+			kind:    ErrUnavailable,
+			api:     &APIError{Method: "POST", Path: "/v2/instances/i1/halt", Status: 500, Message: "Internal error."},
+			text:    "vultr: POST /v2/instances/i1/halt: 500 Internal Server Error: Internal error.",
+			calls:   []string{"POST"},
+		},
+		{
+			name:    "503 on every PATCH is sent 4 times",
+			call:    updateInstance,
+			handler: answer(503, `{"error":"Try again.","status":503}`),
+			kind:    ErrUnavailable,
+			api:     &APIError{Method: "PATCH", Path: "/v2/instances/i1", Status: 503, Message: "Try again."},
+			text:    "vultr: PATCH /v2/instances/i1: 503 Service Unavailable: Try again.",
+			calls:   []string{"PATCH", "PATCH", "PATCH", "PATCH"},
+		},
+		{
+			name:    "an instance answer without the instance",
+			call:    getInstance,
+			handler: answer(200, `{}`),
+			text:    "vultr: GET /v2/instances/i1: the answer holds no object",
+			calls:   []string{"GET"},
 		},
 		{
 			name: "a redirect",
@@ -721,14 +889,14 @@ func TestCallNoRequestSent(t *testing.T) {
 
 func TestClientChecksIDs(t *testing.T) {
 	const good = "ok-1f2e"
-	// One answer that every call below can read: a list, a rule and the plans.
+	// One answer that every call below can read: a list, a rule, the plans and an instance.
 	srv := newAPIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		writeJSON(w, http.StatusOK, `{"firewall_rules":[],"firewall_rule":{"id":1},"available_plans":[],`+
-			`"meta":{"total":0,"links":{"next":"","prev":""}}}`)
+			`"instance":{"id":"i1"},"meta":{"total":0,"links":{"next":"","prev":""}}}`)
 	})
 	c := newTestClient(t, srv.Server)
 	for _, tc := range []struct {
@@ -769,6 +937,31 @@ func TestClientChecksIDs(t *testing.T) {
 			},
 			"/v2/regions/" + good + "/availability",
 		},
+		{
+			"GET /v2/instances/{id}", "id",
+			func(ctx context.Context, id string) error {
+				_, err := c.GetInstance(ctx, id)
+				return err
+			},
+			"/v2/instances/" + good,
+		},
+		{"DELETE /v2/instances/{id}", "id", c.DeleteInstance, "/v2/instances/" + good},
+		{"POST /v2/instances/{id}/halt", "id", c.HaltInstance, "/v2/instances/" + good + "/halt"},
+		{
+			"PATCH /v2/instances/{id}", "id",
+			func(ctx context.Context, id string) error {
+				return c.UpdateInstance(ctx, id, &govultr.InstanceUpdateReq{Label: "l"})
+			},
+			"/v2/instances/" + good,
+		},
+		{
+			"GET /v2/instances/{id}/vpcs", "id",
+			func(ctx context.Context, id string) error {
+				_, err := c.ListInstanceVPCs(ctx, id)
+				return err
+			},
+			"/v2/instances/" + good + "/vpcs",
+		},
 	} {
 		t.Run(tc.route, func(t *testing.T) {
 			before := len(srv.requests())
@@ -804,6 +997,8 @@ func TestClientChecksIDs(t *testing.T) {
 				`vultr: DELETE /v2/firewalls/{groupID}/rules/{ruleID}: invalid ruleID 0`},
 			{c.DeleteFirewallRule(t.Context(), good, -1),
 				`vultr: DELETE /v2/firewalls/{groupID}/rules/{ruleID}: invalid ruleID -1`},
+			// A list of instances without a tag would hold every instance of the account.
+			{listInstances(t, c, ""), `vultr: GET /v2/instances: invalid tag ""`},
 		} {
 			if tc.err == nil || tc.err.Error() != tc.want {
 				t.Errorf("err = %v, want %q", tc.err, tc.want)
@@ -813,6 +1008,16 @@ func TestClientChecksIDs(t *testing.T) {
 			t.Errorf("the server got %d requests, want none", n)
 		}
 	})
+}
+
+// listInstances returns the error of c.ListInstances with the tag, and fails the test when it lists instances.
+func listInstances(t *testing.T, c API, tag string) error {
+	t.Helper()
+	got, err := c.ListInstances(t.Context(), tag)
+	if got != nil {
+		t.Errorf("ListInstances(%q) = %v, want none", tag, got)
+	}
+	return err
 }
 
 func TestCheckID(t *testing.T) {
@@ -827,6 +1032,58 @@ func TestCheckID(t *testing.T) {
 		if err := CheckID(route, "id", id); err == nil || err.Error() != want {
 			t.Errorf("CheckID(%q) = %v, want %q", id, err, want)
 		}
+	}
+}
+
+func TestCheckTag(t *testing.T) {
+	for _, tag := range []string{"tent/cluster=prod", "TENT/op=1", " "} {
+		if err := CheckTag(tag); err != nil {
+			t.Errorf("CheckTag(%q) = %v, want nil", tag, err)
+		}
+	}
+	const want = `vultr: GET /v2/instances: invalid tag ""`
+	if err := CheckTag(""); err == nil || err.Error() != want {
+		t.Errorf(`CheckTag("") = %v, want %q`, err, want)
+	}
+}
+
+// TestClientCreateInstanceHidesThePassword checks that no error of an instance create shows the root password that
+// the create answer holds, whatever is wrong with the answer.
+func TestClientCreateInstanceHidesThePassword(t *testing.T) {
+	body := `{"instance":{"id":"i1","default_password":"` + password + `"}}`
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{
+			"a success that is not JSON",
+			func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/plain")
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = io.WriteString(w, body)
+			},
+		},
+		{"a success that does not decode", answer(202, `{"instance":{"default_password":"`+password+`","ram":"x"}}`)},
+		{"a cut success", answer(202, strings.TrimSuffix(body, "}}"))},
+		{"a success status that govultr does not read", answer(207, body)},
+		{"an unknown success status", answer(299, body)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newAPIServer(t, tc.handler)
+			in, err := newTestClient(t, srv.Server).CreateInstance(t.Context(), &createInstanceReq)
+			if err == nil || in != nil {
+				t.Fatalf("CreateInstance = %+v, %v; want an error", in, err)
+			}
+			for e := err; e != nil; e = errors.Unwrap(e) {
+				if strings.Contains(e.Error(), password) {
+					t.Errorf("the error shows the password: %v", e)
+				}
+			}
+			wantClass(t, err, ErrUnavailable)
+			if n := len(srv.requests()); n != 1 {
+				t.Errorf("the server got %d requests, want 1", n)
+			}
+		})
 	}
 }
 

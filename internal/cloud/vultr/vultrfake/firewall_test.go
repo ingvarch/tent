@@ -1,6 +1,8 @@
 package vultrfake_test
 
 import (
+	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -53,13 +55,16 @@ func TestFirewallGroups(t *testing.T) {
 
 	ssh := mustCreateRule(t, f, "firewall-1", sshRule)
 	wantSSH := govultr.FirewallRule{
-		ID: 1, Action: "accept", IPType: "v4", Protocol: "tcp", Port: "22", Subnet: "0.0.0.0", Notes: "ssh",
+		ID: 1, Action: "accept", IPType: "v4", Protocol: "tcp", Port: "22", Subnet: "0.0.0.0", Source: "0.0.0.0/0",
+		Notes: "ssh",
 	}
 	if diff := cmp.Diff(&wantSSH, ssh); diff != "" {
 		t.Errorf("CreateFirewallRule (-want +got):\n%s", diff)
 	}
 	ping := mustCreateRule(t, f, "firewall-1", pingRule)
-	wantPing := govultr.FirewallRule{ID: 2, Action: "accept", IPType: "v6", Protocol: "icmp", Subnet: "::"}
+	wantPing := govultr.FirewallRule{
+		ID: 2, Action: "accept", IPType: "v6", Protocol: "icmp", Subnet: "::", Source: "::/0",
+	}
 	if diff := cmp.Diff(&wantPing, ping); diff != "" {
 		t.Errorf("CreateFirewallRule (-want +got):\n%s", diff)
 	}
@@ -129,6 +134,97 @@ func TestCreateFirewallRuleCall(t *testing.T) {
 	)
 }
 
+func TestFirewallRuleSource(t *testing.T) {
+	f := newFake()
+	mustCreateGroup(t, f, "g")
+	for _, tc := range []struct {
+		name string
+		req  govultr.FirewallRuleReq
+		want string // the source that the create answer and the list give
+	}{
+		// Vultr lists a rule without a source with its own subnet as the source.
+		{
+			name: "no source",
+			req:  govultr.FirewallRuleReq{IPType: "v4", Protocol: "tcp", Subnet: "203.0.113.7", SubnetSize: 32, Port: "22"},
+			want: "203.0.113.7/32",
+		},
+		{name: "no source, IPv6", req: pingRule, want: "::/0"},
+		{
+			name: "a source",
+			req:  govultr.FirewallRuleReq{IPType: "v4", Protocol: "tcp", Subnet: "0.0.0.0", Port: "443", Source: "cloudflare"},
+			want: "cloudflare",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			created := mustCreateRule(t, f, "firewall-1", tc.req)
+			if created.Source != tc.want {
+				t.Errorf("CreateFirewallRule gives the source %q, want %q", created.Source, tc.want)
+			}
+			rules := f.FirewallRules("firewall-1")
+			if i := slices.IndexFunc(rules, func(r govultr.FirewallRule) bool { return r.ID == created.ID }); i < 0 ||
+				rules[i].Source != tc.want {
+				t.Errorf("the rules of firewall-1 are %+v, want rule %d with the source %q", rules, created.ID, tc.want)
+			}
+		})
+	}
+}
+
+func TestFirewallRuleAlreadyDefined(t *testing.T) {
+	f := newFake()
+	mustCreateGroup(t, f, "g")
+	mustCreateRule(t, f, "firewall-1", sshRule)
+	const defined = "vultr: POST /v2/firewalls/firewall-1/rules: 400 Bad Request: This rule is already defined"
+	notes := sshRule
+	notes.Notes = "" // notes do not tell rules apart
+	for _, req := range []govultr.FirewallRuleReq{sshRule, notes} {
+		rule, err := f.CreateFirewallRule(t.Context(), "firewall-1", &req)
+		wantAPIError(t, err, vultr.ErrInvalid, defined)
+		if rule != nil {
+			t.Errorf("CreateFirewallRule returned %+v with the error", rule)
+		}
+	}
+	// A rule that differs in ip_type, protocol, subnet, subnet_size, port or source is another rule.
+	for _, edit := range []func(r *govultr.FirewallRuleReq){
+		func(r *govultr.FirewallRuleReq) { r.IPType = "v6" },
+		func(r *govultr.FirewallRuleReq) { r.Protocol = "udp" },
+		func(r *govultr.FirewallRuleReq) { r.Subnet = "198.51.100.0" },
+		func(r *govultr.FirewallRuleReq) { r.SubnetSize = 8 },
+		func(r *govultr.FirewallRuleReq) { r.Port = "23" },
+		func(r *govultr.FirewallRuleReq) { r.Source = "cloudflare" },
+	} {
+		req := sshRule
+		edit(&req)
+		mustCreateRule(t, f, "firewall-1", req)
+	}
+	if got := len(f.FirewallRules("firewall-1")); got != 7 {
+		t.Errorf("firewall-1 holds %d rules, want 7", got)
+	}
+}
+
+// TestFirewallRuleAlreadyDefinedWithoutSource checks that a rule without a source is the same rule as one whose source
+// is its own subnet, as Vultr lists it: a seeded rule keeps an empty source.
+func TestFirewallRuleAlreadyDefinedWithoutSource(t *testing.T) {
+	f := newFake()
+	g := f.AddFirewallGroup(t, govultr.FirewallGroup{})
+	f.AddFirewallRule(t, g.ID, govultr.FirewallRule{IPType: "v4", Protocol: "tcp", Subnet: "0.0.0.0", Port: "22"})
+	f.AddFirewallRule(t, g.ID, govultr.FirewallRule{
+		IPType: "v6", Protocol: "icmp", Subnet: "::", Source: "::/0",
+	})
+	withSource := sshRule
+	withSource.Source = "0.0.0.0/0"
+	for _, req := range []govultr.FirewallRuleReq{sshRule, withSource, pingRule} {
+		rule, err := f.CreateFirewallRule(t.Context(), g.ID, &req)
+		wantAPIError(t, err, vultr.ErrInvalid,
+			"vultr: POST /v2/firewalls/firewall-1/rules: 400 Bad Request: This rule is already defined")
+		if rule != nil {
+			t.Errorf("CreateFirewallRule returned %+v with the error", rule)
+		}
+	}
+	if got := len(f.FirewallRules(g.ID)); got != 2 {
+		t.Errorf("firewall-1 holds %d rules, want the 2 seeded", got)
+	}
+}
+
 func TestMissingFirewallGroup(t *testing.T) {
 	f := newFake()
 	ctx := t.Context()
@@ -177,13 +273,21 @@ func TestCreateFirewallRuleInvalid(t *testing.T) {
 	}
 }
 
+// portRule returns sshRule with the port n, so that each n gives another rule.
+func portRule(n int) govultr.FirewallRuleReq {
+	r := sshRule
+	r.Port = strconv.Itoa(n)
+	return r
+}
+
 func TestFirewallRuleLimit(t *testing.T) {
 	f := newFake()
 	mustCreateGroup(t, f, "g")
-	for range 50 {
-		mustCreateRule(t, f, "firewall-1", sshRule)
+	for n := range 50 {
+		mustCreateRule(t, f, "firewall-1", portRule(n+1))
 	}
-	rule, err := f.CreateFirewallRule(t.Context(), "firewall-1", &sshRule)
+	last := portRule(51)
+	rule, err := f.CreateFirewallRule(t.Context(), "firewall-1", &last)
 	wantAPIError(t, err, vultr.ErrLimitReached, "vultr: POST /v2/firewalls/firewall-1/rules: 400 Bad Request: "+
 		"You have reached the maximum number of rules for this firewall group.")
 	if rule != nil {
@@ -196,7 +300,7 @@ func TestFirewallRuleLimit(t *testing.T) {
 	if err := f.DeleteFirewallRule(t.Context(), "firewall-1", 7); err != nil {
 		t.Fatalf("DeleteFirewallRule: %v", err)
 	}
-	if r := mustCreateRule(t, f, "firewall-1", sshRule); r.ID != 51 {
+	if r := mustCreateRule(t, f, "firewall-1", last); r.ID != 51 {
 		t.Errorf("the rule after a delete has the id %d, want 51", r.ID)
 	}
 }

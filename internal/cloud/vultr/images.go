@@ -1,6 +1,7 @@
 package vultr
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 )
@@ -25,6 +26,11 @@ func osID(name string) (int, bool) {
 		return 0, false
 	}
 	return images[i].osID, true
+}
+
+// unsupportedImage says that tent does not support the image name on Vultr, and lists the images it supports.
+func unsupportedImage(name string) string {
+	return fmt.Sprintf("tent supports %s on Vultr, not %q", imageNames(), name)
 }
 
 // imageNames lists the names of the images tent supports on Vultr, such as "ubuntu-24.04 and ubuntu-26.04".

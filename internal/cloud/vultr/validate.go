@@ -123,7 +123,7 @@ func (o *offer) imageProblem(name string) string {
 	id, ok := osID(name)
 	switch {
 	case !ok:
-		return fmt.Sprintf("tent supports %s on Vultr, not %q", imageNames(), name)
+		return unsupportedImage(name)
 	case !o.images[id]:
 		return fmt.Sprintf("Vultr does not offer %s (os_id %d) now", name, id)
 	}

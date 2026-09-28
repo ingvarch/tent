@@ -124,6 +124,23 @@ func TestSameIDErrorsAsTheClient(t *testing.T) {
 			_, err := a.AvailablePlans(ctx, id, "vc2")
 			return err
 		},
+		"ListInstances without a tag": func(ctx context.Context, a vultr.API, _ string) error {
+			_, err := a.ListInstances(ctx, "")
+			return err
+		},
+		"GetInstance": func(ctx context.Context, a vultr.API, id string) error {
+			_, err := a.GetInstance(ctx, id)
+			return err
+		},
+		"DeleteInstance": func(ctx context.Context, a vultr.API, id string) error { return a.DeleteInstance(ctx, id) },
+		"HaltInstance":   func(ctx context.Context, a vultr.API, id string) error { return a.HaltInstance(ctx, id) },
+		"UpdateInstance": func(ctx context.Context, a vultr.API, id string) error {
+			return a.UpdateInstance(ctx, id, &govultr.InstanceUpdateReq{Label: "l"})
+		},
+		"ListInstanceVPCs": func(ctx context.Context, a vultr.API, id string) error {
+			_, err := a.ListInstanceVPCs(ctx, id)
+			return err
+		},
 	}
 	for name, call := range calls {
 		t.Run(name, func(t *testing.T) {
@@ -169,14 +186,15 @@ func TestConcurrentUse(t *testing.T) {
 	for w := range workers {
 		wg.Go(func() {
 			ctx := t.Context()
-			for range rounds {
+			for i := range rounds {
 				if _, err := f.CreateSSHKey(ctx, &govultr.SSHKeyReq{Name: "k", SSHKey: "ssh-ed25519 AAAA"}); err != nil {
 					t.Errorf("CreateSSHKey: %v", err)
 				}
 				if _, err := f.CreateVPC(ctx, &govultr.VPCReq{Region: regions[w]}); err != nil {
 					t.Errorf("CreateVPC: %v", err)
 				}
-				if _, err := f.CreateFirewallRule(ctx, group, &sshRule); err != nil {
+				rule := portRule(w*rounds + i + 1) // the group takes no second copy of a rule
+				if _, err := f.CreateFirewallRule(ctx, group, &rule); err != nil {
 					t.Errorf("CreateFirewallRule: %v", err)
 				}
 				if _, err := f.ListSSHKeys(ctx); err != nil {
