@@ -1,0 +1,4 @@
++ node prod-workers-2 (client, vc2-2c-4gb, ams)
+
+Nodes: 1 to create, 0 to wait for, 0 to delete.
+State: cluster.completed.yaml will be written.

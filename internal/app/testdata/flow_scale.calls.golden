@@ -1,0 +1,42 @@
+AvailablePlans ams
+ListPlans
+ListOS
+ListSSHKeys
+ListVPCs
+ListFirewallGroups
+ListInstances tent/cluster=prod
+ListFirewallRules <vultr.FirewallGroup/prod-clients>
+ListFirewallRules <vultr.FirewallGroup/prod-servers>
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-servers-0>
+ListInstanceVPCs <prod-servers-1>
+ListInstanceVPCs <prod-servers-2>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+AvailablePlans ams
+ListPlans
+ListOS
+ListSSHKeys
+ListVPCs
+ListFirewallGroups
+ListInstances tent/cluster=prod
+ListFirewallRules <vultr.FirewallGroup/prod-clients>
+ListFirewallRules <vultr.FirewallGroup/prod-servers>
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-servers-0>
+ListInstanceVPCs <prod-servers-1>
+ListInstanceVPCs <prod-servers-2>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+ListInstances tent/op=<op1>
+ListSSHKeys
+ListVPCs
+ListFirewallGroups
+ListInstances tent/cluster=prod
+ListFirewallRules <vultr.FirewallGroup/prod-clients>
+ListFirewallRules <vultr.FirewallGroup/prod-servers>
+CreateInstance prod-workers-2
+GetInstance <prod-workers-2>
+GetInstance <prod-workers-2>
+GetInstance <prod-workers-2>
+ListInstanceVPCs <prod-workers-2>

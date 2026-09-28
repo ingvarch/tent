@@ -1,0 +1,12 @@
+{
+  "infrastructure": {
+    "changes": [],
+    "summary": {
+      "create": 0,
+      "update": 0,
+      "replace": 0,
+      "delete": 0
+    }
+  },
+  "nodes": []
+}

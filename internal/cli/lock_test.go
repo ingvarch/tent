@@ -135,7 +135,7 @@ func TestWriteObjectsPrintsAChangeSavedWithoutItsLock(t *testing.T) {
 	write := func(*app.Service, context.Context, spec.Objects, bool) ([]app.Change, error) {
 		return []app.Change{{Kind: v1alpha1.KindNodeGroup, Name: "workers", Action: app.Replaced}}, errSaved
 	}
-	if err := writeObjects(cmd, opts, spec.Objects{}, false, write); !errors.Is(err, errSaved) {
+	if err := writeObjects(cmd, opts, spec.Objects{}, false, write, false); !errors.Is(err, errSaved) {
 		t.Errorf("writeObjects returned %v, want %v", err, errSaved)
 	}
 	if got, want := out.String(), "node group workers replaced\n"; got != want {

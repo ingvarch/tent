@@ -19,7 +19,7 @@ func newReplaceCommand(opts *globalOptions) *cobra.Command {
 			"the cloud.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return writeSpecFile(cmd, opts, file, allowSingle, (*app.Service).Replace)
+			return writeSpecFile(cmd, opts, file, allowSingle, (*app.Service).Replace, false)
 		},
 	}
 	cmd.Flags().StringVarP(&file, "filename", "f", "", "spec `FILE`, or - for standard input")

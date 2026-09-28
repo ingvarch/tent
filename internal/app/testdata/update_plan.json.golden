@@ -1,0 +1,89 @@
+{
+  "infrastructure": {
+    "changes": [
+      {
+        "kind": "vultr.VPC",
+        "name": "prod",
+        "action": "create"
+      },
+      {
+        "kind": "vultr.FirewallGroup",
+        "name": "prod-clients",
+        "action": "create"
+      },
+      {
+        "kind": "vultr.FirewallGroup",
+        "name": "prod-servers",
+        "action": "update",
+        "diff": [
+          {
+            "field": "rules",
+            "new": "tcp/4646 from 203.0.113.7/32"
+          }
+        ]
+      },
+      {
+        "kind": "vultr.SSHKey",
+        "name": "prod-99aabbcc",
+        "id": "ssh-9",
+        "action": "delete"
+      }
+    ],
+    "summary": {
+      "create": 2,
+      "update": 1,
+      "replace": 0,
+      "delete": 1
+    }
+  },
+  "nodes": [
+    {
+      "action": "create",
+      "name": "prod-servers-2",
+      "group": "servers",
+      "role": "server",
+      "zone": "ams",
+      "machineType": "vc2-2c-4gb",
+      "image": "ubuntu-24.04"
+    },
+    {
+      "action": "create",
+      "name": "prod-workers-1",
+      "group": "workers",
+      "role": "client",
+      "zone": "ams",
+      "machineType": "vc2-4c-8gb",
+      "image": "ubuntu-24.04"
+    },
+    {
+      "action": "wait",
+      "name": "prod-servers-1",
+      "group": "servers",
+      "role": "server",
+      "zone": "ams",
+      "machineType": "vc2-2c-4gb",
+      "image": "ubuntu-24.04",
+      "id": "instance-2",
+      "op": "5f0c2a9e-8d1b-4c7e-9f3a-2b6d8e1c4a70"
+    },
+    {
+      "action": "delete",
+      "name": "prod-old-0",
+      "id": "instance-7",
+      "reason": "not in the spec"
+    },
+    {
+      "action": "delete",
+      "name": "prod-workers-0",
+      "id": "instance-5",
+      "reason": "duplicate"
+    },
+    {
+      "action": "delete",
+      "name": "prod-workers-3",
+      "id": "instance-8",
+      "reason": "surplus"
+    }
+  ],
+  "completedSpec": true
+}

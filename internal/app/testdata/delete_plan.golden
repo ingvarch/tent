@@ -1,0 +1,13 @@
+- node prod-servers-0 (ID instance-1)
+- node prod-workers-0 (ID instance-4)
+- vultr.FirewallGroup/prod-servers (ID fw-1)
+- vultr.VPC/prod (ID vpc-1)
+- vultr.SSHKey/prod-99aabbcc (ID ssh-9)
+- state prod/cluster.completed.yaml
+- state prod/nodegroups/servers.yaml
+- state prod/cluster.yaml
+- state prod/tent-version
+
+Nodes: 2 to delete.
+Plan: 0 to create, 0 to update, 0 to replace, 3 to delete.
+State: 4 objects to delete.

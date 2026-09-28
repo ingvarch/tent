@@ -62,8 +62,9 @@ func (e *lockLost) Unwrap() []error {
 	return []error{statestore.ErrLockLost, e.err}
 }
 
-// saved reports whether err is the error of a change that was saved although its lock was lost at the end.
-func saved(err error) bool {
+// Saved reports whether err is the error of a change that was saved although its lock was lost at the end, so that
+// what the change did stands.
+func Saved(err error) bool {
 	e, ok := errors.AsType[*lockLost](err)
 	return ok && e.err == nil
 }
