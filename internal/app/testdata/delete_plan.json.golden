@@ -42,6 +42,10 @@
   "state": [
     "prod/cluster.completed.yaml",
     "prod/nodegroups/servers.yaml",
+    "prod/secrets/acl-bootstrap-token",
+    "prod/secrets/gossip.key",
+    "prod/pki/ca-bundle.pem",
+    "prod/pki/private/ca.key",
     "prod/cluster.yaml",
     "prod/tent-version"
   ]

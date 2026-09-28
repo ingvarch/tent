@@ -144,11 +144,15 @@ func teardownOf(t *testing.T, f *vultrfake.Fake, n int) string {
 		"- state prod/cluster.completed.yaml\n" +
 		"- state prod/nodegroups/servers.yaml\n" +
 		"- state prod/nodegroups/workers.yaml\n" +
+		"- state prod/secrets/acl-bootstrap-token\n" +
+		"- state prod/secrets/gossip.key\n" +
+		"- state prod/pki/ca-bundle.pem\n" +
+		"- state prod/pki/private/ca.key\n" +
 		"- state prod/cluster.yaml\n" +
 		"\n")
 	fmt.Fprintf(&b, "Nodes: %d to delete.\n", n)
 	b.WriteString("Plan: 0 to create, 0 to update, 0 to replace, 3 to delete.\n" +
-		"State: 4 objects to delete.\n")
+		"State: 8 objects to delete.\n")
 	return b.String()
 }
 
@@ -157,7 +161,7 @@ func teardownOf(t *testing.T, f *vultrfake.Fake, n int) string {
 func TestDeleteClusterPlansTwice(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
-		want := teardown(t, f) + "\nDeleted: 6 nodes, 3 infrastructure objects, 4 state objects.\n"
+		want := teardown(t, f) + "\nDeleted: 6 nodes, 3 infrastructure objects, 8 state objects.\n"
 		before := len(f.Calls())
 
 		got := runOn(t, f, "delete", "cluster", "prod", "--yes", "--state", s.url)
@@ -176,7 +180,7 @@ func TestDeleteClusterPlansTwice(t *testing.T) {
 func TestDeleteClusterPrintsThePlanItApplies(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
-		want := teardownOf(t, f, 5) + "\nDeleted: 5 nodes, 3 infrastructure objects, 4 state objects.\n"
+		want := teardownOf(t, f, 5) + "\nDeleted: 5 nodes, 3 infrastructure objects, 8 state objects.\n"
 		f.SetHook(func(ctx context.Context, c vultrfake.Call, next func(context.Context) error) error {
 			if c.Name == "ListSSHKeys" { // the inventory, after the list of the nodes
 				f.SetHook(nil)
@@ -209,7 +213,7 @@ func TestDeleteClusterWithItsCloud(t *testing.T) {
 
 		got := runOn(t, f, "delete", "cluster", "prod", "--yes", "--state", s.url)
 
-		deleted := want + "\nDeleted: 6 nodes, 3 infrastructure objects, 4 state objects.\n"
+		deleted := want + "\nDeleted: 6 nodes, 3 infrastructure objects, 8 state objects.\n"
 		if got.code != 0 || got.out != deleted {
 			t.Errorf("exit code = %d, stdout\n%s\nwant 0 and\n%s", got.code, got.out, deleted)
 		}

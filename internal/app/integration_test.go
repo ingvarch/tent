@@ -127,13 +127,14 @@ func buildExample(t *testing.T) (plan app.UpdatePlan, calls, view []string) {
 }
 
 // deleteExample builds the example cluster on an empty fake and deletes it, in a bubble of its own, and returns the
-// calls of the delete, as flowCalls gives them.
+// calls of the delete, as flowCalls gives them. It fails the test unless the delete leaves nothing in the store.
 func deleteExample(t *testing.T) (calls []string) {
 	t.Helper()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newExample(t)
 		mustUpdate(t, svc)
 		calls = deleteFlow(t, svc, f)
+		wantPaths(t, svc.Store)
 	})
 	return calls
 }

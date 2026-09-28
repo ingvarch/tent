@@ -149,14 +149,26 @@ func exampleNodes() []app.NodeChange {
 	}
 }
 
+// secretNames are the test cluster's secrets as a plan names them: relative to the cluster, in the order an update
+// writes them.
+var secretNames = []string{
+	"pki/private/ca.key", "pki/ca-bundle.pem", "secrets/gossip.key", "secrets/acl-bootstrap-token",
+}
+
 // someNodes returns a create and a delete of nodes.
 func someNodes() []app.NodeChange {
 	nodes := exampleNodes()
 	return []app.NodeChange{nodes[1], nodes[5]}
 }
 
+// exampleUpdate is an update plan with every part.
+func exampleUpdate(t *testing.T) app.UpdatePlan {
+	t.Helper()
+	return app.UpdatePlan{Infra: exampleInfra(t), Nodes: exampleNodes(), Secrets: secretNames, Completed: true}
+}
+
 func TestUpdatePlanWriteTextGolden(t *testing.T) {
-	got := planText(t, app.UpdatePlan{Infra: exampleInfra(t), Nodes: exampleNodes(), Completed: true})
+	got := planText(t, exampleUpdate(t))
 	checkGolden(t, "update_plan.golden", got)
 	if strings.Contains(got, waitOp) {
 		t.Errorf("the text shows the operation id %s:\n%s", waitOp, got)
@@ -164,8 +176,7 @@ func TestUpdatePlanWriteTextGolden(t *testing.T) {
 }
 
 func TestUpdatePlanJSONGolden(t *testing.T) {
-	p := app.UpdatePlan{Infra: exampleInfra(t), Nodes: exampleNodes(), Completed: true}
-	checkGolden(t, "update_plan.json.golden", encodeJSON(t, p, "  "))
+	checkGolden(t, "update_plan.json.golden", encodeJSON(t, exampleUpdate(t), "  "))
 }
 
 func TestUpdatePlanWithoutChanges(t *testing.T) {
@@ -182,6 +193,8 @@ func TestUpdatePlanWriteText(t *testing.T) {
 Nodes: 1 to create, 0 to wait for, 1 to delete.
 `
 		completedOnly = "State: cluster.completed.yaml will be written.\n"
+		secretsOnly   = "State: pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key and " +
+			"secrets/acl-bootstrap-token will be written.\n"
 	)
 	var infraOnly strings.Builder
 	if err := exampleInfra(t).WriteText(&infraOnly); err != nil {
@@ -200,6 +213,19 @@ Nodes: 1 to create, 0 to wait for, 1 to delete.
 			"the nodes and the completed spec",
 			app.UpdatePlan{Nodes: someNodes(), Completed: true},
 			nodesOnly + completedOnly,
+		},
+		{"the secrets only", app.UpdatePlan{Infra: infraPlan(t, nil), Secrets: secretNames}, secretsOnly},
+		{
+			"the nodes, the secrets and the completed spec",
+			app.UpdatePlan{Nodes: someNodes(), Secrets: secretNames, Completed: true},
+			nodesOnly + "State: pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, " +
+				"secrets/acl-bootstrap-token and cluster.completed.yaml will be written.\n",
+		},
+		{"one secret", app.UpdatePlan{Secrets: secretNames[1:2]}, "State: pki/ca-bundle.pem will be written.\n"},
+		{
+			"one secret and the completed spec",
+			app.UpdatePlan{Secrets: secretNames[2:3], Completed: true},
+			"State: secrets/gossip.key and cluster.completed.yaml will be written.\n",
 		},
 		{"nothing", app.UpdatePlan{}, "No changes.\n"},
 		{
@@ -233,6 +259,7 @@ func TestUpdatePlanHasChanges(t *testing.T) {
 		{"the nodes", app.UpdatePlan{Infra: infraPlan(t, nil), Nodes: someNodes()}, true},
 		{"both", app.UpdatePlan{Infra: exampleInfra(t), Nodes: someNodes()}, true},
 		{"the completed spec", app.UpdatePlan{Infra: infraPlan(t, nil), Completed: true}, true},
+		{"a secret", app.UpdatePlan{Infra: infraPlan(t, nil), Secrets: secretNames[3:]}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.plan.HasChanges(); got != tc.want {
@@ -250,6 +277,11 @@ func TestUpdatePlanJSONWithoutInfrastructure(t *testing.T) {
 		{app.UpdatePlan{}, `{"infrastructure":null,"nodes":[]}` + "\n"},
 		{app.UpdatePlan{Completed: true}, `{"infrastructure":null,"nodes":[],"completedSpec":true}` + "\n"},
 		{app.UpdatePlan{Applied: true}, `{"applied":true,"infrastructure":null,"nodes":[]}` + "\n"},
+		{
+			app.UpdatePlan{Secrets: secretNames[2:], Completed: true},
+			`{"infrastructure":null,"nodes":[],"secrets":["secrets/gossip.key","secrets/acl-bootstrap-token"],` +
+				`"completedSpec":true}` + "\n",
+		},
 	} {
 		if got := encodeJSON(t, tc.plan, ""); got != tc.want {
 			t.Errorf("JSON = %q, want %q", got, tc.want)
@@ -337,15 +369,22 @@ func TestUpdatePlanWriteApplied(t *testing.T) {
 	}{
 		{
 			"every part",
-			app.UpdatePlan{Infra: exampleInfra(t), Nodes: exampleNodes(), Completed: true},
+			exampleUpdate(t),
 			"Applied: 2 created, 1 updated, 0 replaced, 1 deleted. Nodes: 2 created, 1 waited for, 3 deleted. " +
-				"Wrote cluster.completed.yaml.\n",
+				"Wrote pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token and " +
+				"cluster.completed.yaml.\n",
 		},
 		{"the infrastructure only", app.UpdatePlan{Infra: exampleInfra(t)},
 			"Applied: 2 created, 1 updated, 0 replaced, 1 deleted.\n"},
 		{"the nodes only", app.UpdatePlan{Infra: infraPlan(t, nil), Nodes: someNodes()},
 			"Nodes: 1 created, 0 waited for, 1 deleted.\n"},
 		{"the completed spec only", app.UpdatePlan{Completed: true}, "Wrote cluster.completed.yaml.\n"},
+		{"one secret only", app.UpdatePlan{Secrets: secretNames[1:2]}, "Wrote pki/ca-bundle.pem.\n"},
+		{
+			"the nodes and two secrets",
+			app.UpdatePlan{Nodes: someNodes(), Secrets: secretNames[2:]},
+			"Nodes: 1 created, 0 waited for, 1 deleted. Wrote secrets/gossip.key and secrets/acl-bootstrap-token.\n",
+		},
 		{"nothing", app.UpdatePlan{Infra: infraPlan(t, nil)}, "No changes.\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

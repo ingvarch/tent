@@ -28,18 +28,19 @@ const (
 // Providers fails with an error that matches cloud.ErrUnsupportedProvider: tent made no cloud objects there, and the
 // plan names the provider.
 //
-// The state is the tent version, the specs and the completed spec. Other objects of the cluster in the store make it
-// refuse before it calls the cloud, unless force is set: then they are deleted with the rest of the state. The lock's
-// lease is left to the lock, which removes it when it is released. Without apply, DeleteCluster returns the plan and
-// changes nothing.
+// The state is the tent version, the specs, the completed spec, and the secrets: the CA's key and bundle, the gossip
+// key and the ACL bootstrap secret. Other objects of the cluster in the store make it refuse before it calls the
+// cloud, unless force is set: then they are deleted with the rest of the state. The lock's lease is left to the lock,
+// which removes it when it is released. Without apply, DeleteCluster returns the plan and changes nothing.
 //
 // With apply it takes the cluster's lock, plans again under it, calls OnDeletePlan with that plan and deletes in this
 // order: every node, one at a time by name; then it lists the nodes every 5 seconds until the cloud lists none, for up
 // to 5 minutes; then every infrastructure object that a fresh inventory finds, in the engine's order; then the state,
-// with cluster.yaml and the tent version last, so that a delete that stops can run again. The first step that fails
-// stops the delete, and the state stays until the cloud's part has succeeded. It returns the plan it applied, made
-// under the lock, with the error; the plan says Applied once every step has succeeded. When the lock is lost after the
-// deletes, the plan comes back together with an error that matches statestore.ErrLockLost.
+// with the secrets next to last, the CA bundle before its key, and cluster.yaml and the tent version last, so that a
+// delete that stops can run again. The first step that fails stops the delete, and the state stays until the cloud's
+// part has succeeded. It returns the plan it applied, made under the lock, with the error; the plan says Applied once
+// every step has succeeded. When the lock is lost after the deletes, the plan comes back together with an error that
+// matches statestore.ErrLockLost.
 func (s *Service) DeleteCluster(ctx context.Context, cluster string, apply, force bool) (_ DeletePlan, err error) {
 	defer func() { err = stopped(ctx, err) }()
 	l, err := s.layout(ctx, cluster)
@@ -226,13 +227,17 @@ func (s *Service) waitNodesGone(ctx context.Context, nodes cloud.Nodes, cluster 
 	}
 }
 
-// state returns the paths of a cluster's state in the order of deletion: the cluster's spec and tent version last.
+// state returns the paths of a cluster's state in the order of deletion: the secrets, then the cluster's spec and
+// tent version last. The secrets go in the reverse order of their writes, so that a delete that stops never leaves a
+// CA bundle without its key.
 func (s *Service) state(ctx context.Context, l statestore.Layout, force bool) ([]string, error) {
 	all, err := s.Store.List(ctx, l.Prefix())
 	if err != nil {
 		return nil, err
 	}
-	last := []string{l.ClusterSpec(), l.TentVersion()}
+	last := l.Secrets()
+	slices.Reverse(last)
+	last = append(last, l.ClusterSpec(), l.TentVersion())
 	var paths, unknown []string
 	for _, p := range all {
 		switch {

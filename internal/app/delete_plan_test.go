@@ -3,6 +3,7 @@ package app_test
 import (
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -43,7 +44,7 @@ func exampleDelete(t *testing.T) app.DeletePlan {
 	return app.DeletePlan{
 		Nodes: []app.NodeChange{nodeDelete("prod-servers-0", "instance-1"), nodeDelete("prod-workers-0", "instance-4")},
 		Infra: teardown(t),
-		State: []string{completedPath, serversPath, clusterPath, versionPath},
+		State: slices.Concat([]string{completedPath, serversPath}, secretDeletes, []string{clusterPath, versionPath}),
 	}
 }
 
@@ -195,7 +196,7 @@ func TestDeletePlanWriteApplied(t *testing.T) {
 		plan app.DeletePlan
 		want string
 	}{
-		{"every part", exampleDelete(t), "Deleted: 2 nodes, 3 infrastructure objects, 4 state objects.\n"},
+		{"every part", exampleDelete(t), "Deleted: 2 nodes, 3 infrastructure objects, 8 state objects.\n"},
 		{
 			"one of each",
 			app.DeletePlan{

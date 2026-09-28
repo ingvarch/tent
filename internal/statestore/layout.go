@@ -63,6 +63,24 @@ func (l Layout) Completed() string { return l.Prefix() + "cluster.completed.yaml
 // Lock returns the path of the cluster's lock.
 func (l Layout) Lock() string { return l.Prefix() + "lock" }
 
+// CAKey returns the path of the private key of the CA's active signer.
+func (l Layout) CAKey() string { return l.Prefix() + "pki/private/ca.key" }
+
+// CABundle returns the path of the CA's certificates.
+func (l Layout) CABundle() string { return l.Prefix() + "pki/ca-bundle.pem" }
+
+// GossipKey returns the path of the key that encrypts the gossip of Nomad servers.
+func (l Layout) GossipKey() string { return l.Prefix() + "secrets/gossip.key" }
+
+// ACLBootstrapSecret returns the path of the secret of the ACL bootstrap token.
+func (l Layout) ACLBootstrapSecret() string { return l.Prefix() + "secrets/acl-bootstrap-token" }
+
+// Secrets returns the paths of the CA key, the CA bundle, the gossip key and the ACL bootstrap secret, in the order
+// they are written: a CA key without a bundle can be completed, a bundle without its key cannot.
+func (l Layout) Secrets() []string {
+	return []string{l.CAKey(), l.CABundle(), l.GossipKey(), l.ACLBootstrapSecret()}
+}
+
 // Clusters lists the clusters in a store, sorted: the top-level names that have a cluster.yaml.
 func Clusters(ctx context.Context, s Store) ([]string, error) {
 	paths, err := s.List(ctx, "")

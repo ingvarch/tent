@@ -85,5 +85,11 @@
       "reason": "surplus"
     }
   ],
+  "secrets": [
+    "pki/private/ca.key",
+    "pki/ca-bundle.pem",
+    "secrets/gossip.key",
+    "secrets/acl-bootstrap-token"
+  ],
   "completedSpec": true
 }

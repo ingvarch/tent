@@ -5,16 +5,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/ingvarch/tent/internal/engine"
+	"github.com/ingvarch/tent/internal/english"
 )
 
-// UpdatePlan is what an update of a cluster changes: its infrastructure, its nodes, and its completed spec in the
-// state store.
+// UpdatePlan is what an update of a cluster changes: its infrastructure, its nodes, and its secrets and completed
+// spec in the state store.
 type UpdatePlan struct {
 	Infra *engine.Plan // the infrastructure's changes; nil stands for none
 	Nodes []NodeChange // the node changes in the order they run
+	// Secrets are the paths of the secrets that the store lacks and the update writes, such as pki/private/ca.key,
+	// relative to the cluster and in the order they are written.
+	Secrets []string
 	// Completed reports that the completed spec, the specs with every default as last applied, will be written:
 	// the stored one is missing or differs.
 	Completed bool
@@ -23,20 +28,29 @@ type UpdatePlan struct {
 	Applied bool
 }
 
-// HasChanges reports whether the plan changes the infrastructure, the nodes or the completed spec.
-func (p UpdatePlan) HasChanges() bool { return p.infraChanges() || len(p.Nodes) > 0 || p.Completed }
+// HasChanges reports whether the plan changes the infrastructure, the nodes, the secrets or the completed spec.
+func (p UpdatePlan) HasChanges() bool {
+	return p.infraChanges() || len(p.Nodes) > 0 || len(p.stateWrites()) > 0
+}
 
 // infraChanges reports whether the plan changes the infrastructure.
 func (p UpdatePlan) infraChanges() bool { return p.Infra != nil && p.Infra.HasChanges() }
 
-// completedLine is the line of a text plan that writes the completed spec.
-const completedLine = "State: cluster.completed.yaml will be written.\n"
+// stateWrites returns the paths, relative to the cluster, of the objects that the plan writes to the state store, in
+// the order they are written: the secrets, then the completed spec.
+func (p UpdatePlan) stateWrites() []string {
+	if !p.Completed {
+		return p.Secrets
+	}
+	return append(slices.Clone(p.Secrets), "cluster.completed.yaml")
+}
 
 // WriteText writes the plan for people: the lines of the infrastructure's changes as the engine writes them, a line
-// for each node change, then a blank line and a line of counts for each of the two parts that changes, and last the
-// line "State: cluster.completed.yaml will be written." when the plan writes the completed spec. A plan that changes
-// only the completed spec is that line alone, and a plan without changes is the line "No changes.". Operation ids do
-// not show.
+// for each node change, then a blank line and a line of counts for each of the two parts that changes, and last a
+// line that names the objects it writes to the state store in the order they are written, such as "State:
+// secrets/gossip.key and cluster.completed.yaml will be written.". A plan that changes only the state store is that
+// line alone, and a plan without changes is the line "No changes.". Operation ids and the secrets' contents do not
+// show.
 func (p UpdatePlan) WriteText(w io.Writer) error {
 	var lines, counts strings.Builder
 	if p.infraChanges() {
@@ -54,8 +68,8 @@ func (p UpdatePlan) WriteText(w io.Writer) error {
 	if counts.Len() > 0 {
 		text = lines.String() + "\n" + counts.String()
 	}
-	if p.Completed {
-		text += completedLine
+	if writes := p.stateWrites(); len(writes) > 0 {
+		text += "State: " + english.And(writes) + " will be written.\n"
 	}
 	if text == "" {
 		text = "No changes.\n"
@@ -115,8 +129,8 @@ func countNodes(changes []NodeChange) map[NodeAction]int {
 
 // WriteApplied writes what applying the plan did, on one line in the past tense: the infrastructure's changes, such
 // as "Applied: 3 created, 0 updated, 0 replaced, 0 deleted.", the node changes, such as "Nodes: 6 created, 0 waited
-// for, 0 deleted.", and "Wrote cluster.completed.yaml.", each only when that part changed. A plan without changes is
-// the line "No changes.".
+// for, 0 deleted.", and the objects it wrote to the state store, such as "Wrote secrets/gossip.key and
+// cluster.completed.yaml.", each only when that part changed. A plan without changes is the line "No changes.".
 func (p UpdatePlan) WriteApplied(w io.Writer) error {
 	var parts []string
 	if p.infraChanges() {
@@ -129,8 +143,8 @@ func (p UpdatePlan) WriteApplied(w io.Writer) error {
 		parts = append(parts, fmt.Sprintf("Nodes: %d created, %d waited for, %d deleted.",
 			n[NodeCreate], n[NodeWait], n[NodeDelete]))
 	}
-	if p.Completed {
-		parts = append(parts, "Wrote cluster.completed.yaml.")
+	if writes := p.stateWrites(); len(writes) > 0 {
+		parts = append(parts, "Wrote "+english.And(writes)+".")
 	}
 	return writeSummary(w, parts)
 }
@@ -144,16 +158,18 @@ func writeSummary(w io.Writer, parts []string) error {
 }
 
 // MarshalJSON encodes the plan as {"applied": true, "infrastructure": <the engine's plan>, "nodes": [...],
-// "completedSpec": true}, the node changes in the order they run. Nodes is [] when nothing changes, infrastructure is
-// null when the plan has no infrastructure plan, and applied and completedSpec are left out when they are false. It
-// leaves HTML characters such as < and & as they are, so the caller's encoder decides whether to escape them.
+// "secrets": ["pki/private/ca.key", ...], "completedSpec": true}, the node changes in the order they run and the
+// secrets in the order they are written. Nodes is [] when nothing changes, infrastructure is null when the plan has no
+// infrastructure plan, and applied, secrets and completedSpec are left out when they are false or empty. It leaves
+// HTML characters such as < and & as they are, so the caller's encoder decides whether to escape them.
 func (p UpdatePlan) MarshalJSON() ([]byte, error) {
 	return marshalPlan(struct {
 		Applied        bool         `json:"applied,omitempty"`
 		Infrastructure *engine.Plan `json:"infrastructure"`
 		Nodes          []NodeChange `json:"nodes"`
+		Secrets        []string     `json:"secrets,omitempty"`
 		CompletedSpec  bool         `json:"completedSpec,omitempty"`
-	}{p.Applied, p.Infra, orEmpty(p.Nodes), p.Completed})
+	}{p.Applied, p.Infra, orEmpty(p.Nodes), p.Secrets, p.Completed})
 }
 
 // marshalPlan encodes the plan v as JSON on one line, and leaves HTML characters such as < and & as they are.

@@ -294,11 +294,7 @@ func (w *writeLog) record(p string) {
 // wantOnlyReads fails the test unless every call that reached the fake reads.
 func wantOnlyReads(t *testing.T, f *vultrfake.Fake) {
 	t.Helper()
-	for _, c := range f.Calls() {
-		if !strings.HasPrefix(c.Name, "List") && !strings.HasPrefix(c.Name, "Get") && c.Name != "AvailablePlans" {
-			t.Errorf("a call that writes: %s %s", c.Name, c.Arg)
-		}
-	}
+	wantNoWrites(t, f.Calls())
 }
 
 // firewallGroupID returns the id of the test cluster's firewall group for role, server or client, in f. It stops the
