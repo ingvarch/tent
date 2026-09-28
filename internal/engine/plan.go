@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"sync/atomic"
+	"sync"
 )
 
 // PlannedChange is one change of a plan: a task's change to its object, or the delete of an owned object.
@@ -23,7 +23,10 @@ type Plan struct {
 	graph   *graph
 	planned map[Key]Change // the change of each task, Noop included
 	pruned  []Object       // the objects to delete, as the snapshot had them, in apply order
-	applied atomic.Bool
+
+	mu          sync.Mutex // guards stage and skipDeletes
+	stage       stage
+	skipDeletes string // why the deletes are skipped, set when the task changes end; empty when they may run
 }
 
 // NewPlan plans tasks against snap: each task in topological order, then a delete for every object of snap that no

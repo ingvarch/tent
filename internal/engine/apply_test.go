@@ -74,8 +74,13 @@ func planFor(t *testing.T, c *fakeCloud, tasks ...Task) *Plan {
 
 // applyAsync applies p in the background; its result arrives on the channel.
 func applyAsync(ctx context.Context, p *Plan, opts ApplyOptions) <-chan error {
+	return async(func() error { return p.Apply(ctx, opts) })
+}
+
+// async calls f in the background; its result arrives on the channel.
+func async(f func() error) <-chan error {
 	done := make(chan error, 1)
-	go func() { done <- p.Apply(ctx, opts) }()
+	go func() { done <- f() }()
 	return done
 }
 
@@ -994,4 +999,424 @@ func TestApplyConverges(t *testing.T) {
 	if changes := planFor(t, cloud, tasks...).Changes(); len(changes) > 0 {
 		t.Errorf("changes after Apply = %v, want none", changes)
 	}
+}
+
+// checkErr checks that err is nil when want is empty, and has the message want otherwise.
+func checkErr(t *testing.T, call string, err error, want string) {
+	t.Helper()
+	switch {
+	case want == "" && err != nil:
+		t.Errorf("%s: %v", call, err)
+	case want != "" && (err == nil || err.Error() != want):
+		t.Errorf("%s error = %v, want %q", call, err, want)
+	}
+}
+
+// TestApplyInTwoParts applies each plan with ApplyTaskChanges, then ApplyDeletes, and checks the events and calls of
+// each part. Together they must send the events that Apply sends and make its calls on a copy of the cloud. One
+// change runs at a time, so their order is fixed.
+func TestApplyInTwoParts(t *testing.T) {
+	a, b, c := thing("a"), thing("b"), thing("c")
+	for _, tc := range []struct {
+		name                     string
+		objects                  []fakeObject
+		tasks                    []Task
+		faults                   map[string]fault
+		taskEvents, deleteEvents []string
+		taskCalls, deleteCalls   []string
+		taskErr, deleteErr       string // empty for none
+	}{
+		{
+			name: "task changes, then deletes kind by kind",
+			objects: []fakeObject{
+				object(a, "1", values{"size": "small"}),
+				duplicate(object(a, "9", nil)),
+				object(base("q"), "5", nil),
+				object(thing("z"), "7", nil),
+			},
+			tasks: []Task{
+				cloudTask{key: c, deps: []Key{b}},
+				cloudTask{key: b, deps: []Key{a}, refs: map[string]Key{"parent": a}},
+				cloudTask{key: a, want: values{"size": "large"}},
+			},
+			faults: map[string]fault{"test.Thing/b": failFirst(1, Retryable(errBusy, 2*time.Second))},
+			taskEvents: []string{
+				"started test.Thing/a update",
+				"succeeded test.Thing/a update",
+				"started test.Thing/b create",
+				"retrying test.Thing/b create: busy (wait 2s)",
+				"succeeded test.Thing/b create",
+				"started test.Thing/c create",
+				"succeeded test.Thing/c create",
+			},
+			deleteEvents: []string{
+				"started test.Thing/a delete (ID 9)",
+				"succeeded test.Thing/a delete (ID 9)",
+				"started test.Thing/z delete (ID 7)",
+				"succeeded test.Thing/z delete (ID 7)",
+				"started test.Base/q delete (ID 5)",
+				"succeeded test.Base/q delete (ID 5)",
+			},
+			taskCalls: []string{
+				"apply test.Thing/a update",
+				"apply test.Thing/b create",
+				"apply test.Thing/b create",
+				"apply test.Thing/c create",
+			},
+			deleteCalls: []string{
+				"delete test.Thing/a (ID 9)",
+				"delete test.Thing/z (ID 7)",
+				"delete test.Base/q (ID 5)",
+			},
+		},
+		{
+			name:    "a failed task change skips every delete",
+			objects: []fakeObject{object(base("q"), "5", nil), object(thing("z"), "7", nil)},
+			tasks:   []Task{cloudTask{key: b, deps: []Key{a}}, cloudTask{key: a}, cloudTask{key: c}},
+			faults:  map[string]fault{"test.Thing/a": failFirst(1, errBoom)},
+			taskEvents: []string{
+				"started test.Thing/a create",
+				"failed test.Thing/a create: boom",
+				"skipped test.Thing/b create: test.Thing/a failed",
+				"started test.Thing/c create",
+				"succeeded test.Thing/c create",
+			},
+			deleteEvents: []string{
+				"skipped test.Thing/z delete (ID 7): an earlier change failed",
+				"skipped test.Base/q delete (ID 5): an earlier change failed",
+			},
+			taskCalls: []string{"apply test.Thing/a create", "apply test.Thing/c create"},
+			taskErr:   "test.Thing/a: boom",
+			deleteErr: "the deletes of the plan were skipped because a task change did not succeed",
+		},
+		{
+			name:       "a failed task change and no deletes",
+			tasks:      []Task{cloudTask{key: a}},
+			faults:     map[string]fault{"test.Thing/a": failFirst(1, errBoom)},
+			taskEvents: []string{"started test.Thing/a create", "failed test.Thing/a create: boom"},
+			taskCalls:  []string{"apply test.Thing/a create"},
+			taskErr:    "test.Thing/a: boom",
+		},
+		{
+			name: "only deletes, and a failed one skips the later kinds",
+			objects: []fakeObject{
+				object(thing("x"), "1", nil),
+				object(thing("y"), "2", nil),
+				object(base("q"), "3", nil),
+			},
+			faults: map[string]fault{"test.Thing/x (ID 1)": failFirst(1, errBoom)},
+			deleteEvents: []string{
+				"started test.Thing/x delete (ID 1)",
+				"failed test.Thing/x delete (ID 1): boom",
+				"started test.Thing/y delete (ID 2)",
+				"succeeded test.Thing/y delete (ID 2)",
+				"skipped test.Base/q delete (ID 3): an earlier change failed",
+			},
+			deleteCalls: []string{"delete test.Thing/x (ID 1)", "delete test.Thing/y (ID 2)"},
+			deleteErr:   "test.Thing/x (ID 1): boom",
+		},
+		{
+			name:       "only task changes",
+			tasks:      []Task{cloudTask{key: a}},
+			taskEvents: []string{"started test.Thing/a create", "succeeded test.Thing/a create"},
+			taskCalls:  []string{"apply test.Thing/a create"},
+		},
+		{name: "no changes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				newCloud := func() *fakeCloud {
+					// The cloud changes its objects in place, so each cloud gets its own copy.
+					cloud := newFakeCloud(slices.Clone(tc.objects)...)
+					for target, f := range tc.faults {
+						cloud.setFault(target, f)
+					}
+					return cloud
+				}
+				cloud := newCloud()
+				p := planFor(t, cloud, tc.tasks...)
+				var tasks, deletes recorder
+				err := p.ApplyTaskChanges(t.Context(), ApplyOptions{Parallelism: 1, OnEvent: tasks.add})
+				checkErr(t, "ApplyTaskChanges", err, tc.taskErr)
+				if diff := cmp.Diff(tc.taskCalls, changeCalls(cloud), cmpopts.EquateEmpty()); diff != "" {
+					t.Errorf("calls of the task changes (-want +got):\n%s", diff)
+				}
+				err = p.ApplyDeletes(t.Context(), ApplyOptions{Parallelism: 1, OnEvent: deletes.add})
+				checkErr(t, "ApplyDeletes", err, tc.deleteErr)
+				calls := append(slices.Clone(tc.taskCalls), tc.deleteCalls...)
+				if diff := cmp.Diff(calls, changeCalls(cloud), cmpopts.EquateEmpty()); diff != "" {
+					t.Errorf("calls of both parts (-want +got):\n%s", diff)
+				}
+				if diff := cmp.Diff(tc.taskEvents, tasks.text(), cmpopts.EquateEmpty()); diff != "" {
+					t.Errorf("events of the task changes (-want +got):\n%s", diff)
+				}
+				if diff := cmp.Diff(tc.deleteEvents, deletes.text(), cmpopts.EquateEmpty()); diff != "" {
+					t.Errorf("events of the deletes (-want +got):\n%s", diff)
+				}
+
+				twin := newCloud()
+				var all recorder
+				err = planFor(t, twin, tc.tasks...).Apply(t.Context(), ApplyOptions{Parallelism: 1, OnEvent: all.add})
+				if ok := tc.taskErr == "" && tc.deleteErr == ""; (err == nil) != ok {
+					t.Errorf("Apply error = %v, want an error only when a part fails", err)
+				}
+				events := append(tasks.text(), deletes.text()...)
+				if diff := cmp.Diff(all.text(), events, cmpopts.EquateEmpty()); diff != "" {
+					t.Errorf("events of the parts (-Apply +parts):\n%s", diff)
+				}
+				if diff := cmp.Diff(changeCalls(twin), changeCalls(cloud), cmpopts.EquateEmpty()); diff != "" {
+					t.Errorf("calls of the parts (-Apply +parts):\n%s", diff)
+				}
+				objects := cloud.snapshot().objects
+				if diff := cmp.Diff(twin.snapshot().objects, objects, cmpopts.EquateEmpty()); diff != "" {
+					t.Errorf("objects after the parts (-Apply +parts):\n%s", diff)
+				}
+			})
+		})
+	}
+}
+
+func TestApplyDeletesBeforeTheTaskChanges(t *testing.T) {
+	cloud := newFakeCloud(object(thing("z"), "1", nil))
+	p := planFor(t, cloud, cloudTask{key: thing("a")})
+	var rec recorder
+	err := p.ApplyDeletes(t.Context(), ApplyOptions{OnEvent: rec.add})
+	checkErr(t, "ApplyDeletes", err, "apply the task changes of the plan before its deletes")
+	if len(rec.events) > 0 {
+		t.Errorf("events = %q, want none", rec.text())
+	}
+	if calls := changeCalls(cloud); len(calls) > 0 {
+		t.Errorf("calls = %q, want none", calls)
+	}
+	// The call that failed applied nothing, so both parts still apply.
+	if err := p.ApplyTaskChanges(t.Context(), ApplyOptions{}); err != nil {
+		t.Fatalf("ApplyTaskChanges: %v", err)
+	}
+	if err := p.ApplyDeletes(t.Context(), ApplyOptions{}); err != nil {
+		t.Fatalf("ApplyDeletes: %v", err)
+	}
+	calls := []string{"apply test.Thing/a create", "delete test.Thing/z (ID 1)"}
+	if diff := cmp.Diff(calls, changeCalls(cloud)); diff != "" {
+		t.Errorf("calls (-want +got):\n%s", diff)
+	}
+}
+
+// TestApplyDeletesWhileTheTaskChangesRun holds a task change and checks that ApplyDeletes fails until
+// ApplyTaskChanges has returned.
+func TestApplyDeletesWhileTheTaskChangesRun(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cloud := newFakeCloud(object(thing("z"), "1", nil))
+		release := cloud.hold("test.Thing/a")
+		p := planFor(t, cloud, cloudTask{key: thing("a")})
+		done := async(func() error { return p.ApplyTaskChanges(t.Context(), ApplyOptions{}) })
+		synctest.Wait()
+		err := p.ApplyDeletes(t.Context(), ApplyOptions{})
+		checkErr(t, "ApplyDeletes", err, "apply the task changes of the plan before its deletes")
+		release()
+		if err := <-done; err != nil {
+			t.Fatalf("ApplyTaskChanges: %v", err)
+		}
+		if err := p.ApplyDeletes(t.Context(), ApplyOptions{}); err != nil {
+			t.Fatalf("ApplyDeletes: %v", err)
+		}
+		calls := []string{"apply test.Thing/a create", "delete test.Thing/z (ID 1)"}
+		if diff := cmp.Diff(calls, changeCalls(cloud)); diff != "" {
+			t.Errorf("calls (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// applyCall is Apply, ApplyTaskChanges or ApplyDeletes as a function of the plan.
+type applyCall struct {
+	name  string
+	apply func(*Plan, context.Context, ApplyOptions) error
+}
+
+var (
+	callApply       = applyCall{"Apply", (*Plan).Apply}
+	callTaskChanges = applyCall{"ApplyTaskChanges", (*Plan).ApplyTaskChanges}
+	callDeletes     = applyCall{"ApplyDeletes", (*Plan).ApplyDeletes}
+)
+
+// TestApplyEachPartOnce calls the parts and Apply in turn. A call that fails sends no events and makes no calls.
+func TestApplyEachPartOnce(t *testing.T) {
+	const (
+		plan    = "the plan was applied already"
+		tasks   = "the task changes of the plan were applied already"
+		deletes = "the deletes of the plan were applied already"
+	)
+	type step struct {
+		call applyCall
+		err  string // empty for none
+	}
+	both := []string{"apply test.Thing/a create", "delete test.Thing/z (ID 1)"}
+	for _, tc := range []struct {
+		name  string
+		steps []step
+		calls []string
+	}{
+		{
+			name:  "the task changes twice",
+			steps: []step{{callTaskChanges, ""}, {callTaskChanges, tasks}},
+			calls: []string{"apply test.Thing/a create"},
+		},
+		{
+			name:  "the deletes twice",
+			steps: []step{{callTaskChanges, ""}, {callDeletes, ""}, {callDeletes, deletes}},
+			calls: both,
+		},
+		{
+			name:  "the task changes after the deletes",
+			steps: []step{{callTaskChanges, ""}, {callDeletes, ""}, {callTaskChanges, tasks}},
+			calls: both,
+		},
+		{
+			name:  "the task changes after Apply",
+			steps: []step{{callApply, ""}, {callTaskChanges, tasks}},
+			calls: both,
+		},
+		{
+			name:  "the deletes after Apply",
+			steps: []step{{callApply, ""}, {callDeletes, deletes}},
+			calls: both,
+		},
+		{
+			name:  "Apply after the task changes",
+			steps: []step{{callTaskChanges, ""}, {callApply, plan}, {callDeletes, ""}},
+			calls: both,
+		},
+		{
+			name:  "Apply after both parts",
+			steps: []step{{callTaskChanges, ""}, {callDeletes, ""}, {callApply, plan}},
+			calls: both,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cloud := newFakeCloud(object(thing("z"), "1", nil))
+			p := planFor(t, cloud, cloudTask{key: thing("a")})
+			for i, s := range tc.steps {
+				calls := len(changeCalls(cloud))
+				var rec recorder
+				err := s.call.apply(p, t.Context(), ApplyOptions{OnEvent: rec.add})
+				checkErr(t, fmt.Sprintf("step %d, %s", i+1, s.call.name), err, s.err)
+				if s.err == "" {
+					continue
+				}
+				if len(rec.events) > 0 {
+					t.Errorf("step %d, %s: events = %q, want none", i+1, s.call.name, rec.text())
+				}
+				if got := changeCalls(cloud)[calls:]; len(got) > 0 {
+					t.Errorf("step %d, %s: calls = %q, want none", i+1, s.call.name, got)
+				}
+			}
+			if diff := cmp.Diff(tc.calls, changeCalls(cloud)); diff != "" {
+				t.Errorf("calls (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestApplyEachPartOnceConcurrently calls each part twice at once: one call applies it, and the other fails.
+func TestApplyEachPartOnceConcurrently(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cloud := newFakeCloud(object(thing("z"), "1", nil))
+		p := planFor(t, cloud, cloudTask{key: thing("a")})
+		for _, part := range []struct {
+			call applyCall
+			err  string
+		}{
+			{callTaskChanges, "the task changes of the plan were applied already"},
+			{callDeletes, "the deletes of the plan were applied already"},
+		} {
+			call := func() error { return part.call.apply(p, t.Context(), ApplyOptions{}) }
+			first, second := async(call), async(call)
+			errs := []error{<-first, <-second}
+			if errs[0] != nil {
+				errs[0], errs[1] = errs[1], errs[0]
+			}
+			if errs[0] != nil || errs[1] == nil || errs[1].Error() != part.err {
+				t.Errorf("%s errors = %v, want one nil and one %q", part.call.name, errs, part.err)
+			}
+		}
+		calls := []string{"apply test.Thing/a create", "delete test.Thing/z (ID 1)"}
+		if diff := cmp.Diff(calls, changeCalls(cloud)); diff != "" {
+			t.Errorf("calls (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// TestApplyCancelledBetweenTheParts cancels once the task changes have succeeded: the deletes do not start.
+func TestApplyCancelledBetweenTheParts(t *testing.T) {
+	cloud := newFakeCloud(object(thing("z"), "1", nil), object(base("q"), "2", nil))
+	p := planFor(t, cloud, cloudTask{key: thing("a")})
+	if err := p.ApplyTaskChanges(t.Context(), ApplyOptions{}); err != nil {
+		t.Fatalf("ApplyTaskChanges: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	var rec recorder
+	wantErr(t, p.ApplyDeletes(ctx, ApplyOptions{OnEvent: rec.add}), "context canceled", context.Canceled)
+	events := []string{
+		"skipped test.Thing/z delete (ID 1): cancelled",
+		"skipped test.Base/q delete (ID 2): cancelled",
+	}
+	if diff := cmp.Diff(events, rec.text()); diff != "" {
+		t.Errorf("events (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"apply test.Thing/a create"}, changeCalls(cloud)); diff != "" {
+		t.Errorf("calls (-want +got):\n%s", diff)
+	}
+}
+
+// TestApplyDeletesAfterCancelledTaskChanges checks that the deletes do not run after task changes that were
+// cancelled, although their own ctx is live.
+func TestApplyDeletesAfterCancelledTaskChanges(t *testing.T) {
+	cloud := newFakeCloud(object(thing("z"), "1", nil))
+	p := planFor(t, cloud, cloudTask{key: thing("a")})
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	var tasks, deletes recorder
+	wantErr(t, p.ApplyTaskChanges(ctx, ApplyOptions{OnEvent: tasks.add}), "context canceled", context.Canceled)
+	err := p.ApplyDeletes(t.Context(), ApplyOptions{OnEvent: deletes.add})
+	checkErr(t, "ApplyDeletes", err, "the deletes of the plan were skipped because a task change did not succeed")
+	if diff := cmp.Diff([]string{"skipped test.Thing/a create: cancelled"}, tasks.text()); diff != "" {
+		t.Errorf("events of the task changes (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"skipped test.Thing/z delete (ID 1): cancelled"}, deletes.text()); diff != "" {
+		t.Errorf("events of the deletes (-want +got):\n%s", diff)
+	}
+	if calls := changeCalls(cloud); len(calls) > 0 {
+		t.Errorf("calls = %q, want none", calls)
+	}
+}
+
+// TestApplyPartsTakeTheirOwnOptions gives each part its own parallelism and deadline.
+func TestApplyPartsTakeTheirOwnOptions(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var objects []fakeObject
+		for i, k := range things("w", "x", "y", "z") {
+			objects = append(objects, object(k, fmt.Sprint(i+1), nil))
+		}
+		cloud := newFakeCloud(objects...)
+		cloud.delay = time.Second
+		p := planFor(t, cloud, cloudTask{key: thing("a")}, cloudTask{key: thing("b")})
+		start := time.Now()
+		if err := p.ApplyTaskChanges(t.Context(), ApplyOptions{Parallelism: 1}); err != nil {
+			t.Fatalf("ApplyTaskChanges: %v", err)
+		}
+		if took := time.Since(start); took != 2*time.Second {
+			t.Errorf("ApplyTaskChanges took %v, want 2s", took)
+		}
+		defer cloud.hold("test.Thing/z (ID 4)")()
+		start = time.Now()
+		err := p.ApplyDeletes(t.Context(), ApplyOptions{Parallelism: 2, ChangeTimeout: time.Minute})
+		wantErr(t, err, "test.Thing/z (ID 4): context deadline exceeded", context.DeadlineExceeded)
+		// w and x take a second at once, then y takes a second while z waits for its deadline.
+		if took := time.Since(start); took != time.Second+time.Minute {
+			t.Errorf("ApplyDeletes took %v, want 1m1s", took)
+		}
+		if busy, most := cloud.load(); busy != 0 || most != 2 {
+			t.Errorf("calls in progress = %d, at most %d; want 0, at most 2", busy, most)
+		}
+	})
 }
