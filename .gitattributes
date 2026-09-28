@@ -1,2 +1,5 @@
 # LF on every system: the build config tests read files as committed.
 * text=auto eol=lf
+
+# Release files as published: their signatures cover the exact bytes.
+internal/assets/testdata/** -text

@@ -6,6 +6,8 @@ on:
   pull_request:
   schedule:
     - cron: "0 6 * * 1"
+  # By hand, only the online job runs: the other jobs skip a workflow_dispatch run.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -16,6 +18,7 @@ concurrency:
 
 jobs:
   lint:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -34,6 +37,7 @@ jobs:
 
   test:
     name: test ${{ matrix.os }} go ${{ matrix.go }}
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
@@ -67,6 +71,7 @@ jobs:
   # - a lifecycle rule on the bucket expires objects under ci/ after 1 day.
   s3:
     name: test s3 on Cloudflare R2
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -95,8 +100,26 @@ jobs:
         # -count=1: a cached pass says nothing about the bucket today.
         run: go test -race -count=1 -run '^TestS3(Store|LeaseLocker|NewLocker)$' ./internal/statestore/
 
+  # Weekly and by hand, the tests that read public release sites: the Nomad releases tent pins still verify with the
+  # HashiCorp key embedded in tent, and that key has half a year left before it expires.
+  online:
+    name: test online
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - env:
+          TENT_TEST_ONLINE: "1"
+        # -count=1: a cached pass says nothing about the release sites today.
+        run: go test -count=1 -run 'Online$' ./...
+
   snapshot:
     name: release snapshot
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -113,6 +136,7 @@ jobs:
           args: release --snapshot --clean --skip=sign
 
   govulncheck:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
