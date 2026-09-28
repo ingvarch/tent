@@ -166,10 +166,23 @@ Facts about Nomad, Hetzner Cloud, Vultr, S3-compatible object stores and prior a
 - **JSON index:** `https://api.releases.hashicorp.com/v1/releases/nomad/{V|latest}`.
 - **Release signing key:** `https://www.hashicorp.com/.well-known/pgp-key.txt`, fingerprint
   `C874 011F 0AB4 0511 0D02 1055 3436 5D94 72D7 468F`. The 2.0.7 signature and the linux_amd64 sha256 were checked
-  and are valid.
+  and are valid. Checked again on 2026-09-28, for the copy that tent embeds:
+  - The primary key is RSA 4096, made on 2021-04-19, and expires on 2030-03-01T23:14Z.
+  - Releases are signed with its subkey `374E C75B 4859 1360 4A83 1CC7 C820 C6D5 CD27 AB87` (RSA 4096, made on
+    2021-04-21), which expires on 2030-03-01T23:15Z. The 2.0.7 `SHA256SUMS.sig` is made with this subkey and SHA-256.
+  - The file also holds an encryption subkey, which expires with the primary key, and a signing subkey that expired
+    on 2022-04-20.
+  - A verifier that checks the key at the current time, as tent does, rejects every signature after the expiry,
+    whenever it was made. HashiCorp can move the expiry with new self-signatures, and a verifier sees that only with a
+    fresh copy of the key.
 - **APT.** ⏳ `apt.releases.hashicorp.com` provides arm64. Its signing key was **rotated on 2026-09-09** after a
   security incident (HCSEC-2026-33); the new key is `D55C 0D1A C78A 8D81 26CB 631C FC9C A96A CA02 6560`. tent does not
   use the APT repository.
+- **CNI plugins** ⏳ (`containernetworking/plugins`, which Nomad's bridge networking needs): the latest release is
+  v1.9.1, of 2026-03-16. Each archive,
+  `https://github.com/containernetworking/plugins/releases/download/v{V}/cni-plugins-linux-{amd64|arm64}-v{V}.tgz`,
+  has a `.sha256` file next to it and no signature. The v1.9.1 sha256s in tent's `stable` channel were checked
+  against the digests that GitHub lists for the release's assets on 2026-09-28.
 
 ### 1.5 Licensing
 
@@ -1089,6 +1102,7 @@ Nomad:
 - CE licence and support: <https://developer.hashicorp.com/nomad/docs/ce-license-support>
 - go-discover: <https://github.com/hashicorp/go-discover>
 - Release signing key: <https://www.hashicorp.com/.well-known/pgp-key.txt>
+- CNI plugins releases: <https://github.com/containernetworking/plugins/releases>
 
 Hetzner:
 - Cloud API OpenAPI spec: <https://docs.hetzner.cloud/cloud.spec.json>

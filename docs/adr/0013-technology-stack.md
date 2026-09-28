@@ -5,7 +5,9 @@
   libraries added by [ADR-0022](0022-json-schema-from-go-types.md); on 2026-09-26 the state store (M0.3) added
   `github.com/gofrs/flock` and `golang.org/x/mod`, and `github.com/aws/smithy-go` as a direct dependency; on
   2026-09-27 the licence check added `github.com/google/licenseclassifier/v2`, which tent does not link
-  ([architecture §16](../architecture.md#16-technology-stack-and-releases))
+  ([architecture §16](../architecture.md#16-technology-stack-and-releases)); on 2026-09-28 the release assets (M2.2)
+  added `github.com/ProtonMail/go-crypto`, which only `internal/assets` imports
+  ([ADR-0026](0026-channels-and-release-assets.md))
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0006](0006-two-binaries-and-nodeconfig.md), [ADR-0011](0011-nomad-only-scope-and-licensing.md),

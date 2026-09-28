@@ -1,7 +1,8 @@
 # ADR-0021: Import rules that list the allowed importers
 
 - **Status:** Accepted; extended by [ADR-0025](0025-stdlib-only-helper-packages.md) (standard-library-only helper
-  packages)
+  packages) and [ADR-0026](0026-channels-and-release-assets.md) (go-crypto only in `internal/assets`; assets and
+  channels kept out of tent-node; `internal/channels` limited to the standard library, the YAML decoder and semver)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0004](0004-layered-architecture.md), [ADR-0006](0006-two-binaries-and-nodeconfig.md),

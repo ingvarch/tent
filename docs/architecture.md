@@ -150,7 +150,7 @@ kind: Cluster
 metadata:
   name: prod                     # [a-z][a-z0-9-]{0,18}[a-z0-9]; prefix of every resource name
 spec:
-  channel: stable                # recommended versions and images (see 13.5)
+  channel: stable                # Nomad and CNI versions (see 13.5)
   cloud:
     provider: vultr
     region: ams                  # Vultr: region | Hetzner: network zone | AWS: region
@@ -164,7 +164,7 @@ spec:
   sshKeys:
     - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILVMgcq7nf63leSBwZNfB40Oi4XwSKWNKchNmRGNCb9k ops@example
   nomad:
-    version: 2.0.7
+    version: 2.0.7               # empty means the version the cluster was first built with (see 13.2)
     region: global
     tls: {verifyHTTPSClient: true}
     clientIntroduction: strict   # strict | warn | none
@@ -237,9 +237,9 @@ This table is also the check that the abstraction survives several providers.
   Every stored object carries its apiVersion. Conversion functions are added when a second version appears.
 - **User spec and completed spec.** The user spec is what the operator wrote. The state store keeps it as given,
   without defaults, but written in tent's field order, so comments and formatting are not kept. The completed spec
-  has every default filled in and records what was last applied; `update` writes it from M1 on
-  ([13.2](#132-tent-update-cluster---yes)). `tent get --full` does not read it yet: it prints the user spec with the
-  defaults filled in.
+  has every default filled in and records what was last applied, the Nomad version included; `update` writes it from
+  M1 on ([13.2](#132-tent-update-cluster---yes)). `tent get --full` does not read it yet: it prints the user spec
+  with the defaults filled in.
 - **Strict decoding.** Keys are case-sensitive, and unknown fields, duplicate keys and null values are errors: an empty
   value such as `vultr:` is almost always a forgotten entry, so write `vultr: {}`. Decoding errors name the document,
   and the line when the file has the key, for example `document 2 (NodeGroup): line 37: unknown field "spec.sizee"`.
@@ -262,6 +262,27 @@ This table is also the check that the abstraction survives several providers.
   or location, and the image architecture matches. Images are given by name (`ubuntu-24.04`), and the provider
   resolves them (Vultr: numeric `os_id`).
 - **Server groups.** v1 allows exactly one server group, of size 1, 3 or 5. Size 1 requires `--allow-single-server`.
+- **Channel and Nomad version** (M2.2, [ADR-0026](adr/0026-channels-and-release-assets.md)). `spec.channel` names a
+  channel embedded in tent, `stable` by default ([13.5](#135-tent-upgrade-cluster---yes)). `spec.nomad.version` is
+  optional, and the channel must allow it: a release `X.Y.Z` from the channel's minimum up to, not including, the next
+  major version.
+  - `api/v1alpha1` checks only that the channel is a name, and no longer checks the version's form: the channel says
+    which versions are valid. The app checks the channel and the version wherever it checks specs: `create` (with
+    `--dry-run` too, also without a state store), `replace`, `edit` and `update`.
+  - The problems are field errors, the channel's first:
+
+    ```
+    Cluster prod: spec.channel: unknown channel "x"; known: stable
+    Cluster prod: spec.nomad.version: "2.0" is not a Nomad version such as 2.0.7
+    Cluster prod: spec.nomad.version: 1.11.0 is older than 2.0.0, the oldest Nomad that channel stable allows
+    Cluster prod: spec.nomad.version: 3.0.0 is newer than this tent knows; channel stable allows 2.x from 2.0.0
+    ```
+
+    The example in the second line is the channel's recommended version. An unknown channel leaves the version
+    unchecked.
+  - A version that the channel allows but has not tested passes with a warning ([14](#14-cli)).
+  - A spec without a version runs the version pinned in the completed spec, which the first `update` takes from the
+    channel ([13.2](#132-tent-update-cluster---yes)).
 - **Fixed cloud.** A cluster's `cloud.provider` and `cloud.region` never change (decided on 2026-09-28,
   [18](#18-open-questions)). tent made the cluster's cloud objects on that provider and in that region, so a change
   would leave them there: `update` would build the cluster again elsewhere, and `delete cluster` could miss them.
@@ -412,9 +433,9 @@ github.com/ingvarch/tent
 │   ├── english/         # lists as English sentences write them, "a, b and c", for messages
 │   ├── secrettest/      # tests only: looks for a secret in what tent prints or logs
 │   ├── statestore/      # Store interface, file:// and s3://, layout, locking
-│   ├── assets/          # Nomad / CNI / tent-node sources, signature and checksum verification
-│   ├── channels/        # embedded channel files: recommended versions and images
-│   ├── buildinfo/       # version, commit, date (ldflags)
+│   ├── assets/          # Nomad, CNI and tent-node: URLs and sha256s; checks Nomad's signature
+│   ├── channels/        # embedded channel files: the Nomad versions allowed and tested, the CNI plugins
+│   ├── buildinfo/       # version, commit, date (ldflags); which release a version counts as
 │   └── buildconfig/     # tests only: CI workflows, Makefile and release config stay consistent
 ├── test/e2e/            # //go:build e2e: black-box tests against real clouds (Vultr first)
 ├── hack/                # janitor, dev upload of tent-node, vultr-spike/
@@ -442,6 +463,12 @@ to `internal/rollout` with the drain and the quorum checks
   CA and the secrets never reaches a cloud or the state store. `internal/uuid`, `internal/english` and
   `internal/secrettest` import only the standard library. The tests of these four packages are exempt
   ([ADR-0025](adr/0025-stdlib-only-helper-packages.md)). Only tests import `internal/secrettest`.
+- Only `internal/assets` imports `github.com/ProtonMail/go-crypto`, tests included. `internal/nodeup`,
+  `internal/nodeconfig` and `cmd/tent-node`, tests included, import neither `internal/assets` nor
+  `internal/channels`: tent-node gets its versions and sha256s in NodeConfig and carries no PGP code
+  ([ADR-0026](adr/0026-channels-and-release-assets.md)).
+- `internal/channels` imports only the standard library, the decoder of the specs (`sigs.k8s.io/yaml` and
+  `sigs.k8s.io/json`) and `golang.org/x/mod/semver`. Its tests are exempt.
 - Everything except `api/` is `internal/`. The project makes no compatibility promises before it has to.
 
 ---
@@ -913,16 +940,34 @@ Full sketches: [Appendix A](#appendix-a-nomad-agent-configuration-sketches).
 
 | Artifact | Source | Verification |
 |---|---|---|
-| Nomad | `https://releases.hashicorp.com/nomad/<v>/nomad_<v>_linux_<arch>.zip` | The **CLI** downloads `nomad_<v>_SHA256SUMS` and verifies its detached signature with HashiCorp's release key, which is embedded in tent. The node verifies only the sha256 carried in NodeConfig. |
-| CNI plugins | GitHub releases of `containernetworking/plugins` (version pinned in the channel) | sha256 in NodeConfig |
-| tent-node | GitHub release of tent (`tent-node_linux_<arch>` + `checksums.txt`) | The CLI reads `checksums.txt` of its own version and puts the sha256 into user data. |
+| Nomad | `https://releases.hashicorp.com/nomad/<v>/nomad_<v>_linux_<arch>.zip` | The **CLI** downloads `nomad_<v>_SHA256SUMS` and verifies its detached signature with HashiCorp's release key, which is embedded in tent. Only SHA-256, SHA-384 and SHA-512 signatures count. The node verifies only the sha256 carried in NodeConfig. |
+| CNI plugins | `https://github.com/containernetworking/plugins/releases/download/v<v>/cni-plugins-linux-<arch>-v<v>.tgz`, the version from the channel | The channel holds the sha256 per architecture, fixed when tent is released: CNI releases carry no signature. NodeConfig carries it to the node. |
+| tent-node | GitHub release of tent (`tent-node_linux_<arch>` + `checksums.txt`) | A release build of the CLI reads `checksums.txt` of its own tag over TLS, without checking its cosign signature, and puts the sha256 into user data. A development build takes `TENT_NODE_URL` and `TENT_NODE_SHA256` (below). |
 | Docker | the distribution's package repository | distribution package signatures |
 
 - Trust is established once, on the operator's side, so nodes need no PGP.
 - The HashiCorp APT repository is deliberately **not** used: its signing key was rotated on 2026-09-09 after a
   security incident.
-- Development builds of tent-node are uploaded to object storage and served through a presigned URL (`TENT_NODE_URL`
-  plus `TENT_NODE_SHA256`).
+- **Built in M2.2** (`internal/assets`, [ADR-0026](adr/0026-channels-and-release-assets.md)). Each artifact resolves
+  to a name, a version, its URLs (one for now; NodeConfig adds mirrors) and a sha256. Each file is read with one
+  request, which the caller's context bounds, and errors name the URL. Nothing is cached. NodeConfig takes the assets
+  in M2.3, and `update` reads the release files then, so a plan will need releases.hashicorp.com, and for a release
+  build github.com.
+- **The key expires.** HashiCorp's key and its signing subkey expire on 2030-03-01
+  ([platform notes §1.4](platform-notes.md#14-downloads-and-verification)). tent checks a signature at the current
+  time, so from then on it verifies no Nomad download, older releases included, and fails with `HashiCorp's release
+  key embedded in this tent expired on 2030-03-01: a newer tent, with the renewed key, is needed`. The weekly `online`
+  CI job fails from 180 days before that ([16](#16-technology-stack-and-releases)). A revocation by HashiCorp reaches
+  tent only with a new embedded copy of the key.
+- **Development builds of tent-node.** A tent whose version is exactly a release or a pre-release tag, such as
+  `v0.3.0` or `v0.3.0-rc.1`, is a release build (`buildinfo.IsRelease`). Every other build is a development build:
+  `dev`, snapshots, `git describe` output such as `v0.3.0-4-gabc1234`, and `-dirty` builds. The version guard counts
+  `git describe` output as its tag ([10.2](#102-layout)), but the tag's tent-node is not the one built from the later
+  commit, and a node runs the CLI's own tent-node.
+  - A development build's tent-node is uploaded to object storage and served through a presigned URL:
+    `TENT_NODE_URL` plus `TENT_NODE_SHA256`. One URL and one sha256 serve every architecture.
+  - Without them a development build fails and names them. A release build ignores them, and from M2.3 warns when
+    they are set.
 
 ### 8.6 Operating systems
 
@@ -1193,7 +1238,9 @@ the s3 backend's probe writes below `.tent-probe/` ([10.4](#104-locking)).
 `cluster prod needs tent v0.4.0 or newer; this is v0.3.1`. `RaiseVersion` records the running version when it is
 newer, under the cluster's lock. A release, a pre-release and `git describe` output are checked, and
 `v0.3.0-4-gabc1234` counts as `v0.3.0`. Development builds, such as `dev` and GoReleaser `-SNAPSHOT` builds, skip the
-guard and never raise the version.
+guard and never raise the version. The rule is `buildinfo.Release`. tent-node's assets use the stricter
+`buildinfo.IsRelease`, under which `git describe` output is a development build
+([8.5](#85-artifacts-and-verification)).
 
 `tent delete cluster` removes the state last. It refuses to remove files it does not recognise unless `--force` is
 given.
@@ -1770,7 +1817,8 @@ The nodes are empty machines. They boot a placeholder cloud-config without secre
 updates and upgrades of the first boot.
 
 ```
- 1. load specs → defaults → validate → provider.Validate (region, plans, images)
+ 1. load specs → defaults → validate → the channel and the Nomad version (M2.2) → provider.Validate (region, plans,
+    images)
  2. plan: inventory → provider.BuildInfra → engine plan; Nodes.List → node changes (13.4); the completed spec;
     the missing secrets (M2.1)
  3. without --yes: print the plan and stop
@@ -1852,6 +1900,32 @@ infrastructure (step 5 above). The secrets are the CA's key and bundle, the goss
 - **A bundle without a key, a key that matches no certificate of the bundle, or a stored gossip key or ACL bootstrap
   secret that does not check** fails the plan, and the error names the paths. tent never replaces them: a new CA
   would cut off every node that trusts the old one.
+
+**Built in M2.2.** Step 1 checks the cluster's channel and Nomad version ([3.3](#33-api-rules)) and pins the version
+in the completed spec ([ADR-0026](adr/0026-channels-and-release-assets.md)).
+- **The pin.** The completed spec's `spec.nomad.version` is the one that the spec sets, else the one of the stored
+  completed spec, else the one that the channel recommends. So the first `update` pins the recommended version, and a
+  later tent that recommends another one keeps it: tent does not move a cluster to another Nomad by itself
+  ([13.5](#135-tent-upgrade-cluster---yes)). A version that the spec set and then left out stays pinned.
+- **A version in the spec wins** over the pin, even a lower one: nothing refuses a downgrade yet. `upgrade cluster`
+  and `rolling-update` will (M3).
+- **When the pin is written.** The pinned version is part of the completed spec, so a change of the version alone is
+  a plan that writes `cluster.completed.yaml` and nothing else. So is the first plan of a cluster whose completed spec
+  an older tent wrote without a version. The completed spec is written only after every other step has succeeded
+  (step 11), so a first `update` that is cut and then run again by a newer tent pins that tent's recommendation. From
+  M2.3 nodes run Nomad, and the pin must be written before the first node is created, with the secrets.
+- **A pin outside the channel** fails the plan before it writes anything or reaches the cloud, such as `cluster prod
+  is pinned to Nomad 2.0.7 (prod/cluster.completed.yaml), which is older than 2.1.0, the oldest Nomad that channel
+  stable allows; set spec.nomad.version to a version that the channel allows`.
+- **A completed spec that does not decode, or holds no Cluster,** blocks `update` only when the pin is needed, that
+  is when the spec leaves `spec.nomad.version` empty. The error then says to set `spec.nomad.version` to the Nomad
+  version the cluster was built with, or to fix the file by hand. With a version in the spec, `update` writes a new
+  completed spec.
+- **Untested versions.** When the version, set in the spec or pinned, is one that the channel has not tested,
+  `update --yes` warns before it applies changes ([14](#14-cli)). A plan without `--yes`, or a run without changes,
+  does not warn.
+- **No downloads yet.** Nodes still boot the placeholder. NodeConfig takes the assets in M2.3
+  ([8.5](#85-artifacts-and-verification)), and `update` fetches them then.
 
 **Target, with Nomad.** The whole flow:
 
@@ -1947,11 +2021,38 @@ planner is in `internal/app`, and it moves to `internal/rollout` with the drain 
 
 ### 13.5 `tent upgrade cluster [--yes]`
 
-- Reads the cluster's channel. The file is embedded in the binary, and a URL can override it.
-- A channel defines recommended and supported Nomad versions, the CNI plugin version and default images per provider.
-- The command proposes upgrades, rewrites the spec and prints the plan. Then run `update` and `rolling-update`.
-- It never downgrades. Only channel-tested version pairs are allowed, because Nomad's 2.x version skew policy has not
-  been restated.
+**Channels, built in M2.2** ([ADR-0026](adr/0026-channels-and-release-assets.md)). tent embeds its channels in
+`internal/channels`, one YAML file each, decoded strictly. `stable` is the only one. Its file on 2026-09-28:
+
+```yaml
+name: stable
+nomad:
+  minimum: 2.0.0        # the oldest version a cluster may run
+  recommended: 2.0.7    # what a new cluster runs
+  tested: [2.0.7]       # the versions tested with this tent
+cni:
+  version: 1.9.1
+  sha256:               # of cni-plugins-linux-<arch>-v1.9.1.tgz
+    amd64: <sha256>
+    arm64: <sha256>
+```
+
+- A channel holds Nomad and the CNI plugins only. Images stay in the provider's table
+  ([ADR-0023](adr/0023-vultr-inventory-dedupe-and-images.md)) and the API default (decision 4 of
+  [18](#18-open-questions)).
+- A cluster may run any official Nomad release from the channel's minimum up to, not including, the next major
+  version: 2.0.0 up to 3.0.0 for `stable`. So a new Nomad patch needs no tent release. A version that the channel does
+  not list as tested gets a warning ([14](#14-cli)). tent does not check that the version was released: its signed
+  `SHA256SUMS` proves that when tent fetches the assets ([8.5](#85-artifacts-and-verification)).
+- This relaxes the rule planned here, that only channel-tested version pairs are allowed. Nomad's 2.x version skew
+  policy has still not been restated ([platform notes §1.3](platform-notes.md#13-upgrades-and-version-skew)).
+
+**`upgrade cluster`, target.**
+- Reads the cluster's channel. A URL can override the embedded file.
+- The command proposes upgrades, also for a cluster whose pinned Nomad version
+  ([13.2](#132-tent-update-cluster---yes)) the channel no longer allows, rewrites the spec and prints the plan. Then
+  run `update` and `rolling-update`.
+- It never downgrades, and neither does `rolling-update`.
 - **Later:** an opt-in in-place upgrade strategy (swap the binary and restart).
 
 ### 13.6 `tent validate cluster [--wait 10m]`
@@ -2112,7 +2213,9 @@ The last column names the milestone that built the command. The spec commands of
   `replace -f` take. With `-o json` it prints them as a list, which those commands take too. It takes one `NAME`.
   `tent get clusters` and `tent get nodegroups` take several names and print tables, and with `-o yaml` or `-o json`
   the specs. On an empty store `tent get clusters` also says `no clusters in <store>` on stderr, because a mistyped
-  `--state` looks like an empty store. `--full` fills in the defaults ([3.3](#33-api-rules)).
+  `--state` looks like an empty store. `--full` fills in the defaults ([3.3](#33-api-rules)). The `NOMAD` column of
+  `tent get clusters` shows the version that the user spec sets, and `-` for a cluster that only has a pinned one
+  ([13.2](#132-tent-update-cluster---yes)), since `get` does not read the completed spec yet.
 - `update cluster` and `delete cluster` print their plan on stdout ([13.2](#132-tent-update-cluster---yes),
   [13.7](#137-tent-delete-cluster---yes)). A plan with changes, without `--yes`, adds a hint on stderr, such as
   `run with --yes to apply the changes`. With `--yes` and `-o table` they print the plan made under the lock, just
@@ -2180,9 +2283,13 @@ The last column names the milestone that built the command. The spec commands of
 - The first Ctrl-C or SIGTERM cancels the command, which then releases its lock. A second one ends tent at once.
 
 **Warnings, errors and exit codes**
-- tent warns while `access.api` lets the whole internet reach the Nomad API, a `/0` range such as the default
-  `0.0.0.0/0`: after `create`, `replace` or a saved `edit`, and before `update cluster --yes` applies changes. A
-  command warns once, `create --yes` included.
+- tent warns about the cluster that results from a change: after `create`, `replace` or a saved `edit`, and before
+  `update cluster --yes` applies changes. A command prints each warning once, `create --yes` included. It warns:
+  - while `access.api` lets the whole internet reach the Nomad API, a `/0` range such as the default `0.0.0.0/0`;
+  - when the cluster's Nomad version is one that its channel allows but has not tested
+    ([13.5](#135-tent-upgrade-cluster---yes)), such as `WARNING: Nomad 2.0.8 is not tested by this tent; channel
+    stable tests 2.0.7`. `create`, `replace` and `edit` check the version that the spec sets, and `update` also a
+    pinned one ([13.2](#132-tent-update-cluster---yes)).
 - An error goes to stderr after `Error: `. An invalid spec prints `Error: invalid spec:` and then one indented line
   per problem, with the field path ([3.3](#33-api-rules)).
 - Exit codes: 0 success, 1 error, 2 when `update cluster --exit-code` finds a plan with changes, and 130 when a
@@ -2291,13 +2398,14 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
   - `hashicorp/nomad/api` (pinned by pseudo-version);
   - `aws-sdk-go-v2` (`config`, `service/s3`) and `aws/smithy-go` for the s3 state store;
   - `gofrs/flock` for the file store's locks (`flock` on Unix, `LockFileEx` on Windows);
-  - `golang.org/x/mod/semver` for the version guard, pinned at v0.40.0 because v0.41.0 declares `go 1.26.0` and would
-    rewrite `go.mod`;
+  - `golang.org/x/mod/semver` for the version guard and the channels, pinned at v0.40.0 because v0.41.0 declares
+    `go 1.26.0` and would rewrite `go.mod`;
   - `sigs.k8s.io/yaml`;
   - `go.yaml.in/yaml/v3` and `sigs.k8s.io/json` for spec files ([ADR-0022](adr/0022-json-schema-from-go-types.md));
   - `invopop/jsonschema`, in the schema generator only;
   - `google/licenseclassifier/v2`, in the licence check only;
-  - `ProtonMail/go-crypto`;
+  - `ProtonMail/go-crypto`, in `internal/assets` only, to verify Nomad's `SHA256SUMS`
+    ([ADR-0026](adr/0026-channels-and-release-assets.md));
   - `golang.org/x/sync/errgroup`;
   - `log/slog`;
   - tests: `google/go-cmp`, and `santhosh-tekuri/jsonschema/v6` to check examples against the schema.
@@ -2310,6 +2418,11 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
     `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` (an R2 API token limited to the bucket, Object Read & Write), and a
     lifecycle rule on the bucket that expires objects under `ci/` after 1 day, for runs cancelled before cleanup;
   - govulncheck, also weekly;
+  - the `online` job, weekly and never on pull requests: the tests named `…Online` read public release sites with
+    `TENT_TEST_ONLINE=1`. They check that the recommended Nomad of `stable` still verifies with the embedded HashiCorp
+    key, and fail when the key expires within 180 days ([8.5](#85-artifacts-and-verification)). The job can also be
+    run by hand (`workflow_dispatch`); a manual run starts only this job, and every other job of `ci.yml` skips it.
+    `internal/buildconfig` checks that every test that reads `TENT_TEST_ONLINE` has such a name;
   - the licences of every module tent links, on each platform the release builds for: each must be Apache-2.0,
     BSD-2-Clause, BSD-3-Clause, ISC, MIT or MPL-2.0, and every licence file other than a NOTICE must name one. A
     licence file the classifier cannot name, such as BUSL-1.1 or a proprietary text, fails even when the module has
@@ -2340,7 +2453,8 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
 | Vultr API churn (VPC 2.0 removed in 2026; the Terraform provider broke) | runtime breakage | pin govultr, Renovate, nightly E2E |
 | Undocumented Vultr behaviour (user_data limit, tag syntax, firewall scope, halt semantics) | wrong assumptions in code | `hack/vultr-spike` settled all of these on 2026-09-25 except Object Storage conditional writes; re-run it when Vultr changes something relevant |
 | Hetzner capacity and account limits (5 servers, creation restrictions since June 2026) | Hetzner provider cannot be E2E-tested | Vultr first (ADR-0014); Hetzner E2E in M4 |
-| Nomad 2.x version skew rules not yet restated | broken upgrades | channels allow only tested version pairs; servers before clients |
+| Nomad 2.x version skew rules not yet restated | broken upgrades | channels allow one major version from a minimum, and tent warns about versions they have not tested; servers before clients |
+| HashiCorp's embedded release key expires on 2030-03-01, or is rotated or revoked | tent cannot verify Nomad downloads, or trusts a revoked key | a weekly CI job fails 180 days before the expiry; a tent release embeds the new key ([8.5](#85-artifacts-and-verification)) |
 | BUSL licence of Nomad | a paid managed offering would need a commercial licence | tent downloads official binaries and never redistributes them; stays free (not legal advice) |
 | Secrets in user data | node impersonation if metadata leaks | mitigations in [9.4](#94-secrets-on-nodes-threat-model), including scrubbing on Vultr; bootstrap controller in v2 |
 | Hetzner rate limit (3600/h per project) | slow or failing large rollouts | snapshots, batched waits, adaptive throttling, targeted rollouts, one project per cluster |
@@ -2367,6 +2481,18 @@ Decided on 2026-09-28:
 7. **A cluster's cloud:** its `cloud.provider` and `cloud.region` never change. A cluster moves by creating a new one
    ([3.3](#33-api-rules)).
 8. **CA validity:** 10 years, until CA rotation exists ([9.1](#91-pki)).
+9. **Nomad's sha256s:** checked at run time. The CLI downloads `nomad_<v>_SHA256SUMS` and its detached signature and
+   verifies them with HashiCorp's release key, which tent embeds ([8.5](#85-artifacts-and-verification),
+   [ADR-0026](adr/0026-channels-and-release-assets.md)). So a plan needs releases.hashicorp.com once NodeConfig uses
+   the assets (M2.3).
+10. **The Nomad version of a spec without one:** the first `update` records the channel's recommended version in
+    `cluster.completed.yaml`, and later runs keep it. A newer tent does not move nodes to another version by itself;
+    `upgrade cluster` does ([13.2](#132-tent-update-cluster---yes), [13.5](#135-tent-upgrade-cluster---yes)).
+    Revised the same day: a cluster may run any official Nomad release from the channel's minimum (2.0.0) up to the
+    next major version (3.0.0, not included), so a new Nomad patch needs no tent release. The channel's tested
+    versions only decide whether tent warns.
+11. **What a channel holds:** Nomad and the CNI plugins only. Images stay in the provider's table
+    ([ADR-0023](adr/0023-vultr-inventory-dedupe-and-images.md)) and the API default (decision 4).
 
 ---
 
