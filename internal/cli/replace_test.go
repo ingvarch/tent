@@ -53,6 +53,18 @@ func TestReplaceSingleServer(t *testing.T) {
 		"node group servers replaced\n")
 }
 
+// TestReplaceKeepsTheCloud refuses a Cluster on another provider or in another region.
+func TestReplaceKeepsTheCloud(t *testing.T) {
+	s := withCluster(t)
+	hetzner := replaced(t, replaced(t, clusterYAML, "provider: vultr", "provider: hetzner"),
+		"region: ams\n    vultr: {}", "region: eu-central\n    zones: [fsn1, nbg1, hel1]\n    hetzner: {}")
+	const moves = "; a cluster moves by creating a new one\n"
+	wantError(t, runIn(t, hetzner, "replace", "-f", "-", "--state", s.url), "Error: invalid spec:\n"+
+		"  Cluster prod: spec.cloud.provider: cannot change from vultr to hetzner"+moves+
+		"  Cluster prod: spec.cloud.region: cannot change from ams to eu-central"+moves)
+	s.want(t, prodObjects)
+}
+
 func TestSpecFileFlagHelp(t *testing.T) {
 	for _, name := range []string{"create", "replace"} {
 		got := runIn(t, "", name, "--help")
@@ -69,4 +81,23 @@ func TestEmptySpecFileFlag(t *testing.T) {
 			"Error: -f needs a file path, or - for standard input\n")
 	}
 	s.want(t, prodObjects)
+}
+
+// TestBrokenClusterSaysHowToRepairIt refuses every change of a cluster whose stored cluster.yaml does not decode, and
+// says how to repair the file.
+func TestBrokenClusterSaysHowToRepairIt(t *testing.T) {
+	s := withCluster(t)
+	s.put(t, clusterPath, "kind: Cluster\n")
+	stored := s.objects(t)
+	e := newFakeEditor(t, "")
+	const broken = "Error: " + clusterPath + ": document 1 (Cluster): apiVersion is required; fix " + clusterPath +
+		" in the state store by hand and keep its spec.cloud.provider and spec.cloud.region, since deleting the file " +
+		"would leave the cloud objects of the cluster behind\n"
+	wantError(t, runIn(t, clusterYAML, "replace", "-f", "-", "--state", s.url), broken)
+	wantError(t, runEdit(t, "", "edit", "cluster", "prod", "--state", s.url), broken)
+	for _, args := range [][]string{{}, {"--yes"}, {"--yes", "--force"}} {
+		wantError(t, runOnCloud(t, append([]string{"delete", "cluster", "prod", "--state", s.url}, args...)...), broken)
+	}
+	s.want(t, stored)
+	e.wantRuns(t)
 }

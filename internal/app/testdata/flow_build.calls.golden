@@ -1,0 +1,89 @@
+AvailablePlans ams
+ListPlans
+ListOS
+ListSSHKeys
+ListVPCs
+ListFirewallGroups
+ListInstances tent/cluster=prod
+ListInstances tent/cluster=prod
+AvailablePlans ams
+ListPlans
+ListOS
+ListSSHKeys
+ListVPCs
+ListFirewallGroups
+ListInstances tent/cluster=prod
+ListInstances tent/cluster=prod
+CreateSSHKey tent:cluster=prod;kind=ssh-key;fp=8ba890ed;op=<op1>
+CreateVPC tent:cluster=prod;kind=vpc;op=<op2>
+CreateFirewallGroup tent:cluster=prod;kind=firewall;role=server;op=<op3>
+ListFirewallRules <vultr.FirewallGroup/prod-servers>
+CreateFirewallRule <vultr.FirewallGroup/prod-servers> v4 icmp 0.0.0.0/0
+CreateFirewallRule <vultr.FirewallGroup/prod-servers> v4 tcp 0.0.0.0/0 4646
+CreateFirewallRule <vultr.FirewallGroup/prod-servers> v4 tcp 203.0.113.7/32 22
+CreateFirewallRule <vultr.FirewallGroup/prod-servers> v6 icmp ::/0
+CreateFirewallGroup tent:cluster=prod;kind=firewall;role=client;op=<op4>
+ListFirewallRules <vultr.FirewallGroup/prod-clients>
+CreateFirewallRule <vultr.FirewallGroup/prod-clients> v4 icmp 0.0.0.0/0
+CreateFirewallRule <vultr.FirewallGroup/prod-clients> v4 tcp 203.0.113.7/32 22
+CreateFirewallRule <vultr.FirewallGroup/prod-clients> v6 icmp ::/0
+ListInstances tent/op=<op5>
+ListSSHKeys
+ListVPCs
+ListFirewallGroups
+ListInstances tent/cluster=prod
+ListFirewallRules <vultr.FirewallGroup/prod-clients>
+ListFirewallRules <vultr.FirewallGroup/prod-servers>
+CreateInstance prod-servers-0
+GetInstance <prod-servers-0>
+GetInstance <prod-servers-0>
+GetInstance <prod-servers-0>
+ListInstanceVPCs <prod-servers-0>
+ListInstances tent/op=<op6>
+ListSSHKeys
+ListVPCs
+ListFirewallGroups
+ListInstances tent/cluster=prod
+ListFirewallRules <vultr.FirewallGroup/prod-clients>
+ListFirewallRules <vultr.FirewallGroup/prod-servers>
+CreateInstance prod-servers-1
+GetInstance <prod-servers-1>
+GetInstance <prod-servers-1>
+GetInstance <prod-servers-1>
+ListInstanceVPCs <prod-servers-1>
+ListInstances tent/op=<op7>
+ListSSHKeys
+ListVPCs
+ListFirewallGroups
+ListInstances tent/cluster=prod
+ListFirewallRules <vultr.FirewallGroup/prod-clients>
+ListFirewallRules <vultr.FirewallGroup/prod-servers>
+CreateInstance prod-servers-2
+GetInstance <prod-servers-2>
+GetInstance <prod-servers-2>
+GetInstance <prod-servers-2>
+ListInstanceVPCs <prod-servers-2>
+ListInstances tent/op=<op8>
+ListSSHKeys
+ListVPCs
+ListFirewallGroups
+ListInstances tent/cluster=prod
+ListFirewallRules <vultr.FirewallGroup/prod-clients>
+ListFirewallRules <vultr.FirewallGroup/prod-servers>
+CreateInstance prod-workers-0
+GetInstance <prod-workers-0>
+GetInstance <prod-workers-0>
+GetInstance <prod-workers-0>
+ListInstanceVPCs <prod-workers-0>
+ListInstances tent/op=<op9>
+ListSSHKeys
+ListVPCs
+ListFirewallGroups
+ListInstances tent/cluster=prod
+ListFirewallRules <vultr.FirewallGroup/prod-clients>
+ListFirewallRules <vultr.FirewallGroup/prod-servers>
+CreateInstance prod-workers-1
+GetInstance <prod-workers-1>
+GetInstance <prod-workers-1>
+GetInstance <prod-workers-1>
+ListInstanceVPCs <prod-workers-1>

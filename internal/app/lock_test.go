@@ -66,7 +66,14 @@ var changes = []struct {
 		return err
 	}},
 	{"delete", "delete", func(t *testing.T, svc *app.Service) error {
-		_, err := svc.DeleteState(t.Context(), "prod", true, false)
+		withCloud(svc)
+		_, err := svc.DeleteCluster(t.Context(), "prod", true, false)
+		return err
+	}},
+	{"update", "update", func(t *testing.T, svc *app.Service) error {
+		f, _ := withCloud(svc)
+		f.SetBootReads(t, 0, 0) // the nodes are ready at once, so no test waits for them
+		_, err := svc.Update(t.Context(), "prod", true)
 		return err
 	}},
 }
@@ -279,6 +286,9 @@ func TestChangesStopWhenTheLockIsLost(t *testing.T) {
 		wantError(t, err, `lost the lock of cluster prod; stopped: put "prod/cluster.yaml": context canceled`)
 		if !errors.Is(err, statestore.ErrLockLost) {
 			t.Errorf("errors.Is(%v, ErrLockLost) = false", err)
+		}
+		if app.Saved(err) {
+			t.Errorf("Saved(%v) = true, want false: the change stopped", err)
 		}
 		wantPaths(t, svc.Store, serversPath)
 	})
@@ -578,7 +588,8 @@ func TestUseCasesSayInterrupted(t *testing.T) {
 		{"Save", func() error { _, err := svc.Save(ctx, ref, bigger, true); return err }},
 		{"Create", func() error { _, err := svc.Create(ctx, decode(t, clusterYAML), true); return err }},
 		{"Replace", func() error { _, err := svc.Replace(ctx, bigger, true); return err }},
-		{"DeleteState", func() error { _, err := svc.DeleteState(ctx, "prod", true, false); return err }},
+		{"DeleteCluster", func() error { _, err := svc.DeleteCluster(ctx, "prod", true, false); return err }},
+		{"Update", func() error { _, err := svc.Update(ctx, "prod", true); return err }},
 		{"Unlock", func() error { _, err := svc.Unlock(ctx, "prod", false); return err }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -690,6 +701,9 @@ func TestLockLostAfterTheChange(t *testing.T) {
 		if !errors.Is(err, statestore.ErrLockLost) {
 			t.Errorf("errors.Is(%v, ErrLockLost) = false", err)
 		}
+		if !app.Saved(err) {
+			t.Errorf("Saved(%v) = false, want true", err)
+		}
 	}
 	t.Run("create", func(t *testing.T) {
 		svc, _ := newService(t)
@@ -700,15 +714,24 @@ func TestLockLostAfterTheChange(t *testing.T) {
 		wantPaths(t, svc.Store, clusterPath, serversPath, workersPath)
 	})
 	t.Run("delete", func(t *testing.T) {
-		svc := newCluster(t)
+		svc, _ := newCluster(t)
 		svc.Store = forceUnlocked{unwrapped{svc.Store}, versionPath}
-		paths, err := svc.DeleteState(t.Context(), "prod", true, false)
+		plan, err := svc.DeleteCluster(t.Context(), "prod", true, false)
 		wantSaved(t, err)
-		if diff := cmp.Diff(allState, paths); diff != "" {
-			t.Errorf("DeleteState (-want +got):\n%s", diff)
+		if diff := cmp.Diff(allState, plan.State); diff != "" {
+			t.Errorf("the state deletes (-want +got):\n%s", diff)
 		}
 		wantPaths(t, svc.Store)
 	})
+}
+
+// TestSavedOnlyForALockLostAfterTheChange: no other error, and no error at all, says that a change was saved with it.
+func TestSavedOnlyForALockLostAfterTheChange(t *testing.T) {
+	for _, err := range []error{nil, errors.New("broken"), statestore.ErrLockLost} {
+		if app.Saved(err) {
+			t.Errorf("Saved(%v) = true, want false", err)
+		}
+	}
 }
 
 // racing writes other content to a path just before a conditional Put of it, as a writer that ignores the lock

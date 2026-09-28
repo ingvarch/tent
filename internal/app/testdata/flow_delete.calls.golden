@@ -1,0 +1,42 @@
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-servers-0>
+ListInstanceVPCs <prod-servers-1>
+ListInstanceVPCs <prod-servers-2>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+ListSSHKeys
+ListVPCs
+ListFirewallGroups
+ListInstances tent/cluster=prod
+ListFirewallRules <vultr.FirewallGroup/prod-clients>
+ListFirewallRules <vultr.FirewallGroup/prod-servers>
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-servers-0>
+ListInstanceVPCs <prod-servers-1>
+ListInstanceVPCs <prod-servers-2>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+ListSSHKeys
+ListVPCs
+ListFirewallGroups
+ListInstances tent/cluster=prod
+ListFirewallRules <vultr.FirewallGroup/prod-clients>
+ListFirewallRules <vultr.FirewallGroup/prod-servers>
+DeleteInstance <prod-servers-0>
+DeleteInstance <prod-servers-1>
+DeleteInstance <prod-servers-2>
+DeleteInstance <prod-workers-0>
+DeleteInstance <prod-workers-1>
+ListInstances tent/cluster=prod
+ListSSHKeys
+ListVPCs
+ListFirewallGroups
+ListInstances tent/cluster=prod
+ListFirewallRules <vultr.FirewallGroup/prod-clients>
+ListFirewallRules <vultr.FirewallGroup/prod-servers>
+ListInstances tent/cluster=prod
+ListInstances tent/cluster=prod
+DeleteFirewallGroup <vultr.FirewallGroup/prod-clients>
+DeleteFirewallGroup <vultr.FirewallGroup/prod-servers>
+DeleteVPC <vultr.VPC/prod>
+DeleteSSHKey <vultr.SSHKey/prod-8ba890ed>

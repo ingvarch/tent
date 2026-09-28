@@ -29,10 +29,16 @@ func exitProcess(code int) { os.Exit(code) }
 // executeWithSignals runs tent as Execute does, stopped by the signals from sigs. The first cancels the command's
 // context, so that the command can stop and release what it holds; a second calls exit with exitInterrupted. While
 // the editor runs, Ctrl-C belongs to the editor.
-func executeWithSignals(ctx context.Context, args []string, s Streams, sigs <-chan os.Signal, exit func(int)) int {
+func executeWithSignals(ctx context.Context, args []string, s Streams, sigs <-chan os.Signal, exit func(int),
+	opts ...Option,
+) int {
 	ctx, stop := watchInterrupts(ctx, sigs, exit)
 	defer stop()
-	return execute(ctx, newRootCommand(s, &globalOptions{}), args, s.Err)
+	o := &globalOptions{}
+	for _, opt := range opts {
+		opt(o)
+	}
+	return execute(ctx, newRootCommand(s, o), args, s.Err)
 }
 
 // interruptsKey finds the interrupts of a command in its context.

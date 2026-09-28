@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"testing"
+	"testing/synctest"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/app"
@@ -50,4 +51,47 @@ func mustReplace(t *testing.T, svc *app.Service, docs ...string) {
 	if _, err := svc.Replace(t.Context(), decode(t, docs...), true); err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
+}
+
+// TestUpdateWarnsWhenTheAPIIsOpen tells OnOpenAPI once, before the first change, when an update applies changes to a
+// cluster whose Nomad API the whole internet may reach.
+func TestUpdateWarnsWhenTheAPIIsOpen(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		svc, _ := newUpdate(t) // access.api left out is 0.0.0.0/0
+		var events []string
+		svc.OnOpenAPI = func() { events = append(events, "open") }
+		svc.OnProgress = func(p app.Progress) { events = append(events, progressLine(p)) }
+		wantWarnings := func(step string, want int) {
+			t.Helper()
+			n := 0
+			for _, e := range events {
+				if e == "open" {
+					n++
+				}
+			}
+			if n != want {
+				t.Errorf("after %s, OnOpenAPI was called %d times, want %d", step, n, want)
+			}
+		}
+
+		if _, err := svc.Update(t.Context(), "prod", false); err != nil {
+			t.Fatalf("Update without apply: %v", err)
+		}
+		wantWarnings("a plan", 0)
+		mustUpdate(t, svc)
+		wantWarnings("an update that applies changes", 1)
+		if len(events) < 2 || events[0] != "open" {
+			t.Errorf("the events start with %q, want the warning before the first change", events[:min(2, len(events))])
+		}
+		mustUpdate(t, svc)
+		wantWarnings("an update without changes", 1)
+
+		narrow := edit(t, keyedClusterYAML, "region: ams", "region: ams\n  access:\n    api: [203.0.113.0/24]")
+		mustReplace(t, svc, narrow)
+		plan := mustUpdate(t, svc)
+		if !plan.HasChanges() {
+			t.Fatal("narrowing the API changes nothing")
+		}
+		wantWarnings("an update of a cluster with a narrow API", 1)
+	})
 }

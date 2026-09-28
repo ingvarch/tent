@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
+	"github.com/ingvarch/tent/internal/cloud"
 )
 
 // Streams are where a command reads its input and writes its output.
@@ -20,12 +22,34 @@ type Streams struct {
 	Err io.Writer
 }
 
-// Execute runs tent with args and returns the process exit code. The first Ctrl-C or SIGTERM cancels the command's
-// context; a second ends tent at once with exit code 130.
-func Execute(ctx context.Context, args []string, s Streams) int {
+// Providers returns the cloud provider that a cluster's spec names, such as vultr, for a command that reaches the
+// cloud. The provider writes its logs to log, the logger of the command. Providers fails for a provider that tent
+// cannot manage, or cannot reach, for example without its credentials.
+type Providers func(name v1alpha1.Provider, log *slog.Logger) (cloud.Provider, error)
+
+// Option changes how Execute runs tent.
+type Option func(*globalOptions)
+
+// WithProviders gives tent the cloud providers that update cluster and delete cluster reach. Without it, those
+// commands fail: tent reaches no cloud.
+func WithProviders(p Providers) Option {
+	return func(o *globalOptions) { o.providers = p }
+}
+
+// exitChanges is tent's exit code when --exit-code finds a plan with changes.
+const exitChanges = 2
+
+// errPlanHasChanges ends a command whose plan has changes under --exit-code: tent exits with exitChanges and prints
+// no error.
+var errPlanHasChanges = errors.New("the plan has changes")
+
+// Execute runs tent with args and returns the process exit code: 0 on success, 1 on an error, and 2 when --exit-code
+// finds a plan with changes. The first Ctrl-C or SIGTERM cancels the command's context; a second ends tent at once
+// with exit code 130.
+func Execute(ctx context.Context, args []string, s Streams, opts ...Option) int {
 	sigs, stop := notifyStopSignals()
 	defer stop()
-	return executeWithSignals(ctx, args, s, sigs, exitProcess)
+	return executeWithSignals(ctx, args, s, sigs, exitProcess, opts...)
 }
 
 func execute(ctx context.Context, cmd *cobra.Command, args []string, stderr io.Writer) int {
@@ -33,11 +57,15 @@ func execute(ctx context.Context, cmd *cobra.Command, args []string, stderr io.W
 		args = []string{} // cobra would otherwise read os.Args
 	}
 	cmd.SetArgs(args)
-	if err := cmd.ExecuteContext(ctx); err != nil {
-		writeError(stderr, err)
-		return 1
+	err := cmd.ExecuteContext(ctx)
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, errPlanHasChanges):
+		return exitChanges
 	}
-	return 0
+	writeError(stderr, err)
+	return 1
 }
 
 // writeError writes "Error: " and the message of err. Lines after the first are indented, so that each error of a
@@ -78,7 +106,7 @@ func newRootCommand(s Streams, opts *globalOptions) *cobra.Command {
 	opts.addFlags(cmd)
 	cmd.AddCommand(
 		newVersionCommand(opts), newCreateCommand(opts), newGetCommand(opts), newReplaceCommand(opts),
-		newDeleteCommand(opts), newStateCommand(opts), newEditCommand(opts),
+		newDeleteCommand(opts), newStateCommand(opts), newEditCommand(opts), newUpdateCommand(opts),
 	)
 	return cmd
 }

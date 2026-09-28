@@ -392,21 +392,38 @@ func TestEditNodeGroup(t *testing.T) {
 
 func TestEditClusterWithYes(t *testing.T) {
 	s := withCluster(t)
-	e := newFakeEditor(t, "", editStep{Old: "region: ams", New: "region: fra"})
+	const cidr = "    vultr: {}\n  networking:\n    cidr: 10.65.0.0/16\n"
+	e := newFakeEditor(t, "", editStep{Old: "    vultr: {}\n", New: cidr})
 	wantDone(t, runEdit(t, "", "edit", "cluster", "prod", "--yes", "--state", s.url), `--- stored
 +++ edited
-@@ -5,5 +5,5 @@
- spec:
-   cloud:
+@@ -7,3 +7,5 @@
      provider: vultr
--    region: ams
-+    region: fra
+     region: ams
      vultr: {}
++  networking:
++    cidr: 10.65.0.0/16
 cluster prod replaced
 `)
-	s.want(t, map[string]string{clusterPath: replaced(t, clusterYAML, "ams", "fra"), serversPath: serversYAML,
-		workersPath: workersYAML})
+	s.want(t, map[string]string{
+		clusterPath: replaced(t, clusterYAML, "    vultr: {}\n", cidr),
+		serversPath: serversYAML,
+		workersPath: workersYAML,
+	})
 	e.wantRuns(t, clusterYAML)
+	e.wantNoFile(t)
+}
+
+// TestEditKeepsTheCloud opens the editor again when the edit moves the cluster to another region, and changes nothing
+// when the operator reverts it.
+func TestEditKeepsTheCloud(t *testing.T) {
+	s := withCluster(t)
+	e := newFakeEditor(t, "", editStep{Old: "region: ams", New: "region: fra"},
+		editStep{Old: "region: fra", New: "region: ams"})
+	wantOK(t, runEdit(t, "", "edit", "cluster", "prod", "--yes", "--state", s.url), "edit cancelled; nothing changed\n")
+	s.want(t, prodObjects)
+	e.wantRuns(t, clusterYAML, fixErrorsHeader+
+		"# Cluster prod: spec.cloud.region: cannot change from ams to fra; a cluster moves by creating a new one\n"+
+		replaced(t, clusterYAML, "region: ams", "region: fra"))
 	e.wantNoFile(t)
 }
 

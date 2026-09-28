@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -13,6 +14,10 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
+	"github.com/ingvarch/tent/api/v1alpha1"
+	"github.com/ingvarch/tent/internal/cloud"
+	"github.com/ingvarch/tent/internal/cloud/vultr"
+	"github.com/ingvarch/tent/internal/cloud/vultr/vultrfake"
 	"github.com/ingvarch/tent/internal/statestore"
 )
 
@@ -178,9 +183,42 @@ type started struct {
 
 // executeTest runs tent as Execute does, but without the process's signals: a test that needs them sends them
 // itself, and signal.Notify from a synctest bubble crashes the test binary.
-func executeTest(ctx context.Context, t *testing.T, args []string, s Streams) int {
+func executeTest(ctx context.Context, t *testing.T, args []string, s Streams, opts ...Option) int {
 	t.Helper()
-	return executeWithSignals(ctx, args, s, nil, func(code int) { t.Errorf("tent exited with %d on a signal", code) })
+	return executeWithSignals(ctx, args, s, nil, func(code int) { t.Errorf("tent exited with %d on a signal", code) },
+		opts...)
+}
+
+// onVultr returns providers that reach the Vultr fake f and log to the command's logger. Every provider other than
+// vultr is one that tent cannot manage yet.
+func onVultr(f *vultrfake.Fake) Providers {
+	return func(name v1alpha1.Provider, log *slog.Logger) (cloud.Provider, error) {
+		if name != v1alpha1.ProviderVultr {
+			return nil, cloud.UnsupportedProvider(name)
+		}
+		return vultr.New(f, vultr.WithLogger(log)), nil
+	}
+}
+
+// runOn executes tent with args as Execute does, its providers reaching the Vultr fake f.
+func runOn(t *testing.T, f *vultrfake.Fake, args ...string) result {
+	t.Helper()
+	return runProviders(t, onVultr(f), args...)
+}
+
+// runProviders executes tent with args as Execute does, with the providers p.
+func runProviders(t *testing.T, p Providers, args ...string) result {
+	t.Helper()
+	var out, errOut syncBuffer
+	code := executeTest(t.Context(), t, args, Streams{In: strings.NewReader(""), Out: &out, Err: &errOut},
+		WithProviders(p))
+	return result{code, out.String(), errOut.String()}
+}
+
+// runOnCloud executes tent with args, its providers reaching a Vultr fake that holds nothing of the test cluster.
+func runOnCloud(t *testing.T, args ...string) result {
+	t.Helper()
+	return runOn(t, vultrfake.New(), args...)
 }
 
 // startIn starts tent with args and stdin in another goroutine.
@@ -280,14 +318,24 @@ type leaseStore struct{ statestore.Store }
 // runWithStore executes tent with args on the store that wrap makes of the one --state names.
 func runWithStore(t *testing.T, wrap func(statestore.Store) statestore.Store, args ...string) result {
 	t.Helper()
-	var out, errOut syncBuffer
-	opts := &globalOptions{openStore: func(ctx context.Context, u string) (statestore.Store, error) {
+	return runWith(t, &globalOptions{openStore: wrapped(wrap)}, args...)
+}
+
+// wrapped returns an openStore that opens the store at a URL and wraps it with wrap.
+func wrapped(wrap func(statestore.Store) statestore.Store) func(context.Context, string) (statestore.Store, error) {
+	return func(ctx context.Context, u string) (statestore.Store, error) {
 		s, err := statestore.Open(ctx, u)
 		if err != nil {
 			return nil, err
 		}
 		return wrap(s), nil
-	}}
+	}
+}
+
+// runWith executes tent with args, starting from opts, which the flags and the config file complete.
+func runWith(t *testing.T, opts *globalOptions, args ...string) result {
+	t.Helper()
+	var out, errOut syncBuffer
 	root := newRootCommand(Streams{In: strings.NewReader(""), Out: &out, Err: &errOut}, opts)
 	code := execute(t.Context(), root, args, &errOut)
 	return result{code, out.String(), errOut.String()}

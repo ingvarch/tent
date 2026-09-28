@@ -1,10 +1,16 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
+
+	"github.com/google/go-cmp/cmp"
+
+	"github.com/ingvarch/tent/internal/cloud/vultr/vultrfake"
 )
 
 // createdProd is what creating the test cluster prints.
@@ -386,4 +392,138 @@ func TestCreateClusterSSHKeyFileOfTwoKeys(t *testing.T) {
 	crlf := writeFile(t, "id_ed25519.pub", testSSHKey+"\r\n")
 	wantResult(t, runIn(t, "", createProd(s, "--ssh-key", crlf, "--dry-run")...), 0,
 		replaced(t, prodYAML, "    vultr: {}\n", "    vultr: {}\n  sshKeys:\n    - "+testSSHKey+"\n"), "")
+}
+
+// TestCreateClusterYes stores the specs, then builds the cluster as update cluster --yes does: the create's lines,
+// then the plan it applied.
+func TestCreateClusterYes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := newState(t)
+		f := vultrfake.New()
+
+		got := runOn(t, f, createProd(s, "--yes")...)
+
+		if got.code != 0 || got.out != createdProd+built {
+			t.Errorf("exit code = %d, stdout\n%s\nwant 0 and\n%s", got.code, got.out, createdProd+built)
+		}
+		wantBuildProgress(t, got.errOut, strings.TrimSuffix(openAPIWarning, "\n"))
+		wantInstances(t, f, nodeNames...)
+		if _, ok := s.objects(t)["prod/cluster.completed.yaml"]; !ok {
+			t.Error("the update did not write the completed spec")
+		}
+	})
+}
+
+func TestCreateFromFileYes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := newState(t)
+		f := vultrfake.New()
+		file := writeFile(t, "prod.yaml", docs(clusterYAML, serversYAML, workersYAML))
+
+		got := runOn(t, f, "create", "-f", file, "--yes", "--state", s.url)
+
+		if got.code != 0 || got.out != createdProd+built {
+			t.Errorf("exit code = %d, stdout\n%s\nwant 0 and\n%s", got.code, got.out, createdProd+built)
+		}
+		wantBuildProgress(t, got.errOut, strings.TrimSuffix(openAPIWarning, "\n"))
+		wantInstances(t, f, nodeNames...)
+	})
+}
+
+// TestCreateNodeGroupYes adds a node group to a stored cluster and updates that cluster.
+func TestCreateNodeGroupYes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := newState(t)
+		s.put(t, clusterPath, clusterYAML)
+		s.put(t, serversPath, serversYAML)
+		f := vultrfake.New()
+
+		got := runOn(t, f, "create", "-f", writeFile(t, "workers.yaml", workersYAML), "--yes", "--state", s.url)
+
+		if got.code != 0 || got.out != "node group workers created\n"+built {
+			t.Errorf("exit code = %d, stdout\n%s\nwant 0 and the create's line and the plan", got.code, got.out)
+		}
+		wantInstances(t, f, nodeNames...)
+	})
+}
+
+// TestCreateClusterYesJSON prints one document: the changes of the create and the plan that the update applied.
+func TestCreateClusterYesJSON(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := newState(t)
+		f := vultrfake.New()
+
+		got := runOn(t, f, createProd(s, "--yes", "-o", "json")...)
+
+		if got.code != 0 {
+			t.Fatalf("exit code = %d\n%s", got.code, got.errOut)
+		}
+		var out struct {
+			Changes []changeOutput  `json:"changes"`
+			Update  json.RawMessage `json:"update"`
+		}
+		dec := json.NewDecoder(strings.NewReader(got.out))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&out); err != nil {
+			t.Fatalf("stdout is not the create's JSON: %v\n%s", err, got.out)
+		}
+		if dec.More() {
+			t.Errorf("stdout holds more than one document:\n%s", got.out)
+		}
+		wantChanges := []changeOutput{
+			{Kind: "Cluster", Name: "prod", Action: "created"},
+			{Kind: "NodeGroup", Name: "servers", Action: "created"},
+			{Kind: "NodeGroup", Name: "workers", Action: "created"},
+		}
+		if diff := cmp.Diff(wantChanges, out.Changes); diff != "" {
+			t.Errorf("the changes (-want +got):\n%s", diff)
+		}
+		plan := decodePlan(t, string(out.Update))
+		wantPlanJSON(t, plan)
+		if !plan.Applied {
+			t.Error("the update's plan does not say it was applied")
+		}
+		wantInstances(t, f, nodeNames...)
+	})
+}
+
+func TestCreateClusterYesYAML(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := newState(t)
+		got := runOn(t, vultrfake.New(), createProd(s, "--yes", "-o", "yaml")...)
+		if got.code != 0 || !strings.HasPrefix(got.out, "changes:\n- action: created\n") ||
+			!strings.Contains(got.out, "\nupdate:\n  applied: true\n") {
+			t.Errorf("exit code = %d, stdout\n%s\nwant 0 and the changes and the update", got.code, got.out)
+		}
+	})
+}
+
+func TestCreateClusterYesStopsAtAnInvalidSpec(t *testing.T) {
+	s := newState(t)
+	f := vultrfake.New()
+	wantError(t, runOn(t, f, createProd(s, "--servers", "2", "--yes")...),
+		"Error: invalid spec:\n  NodeGroup servers: spec.size: must be 1, 3 or 5 for role=server\n")
+	if calls := f.Calls(); len(calls) != 0 {
+		t.Errorf("calls to the cloud: %v", calls)
+	}
+	s.wantEmpty(t)
+}
+
+func TestCreateClusterDryRunTakesNoYes(t *testing.T) {
+	s := newState(t)
+	const refused = "Error: --dry-run writes nothing, so it takes no --yes\n"
+	wantError(t, runOnCloud(t, createProd(s, "--dry-run", "--yes")...), refused)
+	wantError(t, runOnCloud(t, createProd(s, "--dry-run", "--yes", "--state", "")...), refused)
+	s.wantEmpty(t)
+}
+
+func TestCreateHelpSaysWhatYesDoes(t *testing.T) {
+	const usage = "then build the cluster in the cloud, as update cluster --yes does"
+	for _, args := range [][]string{{"create", "--help"}, {"create", "cluster", "--help"}} {
+		got := runIn(t, "", args...)
+		if got.code != 0 || !helpHas(got.out, "--yes", usage) {
+			t.Errorf("%s: exit code = %d, help\n%s\nwant 0 and a line for --yes: %s", strings.Join(args, " "), got.code,
+				got.out, usage)
+		}
+	}
 }

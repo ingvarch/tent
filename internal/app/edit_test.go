@@ -191,3 +191,26 @@ func TestSaveOneObject(t *testing.T) {
 	}
 	wantStored(t, svc.Store, clusterPath, encode(t, clusterYAML))
 }
+
+// TestSaveKeepsTheCloud refuses an edit of the Cluster that changes its provider or region, and saves an edit of
+// another field.
+func TestSaveKeepsTheCloud(t *testing.T) {
+	svc, _ := newService(t)
+	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
+	ref := load(t, svc, v1alpha1.KindCluster, "")
+	for _, apply := range []bool{false, true} {
+		_, err := svc.Save(t.Context(), ref, decode(t, edit(t, clusterYAML, "region: ams", "region: fra")), apply)
+		wantFieldErrors(t, err, v1alpha1.FieldError{
+			Object: "Cluster prod", Path: "spec.cloud.region", Detail: moved("ams", "fra"),
+		})
+	}
+	wantStored(t, svc.Store, clusterPath, encode(t, clusterYAML))
+
+	beta := edit(t, clusterYAML, "region: ams", "region: ams\n  channel: beta")
+	changes, err := svc.Save(t.Context(), ref, decode(t, beta), true)
+	if err != nil {
+		t.Fatalf("Save of another field: %v", err)
+	}
+	wantChanges(t, changes, cluster(app.Replaced))
+	wantStored(t, svc.Store, clusterPath, encode(t, beta))
+}

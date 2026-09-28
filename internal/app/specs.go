@@ -125,12 +125,17 @@ func (s *Service) Get(ctx context.Context, cluster string, full bool) (_ spec.Ob
 	if err != nil {
 		return spec.Objects{}, err
 	}
+	return s.get(ctx, l, full)
+}
+
+// get is Get once the cluster's name and tent version are checked.
+func (s *Service) get(ctx context.Context, l statestore.Layout, full bool) (spec.Objects, error) {
 	st, err := s.load(ctx, l)
 	if err != nil {
 		return spec.Objects{}, err
 	}
 	if _, ok := st[l.ClusterSpec()]; !ok {
-		return spec.Objects{}, s.notFound(clusterLabel(cluster))
+		return spec.Objects{}, s.notFound(clusterLabel(l.Cluster()))
 	}
 	objs, err := decodeStored(l, st, nil)
 	if err != nil {
@@ -250,7 +255,7 @@ func (s *Service) write(ctx context.Context, objs spec.Objects, m mode, ref Ref,
 		changes, cluster = c, rc
 		return steps, err
 	})
-	if err != nil && !saved(err) {
+	if err != nil && !Saved(err) {
 		return nil, err
 	}
 	if apply && s.OnOpenAPI != nil && openAPI(cluster) {
@@ -264,12 +269,18 @@ func openAPI(c *v1alpha1.Cluster) bool {
 	if c == nil {
 		return false
 	}
-	filled := *c // SetDefaults sets fields of the copy only
-	v1alpha1.SetDefaults(&filled, nil)
-	return slices.ContainsFunc(filled.Spec.Access.API, func(cidr string) bool {
+	return slices.ContainsFunc(withDefaults(c).Spec.Access.API, func(cidr string) bool {
 		p, err := netip.ParsePrefix(cidr)
 		return err == nil && p.Bits() == 0
 	})
+}
+
+// withDefaults returns a copy of the cluster c with its defaults filled in. The copy shares c's lists, which
+// SetDefaults replaces rather than changes.
+func withDefaults(c *v1alpha1.Cluster) v1alpha1.Cluster {
+	filled := *c
+	v1alpha1.SetDefaults(&filled, nil)
+	return filled
 }
 
 // input is the objects a use case writes, all of one cluster.
@@ -521,7 +532,8 @@ func isGroup(l statestore.Layout, p string) bool {
 }
 
 // validate checks the cluster that results from storing the input: the stored objects that the input does not
-// replace, and the input. It returns the resulting Cluster.
+// replace, and the input. A Cluster that replaces a stored one keeps its provider and region, and the stored one must
+// decode to show them. It returns the resulting Cluster.
 func (s *Service) validate(st map[string]entry, in input) (*v1alpha1.Cluster, error) {
 	replaced := make(map[string]bool, len(in.docs))
 	for _, d := range in.docs {
@@ -531,11 +543,50 @@ func (s *Service) validate(st map[string]entry, in input) (*v1alpha1.Cluster, er
 	if err != nil {
 		return nil, err
 	}
+	var moves v1alpha1.Errors
 	if in.cluster != nil {
+		if e, ok := st[in.layout.ClusterSpec()]; ok {
+			stored, err := decodeCluster(in.layout.ClusterSpec(), e.data)
+			if err != nil {
+				return nil, err
+			}
+			moves = cloudMoves(stored, in.cluster)
+		}
 		objs.Cluster = in.cluster
 	}
 	objs.NodeGroups = append(objs.NodeGroups, in.groups...)
-	return objs.Cluster, Check(objs, s.Validate)
+	return objs.Cluster, withProblems(moves, Check(objs, s.Validate))
+}
+
+// cloudMoves returns a problem for the provider and one for the region of the cluster c when they differ from those
+// of the stored cluster, both with their defaults: the cluster's cloud objects stay where tent made them, and tent
+// would no longer find them. An empty value is not compared: a new one fails validation, and a stored one names no
+// cloud.
+func cloudMoves(stored, c *v1alpha1.Cluster) v1alpha1.Errors {
+	was, now := withDefaults(stored).Spec.Cloud, withDefaults(c).Spec.Cloud
+	var errs v1alpha1.Errors
+	for _, f := range []struct{ path, was, now string }{
+		{"spec.cloud.provider", string(was.Provider), string(now.Provider)},
+		{"spec.cloud.region", was.Region, now.Region},
+	} {
+		if f.was != "" && f.now != "" && f.was != f.now {
+			errs = append(errs, v1alpha1.FieldError{
+				Object: v1alpha1.KindCluster + " " + c.Metadata.Name, Path: f.path,
+				Detail: "cannot change from " + f.was + " to " + f.now + "; a cluster moves by creating a new one",
+			})
+		}
+	}
+	return errs
+}
+
+// withProblems returns the problems first, followed by those of err, an error of Check, as one v1alpha1.Errors. It
+// returns err alone when there are no problems first or err is another error.
+func withProblems(first v1alpha1.Errors, err error) error {
+	more, ok := errors.AsType[v1alpha1.Errors](err)
+	if len(first) == 0 || (err != nil && !ok) {
+		return err
+	}
+	return append(first, more...)
 }
 
 // Check checks a cluster and its node groups on their own, without a state store: it fills in the defaults on copies
@@ -608,15 +659,24 @@ func clone[T any](v *T) (*T, error) {
 	return c, nil
 }
 
+// decodeCluster decodes the Cluster stored at p. A file that does not decode fails with brokenCluster.
 func decodeCluster(p string, data []byte) (*v1alpha1.Cluster, error) {
 	objs, err := spec.Decode(data)
 	switch {
 	case err != nil:
-		return nil, fmt.Errorf("%s: %w", p, err)
+		return nil, brokenCluster(p, err)
 	case objs.Cluster == nil || len(objs.NodeGroups) > 0:
-		return nil, fmt.Errorf("%s: want one %s", p, v1alpha1.KindCluster)
+		return nil, brokenCluster(p, errors.New("want one "+v1alpha1.KindCluster))
 	}
 	return objs.Cluster, nil
+}
+
+// brokenCluster returns the error of the stored Cluster at p that does not decode, for the reason err, which it wraps.
+// It says how to repair the file: tent reads the cluster's cloud from it, so deleting it would leave the cluster's
+// cloud objects behind.
+func brokenCluster(p string, err error) error {
+	return fmt.Errorf("%s: %w; fix %s in the state store by hand and keep its spec.cloud.provider and "+
+		"spec.cloud.region, since deleting the file would leave the cloud objects of the cluster behind", p, err, p)
 }
 
 func decodeGroup(p string, data []byte) (*v1alpha1.NodeGroup, error) {

@@ -1,0 +1,48 @@
+{
+  "nodes": [
+    {
+      "action": "delete",
+      "name": "prod-servers-0",
+      "id": "instance-1"
+    },
+    {
+      "action": "delete",
+      "name": "prod-workers-0",
+      "id": "instance-4"
+    }
+  ],
+  "infrastructure": {
+    "changes": [
+      {
+        "kind": "vultr.FirewallGroup",
+        "name": "prod-servers",
+        "id": "fw-1",
+        "action": "delete"
+      },
+      {
+        "kind": "vultr.VPC",
+        "name": "prod",
+        "id": "vpc-1",
+        "action": "delete"
+      },
+      {
+        "kind": "vultr.SSHKey",
+        "name": "prod-99aabbcc",
+        "id": "ssh-9",
+        "action": "delete"
+      }
+    ],
+    "summary": {
+      "create": 0,
+      "update": 0,
+      "replace": 0,
+      "delete": 3
+    }
+  },
+  "state": [
+    "prod/cluster.completed.yaml",
+    "prod/nodegroups/servers.yaml",
+    "prod/cluster.yaml",
+    "prod/tent-version"
+  ]
+}

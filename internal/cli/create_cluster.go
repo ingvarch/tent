@@ -20,7 +20,7 @@ type clusterFlags struct {
 	provider, region, machineType, workerMachineType, image, nomadVersion string
 	zones, sshKeyFiles, sshAccess, apiAccess                              []string
 	servers, workers                                                      int
-	combined, allowSingle, dryRun                                         bool
+	combined, allowSingle, dryRun, yes                                    bool
 }
 
 func newCreateClusterCommand(opts *globalOptions) *cobra.Command {
@@ -31,9 +31,13 @@ func newCreateClusterCommand(opts *globalOptions) *cobra.Command {
 		Long: "Generate the Cluster and its node groups from the flags and write them to the state store. The " +
 			"cluster is named by NAME or --name. It has a server group named servers and a client group named " +
 			"workers, or with --combined a single group named nodes. The specs hold only what the flags set; " +
-			"tent fills in the defaults. Nothing is created in the cloud.",
+			"tent fills in the defaults. With --yes tent then builds the cluster in the cloud, as update cluster " +
+			"--yes does; without it, nothing is created in the cloud.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if f.dryRun && f.yes {
+				return errors.New("--dry-run writes nothing, so it takes no --yes")
+			}
 			if f.combined && (cmd.Flags().Changed("workers") || cmd.Flags().Changed("worker-machine-type")) {
 				return errors.New("--combined makes one group of --servers nodes; it takes no --workers or " +
 					"--worker-machine-type")
@@ -47,7 +51,7 @@ func newCreateClusterCommand(opts *globalOptions) *cobra.Command {
 				return err
 			}
 			if !f.dryRun {
-				return writeObjects(cmd, opts, objs, f.allowSingle, (*app.Service).Create)
+				return writeObjects(cmd, opts, objs, f.allowSingle, (*app.Service).Create, f.yes)
 			}
 			if err := f.check(cmd, opts, objs); err != nil {
 				return err
@@ -80,6 +84,7 @@ func newCreateClusterCommand(opts *globalOptions) *cobra.Command {
 	addAllowSingleServer(cmd, &f.allowSingle)
 	fs.BoolVar(&f.dryRun, "dry-run", false, "check the specs, also against the state store when there is one, "+
 		"and print them; write nothing")
+	addBuild(cmd, &f.yes)
 	for _, name := range []string{"provider", "region", "machine-type"} {
 		_ = cmd.MarkFlagRequired(name) // fails only for a flag that does not exist
 	}

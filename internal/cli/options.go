@@ -47,6 +47,8 @@ type globalOptions struct {
 	logger      *slog.Logger
 	// openStore opens the state store at a URL; statestore.Open when nil.
 	openStore func(ctx context.Context, url string) (statestore.Store, error)
+	// providers returns the cloud provider that a cluster's spec names; nil when tent reaches no cloud.
+	providers Providers
 }
 
 // addFlags adds the global flags to cmd and its subcommands.

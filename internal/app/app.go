@@ -1,5 +1,6 @@
-// Package app runs tent's use cases on the state store: create, get, replace, edit and delete cluster specs, and
-// remove a stale cluster lock.
+// Package app runs tent's use cases: it creates, gets, replaces and edits cluster specs in the state store, removes a
+// stale cluster lock, updates a cluster's cloud objects to its specs, and deletes a cluster's cloud objects and its
+// state.
 package app
 
 import (
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
+	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/statestore"
 )
 
@@ -27,9 +29,22 @@ type Service struct {
 	OnWeakLock func()
 	// OnTakeover, when set, is called with the lease of a holder that expired or ended when a change takes its lock.
 	OnTakeover func(previous statestore.Lease)
-	// OnOpenAPI, when set, is called after a create, replace or save when the cluster, with its defaults, lets the
-	// whole internet reach the Nomad API.
+	// OnOpenAPI, when set, is called when the cluster, with its defaults, lets the whole internet reach the Nomad API:
+	// after a create, replace or save, and once before an update applies its changes.
 	OnOpenAPI func()
+	// Providers returns the cloud provider that a cluster's spec names, for an update or a delete. It fails for a
+	// provider that tent does not know or cannot reach, such as one without its credentials.
+	Providers func(v1alpha1.Provider) (cloud.Provider, error)
+	// OnProgress, when set, is told what happens while an update or a delete applies its plan. One update or delete
+	// never calls it concurrently.
+	OnProgress func(Progress)
+	// OnUpdatePlan, when set, is called with the plan of an update that has changes, made under the cluster's lock,
+	// just before the update applies it. When it returns an error, the update stops before it changes anything and
+	// returns that error.
+	OnUpdatePlan func(UpdatePlan) error
+	// OnDeletePlan, when set, is called with the plan of a delete, made under the cluster's lock, just before the
+	// delete applies it. When it returns an error, the delete stops before it changes anything and returns that error.
+	OnDeletePlan func(DeletePlan) error
 }
 
 // Action is what a use case did to one object.

@@ -51,14 +51,16 @@ func TestNamesAreChecked(t *testing.T) {
 		spec bool // the name is from a spec: the error is v1alpha1.Errors
 	}{
 		{"Get", func() error { _, err := svc.Get(t.Context(), "PROD", false); return err }, cluster, false},
-		{"DeleteState plan", func() error {
-			_, err := svc.DeleteState(t.Context(), "PROD", false, false)
+		{"DeleteCluster plan", func() error {
+			_, err := svc.DeleteCluster(t.Context(), "PROD", false, false)
 			return err
 		}, cluster, false},
-		{"DeleteState", func() error {
-			_, err := svc.DeleteState(t.Context(), "PROD", true, true)
+		{"DeleteCluster", func() error {
+			_, err := svc.DeleteCluster(t.Context(), "PROD", true, true)
 			return err
 		}, cluster, false},
+		{"Update plan", func() error { _, err := svc.Update(t.Context(), "PROD", false); return err }, cluster, false},
+		{"Update", func() error { _, err := svc.Update(t.Context(), "PROD", true); return err }, cluster, false},
 		{"Unlock", func() error { _, err := svc.Unlock(t.Context(), "PROD", true); return err }, cluster, false},
 		{"Load cluster", func() error {
 			_, _, err := svc.Load(t.Context(), "PROD", v1alpha1.KindCluster, "")
