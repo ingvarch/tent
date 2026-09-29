@@ -45,13 +45,22 @@ Facts about Nomad, Hetzner Cloud, Vultr, S3-compatible object stores and prior a
 
 ### 1.2 Features tent relies on
 
+The items that name a source file were checked in the Nomad **v1.11.3** source (the Go module cache) on 2026-09-29.
+Files under `api/` are those of the API module at tent's pin ([1.5](#15-licensing)). The source of 2.0.7 was not
+checked offline. ⏳ Re-check them against the version tent runs.
+
 **Client introduction** (1.11.0, CE):
 - **Server configuration.** In the `server` block:
   `client_introduction { enforcement = "none|warn|strict" (default warn), default_identity_ttl = "5m",
   max_identity_ttl = "30m" }`.
 - **Creating a token.** `nomad node intro create [-node-name] [-node-pool] [-ttl]`, or
-  `POST /v1/acl/identity/client-introduction-token {NodeName, NodePool, TTL}`, which returns `{"JWT": …}`. Needs
-  `node:write`.
+  `PUT` or `POST /v1/acl/identity/client-introduction-token {NodeName, NodePool, TTL}`, which returns `{"JWT": …}`
+  (`ACLCreateClientIntroductionTokenRequest` in `command/agent/acl_endpoint.go`). The Go client's
+  `ACLIdentity().CreateClientIntroductionToken` sends PUT (`api/acl.go`). Needs `node:write`.
+  - A TTL above `max_identity_ttl` is cut to it. The server logs a warning, and the answer does not say so
+    (`IdentityTTL` in `nomad/structs/acl.go`).
+  - The server does not check that the pool exists (`ACL.CreateClientIntroductionToken` in
+    `nomad/acl_endpoint.go`).
 - **Giving it to a client.** Use `-client-intro-token`, `NOMAD_CLIENT_INTRO_TOKEN`, or the file
   `<client state_dir>/intro_token.jwt`. It **cannot** be set in the agent configuration file.
 - **Lifecycle.** The token is used only for the first registration. After that the node holds an identity JWT with
@@ -63,17 +72,24 @@ Facts about Nomad, Hetzner Cloud, Vultr, S3-compatible object stores and prior a
   - Client introduction does not replace mTLS.
 
 **ACL bootstrap with an operator-supplied secret** (since 1.3.2):
-- `POST /v1/acl/bootstrap {"BootstrapSecret": "<UUID>"}`. A non-UUID secret gets HTTP 400.
-- The Go client offers `ACLTokens().BootstrapOpts`.
-- **Not idempotent.** A second call fails with "ACL bootstrap already done (reset index: N)", HTTP 400 in the
-  source. To make tent idempotent, verify the stored secret with `GET /v1/acl/token/self` after such an error.
+- `PUT` or `POST /v1/acl/bootstrap {"BootstrapSecret": "<UUID>"}` (`ACLTokenBootstrap` in
+  `command/agent/acl_endpoint.go`). The Go client's `ACLTokens().BootstrapOpts` sends PUT (`api/acl.go`).
+- A secret that is not a UUID gets 400 `invalid acl token`. Without a secret, Nomad makes one.
+- **Not idempotent.** A second call fails with 400 `ACL bootstrap already done (reset index: N)`, before the secret is
+  checked (`ACL.Bootstrap` in `nomad/acl_endpoint.go`). To make tent idempotent, verify the stored secret with
+  `GET /v1/acl/token/self` after such an error.
+- **`token/self` with a secret that matches no token** answers 403 `Permission denied`: `Authenticate` turns the
+  unknown token into that error (`nomad/auth/auth.go`, `TestACLEndpoint_WhoAmI` in `nomad/acl_endpoint_test.go`). A
+  secret of an identity without an ACL token, such as a node's secret, gets 404 `ACL token not found`
+  (`aclTokenSelf` in `command/agent/acl_endpoint.go`).
 
 **Autopilot and Raft:**
 - `GET /v1/operator/autopilot/health` (`operator:read`) returns `Healthy`, `FailureTolerance`, `Leader`, `Voters`
   and `Servers[]` (ID, Name, Address, SerfStatus, Version, Leader, LastContact, LastTerm, LastIndex, Healthy, Voter,
   StableSince).
-- **It returns HTTP 429 while unhealthy.** The Go `AutopilotServerHealth` then returns an error instead of the
-  body, so handle 429 explicitly.
+- **It returns HTTP 429 while unhealthy**, with the same report as the body (`OperatorServerHealth` in
+  `command/agent/operator_endpoint.go`). The Go `AutopilotServerHealth` then returns an error instead of the body, so
+  handle 429 explicitly.
 - `cleanup_dead_servers` defaults to true.
 - **Leadership transfer** (since 1.7.0): `PUT /v1/operator/raft/transfer-leadership?id=<peer id>` or
   `nomad operator raft transfer-leadership`.
@@ -82,9 +98,11 @@ Facts about Nomad, Hetzner Cloud, Vultr, S3-compatible object stores and prior a
 
 **Node pools** (since 1.6.0):
 - Client configuration: `client { node_pool = "x" }`, default `default`. The built-ins `default` and `all` cannot
-  be modified, and `all` is for jobs only.
-- **Pools are auto-created** when a client registers in the authoritative region. A job that references a missing
-  pool fails to register.
+  be modified, and `all` is for jobs only. A change to either gets 400 `modifying node pool "…" is not allowed`
+  (`NodePool.UpsertNodePools` in `nomad/node_pool_endpoint.go`).
+- **Pools are auto-created** when a client registers in the authoritative region (`Node.Register` in
+  `nomad/node_endpoint.go`, `UpsertNode` in `nomad/state/state_store.go`). A job that references a missing pool fails
+  to register.
 - **Per-pool `scheduler_config` is Enterprise-only.**
 
 **Joining servers:**
@@ -98,10 +116,6 @@ Facts about Nomad, Hetzner Cloud, Vultr, S3-compatible object stores and prior a
     space-separated IPs, plus `HCLOUD_TOKEN` on the node.
 
 **Agent configuration:**
-
-The items that name a source file were checked in the Nomad **v1.11.3** source (the Go module cache) on 2026-09-29.
-The source of 2.0.7 was not checked offline. ⏳ Re-check them against the version tent runs.
-
 - **go-sockaddr templates** work in `bind_addr`, `addresses.*`, `advertise.*` and `client.network_interface`.
   `addresses.http` accepts several space-separated addresses.
 - **File merging.** `LoadConfigDir` (`command/agent/config.go`) reads the `.hcl` and `.json` files of a directory,
@@ -178,6 +192,27 @@ The source of 2.0.7 was not checked offline. ⏳ Re-check them against the versi
 - **`PUT /v1/agent/force-leave?node=<name>&prune=true`** (`agent:write`) removes a failed or left member from the Serf
   member list immediately. A member that is still alive rejoins.
 
+**Without a leader:**
+- A server that knows no leader holds each request that needs one for the RPC hold timeout, 5 s by default
+  (`RPCHoldTimeout` in `nomad/config.go`). Then it answers 500 `No cluster leader` (`getLeaderForRPC` in
+  `nomad/rpc.go`, the default status of `wrap` in `command/agent/http.go`). Writes need the leader, and so do reads
+  without `?stale`.
+- `GET /v1/status/leader` goes the same way: without a leader it answers 500 `No cluster leader`, and `""` only with
+  `?stale` (`Status.Leader` in `nomad/status_endpoint.go`).
+
+**The Go API client over HTTP:**
+- `Nodes().List` sorts the list by `CreateIndex` and panics on a `null` element (`NodeIndexSort.Less` in
+  `api/nodes.go`).
+- `api.NewClient` calls `DefaultConfig`, which reads the `NOMAD_*` variables, but takes only its address, and only
+  when the given one is empty (`api/api.go`).
+- The client sends the token as `X-Nomad-Token` (`api/api.go`). Go's `net/http` client copies every header of the
+  first request to each redirect. It drops only `Authorization`, `Www-Authenticate`, `Cookie`, `Cookie2`,
+  `Proxy-Authorization` and `Proxy-Authenticate`, and those only when the host changes (`makeHeadersCopier` in
+  `net/http/client.go`, Go 1.27.1). So the token follows any redirect.
+- An agent takes at most 100 HTTP connections from one client IP by default:
+  `limits { http_max_conns_per_client = 100 }` (`DefaultLimits` in `nomad/structs/config/limits.go`, `connLimiter`
+  in `command/agent/http.go`).
+
 **Fingerprinting:**
 - The only cloud environment fingerprinters are `env_aws`, `env_gce`, `env_azure` and `env_digitalocean`. There is
   none for Hetzner or Vultr.
@@ -241,6 +276,16 @@ The source of 2.0.7 was not checked offline. ⏳ Re-check them against the versi
 - **MPL-2.0 modules:** `github.com/hashicorp/nomad/api` (a separate module with no semver tags, so pin by
   pseudo-version; requires Go 1.26+), `jobspec2`, `go-discover`, `go-netaddrs`.
 - **Do not import root-module packages** such as `helper/tlsutil`: they are BUSL.
+- **tent's pin.** tent pins `nomad/api` at `v0.0.0-20260917172403-9dcbdc5e64ec`, the commit of tag v2.0.7 (decision
+  16 of [architecture §18](architecture.md#18-open-questions)). It brings `hashicorp/cronexpr` v1.1.3,
+  `hashicorp/go-rootcerts` v1.0.2 (MPL-2.0), `gorilla/websocket` v1.5.3 (BSD-2-Clause), `go-viper/mapstructure/v2`
+  v2.5.0 (MIT) and `mitchellh/go-homedir` v1.1.0 (MIT). `hashicorp/go-cleanhttp` v0.5.2 (MPL-2.0), an indirect
+  dependency before, is now direct. The licence check passes on `./cmd/tent ./internal/nomadops` (2026-09-29).
+- **cronexpr** offers Apache-2.0 or GPLv3 (its README) and ships both texts, as `APLv2` and `GPLv3`. Its `LICENSE` is
+  Apache-2.0, and tent uses it under Apache-2.0. The licence check reads only files named like `LICENSE`, `COPYING`
+  or `NOTICE`.
+- **Size.** Linking `internal/nomadops` adds about 150 KB to the `tent` binary in a release build (`-s -w`), about
+  210 KB unstripped. That happens when `update` calls it (M2.7).
 - **Competitive use.** BUSL "competitive offering" covers products provided on a paid basis. A free tool that
   downloads official binaries is fine; a paid managed-Nomad offering would need a commercial licence. This is not
   legal advice.

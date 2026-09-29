@@ -399,9 +399,9 @@ This split is the central decision.
      `Delete`.
    - Nodes are **not** tasks in the engine graph. In kops the Hetzner "ServerGroup" is a task, so replacing one node
      re-runs the whole plan.
-3. **Nomad configuration**: agent config, TLS material, ACL bootstrap, node pools and the rest of day-1 setup. It
-   does not depend on the cloud and lives in the core. tent renders the agent configuration into NodeConfig
-   (`internal/nodeconfig`), and tent-node writes it on the node ([8.4](#84-nomad-configuration-rendering)).
+3. **Nomad configuration**: agent config, TLS material, ACL bootstrap, node pool membership and the rest of day-1
+   setup. It does not depend on the cloud and lives in the core. tent renders the agent configuration into
+   NodeConfig (`internal/nodeconfig`), and tent-node writes it on the node ([8.4](#84-nomad-configuration-rendering)).
 
 ### 4.2 Two binaries
 
@@ -435,7 +435,8 @@ github.com/ingvarch/tent
 │   ├── nodeconfig/      # tent <-> tent-node contract: NodeConfig, Nomad config rendering, spec hash, user data
 │   ├── nodeup/          # tent-node phases: system, host firewall, runtime, CNI, nomad, join refresh
 │   │   └── env/         # metadata clients: vultr/, hetzner/ (IMDSv2 for AWS later)
-│   ├── nomadops/        # the ONLY importer of github.com/hashicorp/nomad/api
+│   ├── nomadops/        # the ONLY importer of github.com/hashicorp/nomad/api: mTLS client, ACL bootstrap, waits
+│   │   └── nomadfake/   # in-memory Nomad cluster behind nomadops.API, for the app's tests
 │   ├── rollout/         # scale up/down, rolling update, server quorum safety
 │   ├── validate/        # cloud + Nomad health checks
 │   ├── pki/             # CA, node and operator certificates, gossip key, ACL bootstrap secret
@@ -468,8 +469,13 @@ to `internal/rollout` with the drain and the quorum checks
 - Cloud SDKs (govultr, hcloud-go) are imported only by their provider's packages, tests included.
 - `internal/nodeup` and `internal/nodeconfig`, tests included, never import `internal/cloud/...`. No code that can
   create or delete cloud resources ever runs on a node.
-- Only `internal/nomadops` imports `github.com/hashicorp/nomad/api`. The root module `github.com/hashicorp/nomad` is
-  BUSL-licensed and must never be imported.
+- Only `internal/nomadops` imports `github.com/hashicorp/nomad/api`, tests included (`nomad-only-in-nomadops`). The
+  root module `github.com/hashicorp/nomad` is BUSL-licensed and must never be imported: inside `internal/nomadops`
+  only the API module is allowed (`nomadops-api-only`). Throw-away files proved both rules on 2026-09-29 (#92): an
+  import of the API module in `internal/app` code, in an `internal/app` test and in `cmd/tent`, and an import of the
+  root module in `internal/nomadops`, gave four findings; the API module in `internal/nomadops` gave none.
+- `internal/nomadops/nomadfake`, tests included, imports no Nomad module: it stands in for Nomad with the types of
+  `internal/nomadops` alone (`nomadfake-no-nomad`). It imports `testing`, so only tests import it.
 - `internal/pki` imports only the standard library, `internal/uuid`, `internal/secret` and `api/v1alpha1`, so the
   code that makes the CA and the secrets never reaches a cloud or the state store. `internal/uuid`, `internal/secret`,
   `internal/english` and `internal/secrettest` import only the standard library. The tests of these five packages are
@@ -1142,11 +1148,18 @@ certificate details are in [ADR-0024](adr/0024-cluster-pki-storage-and-certifica
 ### 9.2 ACL and tokens
 
 - **ACLs are always enabled.**
-- **Bootstrap.**
-  - tent generates the bootstrap secret, a UUID, and stores it in the state store **before** calling
-    `POST /v1/acl/bootstrap {"BootstrapSecret": ...}`.
-  - Bootstrap is not idempotent: a second call fails with "ACL bootstrap already done". On retry, tent verifies the
-    stored secret with `GET /v1/acl/token/self`.
+- **Bootstrap.** Built in M2.4 as `nomadops.Client.Bootstrap`; `update` calls it from M2.7.
+  - tent generates the bootstrap secret, a UUID, and stores it in the state store **before** it calls
+    `PUT /v1/acl/bootstrap {"BootstrapSecret": ...}`.
+  - Before any request, `Bootstrap` checks that the secret is a lower-case UUID of version 4, as tent makes it. It
+    never sends an empty secret, for which Nomad would make one that nobody knows.
+  - Nomad's bootstrap is not idempotent: a second call fails with 400 `ACL bootstrap already done (reset index: N)`.
+    On that answer, `Bootstrap` calls `GET /v1/acl/token/self` with the stored secret. A management token means an
+    earlier call bootstrapped with this secret, and `Bootstrap` succeeds. A 403, or a token of another type, means
+    the cluster was bootstrapped with another secret: the call fails with `ErrBootstrapMismatch`, whose message names
+    `secrets/acl-bootstrap-token` and never the value.
+  - So a bootstrap whose answer was lost is safe to repeat. The lost call fails with `ErrNotReady`, since its outcome
+    is unknown, and the next call finds the bootstrap done and verifies the secret.
 - **The bootstrap token is used only by tent itself.** Scoped tokens with TTLs for tent's own operations come later.
 - **For humans**, `tent export nomad` issues a separate ACL token with a TTL.
 
@@ -1157,8 +1170,13 @@ group defaults to `warn`, and `strict` is refused there: the combined node's cli
 exist ([ADR-0019](adr/0019-combined-server-client-role.md)).
 
 - **Issuing.** Right before each client VM is created, tent requests an introduction token with
-  `POST /v1/acl/identity/client-introduction-token`. The token is bound to the node name and node pool, with a TTL
-  of at most 30 minutes.
+  `PUT /v1/acl/identity/client-introduction-token` (`nomadops.Client.IntroToken`, built in M2.4). The token is bound
+  to the node name and node pool.
+- **TTL.** 30 minutes at most (`nomadops.MaxIntroTTL`), the default `max_identity_ttl` of the servers. A server cuts
+  a longer TTL to its maximum without a word, so nomadops refuses one before it sends the request. It refuses an
+  empty node name or pool too.
+- **Node pools.** tent creates none. Nomad creates a pool when its first client registers, and an intro token may
+  name a pool that does not exist yet (decision 17 of [18](#18-open-questions)).
 - **Delivery.** NodeConfig carries the token as a secret file, and tent-node writes it to
   `<client state_dir>/intro_token.jwt`, because the agent configuration file cannot carry it. With tent's `data_dir`
   that is `/var/lib/nomad/client/intro_token.jwt` ([8.4](#84-nomad-configuration-rendering)). An `extraConfig` that
@@ -1248,6 +1266,16 @@ User data then carries no secrets at all. Credential delivery is therefore a str
   token are short-lived.
 - **`tent ui`** is a local reverse proxy from `127.0.0.1:4646` to the cluster that injects mTLS and the token. The
   browser UI works without installing client certificates, and `verify_https_client = true` stays on.
+- **tent's own calls** go through `nomadops.Client` (built in M2.4, used from M2.7):
+  - mTLS with an operator certificate (`cli.<region>.nomad`) and the cluster's CA, both PEM in memory; TLS 1.2 or
+    newer, over HTTP/1.1. It always uses https and expects the certificate of `server.<region>.nomad` whatever
+    address it dials (`TLSServerName`).
+  - It is configured by hand, so the `NOMAD_*` variables of the Nomad CLI have no effect.
+  - It goes through the proxy that `HTTPS_PROXY` and `NO_PROXY` name, as tent's other HTTPS clients do. TLS stays
+    end to end, so a proxy does not see the token.
+  - It never follows a redirect, so the token goes to the server alone: Go's HTTP client would send `X-Nomad-Token`
+    to any redirect target ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)).
+  - Its errors never show the token, a key or a secret.
 
 ### 9.8 Credentials handling
 
@@ -2066,6 +2094,27 @@ secrets (decision 12 of [18](#18-open-questions)). M2.7 adds to the flow the ass
 NodeConfig per node; the spec hash as a label; real user data, its size checked at plan time; the Nomad pin, written
 before the first node; and the warning about development variables on a release build.
 
+**Built in M2.4, not used yet.** `internal/nomadops` holds the calls that steps 5 and 7 of the target need, and
+`nomadfake` stands in for Nomad in the app's tests ([15](#15-testing)). Nothing calls them before M2.7.
+- **Calls.** `nomadops.API` has `Leader`, `Bootstrap` ([9.2](#92-acl-and-tokens)), `IntroToken`
+  ([9.3](#93-client-introduction)), `Nodes` and `Health`. A `Client` talks to one server
+  ([9.7](#97-operator-access)); the caller moves to the next server when a call fails with `ErrNotReady`. Make one
+  client per server and reuse it: its idle connections stay open for 90 seconds, and a server takes at most 100 HTTP
+  connections from one address.
+- **Deadlines.** Each call has 30 seconds, and none is retried. The caller's context can end it sooner.
+- **Errors.** A call that may succeed later, on this server or another one, fails with an error that matches
+  `ErrNotReady`: no answer, an answer broken off, no answer within 30 seconds, a 5xx, a 429, or no leader. For a
+  write the outcome is then unknown. When the caller's context ends, the error matches the context's error instead.
+  TLS failures and every other 4xx are permanent. Messages read like `nomad: PUT /v1/acl/bootstrap: 400: …`.
+- **Answers.** `Leader` takes an empty leader as no leader. `Health` takes the 429 of an unhealthy cluster as a
+  report, not an error, and returns whether the servers are healthy and how many vote. `Nodes` reads `/v1/nodes`
+  itself, skips `null` elements and keeps the server's order: the API module's `Nodes().List` panics on a `null`.
+  A name can appear twice, for a node that went down and its replacement.
+- **Waits.** `WaitLeader`, `WaitNode` and `WaitHealthy` wait 2 seconds after each call and try again only after
+  `ErrNotReady`. When the context ends, the error says what they waited for and the last cause, and does not match
+  `ErrNotReady`. `WaitNode` ends when a node of the name is ready and eligible; a `down` node of the same name does
+  not end it. `WaitHealthy` needs healthy servers and at least the given number of voters.
+
 **Target, with Nomad.** The whole flow:
 
 ```
@@ -2076,7 +2125,7 @@ before the first node; and the warning about development variables on a release 
  4. servers first: create missing servers
     (Hetzner: into slots; Vultr: server-0 first, then the rest seeded with existing server IPs)
  5. wait for a leader → ACL bootstrap with the pre-generated secret
- 6. day-1 over the API: node pools (descriptions/meta), other cluster settings
+ 6. day-1 over the API: cluster settings; no node pools, which Nomad creates when their first client registers
  7. clients: for each missing node → intro token → Nodes.Create (seeded with current server IPs) → wait ready
  8. Vultr: scrub user data of nodes that registered (Nodes.ScrubUserData)
  9. scale down surplus nodes: drain → stop/delete → purge
@@ -2086,8 +2135,9 @@ before the first node; and the warning about development variables on a release 
 ```
 
 - The secrets (step 2) are built (M2.1, above), but no node uses them yet. The NodeConfig with the seed of server
-  addresses and the intro tokens (steps 4 and 7), the ACL bootstrap (step 5), the day-1 configuration (step 6) and
-  the scrub (step 8) come with Nomad in M2.7.
+  addresses and the intro tokens (steps 4 and 7), the ACL bootstrap (step 5), the day-1 configuration (step 6,
+  without node pools: decision 17 of [18](#18-open-questions)) and the scrub (step 8) come with Nomad in M2.7. Their
+  Nomad calls are built (M2.4, above).
 - The drain and the purge (step 9), `validate` and the history (step 11) and the report of outdated nodes (step 12)
   are not built yet.
 
@@ -2449,6 +2499,8 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
    - the label codecs;
    - the address plan;
    - the engine: golden plans, apply with fake time (`testing/synctest`);
+   - the Nomad API client: `httptest` servers with real mTLS from `internal/pki`, and the waits on `nomadfake` with
+     fake time;
    - rollout decisions as pure functions (cluster state → next step).
 2. **Provider tests.**
    - Tasks and `Nodes` run against in-memory fakes of narrow interfaces that inject provider-specific failures.
@@ -2485,6 +2537,16 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
    - Hetzner: a fake of hcloud-go's `I*Client` interfaces that injects `uniqueness_error`, actions and 412.
 3. **Integration tests without a cloud**, like kops' `tests/integration`.
    - Full `update`, `rolling-update` and `delete` flows run against the cloud fakes of item 2 and a fake Nomad API.
+   - The fake Nomad API is `internal/nomadops/nomadfake` (M2.4). Its clients implement `nomadops.API` with the error
+     classes of nomadops, so the app runs on it as on the real client.
+     - A test sets the leader, registers nodes and sets the health, and reads the calls that reached the fake and
+       the tokens its clients got.
+     - Without a leader every call fails with `ErrNotReady`, as Nomad answers `No cluster leader`. The first
+       bootstrap stores its secret; the same secret again succeeds, and another one fails with
+       `ErrBootstrapMismatch`. Intro tokens are unsigned JWTs that carry the node's name and pool.
+     - Faults: a given error (`Fail`), or a lost answer after the fake carried the call out (`LoseResponse`), so a
+       lost bootstrap leaves the ACL system bootstrapped.
+     - It is simpler than Nomad: it checks no ACL token, and it lists one node per name.
    - Golden files hold the plan and the sequence of operations.
    - Interruption tests cut a flow at every step and check that the next run converges.
    - Runs on every PR.
@@ -2535,7 +2597,12 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
   - `vultr/govultr/v3`, pinned at v3.33.0, with its retries off: tent's own transport retries idempotent calls and
     limits the rate ([11.8](#118-api-client-rate-limits-cost));
   - `hetznercloud/hcloud-go/v2`;
-  - `hashicorp/nomad/api` (pinned by pseudo-version);
+  - `hashicorp/nomad/api`, in `internal/nomadops` only, pinned at `v0.0.0-20260917172403-9dcbdc5e64ec`, the commit
+    of Nomad's tag v2.0.7, which the `stable` channel recommends. It moves by hand with the channel, and Renovate
+    leaves it alone: a rule in `.github/renovate.json`, checked by a test in `internal/buildconfig` (decision 16 of
+    [18](#18-open-questions)). The modules it brings are in
+    [platform notes §1.5](platform-notes.md#15-licensing);
+  - `hashicorp/go-cleanhttp`, for the pooled transport of the Nomad API client;
   - `aws-sdk-go-v2` (`config`, `service/s3`) and `aws/smithy-go` for the s3 state store;
   - `gofrs/flock` for the file store's locks (`flock` on Unix, `LockFileEx` on Windows);
   - `golang.org/x/mod/semver` for the version guard and the channels, pinned at v0.40.0 because v0.41.0 declares
@@ -2598,6 +2665,7 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
 | HashiCorp's embedded release key expires on 2030-03-01, or is rotated or revoked | tent cannot verify Nomad downloads, or trusts a revoked key | a weekly CI job fails 180 days before the expiry; a tent release embeds the new key ([8.5](#85-artifacts-and-verification)) |
 | BUSL licence of Nomad | a paid managed offering would need a commercial licence | tent downloads official binaries and never redistributes them; stays free (not legal advice) |
 | Nomad reads a rendered value differently from the HCL1 that the tests use: Nomad parses with its fork `v1.0.1-nomad-1`, the tests with upstream v1.0.0 | a node does not start, or runs with another setting | strict quoting refuses what HCL1 cannot read back; tests parse every golden back; `nomad config validate` checks the goldens from M2.5 |
+| nomadops relies on Nomad answers read in the v1.11.3 source, not in 2.0.7: the text `ACL bootstrap already done`, 403 from `token/self` for an unknown secret, the report in the 429 of an unhealthy cluster | a repeated bootstrap fails, or a health wait runs out | nomadops matches status codes and one message prefix; E2E runs real Nomad from M2.9 ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)) |
 | `extraConfig` overrides tent's settings, such as `data_dir`, the TLS paths or the dynamic ports | a node cannot find its files, a client is refused, or the host firewall blocks workloads | documented as unsupported ([3.3](#33-api-rules), [8.4](#84-nomad-configuration-rendering)) |
 | Secrets in user data | node impersonation if metadata leaks | mitigations in [9.4](#94-secrets-on-nodes-threat-model), including scrubbing on Vultr; bootstrap controller in v2 |
 | Hetzner rate limit (3600/h per project) | slow or failing large rollouts | snapshots, batched waits, adaptive throttling, targeted rollouts, one project per cluster |
@@ -2651,6 +2719,15 @@ Decided on 2026-09-28:
     and combined nodes, 4646 are open on the host, and the cloud firewall filters their sources. The host opens
     Nomad's ports and the dynamic ports only to the cluster CIDR and blocks the metadata address for workloads. A
     change of `access` never changes the spec hash ([8.3](#83-nodeconfig-contract)).
+
+Decided on 2026-09-29:
+
+16. **The Nomad API module:** `github.com/hashicorp/nomad/api` is pinned to the commit of the Nomad tag that the
+    channel recommends, v2.0.7 now, and moved by hand with the channel. Renovate is off for it
+    ([16](#16-technology-stack-and-releases)).
+17. **Node pools:** tent does not create them. Nomad creates a pool when its first client registers
+    ([9.3](#93-client-introduction), [13.2](#132-tent-update-cluster---yes)). Pool descriptions or meta come when the
+    spec has such fields.
 
 ---
 
