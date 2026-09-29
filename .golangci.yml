@@ -63,6 +63,16 @@ linters:
             - sigs.k8s.io/yaml$
             - sigs.k8s.io/json$
             - golang.org/x/mod/semver$
+        # internal/s3url reads s3 URLs and makes clients for them, for the state store and the development tools, with
+        # the standard library and the AWS SDK alone.
+        s3url-stdlib-and-aws:
+          files: ["${base-path}/internal/s3url/**", "!$test"]
+          allow:
+            - $gostd
+            - github.com/aws/aws-sdk-go-v2/aws$
+            - github.com/aws/aws-sdk-go-v2/config$
+            - github.com/aws/aws-sdk-go-v2/service/s3$
+            - github.com/aws/smithy-go/logging$
         # internal/nodeconfig is the contract that tent-node decodes on every node, so it imports only the standard
         # library, internal/secret and the API types: nothing that reaches a cloud, the state store or Nomad.
         nodeconfig-stdlib-only:
@@ -71,8 +81,8 @@ linters:
             - $gostd
             - github.com/ingvarch/tent/internal/secret$
             - github.com/ingvarch/tent/api/v1alpha1$
-        # internal/secrettest, nomadfake and nodeuptest, which import testing, are for tests: no code that tent
-        # or tent-node runs imports them.
+        # internal/secrettest, nomadfake, nodeuptest and s3urltest, which import testing, are for tests: no code that
+        # tent, tent-node or a development tool runs imports them.
         secrettest-only-in-tests:
           files: ["$all", "!$test"]
           deny:
@@ -82,6 +92,8 @@ linters:
               desc: nomadfake is for tests only
             - pkg: github.com/ingvarch/tent/internal/nodeup/nodeuptest
               desc: nodeuptest is for tests only
+            - pkg: github.com/ingvarch/tent/internal/s3url/s3urltest
+              desc: s3urltest is for tests only
         # Tests read the rendered Nomad configuration back with HCL1; no code that tent runs parses HCL.
         hcl-only-in-tests:
           files: ["$all", "!$test"]

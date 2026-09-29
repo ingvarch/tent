@@ -41,7 +41,7 @@ func Open(ctx context.Context, rawURL string) (Store, error) {
 	case "file":
 		backend, err = newFileStore(u)
 	case "s3":
-		backend, err = newS3Store(ctx, u)
+		backend, err = newS3Store(ctx, rawURL)
 	case "":
 		return nil, errors.New("state store URL has no scheme: " + schemes)
 	default:

@@ -4,18 +4,23 @@
 #
 # It creates REAL, BILLED resources in your Vultr account (at most 3 instances at a time, 4 in total,
 # one VPC, up to three firewall groups, up to two SSH keys) and deletes them on exit unless --keep is given.
+# The tentnode check runs alone: one instance, one VPC and one SSH key.
 # Usage and details: hack/vultr-spike/README.md
 #
-# Portable bash (3.2+, macOS default), requires: curl, jq 1.6+, ssh, ssh-keygen, awk, od.
+# Portable bash (3.2+, macOS default), requires: curl, jq 1.6+, ssh, ssh-keygen, awk, od; tentnode also go and gzip.
 set -euo pipefail
 
-readonly SPIKE_VERSION="4"
+readonly SPIKE_VERSION="5"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 readonly SCRIPT_DIR
+REPO_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
+readonly REPO_DIR
 readonly API_BASE="${VULTR_API_BASE:-https://api.vultr.com/v2}"
-readonly ALL_CHECKS="boot,inside,metadata,network,firewall,alias,tags,markers,userdata,scrub,halt,sshdup,lengths,rules,fwinuse,patchtags,vpcpending,halttwice,objstore"
+# The checks of a run without --only. tentnode runs only when --only names it alone.
+readonly DEFAULT_CHECKS="boot,inside,metadata,network,firewall,alias,tags,markers,userdata,scrub,halt,sshdup,lengths,rules,fwinuse,patchtags,vpcpending,halttwice,objstore"
+readonly ALL_CHECKS="$DEFAULT_CHECKS,tentnode"
 # The checks that log in to an instance over SSH. Without them, instance A gets a firewall group with no rules.
-readonly SSH_CHECKS="boot inside metadata network firewall alias scrub halt"
+readonly SSH_CHECKS="boot inside metadata network firewall alias scrub halt tentnode"
 
 REGION="${REGION:-ams}"
 PLAN="${PLAN:-vc2-1c-1gb}"
@@ -24,7 +29,7 @@ OS_ID="${OS_ID:-}"
 VPC_SUBNET="${VPC_SUBNET:-10.64.0.0}"
 VPC_MASKS="${VPC_MASKS:-16 20 24}"
 OUT_DIR="${OUT_DIR:-$SCRIPT_DIR/results}"
-CHECKS="${CHECKS:-$ALL_CHECKS}"
+CHECKS="${CHECKS:-$DEFAULT_CHECKS}"
 READY_TIMEOUT="${READY_TIMEOUT:-900}"
 VENDOR_TIMEOUT="${VENDOR_TIMEOUT:-2400}"
 USERDATA_TARGET="${USERDATA_TARGET:-65536}"
@@ -33,6 +38,9 @@ S3_BUCKET="${S3_BUCKET:-}"
 S3_ACCESS_KEY="${S3_ACCESS_KEY:-}"
 S3_SECRET_KEY="${S3_SECRET_KEY:-}"
 S3_REGION="${S3_REGION:-us-east-1}"
+# tentnode: the tent-node under test, as hack/tent-node-upload prints it. TENT_NODE_URL carries a signature: the script
+# never logs it. TENT_NODE_VERSION defaults to the version of bin/tent from the same make build.
+TENT_NODE_VERSION="${TENT_NODE_VERSION:-}"
 
 # SSH pacing: v1 lost SSH after a burst of ~7 connections. At most one new connection to port 22 per host per
 # POLL_INTERVAL keeps the spike under ufw's `limit` (6 per 30 s); SSH_MAX_FAILS failures in a row stop further
@@ -73,22 +81,27 @@ INST_STATE=""   # set by read_state
 HOURLY=""
 UD_BYTES=""
 PAYLOAD_SHA=""
-A_ID="" B_ID="" C_ID="" V_ID=""
-A_PUB="" B_PUB="" V_PUB=""
-A_VPC_IP="" B_VPC_IP=""
+A_ID="" B_ID="" C_ID="" V_ID="" T_ID=""
+A_PUB="" B_PUB="" V_PUB="" T_PUB=""
+A_VPC_IP="" B_VPC_IP="" T_VPC_IP=""
 # shellcheck disable=SC2034 # read indirectly via getv
-A_VPC_MAC="" B_VPC_MAC=""
+A_VPC_MAC="" B_VPC_MAC="" T_VPC_MAC=""
 # shellcheck disable=SC2034 # read indirectly via getv
-A_T0="" B_T0="" V_T0=""
+A_T0="" B_T0="" V_T0="" T_T0=""
 # shellcheck disable=SC2034 # read indirectly via getv
-A_T_OK="" B_T_OK="" V_T_OK="" A_T_IP="" B_T_IP="" V_T_IP=""
+A_T_OK="" B_T_OK="" V_T_OK="" T_T_OK="" A_T_IP="" B_T_IP="" V_T_IP="" T_T_IP=""
 # shellcheck disable=SC2034 # read indirectly via getv
-A_T_PORT="" B_T_PORT="" V_T_PORT="" A_T_SSH="" B_T_SSH="" V_T_SSH="" A_T_CI="" B_T_CI="" V_T_CI=""
+A_T_PORT="" B_T_PORT="" V_T_PORT="" T_T_PORT="" A_T_SSH="" B_T_SSH="" V_T_SSH="" T_T_SSH=""
 # shellcheck disable=SC2034 # read indirectly via getv
-A_CI_STATUS="" B_CI_STATUS="" V_CI_STATUS=""
+A_T_CI="" B_T_CI="" V_T_CI="" T_T_CI=""
 # shellcheck disable=SC2034 # read indirectly via getv
-A_LAST=0 B_LAST=0 V_LAST=0
+A_CI_STATUS="" B_CI_STATUS="" V_CI_STATUS="" T_CI_STATUS=""
+# shellcheck disable=SC2034 # read indirectly via getv
+A_LAST=0 B_LAST=0 V_LAST=0 T_LAST=0
 V_DONE=""
+TN_UD=""        # tentnode: instance T's user data, from hack/tent-node-userdata
+TN_JSON_SHA=""  # tentnode: the sha256 of the node.json in it
+TN_REBOOT_S=""  # tentnode: seconds from the reboot to SSH on the new boot
 VPC_MARKER="" SSH_MARKER="" FG_MARKER=""
 SSH_NAME_USED=""
 
@@ -103,7 +116,7 @@ Options:
   --dry-run          Print what would be created and exit (needs no API key).
   --yes              Do not ask for confirmation before creating billed resources.
   --keep             Do not delete resources on exit (you must delete them yourself).
-  --only LIST        Comma-separated subset of checks (default: all):
+  --only LIST        Comma-separated subset of checks (default: all but tentnode):
                      boot,inside,metadata,network,firewall,alias,tags,markers,userdata,scrub,halt,
                      sshdup,lengths,rules,fwinuse,patchtags,vpcpending,halttwice,objstore
                      ("--only objstore" needs no Vultr API key and creates no instances;
@@ -111,6 +124,8 @@ Options:
                      halttwice need only instance A. Unless a check that needs SSH is selected (boot,
                      inside, metadata, network, firewall, alias, scrub, halt), A gets a firewall group
                      with no rules at creation and the checks start once the API reports A ready)
+                     tentnode is not in the default list and runs alone ("--only tentnode"): it boots
+                     instance T with a development build of tent-node and checks it over SSH
   --region ID        Vultr region (default: ams; env REGION).
   --plan ID          Instance plan (default: vc2-1c-1gb; env PLAN).
   --out DIR          Report directory (default: hack/vultr-spike/results, git-ignored; env OUT_DIR).
@@ -118,7 +133,7 @@ Options:
 
 Environment:
   VULTR_API_KEY      Required for a real run. Never printed, passed to curl via a 0600 config file.
-  OS_NAME / OS_ID    Image by exact name (default "Ubuntu 24.04 LTS x64") or numeric os_id.
+  OS_NAME / OS_ID    Image by exact name (default "Ubuntu 24.04 LTS x64") or numeric os_id, which wins.
   VPC_SUBNET         VPC network address to try (default 10.64.0.0) with masks VPC_MASKS ("16 20 24").
   READY_TIMEOUT      Seconds to wait for instances A and B to boot (default 900).
   VENDOR_TIMEOUT     Seconds to wait for instance V (no user_data, vendor defaults) to boot (default 2400).
@@ -126,6 +141,11 @@ Environment:
   S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY [, S3_REGION]
                      Optional: run the Object Storage conditional-write check against an EXISTING bucket
                      (e.g. S3_ENDPOINT=https://ams1.vultrobjects.com). Needs curl with --aws-sigv4 (7.75+).
+  TENT_NODE_URL, TENT_NODE_SHA256
+                     Required by tentnode: the tent-node under test, as "make dev-upload" prints them
+                     (hack/tent-node-upload/README.md). The URL is never printed.
+  TENT_NODE_VERSION  tentnode: the version of that tent-node (default: bin/tent version, after a check that
+                     bin/tent-node_linux_amd64 has the sha256 TENT_NODE_SHA256).
 EOF
 }
 
@@ -326,13 +346,17 @@ preflight() {
   monthly=$(jq -r --arg p "$PLAN" '.plans[] | select(.id==$p) | .monthly_cost' "$API_BODY")
   [ -n "$monthly" ] || die "unknown plan: $PLAN"
   HOURLY=$(awk -v m="$monthly" 'BEGIN { printf "%.4f", m / 672 }')
+  api GET "/os?per_page=500"
+  api_ok || die "GET /os failed: $API_STATUS $(api_err)"
   if [ -z "$OS_ID" ]; then
-    api GET "/os?per_page=500"
-    api_ok || die "GET /os failed: $API_STATUS $(api_err)"
     OS_ID=$(jq -r --arg n "$OS_NAME" '.os[] | select(.name==$n) | .id' "$API_BODY" | head -1)
     [ -n "$OS_ID" ] || die "image not found by exact name: $OS_NAME (set OS_ID)"
+  else
+    # The report names the image that OS_ID selects, not the default name.
+    OS_NAME=$(jq -r --arg id "$OS_ID" '.os[] | select((.id | tostring) == $id) | .name' "$API_BODY" | head -1)
+    [ -n "$OS_NAME" ] || die "unknown os_id: $OS_ID"
   fi
-  row "Preflight" "region $REGION ($city); $PLAN deployable; \$$monthly/month = \$$HOURLY/hour (÷672); os_id $OS_ID" \
+  row "Preflight" "region $REGION ($city); $PLAN deployable; \$$monthly/month = \$$HOURLY/hour (÷672); os_id $OS_ID ($OS_NAME)" \
     "availability endpoint + /plans work without a key"
 }
 
@@ -1494,6 +1518,291 @@ check_objstore() {
 }
 
 # ---------------------------------------------------------------------------------------------------------------
+# tentnode: a development build of tent-node on instance T, booted with the user data of hack/tent-node-userdata,
+# the M2.5 check on a real machine. TENT_NODE_URL carries a signature: nothing logs it, and hide_url masks it in what
+# the report takes from the instance.
+
+# The files that tent-node's install and up write. After a reboot, up must change none but status.json.
+readonly TN_FILES="/etc/tent/node.json /usr/local/bin/tent-node /etc/systemd/system/tent-node.service
+/etc/systemd/system/tent-node-join.service /etc/systemd/system/tent-node-join.timer /etc/modules-load.d/tent.conf
+/etc/sysctl.d/99-tent.conf /etc/systemd/journald.conf.d/tent.conf /var/lib/tent/status.json"
+
+hide_url() { sed -E 's/(X-Amz-(Signature|Credential|Security-Token))=[^&[:space:]"'"'"']*/\1=[hidden]/g'; }
+
+# prepare_tentnode: checks the variables of the tent-node under test, finds its version, writes instance T's user
+# data to TN_UD and sets TN_JSON_SHA to the sha256 of the node.json in it.
+prepare_tentnode() {
+  local bin="$REPO_DIR/bin/tent-node_linux_amd64" sum bytes
+  [ -n "${TENT_NODE_URL:-}" ] && [ -n "${TENT_NODE_SHA256:-}" ] ||
+    die "tentnode needs TENT_NODE_URL and TENT_NODE_SHA256: run make dev-upload (hack/tent-node-upload/README.md)"
+  if [ -z "$TENT_NODE_VERSION" ]; then
+    # bin/tent and bin/tent-node_linux_amd64 come from one make build, so they carry one version, as long as the
+    # uploaded tent-node is that build's.
+    [ -x "$REPO_DIR/bin/tent" ] && [ -f "$bin" ] || die "set TENT_NODE_VERSION, or run make dev-upload first"
+    sum=$(sha256 <"$bin")
+    [ "$sum" = "$TENT_NODE_SHA256" ] ||
+      die "bin/tent-node_linux_amd64 is not the tent-node with TENT_NODE_SHA256: run make dev-upload again, or set TENT_NODE_VERSION"
+    TENT_NODE_VERSION=$("$REPO_DIR/bin/tent" version -o json | jq -r .version) || die "bin/tent version failed"
+  fi
+  TN_UD="$WORK/tentnode-ud.yaml"
+  # The name is instance T's host name: create_instance names T $RUN_TAG-t.
+  (cd "$REPO_DIR" && go run ./hack/tent-node-userdata -name "$RUN_TAG-t" -version "$TENT_NODE_VERSION") >"$TN_UD" ||
+    die "hack/tent-node-userdata failed"
+  TN_JSON_SHA=$(awk '/encoding: gz\+b64/ {f = 1} f && $1 == "content:" {print $2; exit}' "$TN_UD" | b64dec |
+    gzip -dc | sha256) || die "the user data holds no gz+b64 node.json"
+  bytes=$(wc -c <"$TN_UD" | tr -d ' ')
+  row "tent-node under test" "version $TENT_NODE_VERSION, sha256 $TENT_NODE_SHA256; user data $bytes bytes, node.json sha256 $TN_JSON_SHA" \
+    "a client NodeConfig without secrets whose only asset is tent-node"
+}
+
+tn_ssh() { ssh_x "$T_PUB" "$@" 2>/dev/null; } # tn_ssh COMMAND...: runs on instance T
+
+tn_out() { # tn_out COMMAND: runs COMMAND on T and prints its output, or why SSH failed when there is none
+  local out
+  out=$(tn_ssh "$1" || true)
+  if [ -n "$out" ]; then printf '%s\n' "$out"; else ssh_unknown "$T_PUB"; fi
+}
+
+tn_files() { # the modification time and sha256 of each of TN_FILES on T, one line each
+  tn_ssh "for f in $(printf '%s' "$TN_FILES" | tr '\n' ' '); do
+    if [ -e \"\$f\" ]; then printf '%s mtime %s sha256 %s\n' \"\$f\" \"\$(stat -c %Y \"\$f\")\" \"\$(sha256sum <\"\$f\" | cut -d' ' -f1)\"
+    else printf '%s missing\n' \"\$f\"; fi
+  done"
+}
+
+tn_missing() { # tn_missing FILE: the files that a tn_files snapshot in FILE lists as missing, space-separated
+  sed -n 's/^\([^ ]*\) missing$/\1/p' "$1" | paste -sd ' ' -
+}
+
+tn_status() { # tn_status FILE: reads T's status.json into FILE and prints its phases as "name status (reason)"
+  tn_ssh 'cat /var/lib/tent/status.json' >"$1" || true
+  [ -s "$1" ] || { printf 'missing: %s' "$(ssh_state "$T_PUB")"; return 0; }
+  jq -r '[.phases[]? | "\(.name) \(.status)" + (if .reason then " (\(.reason))" else "" end)] | join(", ")' "$1" 2>/dev/null ||
+    printf 'unreadable'
+}
+
+tn_phases_are() { # tn_phases_are FILE STATUS_OF_SYSTEM: are the phases in FILE those of a run on a fresh or a set-up node?
+  jq -e --arg sys "$2" '[.phases[]? | [.name, .status]] == [["preflight", "unchanged"], ["system", $sys],
+    ["hostfirewall", "skipped"], ["runtime", "skipped"], ["cni", "skipped"], ["join", "skipped"], ["nomad", "skipped"],
+    ["verify", "unchanged"]]' "$1" >/dev/null 2>&1
+}
+
+tn_instance() { # tn_instance FILE: the instance and the version in status.json against the API and the tent-node under test
+  [ -s "$1" ] || { echo "no status.json"; return 0; }
+  jq -r --arg id "$T_ID" --arg zone "$REGION" --arg ip "$T_VPC_IP" --arg v "$TENT_NODE_VERSION" '(.instance // {}) as $i |
+    "id \($i.id // "none") (\(if $i.id == $id then "the API id" else "NOT the API id" end)), zone \($i.zone // "none")" +
+    " (\(if $i.zone == $zone then "the region" else "NOT the region" end)), private IP \($i.privateIP // "none")" +
+    " (\(if $i.privateIP == $ip then "the VPC IP" else "NOT the VPC IP \($ip)" end)); version \(.version // "none")" +
+    " (\(if .version == $v then "the tent-node under test" else "NOT \($v)" end))"' "$1" 2>/dev/null || echo "unreadable"
+}
+
+tn_metadata_ms() { # tn_metadata_ms BOOT: ms from preflight's "read the metadata service" to its result in boot BOOT
+  local f="$WORK/journal$1.json"
+  tn_ssh "journalctl -b $1 -u tent-node.service -o json --no-pager" >"$f" ||
+    { printf 'unreadable: %s' "$(ssh_state "$T_PUB")"; return 0; }
+  jq -rs '
+    def at(re): [.[] | select((.MESSAGE | type) == "string" and (.MESSAGE | test(re)))][0].__REALTIME_TIMESTAMP;
+    (at("msg=\"read the metadata service\"")) as $a | (at("msg=phase phase=preflight ")) as $b
+    | if $a == null or $b == null then "not in the journal"
+      else "\((($b | tonumber) - ($a | tonumber)) / 1000 | floor) ms" end' "$f" 2>/dev/null || echo "unreadable"
+}
+
+tn_cloud_init() { # tn_cloud_init WHEN SECONDS: waits at most SECONDS for cloud-init on T and records its status
+  local out ci code errs res
+  out=$(tn_out "timeout $2 cloud-init status --wait --long; echo \"exit \$?\"" | hide_url)
+  printf '%s\n' "$out" | detail "cloud-init status --wait --long (T, $1)"
+  ci=$(printf '%s\n' "$out" | sed -n 's/^status: //p' | head -1)
+  code=$(printf '%s\n' "$out" | sed -n 's/^exit //p' | tail -1)
+  errs=$(printf '%s\n' "$out" | sed -n 's/^errors: //p' | head -1)
+  if [ -n "$ci" ]; then res="status $ci, exit ${code:-?}, errors ${errs:-?}"; else res=$(printf '%s' "$out" | oneline 300); fi
+  row "cloud-init ($1)" "$res" "decision 19: install waits for tent-node.service, which has no ordering on cloud-final"
+}
+
+tn_chain() { # tn_chain UNIT WHEN: records the critical chain of UNIT on T (the default target for "") and prints it
+  local chain
+  chain=$(tn_out "systemd-analyze critical-chain $1")
+  printf '%s\n' "$chain" | detail "systemd-analyze critical-chain ${1:-(the default target)} (T, $2)"
+  printf '%s\n' "$chain"
+}
+
+tn_chain_row() { # tn_chain_row WHEN: the row of tent-node.service's critical chain; UNEXPECTED when it passes cloud-init
+  local chain line
+  chain=$(tn_chain tent-node.service "$1")
+  line=$(printf '%s\n' "$chain" | grep -m1 'tent-node.service' | tr -s ' ' || true)
+  [ -n "$line" ] || line=$(printf '%s' "$chain" | oneline 200)
+  if printf '%s\n' "$chain" | grep -Eq 'cloud-(final|config)|cloud-init\.target'; then
+    line="UNEXPECTED: the chain passes cloud-final, cloud-config or cloud-init.target: $line"
+  fi
+  row "critical chain of tent-node.service ($1)" "$line" \
+    "decision 19: no ordering on cloud-final, cloud-config or cloud-init.target"
+}
+
+# tn_boot_order: does boot wait for up? A critical chain follows the slowest dependency alone, so this reads the
+# ordering itself: multi-user.target orders after tent-node.service, as a target does after the units it wants, and
+# tent-node.service became active before multi-user.target, which did before cloud-final.service started.
+# shellcheck disable=SC2016 # the single-quoted command expands on instance T
+tn_boot_order() {
+  local out after t m f verdict
+  out=$(tn_ssh 'a=$(systemctl show -p After --value multi-user.target)
+    case " $a " in *" tent-node.service "*) a=yes ;; *) a=no ;; esac
+    printf "%s:%s:%s:%s\n" "$a" "$(systemctl show -p ActiveEnterTimestampMonotonic --value tent-node.service)" \
+      "$(systemctl show -p ActiveEnterTimestampMonotonic --value multi-user.target)" \
+      "$(systemctl show -p InactiveExitTimestampMonotonic --value cloud-final.service)"' || true)
+  [ -n "$out" ] || { ssh_unknown "$T_PUB"; return 0; }
+  IFS=: read -r after t m f <<<"$out"
+  verdict="UNEXPECTED"
+  for v in "$t" "$m" "$f"; do case "$v" in "" | 0 | *[!0-9]*) verdict="unknown" ;; esac; done
+  if [ "$verdict" != unknown ] && [ "$after" = yes ] && [ "$t" -le "$m" ] && [ "$m" -le "$f" ]; then
+    verdict="as expected"
+  fi
+  printf '%s: multi-user.target After lists tent-node.service: %s; monotonic, tent-node.service active at %s, multi-user.target active at %s, cloud-final.service started at %s' \
+    "$verdict" "$after" "$(tn_seconds "$t")" "$(tn_seconds "$m")" "$(tn_seconds "$f")"
+}
+
+tn_seconds() { # tn_seconds MICROSECONDS: as seconds with one decimal, or "?"
+  case "$1" in "" | *[!0-9]*) echo "?" ;; *) awk -v u="$1" 'BEGIN { printf "%.1fs", u / 1000000 }' ;; esac
+}
+
+tn_reboot() { # reboots T from inside and waits for SSH on the new boot; sets TN_REBOOT_S, returns 1 on a failure
+  local before boot t0 deadline
+  before=$(tn_ssh 'cat /proc/sys/kernel/random/boot_id' || true)
+  [ -n "$before" ] || return 1
+  tn_ssh 'systemctl reboot' >/dev/null || true
+  ssh_close "$T_PUB"
+  t0=$(now)
+  deadline=$((t0 + READY_TIMEOUT))
+  while [ "$(now)" -lt "$deadline" ]; do
+    sleep "$POLL_INTERVAL"
+    port_open "$T_PUB" || continue
+    ssh_reset "$T_PUB"
+    boot=$(tn_ssh 'cat /proc/sys/kernel/random/boot_id' || true)
+    if [ -n "$boot" ] && [ "$boot" != "$before" ]; then
+      TN_REBOOT_S=$(($(now) - t0))
+      return 0
+    fi
+    ssh_close "$T_PUB" # the old boot still answered
+  done
+  return 1
+}
+
+# shellcheck disable=SC2016 # the single-quoted commands expand on instance T
+tn_first_boot() { # checks T after the first boot: cloud-init wrote node.json, downloaded tent-node and ran install
+  local out sha res missing s1="$WORK/status-1.json" units="tent-node.service active/enabled; tent-node-join.timer active/enabled; "
+  out=$(tn_ssh 'f=/etc/tent/node.json; if [ -f "$f" ]; then sha256sum "$f" | cut -d" " -f1; stat -c "%a %U:%G" "$f"; else echo missing; fi' || true)
+  sha=${out%%$'\n'*}
+  case "$out" in
+    "") res=$(ssh_unknown "$T_PUB") ;;
+    missing) res="MISSING: /etc/tent/node.json" ;;
+    *) if [ "$sha" = "$TN_JSON_SHA" ]; then res="intact"; else res="MISMATCH: sha256 $sha, want $TN_JSON_SHA"; fi
+      res="$res; mode ${out#*$'\n'}" ;;
+  esac
+  row "node.json from the gz+b64 user data" "$res" "UserData writes node.json with cloud-init's gz+b64 (platform notes §3.4)"
+  tn_cloud_init "first boot" 900
+  out=$(tn_out '. /etc/os-release; echo "os: $PRETTY_NAME"; timedatectl show -p CanNTP -p NTP -p NTPSynchronized
+    echo "ntp-units.d: $(ls /usr/lib/systemd/ntp-units.d/ 2>&1 | paste -sd " " -)"
+    for u in systemd-timesyncd chrony; do echo "$u: $(systemctl is-active "$u")"; done')
+  printf '%s\n' "$out" | detail "OS and time sync (T, first boot)"
+  row "OS and time sync (first boot)" "$(printf '%s' "$out" | oneline 400)" "the system phase runs timedatectl set-ntp true"
+  out=$(tn_out 'for u in tent-node.service tent-node-join.timer; do printf "%s %s/%s; " "$u" "$(systemctl is-active "$u")" "$(systemctl is-enabled "$u")"; done')
+  if [ "$out" = "$units" ]; then res="as expected: $out"; else res="UNEXPECTED: $out"; fi
+  row "tent-node units (active/enabled)" "$res" "want tent-node.service and tent-node-join.timer active and enabled"
+  res=$(tn_status "$s1" | hide_url)
+  if tn_phases_are "$s1" "done"; then res="as expected: $res"; else res="UNEXPECTED: $res"; fi
+  row "status.json after the first boot" "$res" "preflight unchanged, system done, the stubs skipped, verify unchanged"
+  out=$(tn_out "stat -c '%a %U:%G %n' /var/lib/tent /var/lib/tent/status.json | paste -sd ';' -")
+  row "status.json: instance and version" "$(tn_instance "$s1"); modes $out" \
+    "the metadata environment on a real Vultr instance (nodeup/env/vultr)"
+  { jq . "$s1" 2>/dev/null || cat "$s1"; } | hide_url | detail "/var/lib/tent/status.json (T, first boot)"
+  tn_chain_row "first boot"
+  out=$(tn_out 'v=$(systemctl --version | head -1); e=$(mktemp); o=$(systemctl is-enabled no-such.service 2>"$e"); rc=$?
+    printf "%s: exit %s; stdout [%s]; stderr [%s]\n" "$v" "$rc" "$o" "$(cat "$e")"; rm -f "$e"')
+  printf '%s\n' "$out" | detail "systemctl is-enabled no-such.service: exit code, stdout and stderr (T)"
+  row "systemctl is-enabled no-such.service" "$(printf '%s' "$out" | oneline 400)" \
+    "Systemd.IsEnabled fails on an empty stdout; verify and install depend on it"
+  tn_ssh 'tail -n 60 /var/log/cloud-init-output.log' | hide_url | detail "/var/log/cloud-init-output.log tail (T, first boot)" || true
+  tn_files >"$WORK/files-1.txt" || true
+  missing=$(tn_missing "$WORK/files-1.txt")
+  if [ ! -s "$WORK/files-1.txt" ]; then
+    res=$(ssh_unknown "$T_PUB")
+  elif [ -n "$missing" ]; then
+    res="MISSING: $missing"
+  else
+    res="all $(wc -l <"$WORK/files-1.txt" | tr -d ' ') present"
+  fi
+  row "tent-node's files after the first boot" "$res" "install writes the units, the system phase its three files, up status.json"
+}
+
+tn_second_boot() { # checks T after the reboot: tent-node.service ran up again, which changed nothing but status.json
+  local out sys res t1 t2 changed missing s1="$WORK/status-1.json" s2="$WORK/status-2.json"
+  sys=$(tn_ssh 'timeout 600 systemctl is-system-running --wait' || true)
+  out=$(tn_ssh 'systemctl is-active tent-node.service' || true)
+  row "Reboot T" "SSH on the new boot after ${TN_REBOOT_S}s; systemctl is-system-running: ${sys:-?}; tent-node.service ${out:-?}" \
+    "tent-node.service runs up at every boot"
+  tn_cloud_init "after the reboot" 600
+  out=$(tn_out 'timedatectl show -p NTP -p NTPSynchronized')
+  row "Time sync after the reboot" "$(printf '%s' "$out" | oneline 200)" ""
+  res=$(tn_status "$s2" | hide_url)
+  t1=$(jq -r '.started // ""' "$s1" 2>/dev/null || true)
+  t2=$(jq -r '.started // ""' "$s2" 2>/dev/null || true)
+  if [ -n "$t2" ] && [ "$t2" != "$t1" ] && tn_phases_are "$s2" unchanged; then res="as expected: $res"; else res="UNEXPECTED: $res"; fi
+  row "status.json after the reboot" "$res; started $t1, then $t2" "every phase unchanged: a second up changes nothing"
+  row "status.json after the reboot: instance and version" "$(tn_instance "$s2")" ""
+  { jq . "$s2" 2>/dev/null || cat "$s2"; } | hide_url | detail "/var/lib/tent/status.json (T, after the reboot)"
+  tn_files >"$WORK/files-2.txt" || true
+  changed=$(diff "$WORK/files-1.txt" "$WORK/files-2.txt" | sed -n 's/^> \([^ ]*\) .*/\1/p' | paste -sd ' ' - || true)
+  missing=$(tn_missing "$WORK/files-2.txt")
+  if [ ! -s "$WORK/files-2.txt" ]; then
+    res=$(ssh_unknown "$T_PUB")
+  elif [ -n "$missing" ]; then
+    res="MISSING: $missing; changed: ${changed:-nothing}"
+  elif [ "$changed" = "/var/lib/tent/status.json" ]; then
+    res="only /var/lib/tent/status.json changed"
+  else
+    res="CHANGED: ${changed:-nothing, not even status.json}"
+  fi
+  row "tent-node's files after the reboot" "$res" "no downloads or writes when the files are as they should be"
+  { printf 'before the reboot:\n'; cat "$WORK/files-1.txt"; printf '\nafter the reboot:\n'; cat "$WORK/files-2.txt"; } |
+    detail "tent-node's files: modification time and sha256 (T)"
+  row "Metadata read by preflight" "after the reboot: $(tn_metadata_ms 0); first boot: $(tn_metadata_ms -1) (a failed try waits 1 s before the next, so under 1000 ms means the first try succeeded)" \
+    "tent-node logs no tries: the time between preflight's two log lines tells"
+  tn_chain_row "after the reboot"
+  # Records only: the details show where boot spent its time.
+  tn_chain cloud-final.service "after the reboot" >/dev/null
+  tn_chain "" "after the reboot" >/dev/null
+  row "Boot order after the reboot" "$(tn_boot_order)" \
+    "boot waits for up: multi-user.target orders after the units it wants, cloud-final after multi-user.target"
+  tn_ssh 'journalctl --list-boots --no-pager | tail -3; echo; journalctl -u tent-node.service -u tent-node-join.service --no-pager -o short-precise' |
+    hide_url | detail "journalctl -u tent-node.service -u tent-node-join.service (T, both boots)" || true
+}
+
+check_tentnode() {
+  local deadline
+  create_instance T "$TN_UD" || die "cannot create instance T: $API_STATUS $(api_err)"
+  deadline=$(($(now) + READY_TIMEOUT))
+  log "waiting for instance T to boot (timeout ${READY_TIMEOUT}s)"
+  until poll_instance T; do
+    if [ "$(now)" -gt "$deadline" ]; then
+      log "timeout waiting for instance T"
+      break
+    fi
+    sleep 5
+  done
+  boot_row T "Boot T (tent-node user data)"
+  if [ -z "$T_PUB" ] || [ -z "$T_T_SSH" ]; then
+    row "tentnode" "$(ssh_unknown "${T_PUB:-no public IP}")" "no check ran"
+    return 0
+  fi
+  tn_first_boot
+  # A reboot runs up again at boot: it must change nothing but status.json.
+  if ! tn_reboot; then
+    row "Reboot T" "no boot id before the reboot, or no SSH on a new boot within ${READY_TIMEOUT}s: $(ssh_unknown "$T_PUB")" \
+      "the second up was not checked"
+    return 0
+  fi
+  tn_second_boot
+}
+
+# ---------------------------------------------------------------------------------------------------------------
 # Cleanup (EXIT trap): write the report, then delete everything this run created unless --keep.
 # Records how long the API refuses to delete the firewall group and the VPC after the instances are gone
 # (the retry loop `tent delete cluster` needs).
@@ -1502,7 +1811,7 @@ cleanup() {
   local rc=$? type id deadline left t0 tries first_err ip
   set +e
   write_report
-  for ip in "$A_PUB" "$B_PUB" "$V_PUB"; do [ -n "$ip" ] && [ -n "$SOCK_DIR" ] && ssh_close "$ip"; done
+  for ip in "$A_PUB" "$B_PUB" "$V_PUB" "$T_PUB"; do [ -n "$ip" ] && [ -n "$SOCK_DIR" ] && ssh_close "$ip"; done
   if [ "$MODE" = "run" ] && [ -n "$STATE" ] && [ -s "$STATE" ]; then
     if [ "$KEEP" = 1 ]; then
       log "--keep: resources left in place (delete them yourself):"
@@ -1589,8 +1898,12 @@ main() {
   for c in $(printf '%s' "$CHECKS" | tr ',' ' '); do
     case ",$ALL_CHECKS," in *",$c,"*) ;; *) die "unknown check: $c" ;; esac
   done
+  if want tentnode && [ "$CHECKS" != tentnode ]; then die "tentnode runs alone: --only tentnode"; fi
+  # tentnode needs one VPC: it tries the first mask alone and makes no test VPCs.
+  if want tentnode; then VPC_MASKS="${VPC_MASKS%% *}"; fi
 
   for c in curl jq awk base64 tr od; do need_cmd "$c"; done
+  if [ "$MODE" = "run" ] && want tentnode; then need_cmd go; need_cmd gzip; fi
   # needs_api: the run creates resources (SSH key, VPC); needs_instances: it also creates instance A.
   local needs_api=0 needs_instances=0
   for c in tags markers userdata fwinuse patchtags vpcpending halttwice $SSH_CHECKS; do
@@ -1632,6 +1945,8 @@ main() {
   fi
 
   local needs_b=0 needs_v=0 instances=0 keys=1 groups=0 cost billed duration keep_note="" lock_note=""
+  local vpcs="1 VPC (plus short-lived test VPCs for mask checks)"
+  if want tentnode; then vpcs="1 VPC"; fi
   if [ "$needs_instances" = 1 ]; then
     for c in network firewall alias; do if want "$c"; then needs_b=1; fi; done
     if want boot; then needs_v=1; fi
@@ -1660,12 +1975,14 @@ main() {
 
 This run creates resources in your Vultr account ($REGION):
   - $billed
-  - 1 VPC (plus short-lived test VPCs for mask checks), $keys SSH key(s), $groups firewall group(s)$lock_note
+  - $vpcs, $keys SSH key(s), $groups firewall group(s)$lock_note
   - all tagged/marked with $RUN_TAG and deleted on exit$keep_note
 Expected duration: $duration. Report: $REPORT
 
 EOF
   [ "$MODE" = "dry-run" ] && { log "dry run: nothing created"; return 0; }
+  # Before anything is created: the user data needs the tent-node under test.
+  if want tentnode; then prepare_tentnode; fi
   [ -n "${VULTR_API_KEY:-}" ] || die "VULTR_API_KEY is not set"
   AUTH_CONF="$WORK/auth.conf"
   (
@@ -1695,6 +2012,11 @@ EOF
   fi
 
   ssh_init
+  if want tentnode; then
+    check_tentnode
+    log "all checks finished"
+    return 0
+  fi
   build_user_data
   if [ "$NEED_SSH" = 0 ]; then create_lockdown_fg; fi
   create_instance A "$WORK/cc-ab.yaml" || die "cannot create instance A: $API_STATUS $(api_err)"

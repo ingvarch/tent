@@ -13,7 +13,7 @@ GOLANGCI_LINT_VERSION := 2.14.0
 
 .DEFAULT_GOAL := check
 
-.PHONY: check build test lint fmt licenses notices generate dist clean golangci-lint-version
+.PHONY: check build test lint fmt licenses notices generate dist clean golangci-lint-version dev-upload
 
 check: fmt lint licenses test build
 
@@ -22,6 +22,14 @@ check: fmt lint licenses test build
 build:
 	$(GOBUILD) -o bin/tent ./cmd/tent
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -o bin/tent-node_linux_amd64 ./cmd/tent-node
+
+# dev-upload runs build, uploads the tent-node it writes to the bucket in TENT_DEV_S3_URL and prints the lines that set
+# TENT_NODE_URL and TENT_NODE_SHA256, for fish when $SHELL is fish and for sh otherwise: make dev-upload | source
+# (hack/tent-node-upload/README.md). Only those lines go to stdout; the build's commands and output go to stderr. It is
+# amd64 only, so a development build's clusters need amd64 plans.
+dev-upload:
+	@$(MAKE) --no-print-directory build >&2
+	@go run ./hack/tent-node-upload -binary bin/tent-node_linux_amd64 -arch amd64
 
 test:
 	go test -race ./...

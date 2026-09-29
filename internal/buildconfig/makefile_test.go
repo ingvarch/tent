@@ -73,8 +73,21 @@ func fakeLinter(onVersion string) string {
 	return "#!/bin/sh\ncase \"$1\" in\n  version) " + onVersion + " ;;\n  *) echo linted \"$@\" ;;\nesac\n"
 }
 
-// makeWith runs a Makefile target with only the given golangci-lint script on PATH ("" means none).
+// makeWith runs a Makefile target with make -s and only the given golangci-lint script on PATH ("" means none), and
+// returns what make wrote to stdout and then to stderr.
 func makeWith(t *testing.T, target, linter string) (string, error) {
+	t.Helper()
+	tools := map[string]string{}
+	if linter != "" {
+		tools["golangci-lint"] = linter
+	}
+	stdout, stderr, err := runMake(t, tools, "-s", target)
+	return stdout + stderr, err
+}
+
+// runMake runs make with args in the repository with only the given tools on PATH, shell scripts by name, and
+// returns what it wrote to stdout and to stderr.
+func runMake(t *testing.T, tools map[string]string, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("the Makefile runs under a POSIX shell")
@@ -88,15 +101,19 @@ func makeWith(t *testing.T, target, linter string) (string, error) {
 		t.Skip("make is not installed")
 	}
 	bin := t.TempDir()
-	if linter != "" {
-		if err := os.WriteFile(filepath.Join(bin, "golangci-lint"), []byte(linter), 0o755); err != nil {
+	for name, script := range tools {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	cmd := exec.Command(maker, "-s", "-C", filepath.Join("..", ".."), target)
+	// In the repository rather than with -C: GNU make 4 prints "Entering directory" to stdout with -C, unless -s.
+	cmd := exec.Command(maker, args...)
+	cmd.Dir = filepath.Join("..", "..")
 	cmd.Env = []string{"PATH=" + bin}
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	var out, errOut strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+	err = cmd.Run()
+	return out.String(), errOut.String(), err
 }
 
 // linterRuns maps each Makefile target that calls golangci-lint to the command it runs.
@@ -208,6 +225,38 @@ func TestMakeBuildBuildsTentNodeLikeTent(t *testing.T) {
 		t.Errorf("make build (-want +got):\n%s", diff)
 	}
 }
+
+func TestMakeDevUploadUploadsWhatBuildWrites(t *testing.T) {
+	// make dev-upload builds, with its output on stderr, then uploads the tent-node that make build writes, for the
+	// nodes of that build.
+	want := []string{
+		"@$(MAKE) --no-print-directory build >&2",
+		"@go run ./hack/tent-node-upload -binary bin/" + assets.TentNodeFile("amd64") + " -arch amd64",
+	}
+	if diff := cmp.Diff(want, recipe(t, "dev-upload")); diff != "" {
+		t.Errorf("make dev-upload (-want +got):\n%s", diff)
+	}
+	phony := regexp.MustCompile(`(?m)^\.PHONY: (.+)$`).FindSubmatch(repoFile(t, "Makefile"))
+	if phony == nil || !slices.Contains(strings.Fields(string(phony[1])), "dev-upload") {
+		t.Error("the Makefile does not list dev-upload in .PHONY")
+	}
+}
+
+func TestMakeDevUploadPrintsOnlyTheToolsLines(t *testing.T) {
+	// make dev-upload | source runs what reaches stdout: with or without -s, only the tool's lines get there.
+	fakeGo := "#!/bin/sh\ncase \"$1\" in\n  build) echo \"built $*\" ;;\n  run) echo \"ran $*\" ;;\nesac\n"
+	for _, flags := range [][]string{nil, {"-s"}} {
+		stdout, stderr, err := runMake(t, map[string]string{"go": fakeGo}, append(flags, "dev-upload")...)
+		want := "ran run ./hack/tent-node-upload -binary bin/" + assets.TentNodeFile("amd64") + " -arch amd64\n"
+		if err != nil || stdout != want {
+			t.Errorf("make %q dev-upload: err %v, stdout %q, want %q", flags, err, stdout, want)
+		}
+		if !strings.Contains(stderr, "built build") {
+			t.Errorf("make %q dev-upload: stderr lacks the build's output:\n%s", flags, stderr)
+		}
+	}
+}
+
 func TestMakeCleanRemovesWhatTheBuildWrites(t *testing.T) {
 	removed := strings.Fields(oneCommand(t, "clean"))
 	for _, generated := range []string{"bin", "dist", noticesFile} {
