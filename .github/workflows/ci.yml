@@ -30,10 +30,11 @@ jobs:
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.14.0
-      # A module tent links, on any platform it ships for, may only have a licence internal/licenses allows. It runs
-      # after a lint failure too, so one failure does not hide the other; the job fails if either does.
+      # A module tent or tent-node links, on any platform the release builds for, may only have a licence
+      # internal/licenses allows. It runs after a lint failure too, so one failure does not hide the other; the job
+      # fails if either does.
       - if: success() || failure()
-        run: go run ./internal/licenses/cmd/licenses ./cmd/tent
+        run: go run ./internal/licenses/cmd/licenses ./cmd/tent ./cmd/tent-node
 
   test:
     name: test ${{ matrix.os }} go ${{ matrix.go }}
@@ -134,6 +135,15 @@ jobs:
         with:
           version-file: .tool-versions
           args: release --snapshot --clean --skip=sign
+      # tent reads tent-node's sha256 from checksums.txt of its release by these names (ADR-0026).
+      - name: check that checksums.txt lists tent-node
+        run: |
+          for file in tent-node_linux_amd64 tent-node_linux_arm64; do
+            if ! grep -Eq "^[0-9a-f]{64}  $file\$" dist/checksums.txt; then
+              echo "::error::dist/checksums.txt lists no $file"
+              exit 1
+            fi
+          done
 
   govulncheck:
     if: github.event_name != 'workflow_dispatch'
