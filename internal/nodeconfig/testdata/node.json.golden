@@ -2,6 +2,7 @@
   "apiVersion": "tent/v1alpha1",
   "kind": "NodeConfig",
   "cluster": "prod",
+  "provider": "vultr",
   "nodeGroup": "core",
   "name": "prod-core-0",
   "role": "combined",

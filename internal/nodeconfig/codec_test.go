@@ -138,6 +138,7 @@ func TestDecodeStrict(t *testing.T) {
 		{"null", "null", `node config: apiVersion "" is not tent/v1alpha1`},
 		{"invalid", with(`"role": "combined"`, `"role": "worker"`),
 			`node config: role "worker" is not server, client or combined`},
+		{"no provider", with(`"provider": "vultr",`, ""), `node config: provider "" is not one of vultr, hetzner`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, err := nodeconfig.Decode([]byte(tc.data))

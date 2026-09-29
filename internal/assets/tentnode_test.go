@@ -17,9 +17,19 @@ const (
 	checksums = "3333333333333333333333333333333333333333333333333333333333333333  tent_0.3.0_linux_amd64.tar.gz\n" +
 		sumAMD64 + "  tent-node_linux_amd64\n" +
 		sumARM64 + "  tent-node_linux_arm64\n" +
+		"6666666666666666666666666666666666666666666666666666666666666666  THIRD_PARTY_NOTICES\n" +
 		"4444444444444444444444444444444444444444444444444444444444444444  tent-node_linux_arm64.sbom.json\n" +
 		"5555555555555555555555555555555555555555555555555555555555555555  x_tent-node_linux_arm64\n"
 )
+
+func TestTentNodeFile(t *testing.T) {
+	// ADR-0026, the release config and the CI snapshot step name the files so.
+	for arch, want := range map[string]string{"amd64": "tent-node_linux_amd64", "arm64": "tent-node_linux_arm64"} {
+		if got := TentNodeFile(arch); got != want {
+			t.Errorf("TentNodeFile(%q) = %q, want %q", arch, got, want)
+		}
+	}
+}
 
 func TestTentNodeOfARelease(t *testing.T) {
 	for _, version := range []string{"v0.3.0", "v0.3.0-rc.1"} {
@@ -70,7 +80,7 @@ func TestTentNodeChecksumsFail(t *testing.T) {
 		{"listed twice", checksums + sumARM64 + "  tent-node_linux_arm64\n", "lists tent-node_linux_arm64 twice"},
 		{"one space", strings.Replace(checksums, sumARM64+"  ", sumARM64+" ", 1), "line 3: want a sha256"},
 		{"no name", strings.Replace(checksums, "tent-node_linux_amd64", "", 1), "line 2: want a sha256"},
-		{"a word", checksums + "garbage\n", "line 6: want a sha256"},
+		{"a word", checksums + "garbage\n", "line 7: want a sha256"},
 		{"blank line", strings.Replace(checksums, line2, "\n"+line2, 1), "line 2: want a sha256"},
 		{"empty", "", "line 1: want a sha256"},
 		{"short sha256", strings.Replace(checksums, sumARM64, sumARM64[1:], 1), "line 3: want a sha256"},

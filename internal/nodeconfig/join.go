@@ -50,6 +50,6 @@ func renderJoin(role v1alpha1.Role, servers []netip.Addr) ([]byte, error) {
 	if p.err != nil {
 		return nil, p.err
 	}
-	return []byte(nodeHeader + block + " {\n  server_join {\n    retry_join = [" + strings.Join(addrs, ", ") +
+	return []byte(NodeHeader + block + " {\n  server_join {\n    retry_join = [" + strings.Join(addrs, ", ") +
 		"]\n  }\n}\n"), nil
 }

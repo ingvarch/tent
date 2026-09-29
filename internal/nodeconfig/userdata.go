@@ -15,8 +15,11 @@ import (
 // of the providers tent supports.
 const MaxUserDataBytes = 24 << 10
 
-// tentNodeAsset is the name of the asset that holds the tent-node binary.
-const tentNodeAsset = "tent-node"
+// TentNodeAsset is the name of the asset that holds the tent-node binary.
+const TentNodeAsset = "tent-node"
+
+// ConfigPath is where the user data writes the NodeConfig, and where tent-node reads it.
+const ConfigPath = "/etc/tent/node.json"
 
 // tentNodeDownload is where the script puts tent-node until its sha256 is checked.
 const tentNodeDownload = "/usr/local/bin/tent-node.download"
@@ -48,7 +51,7 @@ func userData(nc *NodeConfig) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	i := slices.IndexFunc(nc.Assets, func(a Asset) bool { return a.Name == tentNodeAsset })
+	i := slices.IndexFunc(nc.Assets, func(a Asset) bool { return a.Name == TentNodeAsset })
 	if i < 0 {
 		return nil, errors.New("no tent-node asset")
 	}
@@ -107,7 +110,7 @@ var userDataTemplate = template.Must(template.New("user-data").Parse(`#cloud-con
 package_update: false
 package_upgrade: false
 write_files:
-  - path: /etc/tent/node.json
+  - path: ` + ConfigPath + `
     encoding: gz+b64
     owner: root:root
     permissions: "0600"
@@ -124,7 +127,7 @@ runcmd:
           echo {{.Check}} | sha256sum -c -; then
           chmod 0755 ` + tentNodeDownload + `
           mv ` + tentNodeDownload + ` /usr/local/bin/tent-node
-          exec /usr/local/bin/tent-node install --config /etc/tent/node.json
+          exec /usr/local/bin/tent-node install --config ` + ConfigPath + `
         fi
       done
       echo "tent-node: no URL gave a file with the expected sha256" >&2

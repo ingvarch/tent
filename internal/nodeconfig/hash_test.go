@@ -126,6 +126,8 @@ func TestSpecHashKeeps(t *testing.T) {
 		{"join servers", func(_ *testing.T, c *nc) { c.Join.Servers = []netip.Addr{netip.MustParseAddr("10.64.0.7")} }},
 		{"join refresh interval", func(_ *testing.T, c *nc) { c.Join.RefreshInterval = time.Hour }},
 		{"name", func(_ *testing.T, c *nc) { c.Name = "prod-core-4" }},
+		// A cluster never changes its provider, so the provider need not mark nodes out of date.
+		{"provider", func(_ *testing.T, c *nc) { c.Provider = v1alpha1.ProviderHetzner }},
 		{"stored spec hash", func(_ *testing.T, c *nc) { c.SpecHash = "0123456789abcdef" }},
 		{"rule order", func(_ *testing.T, c *nc) { slices.Reverse(c.Firewall.Rules) }},
 		{"source order", func(t *testing.T, c *nc) {

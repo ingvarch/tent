@@ -66,6 +66,7 @@ func sample() *nodeconfig.NodeConfig {
 		APIVersion: v1alpha1.APIVersion,
 		Kind:       nodeconfig.Kind,
 		Cluster:    "prod",
+		Provider:   v1alpha1.ProviderVultr,
 		NodeGroup:  "core",
 		Name:       "prod-core-0",
 		Role:       v1alpha1.RoleCombined,

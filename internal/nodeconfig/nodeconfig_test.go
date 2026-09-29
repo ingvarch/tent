@@ -33,6 +33,12 @@ func TestValidate(t *testing.T) {
 		{"kind", func(c *nc) { c.Kind = "Cluster" }, `node config: kind "Cluster" is not NodeConfig`},
 		{"cluster", func(c *nc) { c.Cluster = "Prod" }, `node config: invalid cluster name "Prod": must be 2 to 20 ` +
 			`lowercase letters, digits or dashes, starting with a letter and ending with a letter or digit`},
+		{"hetzner", func(c *nc) { c.Provider = v1alpha1.ProviderHetzner }, ""},
+		{"no provider", func(c *nc) { c.Provider = "" }, `node config: provider "" is not one of vultr, hetzner`},
+		{"unknown provider", func(c *nc) { c.Provider = "aws" },
+			`node config: provider "aws" is not one of vultr, hetzner`},
+		{"provider in upper case", func(c *nc) { c.Provider = "Vultr" },
+			`node config: provider "Vultr" is not one of vultr, hetzner`},
 		{"node group", func(c *nc) { c.NodeGroup = "" }, `node config: invalid node group name "": must be 2 to 20 ` +
 			`lowercase letters, digits or dashes, starting with a letter and ending with a letter or digit`},
 		{"name", func(c *nc) { c.Name = "prod_core_0" }, `node config: name "prod_core_0" is not a host name: ` +
@@ -93,12 +99,22 @@ func TestValidate(t *testing.T) {
 
 		{"sysctl key", func(c *nc) { c.System.Sysctls["net ipv4"] = "1" },
 			`node config: sysctl "net ipv4" is not a sysctl key`},
+		// A leading dash in sysctl.d makes errors on the line ignored.
+		{"sysctl key with a leading dash", func(c *nc) { c.System.Sysctls["-net.ipv4.ip_forward"] = "1" },
+			`node config: sysctl "-net.ipv4.ip_forward" is not a sysctl key`},
+		{"sysctl key with a leading underscore", func(c *nc) { c.System.Sysctls["_net.ipv4.ip_forward"] = "1" },
+			`node config: sysctl "_net.ipv4.ip_forward" is not a sysctl key`},
 		{"empty sysctl value", func(c *nc) { c.System.Sysctls["net.ipv4.ip_forward"] = "" },
 			"node config: sysctl net.ipv4.ip_forward: the value is empty"},
 		{"sysctl value with a line end", func(c *nc) { c.System.Sysctls["vm.max_map_count"] = "1\nkernel.x = 1" },
 			"node config: sysctl vm.max_map_count: the value has a control character or invalid UTF-8"},
 		{"kernel module", func(c *nc) { c.System.KernelModules[1] = "overlay; reboot" },
 			`node config: kernel module "overlay; reboot" is not a module name`},
+		// modprobe would read it as an option.
+		{"kernel module like an option", func(c *nc) { c.System.KernelModules[1] = "--dry-run" },
+			`node config: kernel module "--dry-run" is not a module name`},
+		{"kernel module starting with an underscore", func(c *nc) { c.System.KernelModules[1] = "_overlay" },
+			`node config: kernel module "_overlay" is not a module name`},
 		{"repeated kernel module", func(c *nc) { c.System.KernelModules[1] = "br_netfilter" },
 			"node config: kernel module br_netfilter is repeated"},
 

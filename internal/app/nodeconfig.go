@@ -101,8 +101,9 @@ func devVariablesWarning(version string, opts assets.Options) string {
 
 // groupTemplates returns the NodeConfig of each node group of the model m, by the group's name: what every node of the
 // group has, with the group's spec hash. c and groups are the specs of m with their defaults, as the completed spec
-// holds them. A template has the Nomad agent configuration that the specs describe, the CA bundle, the assets that
-// its role downloads, the join strategy, the system settings and the host firewall; nodeConfig adds what one node has.
+// holds them. A template has the cluster's provider, the Nomad agent configuration that the specs describe, the CA
+// bundle, the assets that its role downloads, the join strategy, the system settings and the host firewall; nodeConfig
+// adds what one node has.
 // An empty CA bundle is an error, as is an empty gossip key for a group that runs servers.
 func groupTemplates(m *model.Cluster, c *v1alpha1.Cluster, groups []*v1alpha1.NodeGroup, downloads nodeAssets,
 	gossip pki.Secret, caBundle []byte,
@@ -148,6 +149,7 @@ func groupTemplates(m *model.Cluster, c *v1alpha1.Cluster, groups []*v1alpha1.No
 			APIVersion: v1alpha1.APIVersion,
 			Kind:       nodeconfig.Kind,
 			Cluster:    m.Name,
+			Provider:   m.Provider,
 			NodeGroup:  g.Name,
 			Role:       g.Role,
 			Assets:     downloads.forRole(g.Role),

@@ -14,8 +14,8 @@ const (
 	instancePath = "/etc/nomad.d/11-instance.hcl"
 )
 
-// nodeHeader starts every file that tent-node renders on the node.
-const nodeHeader = "# Rendered by tent-node. Do not edit: changes are overwritten.\n"
+// NodeHeader starts every file that tent-node renders on the node.
+const NodeHeader = "# Rendered by tent-node. Do not edit: changes are overwritten.\n"
 
 // perNodeFile returns a file that only one node has. It holds no secret, so every local user may read it, as tent's
 // settings.
@@ -71,5 +71,5 @@ func RenderInstance(id string) (File, error) {
 		return File{}, fmt.Errorf("11-instance.hcl: %w", p.err)
 	}
 	return perNodeFile(instancePath,
-		[]byte(nodeHeader+"client {\n  meta {\n    \"tent_instance_id\" = "+quoted+"\n  }\n}\n")), nil
+		[]byte(NodeHeader+"client {\n  meta {\n    \"tent_instance_id\" = "+quoted+"\n  }\n}\n")), nil
 }
