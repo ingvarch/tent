@@ -21,6 +21,11 @@
       "allowedVersions": "<0.41.0"
     },
     {
+      "description": "nomad/api is pinned to the commit of the Nomad release that the channel recommends and moved by hand with it.",
+      "matchPackageNames": ["github.com/hashicorp/nomad/api"],
+      "enabled": false
+    },
+    {
       "description": "Minor, patch and pseudo-version updates of Go modules come in one weekly PR; majors come alone.",
       "matchManagers": ["gomod"],
       "matchUpdateTypes": ["minor", "patch", "digest"],

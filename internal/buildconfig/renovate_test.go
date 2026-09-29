@@ -202,6 +202,11 @@ func TestRenovateLeavesThePickedVersionsAlone(t *testing.T) {
 			"matchDepTypes": []any{"github-runner"},
 			"enabled":       false,
 		}},
+		// nomad/api is pinned to the commit of the Nomad release that the channel recommends, and moves with it.
+		{"the Nomad API module", map[string]any{
+			"matchPackageNames": []any{"github.com/hashicorp/nomad/api"},
+			"enabled":           false,
+		}},
 	}
 	rules := renovate(t).PackageRules
 	anyOrder := cmpopts.SortSlices(func(a, b any) bool { return fmt.Sprint(a) < fmt.Sprint(b) })
