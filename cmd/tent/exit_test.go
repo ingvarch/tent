@@ -24,13 +24,13 @@ import (
 // The checks of M0's exit criteria (docs/roadmap.md, issue #36). The first two run tent in this process through
 // cli.Execute and as the built binary; the third needs separate processes, so it runs the binary only.
 
-// vultrSpec is the Vultr example of docs/architecture.md §3.1, as of 2026-09-27.
+// vultrSpec is the Vultr example of docs/architecture.md §3.1, as of 2026-09-29.
 const vultrSpec = `apiVersion: tent/v1alpha1
 kind: Cluster
 metadata:
   name: prod                     # [a-z][a-z0-9-]{0,18}[a-z0-9]; prefix of every resource name
 spec:
-  channel: stable                # recommended versions and images (see 13.5)
+  channel: stable                # Nomad and CNI versions (see 13.5)
   cloud:
     provider: vultr
     region: ams                  # Vultr: region | Hetzner: network zone | AWS: region
@@ -44,11 +44,11 @@ spec:
   sshKeys:
     - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILVMgcq7nf63leSBwZNfB40Oi4XwSKWNKchNmRGNCb9k ops@example
   nomad:
-    version: 2.0.7
+    version: 2.0.7               # empty means the version the cluster was first built with (see 13.2)
     region: global
     tls: {verifyHTTPSClient: true}
     clientIntroduction: strict   # strict | warn | none
-    extraConfig:                 # escape hatch, rendered into 99-user.hcl
+    extraConfig:                 # escape hatch, rendered into 98-user-server.hcl and 99-user-client.hcl
       server: ""
       client: ""
 ---

@@ -134,7 +134,8 @@ type ClusterNomad struct {
 	// ClientIntroduction is strict, warn or none. Defaults to strict, or to warn when the cluster has a combined group;
 	// strict is an error with a combined group, whose client registers before intro tokens exist.
 	ClientIntroduction ClientIntroduction `json:"clientIntroduction,omitempty"`
-	// ExtraConfig is HCL added to the agents as 99-user.hcl. It is not validated or supported.
+	// ExtraConfig is HCL added to the agents as given: the server part as 98-user-server.hcl, the client part as
+	// 99-user-client.hcl. It is not validated or supported.
 	ExtraConfig ExtraConfig `json:"extraConfig,omitzero"`
 }
 
@@ -145,7 +146,7 @@ type TLS struct {
 	VerifyHTTPSClient *bool `json:"verifyHTTPSClient,omitempty"`
 }
 
-// ExtraConfig is HCL added to the agents as 99-user.hcl.
+// ExtraConfig is HCL added to the agents as given: Server as 98-user-server.hcl, Client as 99-user-client.hcl.
 type ExtraConfig struct {
 	// Server is added to server and combined nodes.
 	Server string `json:"server,omitempty"`
@@ -178,6 +179,12 @@ const (
 // Roles lists the node group roles.
 func Roles() []Role { return []Role{RoleServer, RoleClient, RoleCombined} }
 
+// RunsServer reports whether nodes of the role run a Nomad server: server and combined nodes do.
+func (r Role) RunsServer() bool { return r == RoleServer || r == RoleCombined }
+
+// RunsClient reports whether nodes of the role run a Nomad client: client and combined nodes do.
+func (r Role) RunsClient() bool { return r == RoleClient || r == RoleCombined }
+
 // NodeGroupSpec is what the operator wants the node group to be.
 type NodeGroupSpec struct {
 	// Role is server, client or combined.
@@ -196,12 +203,17 @@ type NodeGroupSpec struct {
 
 // NodeGroupNomad configures the Nomad clients of a group.
 type NodeGroupNomad struct {
-	// NodePool of the clients. Defaults to the node pool named default for client and combined groups.
+	// NodePool of the clients. Defaults to the node pool named default for client and combined groups. It must not be
+	// all, Nomad's pool of every node, which no client joins.
 	NodePool string `json:"nodePool,omitempty"`
 	// NodeClass of the clients.
 	NodeClass string `json:"nodeClass,omitempty"`
-	// Drivers are the task drivers the clients enable, for example docker and exec.
+	// Drivers are the task drivers the clients enable, for example docker and exec. Left out, the clients keep all of
+	// Nomad's built-in drivers. raw_exec stays disabled unless extraConfig enables it, and java and qemu need packages
+	// that tent does not install.
 	Drivers []string `json:"drivers,omitzero"`
-	// Meta is client metadata that jobs can use in constraints.
+	// Meta is client metadata that jobs can use in constraints. A key is one or more words of letters, digits, _ and -,
+	// joined by dots, such as team.owner, and must not start with tent_, which tent keeps for its own meta. A value
+	// must not have a control character, U+E123 or ${.
 	Meta map[string]string `json:"meta,omitzero"`
 }

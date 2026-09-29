@@ -24,16 +24,24 @@ linters:
           allow:
             - $gostd
             - github.com/ingvarch/tent/api
-        # internal/pki makes the cluster's CA and secrets with the standard library, internal/uuid and the API types
-        # alone, so it never reaches a cloud or the store. internal/uuid imports only the standard library.
+        # internal/pki makes the cluster's CA and secrets with the standard library, internal/uuid, internal/secret and
+        # the API types alone, so it never reaches a cloud or the store. internal/uuid imports only the standard
+        # library.
         pki-stdlib-only:
           files: ["${base-path}/internal/pki/**", "!$test"]
           allow:
             - $gostd
             - github.com/ingvarch/tent/internal/uuid$
+            - github.com/ingvarch/tent/internal/secret$
             - github.com/ingvarch/tent/api/v1alpha1$
         uuid-stdlib-only:
           files: ["${base-path}/internal/uuid/**", "!$test"]
+          allow:
+            - $gostd
+        # internal/secret holds the type of keys and tokens that must never print, for every layer and tent-node, so it
+        # imports only the standard library.
+        secret-stdlib-only:
+          files: ["${base-path}/internal/secret/**", "!$test"]
           allow:
             - $gostd
         # internal/english writes the lists of messages for every layer, so it imports only the standard library.
@@ -55,12 +63,26 @@ linters:
             - sigs.k8s.io/yaml$
             - sigs.k8s.io/json$
             - golang.org/x/mod/semver$
+        # internal/nodeconfig is the contract that tent-node decodes on every node, so it imports only the standard
+        # library, internal/secret and the API types: nothing that reaches a cloud, the state store or Nomad.
+        nodeconfig-stdlib-only:
+          files: ["${base-path}/internal/nodeconfig/**", "!$test"]
+          allow:
+            - $gostd
+            - github.com/ingvarch/tent/internal/secret$
+            - github.com/ingvarch/tent/api/v1alpha1$
         # internal/secrettest is for tests: no code that tent runs imports it.
         secrettest-only-in-tests:
           files: ["$all", "!$test"]
           deny:
             - pkg: github.com/ingvarch/tent/internal/secrettest
               desc: internal/secrettest is for tests only
+        # Tests read the rendered Nomad configuration back with HCL1; no code that tent runs parses HCL.
+        hcl-only-in-tests:
+          files: ["$all", "!$test"]
+          deny:
+            - pkg: github.com/hashicorp/hcl
+              desc: github.com/hashicorp/hcl is for tests only
         # Only cmd/tent imports provider packages, to register them (ADR-0021). No other package can reach a
         # provider, directly or through another package.
         providers-only-in-cmd:
@@ -79,9 +101,10 @@ linters:
           deny:
             - pkg: github.com/hetznercloud/hcloud-go
               desc: hcloud-go is used only by internal/cloud/hetzner (ADR-0021)
-        # No code that can create or delete cloud resources runs on a node, not even the provider interfaces.
+        # No code that can create or delete cloud resources runs on a node, not even the provider interfaces: neither
+        # tent-node's phases nor the NodeConfig they read, tests included.
         nodeup-no-cloud:
-          files: ["${base-path}/internal/nodeup/**"]
+          files: ["${base-path}/internal/nodeup/**", "${base-path}/internal/nodeconfig/**"]
           deny:
             - pkg: github.com/ingvarch/tent/internal/cloud$
               desc: tent-node never touches cloud APIs

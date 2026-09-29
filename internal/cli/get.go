@@ -127,10 +127,10 @@ func printClusters(w io.Writer, format string, clusters []spec.Objects) error {
 func clusterRow(c spec.Objects) []string {
 	var servers, workers int
 	for _, g := range c.NodeGroups {
-		switch g.Spec.Role {
-		case v1alpha1.RoleServer, v1alpha1.RoleCombined:
+		switch {
+		case g.Spec.Role.RunsServer():
 			servers += g.Spec.Size
-		case v1alpha1.RoleClient:
+		case g.Spec.Role == v1alpha1.RoleClient:
 			workers += g.Spec.Size
 		}
 	}

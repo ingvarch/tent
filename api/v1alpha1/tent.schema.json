@@ -131,7 +131,7 @@
         },
         "extraConfig": {
           "$ref": "#/$defs/ExtraConfig",
-          "description": "ExtraConfig is HCL added to the agents as 99-user.hcl. It is not validated or supported."
+          "description": "ExtraConfig is HCL added to the agents as given: the server part as 98-user-server.hcl, the client part as 99-user-client.hcl. It is not validated or supported."
         }
       },
       "additionalProperties": false,
@@ -188,7 +188,7 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "description": "ExtraConfig is HCL added to the agents as 99-user.hcl."
+      "description": "ExtraConfig is HCL added to the agents as given: Server as 98-user-server.hcl, Client as 99-user-client.hcl."
     },
     "HetznerCloud": {
       "properties": {},
@@ -261,7 +261,7 @@
       "properties": {
         "nodePool": {
           "type": "string",
-          "description": "NodePool of the clients. Defaults to the node pool named default for client and combined groups."
+          "description": "NodePool of the clients. Defaults to the node pool named default for client and combined groups. It must not be all, Nomad's pool of every node, which no client joins."
         },
         "nodeClass": {
           "type": "string",
@@ -272,14 +272,14 @@
             "type": "string"
           },
           "type": "array",
-          "description": "Drivers are the task drivers the clients enable, for example docker and exec."
+          "description": "Drivers are the task drivers the clients enable, for example docker and exec. Left out, the clients keep all of Nomad's built-in drivers. raw_exec stays disabled unless extraConfig enables it, and java and qemu need packages that tent does not install."
         },
         "meta": {
           "additionalProperties": {
             "type": "string"
           },
           "type": "object",
-          "description": "Meta is client metadata that jobs can use in constraints."
+          "description": "Meta is client metadata that jobs can use in constraints. A key is one or more words of letters, digits, _ and -, joined by dots, such as team.owner, and must not start with tent_, which tent keeps for its own meta. A value must not have a control character, U+E123 or ${."
         }
       },
       "additionalProperties": false,

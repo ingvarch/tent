@@ -50,16 +50,17 @@ func nodeNames(role v1alpha1.Role, region string) ([]string, error) {
 	if region == "" {
 		return nil, errors.New("no Nomad region")
 	}
-	server, client := "server."+region+".nomad", "client."+region+".nomad"
-	switch role {
-	case v1alpha1.RoleServer:
-		return []string{server}, nil
-	case v1alpha1.RoleClient:
-		return []string{client}, nil
-	case v1alpha1.RoleCombined:
-		return []string{server, client}, nil
+	var names []string
+	if role.RunsServer() {
+		names = append(names, "server."+region+".nomad")
 	}
-	return nil, fmt.Errorf("role %q is not server, client or combined", role)
+	if role.RunsClient() {
+		names = append(names, "client."+region+".nomad")
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("role %q is not server, client or combined", role)
+	}
+	return names, nil
 }
 
 // IssueOperator issues the certificate of an operator of the Nomad region, cli.<region>.nomad, for client

@@ -61,7 +61,7 @@ func setGroupDefaults(s *NodeGroupSpec, clusterZones []string) {
 	if len(s.Zones) == 0 {
 		s.Zones = slices.Clone(clusterZones)
 	}
-	if s.Role == RoleClient || s.Role == RoleCombined {
+	if s.Role.RunsClient() {
 		setIfEmpty(&s.Nomad.NodePool, DefaultNodePool)
 	}
 }

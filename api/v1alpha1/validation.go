@@ -50,7 +50,15 @@ var (
 	nodePoolPattern  = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 	nodeClassPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 	driverPattern    = regexp.MustCompile(`^[a-z0-9_-]+$`)
-	metaKeyPattern   = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+	metaKeyPattern   = regexp.MustCompile(`^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$`) // Nomad refuses empty parts
+)
+
+// Prefixes and values that Nomad or tent keep for themselves.
+const (
+	tentMetaPrefix = "tent_" // tent's own client meta, such as tent_cluster
+	nodePoolAll    = "all"   // Nomad's built-in pool of every node, which no client joins
+	// hclReserved is a character that Nomad's configuration parser, HCL1, refuses anywhere in a file.
+	hclReserved = '\uE123'
 )
 
 // sshKeyTypes are the public key types tent installs on nodes.
@@ -226,14 +234,14 @@ func checkGroup(ck checker, g *NodeGroup, c *Cluster, opts ValidateOptions, shar
 
 func checkSize(ck checker, role Role, size int, opts ValidateOptions) {
 	const path = "spec.size"
-	switch role {
-	case RoleServer, RoleCombined:
+	switch {
+	case role.RunsServer():
 		if size != 1 && size != 3 && size != 5 {
 			ck.add(path, "must be 1, 3 or 5 for role="+string(role))
 		} else if size == 1 && !opts.AllowSingleServer {
 			ck.add(path, "size 1 needs --allow-single-server")
 		}
-	case RoleClient:
+	case role == RoleClient:
 		if size < 0 {
 			ck.add(path, "must not be negative")
 		}
@@ -248,7 +256,10 @@ func checkGroupNomad(ck checker, role Role, n *NodeGroupNomad) {
 		}
 		return
 	}
-	if n.NodePool != "" {
+	if n.NodePool == nodePoolAll {
+		ck.add("spec.nomad.nodePool",
+			"must not be all: Nomad keeps it for the pool of every node, which no client joins")
+	} else if n.NodePool != "" {
 		ck.matches("spec.nomad.nodePool", n.NodePool, nodePoolPattern)
 	}
 	if n.NodeClass != "" {
@@ -256,9 +267,26 @@ func checkGroupNomad(ck checker, role Role, n *NodeGroupNomad) {
 	}
 	ck.list("spec.nomad.drivers", n.Drivers, "driver", ck.matching(driverPattern))
 	for _, key := range slices.Sorted(maps.Keys(n.Meta)) {
-		if !metaKeyPattern.MatchString(key) {
-			ck.add(fmt.Sprintf("spec.nomad.meta[%q]", key), "key must match "+metaKeyPattern.String())
-		}
+		checkMeta(ck, fmt.Sprintf("spec.nomad.meta[%q]", key), key, n.Meta[key])
+	}
+}
+
+// checkMeta checks one client meta key and its value, which tent writes into the Nomad configuration.
+func checkMeta(ck checker, path, key, value string) {
+	switch {
+	case !metaKeyPattern.MatchString(key):
+		ck.add(path, "key must match "+metaKeyPattern.String())
+	case strings.HasPrefix(key, tentMetaPrefix):
+		ck.add(path, "key must not start with "+tentMetaPrefix+": tent keeps those keys for its own meta, such as "+
+			"tent_cluster")
+	}
+	switch {
+	case strings.ContainsFunc(value, unicode.IsControl):
+		ck.add(path, "value must not have a control character, such as a line end or a tab")
+	case strings.ContainsRune(value, hclReserved):
+		ck.add(path, fmt.Sprintf("value must not have %U, which Nomad's configuration parser refuses", hclReserved))
+	case strings.Contains(value, "${"):
+		ck.add(path, "value must not have ${, which Nomad reads as the start of an interpolation")
 	}
 }
 
@@ -266,7 +294,7 @@ func checkGroupNomad(ck checker, role Role, n *NodeGroupNomad) {
 func checkServerCount(ck checker, groups []*NodeGroup) {
 	var servers []string
 	for _, g := range groups {
-		if g.Spec.Role == RoleServer || g.Spec.Role == RoleCombined {
+		if g.Spec.Role.RunsServer() {
 			servers = append(servers, displayName(g.Metadata.Name))
 		}
 	}

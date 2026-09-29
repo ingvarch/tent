@@ -20,6 +20,9 @@ const (
 	privateRule    = "must be a private range inside 10.0.0.0/8, 172.16.0.0/12 or 192.168.0.0/16"
 	whitespaceRule = "must not contain whitespace"
 	serverNomad    = "must be empty for role=server: client settings do not apply"
+	metaKeyRule    = `key must match ^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$`
+	tentMeta       = "key must not start with tent_: tent keeps those keys for its own meta, such as tent_cluster"
+	controlMeta    = "value must not have a control character, such as a line end or a tab"
 	keyTypeRule    = "key type must be one of ssh-ed25519, ecdsa-sha2-nistp256, ecdsa-sha2-nistp384, " +
 		"ecdsa-sha2-nistp521, ssh-rsa, sk-ssh-ed25519@openssh.com, sk-ecdsa-sha2-nistp256@openssh.com"
 )
@@ -155,6 +158,19 @@ func TestValidateAccepts(t *testing.T) {
 			name: "server group with drivers: []",
 			spec: func(o *objects) { o.NodeGroups[0].Spec.Nomad.Drivers = []string{} },
 		},
+		{
+			// HCL1 reads "$", "{{" and "%{" alone as text.
+			name: "meta keys of dotted words and values that Nomad reads as text",
+			spec: func(o *objects) {
+				o.NodeGroups[1].Spec.Nomad.Meta = map[string]string{
+					"team":             "platform",
+					"team.owner":       `"ops" \ $HOME {{ .x }} %{ y } é`,
+					"cost-center_1.b2": "",
+					"TENT_LOUD":        "keys are case-sensitive, and only tent_ is tent's",
+				}
+			},
+		},
+		{name: "node pool All", spec: func(o *objects) { o.NodeGroups[1].Spec.Nomad.NodePool = "All" }},
 		{
 			name: "nil node group entry",
 			spec: func(o *objects) { o.NodeGroups = append([]*NodeGroup{nil}, o.NodeGroups...) },
@@ -569,9 +585,71 @@ func TestValidateReportsFieldPaths(t *testing.T) {
 				o.NodeGroups[1].Spec.Nomad.Meta = map[string]string{"team": "a", "zz top": "b", "cost center": "c"}
 			},
 			want: Errors{
-				{"NodeGroup workers", `spec.nomad.meta["cost center"]`, "key must match ^[A-Za-z0-9_.-]+$"},
-				{"NodeGroup workers", `spec.nomad.meta["zz top"]`, "key must match ^[A-Za-z0-9_.-]+$"},
+				{"NodeGroup workers", `spec.nomad.meta["cost center"]`, metaKeyRule},
+				{"NodeGroup workers", `spec.nomad.meta["zz top"]`, metaKeyRule},
 			},
+		},
+		{
+			// Nomad refuses keys with an empty part between dots.
+			name: "meta keys with empty parts",
+			spec: func(o *objects) {
+				o.NodeGroups[1].Spec.Nomad.Meta = map[string]string{"a..b": "x", ".a": "x", "a.": "x", "": "x"}
+			},
+			want: Errors{
+				{"NodeGroup workers", `spec.nomad.meta[""]`, metaKeyRule},
+				{"NodeGroup workers", `spec.nomad.meta[".a"]`, metaKeyRule},
+				{"NodeGroup workers", `spec.nomad.meta["a."]`, metaKeyRule},
+				{"NodeGroup workers", `spec.nomad.meta["a..b"]`, metaKeyRule},
+			},
+		},
+		{
+			name: "meta keys of tent",
+			spec: func(o *objects) {
+				o.NodeGroups[1].Spec.Nomad.Meta = map[string]string{"tent_cluster": "x", "tent_.x": "y", "tent_ x": "z"}
+			},
+			want: Errors{
+				{"NodeGroup workers", `spec.nomad.meta["tent_ x"]`, metaKeyRule},
+				{"NodeGroup workers", `spec.nomad.meta["tent_.x"]`, tentMeta},
+				{"NodeGroup workers", `spec.nomad.meta["tent_cluster"]`, tentMeta},
+			},
+		},
+		{
+			name: "meta values that Nomad cannot read",
+			spec: func(o *objects) {
+				o.NodeGroups[1].Spec.Nomad.Meta = map[string]string{
+					"interpolation": "${node.unique.id}",
+					"line-end":      "a\nb",
+					"tab":           "a\tb",
+					"delete":        "a\x7fb",
+					"reserved":      "a\ue123b",
+					"both":          "${a}\n",
+				}
+			},
+			want: Errors{
+				{"NodeGroup workers", `spec.nomad.meta["both"]`, controlMeta},
+				{"NodeGroup workers", `spec.nomad.meta["delete"]`, controlMeta},
+				{"NodeGroup workers", `spec.nomad.meta["interpolation"]`,
+					"value must not have ${, which Nomad reads as the start of an interpolation"},
+				{"NodeGroup workers", `spec.nomad.meta["line-end"]`, controlMeta},
+				{"NodeGroup workers", `spec.nomad.meta["reserved"]`,
+					"value must not have U+E123, which Nomad's configuration parser refuses"},
+				{"NodeGroup workers", `spec.nomad.meta["tab"]`, controlMeta},
+			},
+		},
+		{
+			name: "meta of a combined group",
+			base: combined,
+			spec: func(o *objects) {
+				o.Cluster.Spec.Nomad.ClientIntroduction = ClientIntroductionWarn
+				o.NodeGroups[0].Spec.Nomad.Meta = map[string]string{"tent_nodegroup": "x"}
+			},
+			want: Errors{{"NodeGroup servers", `spec.nomad.meta["tent_nodegroup"]`, tentMeta}},
+		},
+		{
+			name: "node pool all",
+			spec: func(o *objects) { o.NodeGroups[1].Spec.Nomad.NodePool = "all" },
+			want: Errors{{"NodeGroup workers", "spec.nomad.nodePool",
+				"must not be all: Nomad keeps it for the pool of every node, which no client joins"}},
 		},
 		// Across objects.
 		{
