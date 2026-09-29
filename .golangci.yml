@@ -71,12 +71,14 @@ linters:
             - $gostd
             - github.com/ingvarch/tent/internal/secret$
             - github.com/ingvarch/tent/api/v1alpha1$
-        # internal/secrettest is for tests: no code that tent runs imports it.
+        # internal/secrettest and nomadfake, which imports testing, are for tests: no code that tent runs imports them.
         secrettest-only-in-tests:
           files: ["$all", "!$test"]
           deny:
             - pkg: github.com/ingvarch/tent/internal/secrettest
               desc: internal/secrettest is for tests only
+            - pkg: github.com/ingvarch/tent/internal/nomadops/nomadfake
+              desc: nomadfake is for tests only
         # Tests read the rendered Nomad configuration back with HCL1; no code that tent runs parses HCL.
         hcl-only-in-tests:
           files: ["$all", "!$test"]
@@ -137,6 +139,13 @@ linters:
           deny:
             - pkg: github.com/hashicorp/nomad
               desc: the Nomad root module is BUSL-licensed (ADR-0011)
+        # nomadfake stands in for a Nomad cluster with the types of internal/nomadops alone, tests included, so it
+        # never imports the Nomad modules itself.
+        nomadfake-no-nomad:
+          files: ["${base-path}/internal/nomadops/nomadfake/**"]
+          deny:
+            - pkg: github.com/hashicorp/nomad
+              desc: nomadfake uses the types of internal/nomadops, not the Nomad modules
         # The JSON Schema libraries only generate and test the schema (ADR-0022).
         jsonschema-only-in-apischema:
           files: ["$all", "!${base-path}/internal/apischema/**"]
