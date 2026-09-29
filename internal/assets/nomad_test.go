@@ -131,7 +131,7 @@ func TestNomad(t *testing.T) {
 	const sumsPath, sigPath = "/2.0.7/nomad_2.0.7_SHA256SUMS", "/2.0.7/nomad_2.0.7_SHA256SUMS.sig"
 	good := map[string]string{sumsPath: testSums, sigPath: sign(t, key, testSums)}
 	opts := func(srv *httptest.Server) Options {
-		return Options{Client: srv.Client(), nomadURL: srv.URL, nomadKey: armored(t, key), now: at(2 * time.Hour)}
+		return Options{Client: srv.Client(), nomadURL: srv.URL, nomadKey: armored(t, key), Now: at(2 * time.Hour)}
 	}
 
 	for _, hash := range []crypto.Hash{crypto.SHA256, crypto.SHA384, crypto.SHA512} {
@@ -225,7 +225,7 @@ func TestNomadChecksTheKeyAtTheClock(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := serve(t, map[string]string{sumsPath: testSums, sigPath: tc.sig})
-			opts := Options{Client: srv.Client(), nomadURL: srv.URL, nomadKey: armored(t, tc.key), now: tc.now}
+			opts := Options{Client: srv.Client(), nomadURL: srv.URL, nomadKey: armored(t, tc.key), Now: tc.now}
 			_, err := Nomad(t.Context(), opts, "2.0.7", "amd64")
 			if tc.want == nil {
 				if err != nil {
@@ -262,7 +262,7 @@ func TestNomadDefaults(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := &http.Client{Transport: sites{sumsURL: tc.sums, sumsURL + ".sig": tc.sig}}
-			a, err := Nomad(t.Context(), Options{Client: client, now: day(t, tc.date)}, "2.0.7", "amd64")
+			a, err := Nomad(t.Context(), Options{Client: client, Now: day(t, tc.date)}, "2.0.7", "amd64")
 			if tc.want != nil {
 				wantErr(t, err, tc.want...)
 				return

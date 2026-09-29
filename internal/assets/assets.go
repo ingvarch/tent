@@ -33,11 +33,13 @@ type Options struct {
 	DevURL    string
 	DevSHA256 string
 
+	// Now returns the time at which signatures and the keys that made them are checked; nil means time.Now.
+	Now func() time.Time
+
 	// Set by tests only.
-	nomadURL string           // Nomad's releases; "" means nomadReleases
-	tentURL  string           // tent's releases; "" means tentReleases
-	nomadKey string           // the armored key that signs Nomad's SHA256SUMS; "" means HashiCorp's release key
-	now      func() time.Time // the time signatures are checked at; nil means time.Now
+	nomadURL string // Nomad's releases; "" means nomadReleases
+	tentURL  string // tent's releases; "" means tentReleases
+	nomadKey string // the armored key that signs Nomad's SHA256SUMS; "" means HashiCorp's release key
 }
 
 // Where the assets come from unless Options say otherwise.
