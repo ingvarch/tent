@@ -1,0 +1,4 @@
+# spec.nomad.extraConfig.client of the cluster, added as given. Do not edit: changes are overwritten on the next boot.
+client {
+  max_kill_timeout = "1m"
+}

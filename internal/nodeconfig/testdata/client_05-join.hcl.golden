@@ -1,0 +1,6 @@
+# Rendered by tent-node. Do not edit: changes are overwritten.
+client {
+  server_join {
+    retry_join = ["10.64.0.5:4647", "10.64.0.9:4647", "[fd00:64::c]:4647"]
+  }
+}

@@ -1,0 +1,49 @@
+# Rendered by tent. Do not edit: changes are overwritten on the next boot.
+region             = "global"
+data_dir           = "/var/lib/nomad"
+leave_on_terminate = true # leave the cluster gracefully when Nomad stops
+
+addresses {
+  http = "0.0.0.0" # the tent CLI reaches it through the cloud firewall
+  rpc  = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+  serf = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+}
+
+advertise {
+  http = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+  rpc  = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+  serf = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+}
+
+server {
+  enabled = true
+
+  client_introduction {
+    enforcement = "strict"
+  }
+}
+
+acl {
+  enabled = true
+}
+
+tls {
+  http = true
+  rpc  = true
+
+  ca_file   = "/etc/nomad.d/tls/ca.pem"
+  cert_file = "/etc/nomad.d/tls/agent.pem"
+  key_file  = "/etc/nomad.d/tls/agent-key.pem"
+
+  verify_server_hostname = true
+  verify_https_client    = true
+}
+
+autopilot {
+  cleanup_dead_servers = true
+}
+
+telemetry {
+  prometheus_metrics   = true
+  publish_node_metrics = true
+}

@@ -1,0 +1,71 @@
+# Rendered by tent. Do not edit: changes are overwritten on the next boot.
+region             = "global"
+data_dir           = "/var/lib/nomad"
+leave_on_terminate = true # leave the cluster gracefully when Nomad stops
+
+addresses {
+  http = "127.0.0.1 {{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+  rpc  = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+}
+
+advertise {
+  http = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+  rpc  = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+}
+
+client {
+  enabled           = true
+  node_pool         = "batch"
+  node_class        = "general"
+  network_interface = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"name\" }}"
+  min_dynamic_port  = 20000
+  max_dynamic_port  = 32000
+
+  drain_on_shutdown {
+    deadline           = "10m"
+    ignore_system_jobs = true
+  }
+
+  options {
+    "driver.allowlist"     = "docker,exec"
+    # Cloud fingerprinters only slow down startup on Vultr and Hetzner.
+    "fingerprint.denylist" = "env_aws,env_gce,env_azure,env_digitalocean"
+  }
+
+  meta {
+    "tent_cluster"   = "prod"
+    "tent_nodegroup" = "workers"
+    "1st"            = "yes"
+    "backslash"      = "C:\\temp\\"
+    "directive"      = "%{ if true }x%{ endif }"
+    "dollar"         = "$HOME costs $5 {and} $ {more}"
+    "empty"          = ""
+    "escape"         = "\\\""
+    "quote"          = "say \"hi\""
+    "rack.id"        = "r1"
+    "team"           = "platform"
+    "template"       = "{{ env \"HOME\" }}"
+    "unicode"        = "Zürich 東京 Ω é"
+  }
+}
+
+acl {
+  enabled = true
+}
+
+tls {
+  http = true
+  rpc  = true
+
+  ca_file   = "/etc/nomad.d/tls/ca.pem"
+  cert_file = "/etc/nomad.d/tls/agent.pem"
+  key_file  = "/etc/nomad.d/tls/agent-key.pem"
+
+  verify_server_hostname = true
+  verify_https_client    = true
+}
+
+telemetry {
+  prometheus_metrics   = true
+  publish_node_metrics = true
+}

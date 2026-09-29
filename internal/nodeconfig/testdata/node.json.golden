@@ -1,0 +1,120 @@
+{
+  "apiVersion": "tent/v1alpha1",
+  "kind": "NodeConfig",
+  "cluster": "prod",
+  "nodeGroup": "core",
+  "name": "prod-core-0",
+  "role": "combined",
+  "join": {
+    "strategy": "seed-and-refresh",
+    "servers": [
+      "10.64.0.5",
+      "10.64.0.9"
+    ],
+    "refreshInterval": 60000000000
+  },
+  "system": {
+    "sysctls": {
+      "net.ipv4.ip_forward": "1",
+      "vm.max_map_count": "262144"
+    },
+    "kernelModules": [
+      "br_netfilter",
+      "overlay"
+    ],
+    "docker": true
+  },
+  "firewall": {
+    "rules": [
+      {
+        "name": "ssh",
+        "protocol": "tcp",
+        "ports": {
+          "first": 22,
+          "last": 22
+        },
+        "from": [
+          "0.0.0.0/0",
+          "::/0"
+        ]
+      },
+      {
+        "name": "icmp",
+        "protocol": "icmp",
+        "from": [
+          "0.0.0.0/0",
+          "::/0"
+        ]
+      },
+      {
+        "name": "dynamic",
+        "protocol": "udp",
+        "ports": {
+          "first": 20000,
+          "last": 32000
+        },
+        "from": [
+          "10.64.0.0/16"
+        ]
+      }
+    ],
+    "blockMetadata": "169.254.169.254"
+  },
+  "assets": [
+    {
+      "name": "nomad",
+      "version": "2.0.7",
+      "urls": [
+        "https://releases.hashicorp.com/nomad/2.0.7/nomad_2.0.7_linux_amd64.zip",
+        "https://mirror.example.com/nomad/2.0.7/nomad_2.0.7_linux_amd64.zip"
+      ],
+      "sha256": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"
+    },
+    {
+      "name": "cni-plugins",
+      "version": "1.9.1",
+      "urls": [
+        "https://github.com/containernetworking/plugins/releases/download/v1.9.1/cni-plugins-linux-amd64-v1.9.1.tgz"
+      ],
+      "sha256": "b98f74a0f8522f0a83867178729c1aa70f2158f90c45a2ca8fa791db1c76b303"
+    },
+    {
+      "name": "tent-node",
+      "version": "v0.3.0-4-gabc1234",
+      "urls": [
+        "https://tent-dev.s3.example.com/tent-node_linux_amd64?X-Amz-Expires=900&X-Amz-Signature=9f2c6e1ab47d03e58c1f6a2b7d4e90c3a5f81b6d2e7c409a3f5b8d1e6c2a7f40"
+      ],
+      "sha256": "3c7d1e9a5b2f8046c1e7a3d9b5f20864e1c7a3d9b5f20864e1c7a3d9b5f20864"
+    }
+  ],
+  "files": [
+    {
+      "path": "/etc/nomad.d/00-tent.hcl",
+      "mode": 420,
+      "owner": "root:root",
+      "content": "# group configuration\nregion = \"global\"\n"
+    },
+    {
+      "path": "/etc/nomad.d/01-gossip.hcl",
+      "mode": 384,
+      "owner": "root:root",
+      "secret": true,
+      "content": "server {\n  encrypt = \"c2VjcmV0LWdvc3NpcC1rZXktZm9yLXRlc3RzLW9ubHk=\"\n}\n"
+    },
+    {
+      "path": "/etc/nomad.d/tls/agent-key.pem",
+      "mode": 384,
+      "owner": "root:root",
+      "perNode": true,
+      "secret": true,
+      "content": "node-key-stand-in-4f1d9c27b8e3a605\n"
+    },
+    {
+      "path": "/etc/nomad.d/10-node.hcl",
+      "mode": 420,
+      "owner": "root:root",
+      "perNode": true,
+      "content": "name = \"prod-core-0\" # <&> é\n"
+    }
+  ]
+}
