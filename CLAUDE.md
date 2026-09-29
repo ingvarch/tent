@@ -39,7 +39,10 @@ Providers, in order:
     and rules between nodes, the NodeConfig types and strict codec, the Nomad agent configuration with golden files,
     the spec hash and the cloud-config within 24 KiB. `update` does not use it until M2.7; nodes still boot the
     placeholder.
-  - Next: M2.4 nomadops.
+  - M2.4 added nomadops (`internal/nomadops`, `nomadfake`): the mTLS client of a server's HTTP API, the ACL
+    bootstrap that is safe to repeat, intro tokens, the leader, the nodes, autopilot health and waits over them.
+    `nomad/api` is pinned at the commit of Nomad v2.0.7 and moved by hand. Nothing calls nomadops until M2.7.
+  - Next: M2.5 tent-node.
 
 ## Read before changing anything
 
@@ -67,7 +70,8 @@ Providers, in order:
   - Cloud SDKs (govultr, hcloud-go) are imported only by their provider package, tests included.
   - `internal/nodeup` (the tent-node agent) and `internal/nodeconfig`, tests included, never import
     `internal/cloud/...`.
-  - Only `internal/nomadops` imports `github.com/hashicorp/nomad/api`.
+  - Only `internal/nomadops` imports `github.com/hashicorp/nomad/api`; `internal/nomadops/nomadfake`, tests
+    included, imports no Nomad module.
   - Never import the root module `github.com/hashicorp/nomad`; it is BUSL-licensed.
   - `internal/pki` imports only the standard library, `internal/uuid`, `internal/secret` and `api/v1alpha1`;
     `internal/uuid`, `internal/secret`, `internal/english` and `internal/secrettest` import only the standard library.
