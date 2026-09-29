@@ -1,7 +1,7 @@
 // Command licenses fails when a module the packages link, on any platform the release builds for, has a licence
 // tent does not allow. With -notices it also writes the third-party notices the release ships.
 //
-//	licenses [-notices THIRD_PARTY_NOTICES] ./cmd/tent
+//	licenses [-notices THIRD_PARTY_NOTICES] ./cmd/tent ./cmd/tent-node
 package main
 
 import (

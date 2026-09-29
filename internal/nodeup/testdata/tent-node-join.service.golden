@@ -1,0 +1,9 @@
+# Rendered by tent-node. Do not edit: changes are overwritten.
+[Unit]
+Description=tent-node refresh-join: keep the Nomad servers that the node joins current
+After=tent-node.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/tent-node refresh-join --config /etc/tent/node.json
+TimeoutStartSec=5min

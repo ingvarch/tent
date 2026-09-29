@@ -210,21 +210,21 @@ func TestCheckFailsOnAnUnknownLicenceBesideAKnownOne(t *testing.T) {
 	}
 }
 
-func TestGoListNamesThePlatformWhenItFails(t *testing.T) {
-	_, err := goList(t.Context(), "windows/arm64", []string{"./does-not-exist"})
+func TestListNamesThePlatformWhenItFails(t *testing.T) {
+	_, err := List(t.Context(), "windows/arm64", "./does-not-exist")
 	if err == nil || !strings.HasPrefix(err.Error(), "list packages for windows/arm64: ") {
-		t.Errorf("goList: err %v, want one that names windows/arm64", err)
+		t.Errorf("List: err %v, want one that names windows/arm64", err)
 	}
 }
 
 func TestCollectRefusesModulesItCannotName(t *testing.T) {
-	downloaded := &listedModule{Path: "example.com/x", Version: "v1.0.0", Dir: "/x"}
+	downloaded := &ListedModule{Path: "example.com/x", Version: "v1.0.0", Dir: "/x"}
 	notDownloaded, replaced := *downloaded, *downloaded
 	notDownloaded.Dir = ""
-	replaced.Replace = &listedModule{Path: "../fork", Dir: "/fork"}
+	replaced.Replace = &ListedModule{Path: "../fork", Dir: "/fork"}
 	cases := []struct {
 		name   string
-		module *listedModule
+		module *ListedModule
 		says   string
 	}{
 		{"no module", nil, "package example.com/x is in no module"},
@@ -240,7 +240,7 @@ func TestCollectRefusesModulesItCannotName(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := collect([]listedPackage{{ImportPath: "example.com/x", Dir: "/x", Module: c.module}})
+			_, err := collect([]ListedPackage{{ImportPath: "example.com/x", Dir: "/x", Module: c.module}})
 			if err == nil || err.Error() != c.says {
 				t.Errorf("collect: err %v, want %q", err, c.says)
 			}

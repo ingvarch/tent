@@ -1,0 +1,4 @@
+# Rendered by tent-node. Do not edit: changes are overwritten.
+net.bridge.bridge-nf-call-arptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
