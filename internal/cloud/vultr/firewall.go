@@ -15,6 +15,7 @@ import (
 
 	"github.com/vultr/govultr/v3"
 
+	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/engine"
 	"github.com/ingvarch/tent/internal/model"
@@ -39,7 +40,7 @@ type firewallTask struct {
 // task of the clients' group when m has a client node group.
 func (p *Provider) firewallTasks(m *model.Cluster) []engine.Task {
 	roles := []string{roleServer}
-	if m.HasClients() {
+	if m.HasClientGroup() {
 		roles = append(roles, roleClient)
 	}
 	tasks := make([]engine.Task, 0, len(roles))
@@ -74,10 +75,13 @@ func wantedRules(access []model.AccessRule, role string) map[string]govultr.Fire
 	return rules
 }
 
-// reaches reports whether an access rule to target reaches the nodes of the firewall group for role: the servers'
-// group takes the rules to every node and to the servers, the clients' group the rules to every node.
+// reaches reports whether an access rule to target reaches the nodes of the firewall group for role: whether the
+// target includes a node role whose machines join that group. The servers' group holds server and combined nodes, the
+// clients' group client nodes.
 func reaches(target model.Target, role string) bool {
-	return target == model.AllNodes || (target == model.Servers && role == roleServer)
+	return slices.ContainsFunc(v1alpha1.Roles(), func(r v1alpha1.Role) bool {
+		return firewallRole(r) == role && target.Includes(r)
+	})
 }
 
 // ruleText returns the text by which tent compares rules: the IP type, the protocol and the subnet, then the port

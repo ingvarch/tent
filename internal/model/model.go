@@ -1,6 +1,8 @@
 // Package model computes what a cluster's infrastructure should be from its specs, in terms every cloud provider
-// understands: the private network, the access rules of the cloud firewalls and the node groups. It holds no Nomad
-// settings; providers build the infrastructure from it.
+// understands. It holds the private network, the access rules of the cloud firewalls and the node groups. It also
+// holds the network intents between nodes, which are the ports nodes may reach on each other and how they find the
+// servers. It holds no Nomad settings. Providers build the infrastructure from it, and the node configuration is
+// built from it too.
 package model
 
 import (
@@ -22,6 +24,8 @@ type Cluster struct {
 	CIDR     netip.Prefix      // the private network
 	SSHKeys  []string          // public keys installed on every node, in the spec's order
 	Access   []AccessRule      // who may reach the nodes from the internet: ssh, icmp and api, in that order
+	Intra    []IntraRule       // the rules between nodes: nomad-http, nomad-rpc, serf and dynamic, in that order
+	Join     JoinStrategy      // how nodes find the servers
 	Groups   []NodeGroup       // sorted by name
 }
 
@@ -35,9 +39,10 @@ type NodeGroup struct {
 	Size        int           // the number of machines
 }
 
-// Protocols of access rules.
+// Protocols of the rules.
 const (
 	ProtocolTCP  = "tcp"
+	ProtocolUDP  = "udp"
 	ProtocolICMP = "icmp"
 )
 
@@ -51,7 +56,39 @@ type AccessRule struct {
 	From     []netip.Prefix // the source networks, never empty: IPv4 first, then by address and length, no repeats
 }
 
-// Target is the nodes an access rule opens. The zero Target is invalid, so a rule must say which nodes it opens.
+// IntraRule lets traffic from the cluster's private network reach some nodes of the cluster. Clouds such as Vultr and
+// Hetzner do not filter private traffic, so the host firewall of each node enforces these rules.
+type IntraRule struct {
+	Name     string         // nomad-http, nomad-rpc, serf or dynamic; not unique: Name and Protocol identify a rule
+	To       Target         // the nodes the rule opens
+	Protocol string         // ProtocolTCP or ProtocolUDP
+	Ports    PortRange      // the destination ports
+	From     []netip.Prefix // the source networks: the cluster CIDR
+}
+
+// PortRange is the ports from First to Last, both included. A range of one port has First equal to Last.
+type PortRange struct {
+	First, Last uint16
+}
+
+// JoinStrategy is how Nomad agents find the servers. The zero JoinStrategy is invalid, so a model must say how.
+type JoinStrategy int
+
+// Join strategies.
+const (
+	// JoinSeedAndRefresh gives a new node the private addresses of the servers that exist when it is created. The
+	// node then keeps the list current by asking the servers for their peers.
+	JoinSeedAndRefresh JoinStrategy = iota + 1
+)
+
+var joinNames = [...]string{JoinSeedAndRefresh: "seed-and-refresh"}
+
+// String returns the strategy's name, such as seed-and-refresh.
+func (j JoinStrategy) String() string {
+	return enumName(joinNames[:], "JoinStrategy", int(j))
+}
+
+// Target is the nodes a rule opens. The zero Target is invalid, so a rule must say which nodes it opens.
 type Target int
 
 // Targets.
@@ -60,22 +97,48 @@ const (
 	AllNodes Target = iota + 1
 	// Servers is the nodes of the server and combined groups, which run Nomad servers.
 	Servers
+	// Clients is the nodes of the client and combined groups, which run Nomad clients and the workloads.
+	Clients
 )
 
-var targetNames = [...]string{AllNodes: "all-nodes", Servers: "servers"}
+var targetNames = [...]string{AllNodes: "all-nodes", Servers: "servers", Clients: "clients"}
 
 // String returns the target's name, such as servers.
 func (t Target) String() string {
-	if t < AllNodes || int(t) >= len(targetNames) {
-		return fmt.Sprintf("Target(%d)", int(t))
-	}
-	return targetNames[t]
+	return enumName(targetNames[:], "Target", int(t))
 }
 
-// Ports that access rules open.
+// Includes reports whether the target's nodes include the nodes of the role: AllNodes includes server, client and
+// combined nodes, Servers includes server and combined nodes, and Clients includes client and combined nodes.
+func (t Target) Includes(role v1alpha1.Role) bool {
+	switch t {
+	case AllNodes:
+		return role.RunsServer() || role.RunsClient()
+	case Servers:
+		return role.RunsServer()
+	case Clients:
+		return role.RunsClient()
+	}
+	return false
+}
+
+// enumName returns names[v], or the type's name with v, such as Target(0), when v is out of range. The value 0 has no
+// name.
+func enumName(names []string, typ string, v int) string {
+	if v < 1 || v >= len(names) {
+		return fmt.Sprintf("%s(%d)", typ, v)
+	}
+	return names[v]
+}
+
+// Ports that the rules open.
 const (
-	sshPort = 22
-	apiPort = 4646 // the Nomad HTTP API
+	SSHPort      = 22
+	APIPort      = 4646  // the Nomad HTTP API
+	rpcPort      = 4647  // Nomad RPC
+	serfPort     = 4648  // Serf gossip between servers
+	dynamicFirst = 20000 // the first of Nomad's dynamic ports for workloads
+	dynamicLast  = 32000 // the last of them
 )
 
 // New computes the model of a cluster from its specs: the Cluster and all its node groups. It fills in the defaults
@@ -105,13 +168,15 @@ func New(c *v1alpha1.Cluster, groups []*v1alpha1.NodeGroup) (*Cluster, error) {
 		CIDR:     cidr,
 		SSHKeys:  slices.Clone(s.SSHKeys),
 		Access:   access,
+		Intra:    intraRules(cidr),
+		Join:     JoinSeedAndRefresh,
 		Groups:   nodeGroups(groups),
 	}, nil
 }
 
-// HasClients reports whether the cluster has a group with the client role, of any size. Combined groups count as
-// servers, not as clients.
-func (c *Cluster) HasClients() bool {
+// HasClientGroup reports whether the cluster has a group with the client role, of any size. A combined group does not
+// count, though the Clients target includes its nodes: it runs the servers too.
+func (c *Cluster) HasClientGroup() bool {
 	return slices.ContainsFunc(c.Groups, func(g NodeGroup) bool { return g.Role == v1alpha1.RoleClient })
 }
 
@@ -143,11 +208,36 @@ func accessRules(a v1alpha1.Access) ([]AccessRule, error) {
 		return nil, err
 	}
 	rules := []AccessRule{
-		{Name: "ssh", To: AllNodes, Protocol: ProtocolTCP, Port: sshPort, From: ssh},
+		{Name: "ssh", To: AllNodes, Protocol: ProtocolTCP, Port: SSHPort, From: ssh},
 		{Name: "icmp", To: AllNodes, Protocol: ProtocolICMP, From: anywhere()},
-		{Name: "api", To: Servers, Protocol: ProtocolTCP, Port: apiPort, From: api},
+		{Name: "api", To: Servers, Protocol: ProtocolTCP, Port: APIPort, From: api},
 	}
 	return slices.DeleteFunc(rules, func(r AccessRule) bool { return len(r.From) == 0 }), nil
+}
+
+// DynamicPorts returns the ports that Nomad gives workloads, which the dynamic rules open to the clients.
+func DynamicPorts() PortRange { return PortRange{First: dynamicFirst, Last: dynamicLast} }
+
+// intraRules returns the rules that open the nodes to each other over the private network cidr: the Nomad HTTP API
+// to every node, RPC and Serf to the servers, and the dynamic ports of workloads to the clients.
+func intraRules(cidr netip.Prefix) []IntraRule {
+	rule := func(name string, to Target, protocol string, first, last uint16) IntraRule {
+		return IntraRule{
+			Name:     name,
+			To:       to,
+			Protocol: protocol,
+			Ports:    PortRange{First: first, Last: last},
+			From:     []netip.Prefix{cidr},
+		}
+	}
+	return []IntraRule{
+		rule("nomad-http", AllNodes, ProtocolTCP, APIPort, APIPort),
+		rule("nomad-rpc", Servers, ProtocolTCP, rpcPort, rpcPort),
+		rule("serf", Servers, ProtocolTCP, serfPort, serfPort),
+		rule("serf", Servers, ProtocolUDP, serfPort, serfPort),
+		rule("dynamic", Clients, ProtocolTCP, dynamicFirst, dynamicLast),
+		rule("dynamic", Clients, ProtocolUDP, dynamicFirst, dynamicLast),
+	}
 }
 
 // sources parses the CIDRs at path in the spec and sorts them: IPv4 first, then by address and length. It drops
