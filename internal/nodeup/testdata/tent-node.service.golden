@@ -1,0 +1,15 @@
+# Rendered by tent-node. Do not edit: changes are overwritten.
+[Unit]
+Description=tent-node up: set the machine up as a Nomad agent of its node group
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/tent-node up --config /etc/tent/node.json
+TimeoutStartSec=45min
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

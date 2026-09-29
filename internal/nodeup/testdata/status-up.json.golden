@@ -1,0 +1,50 @@
+{
+  "version": "v0.3.0",
+  "specHash": "27e4cf146a55384d",
+  "started": "2026-09-29T12:00:01Z",
+  "finished": "2026-09-29T12:00:02Z",
+  "instance": {
+    "id": "9d1c6f3e-2b7a-4e58-8c0d-5a4f1e7b3c92",
+    "zone": "ams",
+    "privateIP": "10.64.0.7"
+  },
+  "phases": [
+    {
+      "name": "preflight",
+      "status": "unchanged"
+    },
+    {
+      "name": "system",
+      "status": "done"
+    },
+    {
+      "name": "hostfirewall",
+      "status": "skipped",
+      "reason": "not built yet"
+    },
+    {
+      "name": "runtime",
+      "status": "skipped",
+      "reason": "not built yet"
+    },
+    {
+      "name": "cni",
+      "status": "skipped",
+      "reason": "not built yet"
+    },
+    {
+      "name": "join",
+      "status": "skipped",
+      "reason": "not built yet"
+    },
+    {
+      "name": "nomad",
+      "status": "skipped",
+      "reason": "not built yet"
+    },
+    {
+      "name": "verify",
+      "status": "unchanged"
+    }
+  ]
+}

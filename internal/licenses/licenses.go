@@ -27,7 +27,8 @@ import (
 // Allowed are the licences, as the classifier names them (SPDX identifiers), that a module linked into tent may have.
 var Allowed = []string{"Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MIT", "MPL-2.0"}
 
-// Platforms are the systems the release builds tent for, as GOOS/GOARCH; each can link other modules.
+// Platforms are the systems the release builds tent for, as GOOS/GOARCH; tent-node's systems are among them. Each can
+// link other modules.
 var Platforms = []string{"darwin/amd64", "darwin/arm64", "linux/amd64", "linux/arm64", "windows/amd64", "windows/arm64"}
 
 // goLicense is Go's LICENSE. Homebrew and Linux distributions move it out of GOROOT, so the package carries a copy.
@@ -51,20 +52,21 @@ type File struct {
 	Licenses []string // the licences found in Text, sorted
 }
 
-// listedModule and listedPackage are the parts of `go list -json` output the package reads.
-type listedModule struct {
+// ListedPackage is a package as go list -json prints it: the fields that the licence check reads.
+type ListedPackage struct {
+	ImportPath string
+	Dir        string
+	Standard   bool
+	Module     *ListedModule // nil for the standard library
+}
+
+// ListedModule is the module of a ListedPackage, as go list -json prints it.
+type ListedModule struct {
 	Path    string
 	Version string
 	Dir     string
 	Main    bool
-	Replace *listedModule
-}
-
-type listedPackage struct {
-	ImportPath string
-	Dir        string
-	Standard   bool
-	Module     *listedModule
+	Replace *ListedModule
 }
 
 // licenceFile matches the names of licence and notice files, such as LICENSE, LICENSE.txt, COPYING or NOTICE.md.
@@ -73,9 +75,9 @@ var licenceFile = regexp.MustCompile(`(?i)^(licen[cs]e|copying|notice)([-._]|$)`
 // Linked returns the standard library and, sorted by path, every module the packages link on any of the platforms,
 // with their licence and notice files and the licences found in them. The program's own module is left out.
 func Linked(ctx context.Context, platforms []string, patterns ...string) ([]Module, error) {
-	var pkgs []listedPackage
+	var pkgs []ListedPackage
 	for _, p := range platforms {
-		listed, err := goList(ctx, p, patterns)
+		listed, err := List(ctx, p, patterns...)
 		if err != nil {
 			return nil, err
 		}
@@ -121,8 +123,10 @@ func goCommand(ctx context.Context, env []string, args ...string) ([]byte, error
 	return out, nil
 }
 
-// goList lists the packages the patterns build from on a platform, without cgo, as the release builds them.
-func goList(ctx context.Context, platform string, patterns []string) ([]listedPackage, error) {
+// List lists the packages that the patterns build from on a platform, GOOS/GOARCH, with every package they depend
+// on, without cgo, as the release builds them. A pattern is an import path or a pattern of them, such as
+// github.com/ingvarch/tent/cmd/tent, or a directory relative to the working directory.
+func List(ctx context.Context, platform string, patterns ...string) ([]ListedPackage, error) {
 	goos, goarch, ok := strings.Cut(platform, "/")
 	if !ok {
 		return nil, fmt.Errorf("platform %q is not GOOS/GOARCH", platform)
@@ -133,10 +137,10 @@ func goList(ctx context.Context, platform string, patterns []string) ([]listedPa
 	if err != nil {
 		return nil, fmt.Errorf("list packages for %s: %w", platform, err)
 	}
-	var pkgs []listedPackage
+	var pkgs []ListedPackage
 	dec := json.NewDecoder(bytes.NewReader(out))
 	for {
-		var p listedPackage
+		var p ListedPackage
 		err := dec.Decode(&p)
 		if errors.Is(err, io.EOF) {
 			return pkgs, nil
@@ -150,7 +154,7 @@ func goList(ctx context.Context, platform string, patterns []string) ([]listedPa
 
 // collect groups the packages outside the standard library and the main module by module, sorted by path, and reads
 // the licence and notice files between each package and its module root.
-func collect(pkgs []listedPackage) ([]Module, error) {
+func collect(pkgs []ListedPackage) ([]Module, error) {
 	type found struct {
 		mod   Module
 		dir   string

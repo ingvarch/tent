@@ -1,0 +1,70 @@
+{
+  "bgp": {
+    "ipv4": {
+      "my-address": "",
+      "my-asn": "",
+      "peer-address": "",
+      "peer-asn": ""
+    },
+    "ipv6": {
+      "my-address": "",
+      "my-asn": "",
+      "peer-address": "",
+      "peer-asn": ""
+    }
+  },
+  "hostname": "prod-core-0",
+  "instance-v2-id": "0b8f5c3e-1d2a-4c6e-9f7b-2a4d6e8c0f13",
+  "instanceid": "123456789",
+  "interfaces": [
+    {
+      "ipv4": {
+        "additional": [],
+        "address": "203.0.113.42",
+        "gateway": "203.0.113.1",
+        "netmask": "255.255.255.0",
+        "routes": [
+          {
+            "netmask": 32,
+            "network": "169.254.169.254"
+          }
+        ]
+      },
+      "ipv6": {
+        "additional": [],
+        "address": "",
+        "network": "",
+        "prefix": ""
+      },
+      "mac": "00:00:5e:00:53:01",
+      "network-type": "public"
+    },
+    {
+      "ipv4": {
+        "additional": [],
+        "address": "10.64.0.3",
+        "gateway": "",
+        "netmask": "255.255.0.0"
+      },
+      "ipv6": {
+        "additional": [],
+        "network": "",
+        "prefix": ""
+      },
+      "mac": "00:00:5e:00:53:02",
+      "mtu": "1450",
+      "network-type": "private",
+      "network-v2-id": "5d2e7a41-9c3b-4f60-8e15-b7a0c4d9e263",
+      "networkid": "net0000000000001"
+    }
+  ],
+  "nvidia-driver": [],
+  "public-keys": [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA tent-example"
+  ],
+  "region": {
+    "countrycode": "NL",
+    "regioncode": "AMS"
+  },
+  "tags": []
+}

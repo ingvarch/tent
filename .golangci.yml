@@ -71,7 +71,8 @@ linters:
             - $gostd
             - github.com/ingvarch/tent/internal/secret$
             - github.com/ingvarch/tent/api/v1alpha1$
-        # internal/secrettest and nomadfake, which imports testing, are for tests: no code that tent runs imports them.
+        # internal/secrettest, nomadfake and nodeuptest, which import testing, are for tests: no code that tent
+        # or tent-node runs imports them.
         secrettest-only-in-tests:
           files: ["$all", "!$test"]
           deny:
@@ -79,6 +80,8 @@ linters:
               desc: internal/secrettest is for tests only
             - pkg: github.com/ingvarch/tent/internal/nomadops/nomadfake
               desc: nomadfake is for tests only
+            - pkg: github.com/ingvarch/tent/internal/nodeup/nodeuptest
+              desc: nodeuptest is for tests only
         # Tests read the rendered Nomad configuration back with HCL1; no code that tent runs parses HCL.
         hcl-only-in-tests:
           files: ["$all", "!$test"]
@@ -104,9 +107,12 @@ linters:
             - pkg: github.com/hetznercloud/hcloud-go
               desc: hcloud-go is used only by internal/cloud/hetzner (ADR-0021)
         # No code that can create or delete cloud resources runs on a node, not even the provider interfaces: neither
-        # tent-node's phases nor the NodeConfig they read, tests included.
+        # tent-node, its phases nor the NodeConfig they read, tests included.
         nodeup-no-cloud:
-          files: ["${base-path}/internal/nodeup/**", "${base-path}/internal/nodeconfig/**"]
+          files:
+            - "${base-path}/internal/nodeup/**"
+            - "${base-path}/internal/nodeconfig/**"
+            - "${base-path}/cmd/tent-node/**"
           deny:
             - pkg: github.com/ingvarch/tent/internal/cloud$
               desc: tent-node never touches cloud APIs
@@ -124,6 +130,19 @@ linters:
               desc: tent-node carries no PGP code; its assets come in NodeConfig (ADR-0006, ADR-0026)
             - pkg: github.com/ingvarch/tent/internal/channels$
               desc: tent-node reads versions from NodeConfig, not from the channels (ADR-0006, ADR-0026)
+        # tent-node runs as root on every node, so its code imports only the standard library, its own packages, the
+        # NodeConfig it reads, the helpers and API types that NodeConfig uses, and internal/buildinfo for its version.
+        # Tests are exempt.
+        tent-node-allowed:
+          files: ["${base-path}/internal/nodeup/**", "${base-path}/cmd/tent-node/**", "!$test"]
+          allow:
+            - $gostd
+            - github.com/ingvarch/tent/internal/nodeup$
+            - github.com/ingvarch/tent/internal/nodeup/
+            - github.com/ingvarch/tent/internal/nodeconfig$
+            - github.com/ingvarch/tent/internal/secret$
+            - github.com/ingvarch/tent/internal/buildinfo$
+            - github.com/ingvarch/tent/api/v1alpha1$
         # Only internal/nomadops talks to Nomad (ADR-0011).
         nomad-only-in-nomadops:
           files: ["$all", "!${base-path}/internal/nomadops/**"]

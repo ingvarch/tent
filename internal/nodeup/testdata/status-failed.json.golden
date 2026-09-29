@@ -1,0 +1,32 @@
+{
+  "version": "v0.3.0",
+  "specHash": "747140e7788cc041",
+  "started": "2026-09-29T12:00:00Z",
+  "finished": "2026-09-29T12:00:00Z",
+  "instance": {
+    "id": "9d1c6f3e-2b7a-4e58-8c0d-5a4f1e7b3c92",
+    "zone": "ams",
+    "privateIP": "10.64.0.7"
+  },
+  "phases": [
+    {
+      "name": "preflight",
+      "status": "done"
+    },
+    {
+      "name": "system",
+      "status": "failed",
+      "reason": "load kernel modules: modprobe br_netfilter: exit status 1: modprobe: FATAL: Module br_netfilter not found."
+    },
+    {
+      "name": "hostfirewall",
+      "status": "skipped",
+      "reason": "not run: system failed"
+    },
+    {
+      "name": "verify",
+      "status": "skipped",
+      "reason": "not run: system failed"
+    }
+  ]
+}

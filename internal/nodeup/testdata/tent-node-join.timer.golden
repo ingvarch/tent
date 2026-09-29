@@ -1,0 +1,11 @@
+# Rendered by tent-node. Do not edit: changes are overwritten.
+[Unit]
+Description=Run tent-node refresh-join every 60s
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=60s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
