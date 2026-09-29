@@ -6,6 +6,7 @@ LDFLAGS = \
 	-X $(MODULE)/internal/buildinfo.version=$(VERSION) \
 	-X $(MODULE)/internal/buildinfo.commit=$(COMMIT) \
 	-X $(MODULE)/internal/buildinfo.date=$(DATE)
+GOBUILD = go build -trimpath -ldflags "$(LDFLAGS)"
 
 # The version CI lints with; another one finds and formats other things. internal/buildconfig keeps the two equal.
 GOLANGCI_LINT_VERSION := 2.14.0
@@ -16,8 +17,11 @@ GOLANGCI_LINT_VERSION := 2.14.0
 
 check: fmt lint licenses test build
 
+# build also builds tent-node for linux/amd64 with the same version: the nodes of a development build run it
+# (TENT_NODE_URL and TENT_NODE_SHA256).
 build:
-	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/tent ./cmd/tent
+	$(GOBUILD) -o bin/tent ./cmd/tent
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -o bin/tent-node_linux_amd64 ./cmd/tent-node
 
 test:
 	go test -race ./...
@@ -40,13 +44,13 @@ lint: golangci-lint-version
 fmt: golangci-lint-version
 	golangci-lint fmt ./...
 
-# licenses fails when a module tent links, on any platform the release builds for, has a licence outside
+# licenses fails when a module tent or tent-node links, on any platform the release builds for, has a licence outside
 # internal/licenses.Allowed. notices checks the same and writes THIRD_PARTY_NOTICES, which the release ships.
 licenses:
-	go run ./internal/licenses/cmd/licenses ./cmd/tent
+	go run ./internal/licenses/cmd/licenses ./cmd/tent ./cmd/tent-node
 
 notices:
-	go run ./internal/licenses/cmd/licenses -notices THIRD_PARTY_NOTICES ./cmd/tent
+	go run ./internal/licenses/cmd/licenses -notices THIRD_PARTY_NOTICES ./cmd/tent ./cmd/tent-node
 
 generate:
 	go generate ./...

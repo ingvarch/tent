@@ -9,6 +9,11 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+
+	"github.com/ingvarch/tent/internal/assets"
 )
 
 // recipe returns the commands of a Makefile target, one per line, without the leading tab.
@@ -148,6 +153,61 @@ func TestCIRunsTheTestsTheMakefileRuns(t *testing.T) {
 	}
 }
 
+// makeVariable returns the value of a variable the Makefile sets with = or :=, its continued lines joined by spaces.
+func makeVariable(t *testing.T, name string) string {
+	t.Helper()
+	lines := strings.Split(string(repoFile(t, "Makefile")), "\n")
+	assign := regexp.MustCompile(`^` + regexp.QuoteMeta(name) + `\s*:?=\s*(.*)$`)
+	for i, line := range lines {
+		m := assign.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		value := m[1]
+		for rest := lines[i+1:]; strings.HasSuffix(value, `\`) && len(rest) > 0; rest = rest[1:] {
+			value = strings.TrimSuffix(value, `\`) + " " + rest[0]
+		}
+		return strings.Join(strings.Fields(value), " ")
+	}
+	t.Fatalf("the Makefile does not set %s", name)
+	return ""
+}
+
+// stamped returns the variables that -X flags set, such as github.com/ingvarch/tent/internal/buildinfo.version.
+func stamped(ldflags string) []string {
+	var vars []string
+	for _, m := range regexp.MustCompile(`-X\s+([^=\s]+)=`).FindAllStringSubmatch(ldflags, -1) {
+		vars = append(vars, m[1])
+	}
+	return vars
+}
+
+func TestMakefileStampsWhatTheReleaseStamps(t *testing.T) {
+	// A development build reports its version, commit and date as a release does.
+	module := makeVariable(t, "MODULE")
+	got := stamped(strings.ReplaceAll(makeVariable(t, "LDFLAGS"), "$(MODULE)", module))
+	want := stamped(strings.Join(byID(t, "builds", release(t).Builds, "tent").Ldflags, " "))
+	if len(want) == 0 {
+		t.Fatal("the release stamps no variables")
+	}
+	if diff := cmp.Diff(want, got, cmpopts.SortSlices(strings.Compare)); diff != "" {
+		t.Errorf("variables the Makefile stamps (-release +Makefile):\n%s", diff)
+	}
+}
+
+func TestMakeBuildBuildsTentNodeLikeTent(t *testing.T) {
+	// A development build's nodes run the tent-node it builds, which must carry the same version as its tent.
+	if got, want := makeVariable(t, "GOBUILD"), `go build -trimpath -ldflags "$(LDFLAGS)"`; got != want {
+		t.Errorf("the Makefile sets GOBUILD = %s, want %s", got, want)
+	}
+	want := []string{
+		"$(GOBUILD) -o bin/tent ./cmd/tent",
+		"GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GOBUILD) -o bin/" + assets.TentNodeFile("amd64") + " ./cmd/tent-node",
+	}
+	if diff := cmp.Diff(want, recipe(t, "build")); diff != "" {
+		t.Errorf("make build (-want +got):\n%s", diff)
+	}
+}
 func TestMakeCleanRemovesWhatTheBuildWrites(t *testing.T) {
 	removed := strings.Fields(oneCommand(t, "clean"))
 	for _, generated := range []string{"bin", "dist", noticesFile} {

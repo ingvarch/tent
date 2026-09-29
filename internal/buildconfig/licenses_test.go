@@ -46,15 +46,48 @@ func TestReleaseWritesTheNoticesBeforeItBuilds(t *testing.T) {
 
 func TestReleaseArchivesShipTheLicenceAndTheNotices(t *testing.T) {
 	archives := release(t).Archives
-	if len(archives) == 0 {
-		t.Fatal(".goreleaser.yaml has no archives")
+	if !slices.ContainsFunc(archives, func(a releaseArchive) bool { return !a.bare() }) {
+		t.Fatal(".goreleaser.yaml has no archives that hold files")
 	}
-	for i, a := range archives {
+	// A bare binary has no room for them; the release publishes the notices beside it.
+	for _, a := range archives {
+		if a.bare() {
+			continue
+		}
 		for _, file := range []string{"LICENSE", noticesFile} {
 			if !slices.ContainsFunc(a.Files, func(f any) bool { return listEntry(f, "src") == file }) {
-				t.Errorf("archive %d does not ship %s: files %v", i, file, a.Files)
+				t.Errorf("archive %q does not ship %s: files %v", a.ID, file, a.Files)
 			}
 		}
+	}
+}
+
+func TestReleasePublishesTheNotices(t *testing.T) {
+	// tent-node ships as a bare binary, so its notices are a file of the release, listed in the signed checksums.
+	cfg := release(t)
+	notices := func(f extraFile) bool { return f.Glob == noticesFile }
+	if !slices.ContainsFunc(cfg.Release.ExtraFiles, notices) {
+		t.Errorf("release extra_files %+v do not publish %s", cfg.Release.ExtraFiles, noticesFile)
+	}
+	if !slices.ContainsFunc(cfg.Checksum.ExtraFiles, notices) {
+		t.Errorf("checksum extra_files %+v do not list %s", cfg.Checksum.ExtraFiles, noticesFile)
+	}
+}
+
+func TestLicenceCheckCoversEveryReleasedBinary(t *testing.T) {
+	// One notices file covers both binaries, so the check reads what either of them links.
+	const licensesCmd = "go run ./internal/licenses/cmd/licenses "
+	check := oneCommand(t, "licenses")
+	pkgs, ok := strings.CutPrefix(check, licensesCmd)
+	if !ok {
+		t.Fatalf("make licenses runs %q, want %q and the main packages", check, licensesCmd)
+	}
+	var mains []string
+	for _, b := range release(t).Builds {
+		mains = append(mains, b.Main)
+	}
+	if diff := cmp.Diff(mains, strings.Fields(pkgs), cmpopts.SortSlices(strings.Compare)); diff != "" {
+		t.Errorf("make licenses checks other packages than the release builds (-built +checked):\n%s", diff)
 	}
 }
 
@@ -76,11 +109,9 @@ func TestLicenceCheckCoversEveryReleasePlatform(t *testing.T) {
 	var want []string
 	for _, b := range release(t).Builds {
 		for _, target := range b.Targets {
-			parts := strings.SplitN(target, "_", 3)
-			if len(parts) < 2 {
-				t.Fatalf("target %q is not goos_goarch", target)
+			if p := platform(t, target); !slices.Contains(want, p) {
+				want = append(want, p)
 			}
-			want = append(want, parts[0]+"/"+parts[1])
 		}
 	}
 	if diff := cmp.Diff(want, licenses.Platforms, cmpopts.SortSlices(strings.Compare)); diff != "" {

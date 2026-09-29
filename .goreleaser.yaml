@@ -3,20 +3,21 @@ version: 2
 
 project_name: tent
 
-# The licences of what tent links require their texts in every copy (ADR-0020). This also fails on a licence tent
-# does not allow.
+# The licences of what tent and tent-node link require their texts in every copy (ADR-0020). This also fails on a
+# licence tent does not allow.
 before:
   hooks:
-    - go run ./internal/licenses/cmd/licenses -notices THIRD_PARTY_NOTICES ./cmd/tent
+    - go run ./internal/licenses/cmd/licenses -notices THIRD_PARTY_NOTICES ./cmd/tent ./cmd/tent-node
 
 builds:
-  - main: ./cmd/tent
+  - id: tent
+    main: ./cmd/tent
     binary: tent
-    env:
+    env: &env
       - CGO_ENABLED=0
-    flags:
+    flags: &flags
       - -trimpath
-    ldflags:
+    ldflags: &ldflags
       - -s -w
       - -X github.com/ingvarch/tent/internal/buildinfo.version=v{{ .Version }}
       - -X github.com/ingvarch/tent/internal/buildinfo.commit={{ .ShortCommit }}
@@ -28,10 +29,23 @@ builds:
       - darwin_arm64_v8.0
       - windows_amd64_v1
       - windows_arm64_v8.0
+  # The node agent: nodes download it from the release by its sha256 in checksums.txt (ADR-0026).
+  - id: tent-node
+    main: ./cmd/tent-node
+    binary: tent-node
+    env: *env
+    flags: *flags
+    ldflags: *ldflags
+    targets:
+      - linux_amd64_v1
+      - linux_arm64_v8.0
 
 archives:
   # A zip for Windows, a tarball everywhere else.
-  - formats:
+  - id: tent
+    ids:
+      - tent
+    formats:
       - tar.gz
     format_overrides:
       - goos: windows
@@ -41,9 +55,19 @@ archives:
       - LICENSE
       - README.md
       - THIRD_PARTY_NOTICES
+  # The bare binary, named as internal/assets looks it up: tent-node_linux_<arch>.
+  - id: tent-node
+    ids:
+      - tent-node
+    formats:
+      - binary
+    name_template: "{{ .Binary }}_{{ .Os }}_{{ .Arch }}"
 
+# The notices are a file of the release, so the signed checksums cover them too.
 checksum:
   name_template: checksums.txt
+  extra_files:
+    - glob: THIRD_PARTY_NOTICES
 
 # Keyless: the release job's OIDC token proves which workflow signed (ADR-0013).
 signs:
@@ -58,11 +82,18 @@ signs:
 
 sboms:
   - artifacts: archive
+  # tent-node is in no archive.
+  - id: tent-node
+    artifacts: binary
+    ids:
+      - tent-node
 
 # Gatekeeper runs a downloaded binary only once Apple has notarized it. A snapshot has no Apple keys.
 notarize:
   macos:
     - enabled: "{{ not .IsSnapshot }}"
+      ids:
+        - tent
       sign:
         certificate: "{{ .Env.MACOS_SIGN_P12 }}"
         password: "{{ .Env.MACOS_SIGN_PASSWORD }}"
@@ -76,12 +107,17 @@ notarize:
 changelog:
   use: github-native
 
-# A -rc tag is published as a prerelease, not as Latest.
+# A -rc tag is published as a prerelease, not as Latest. The bare tent-node binaries have no room for the notices, so
+# they are a file of the release too.
 release:
   prerelease: auto
+  extra_files:
+    - glob: THIRD_PARTY_NOTICES
 
 nfpms:
-  - vendor: Igor Churmeev
+  - ids:
+      - tent
+    vendor: Igor Churmeev
     maintainer: Igor Churmeev <ingvarch@gmail.com>
     homepage: &homepage https://github.com/ingvarch/tent
     description: &description Provision and operate HashiCorp Nomad clusters on cloud providers
@@ -96,8 +132,11 @@ nfpms:
       - src: THIRD_PARTY_NOTICES
         dst: /usr/share/doc/tent/THIRD_PARTY_NOTICES
 
+# ids select archives here: tent's archive.
 homebrew_casks:
-  - homepage: *homepage
+  - ids:
+      - tent
+    homepage: *homepage
     description: *description
     license: *license
     skip_upload: auto
