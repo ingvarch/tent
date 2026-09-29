@@ -32,6 +32,7 @@ Run it once before starting milestone M1, and again whenever Vultr changes somet
 | `vpcpending` | What `GET /instances/{id}/vpcs` answers while instance A boots, from right after the create answer until it lists an address other than `0.0.0.0` (at most 120 s): each distinct answer (HTTP status, error text or addresses, and A's status) with the seconds since the create | whether tent's List may read a 404 on `/vpcs` as a deleted instance |
 | `halttwice` | Halt A, wait until it is stopped (at most 60 s), halt it again: both answers. Runs last and leaves A stopped | whether `Stop` fails when Go's HTTP/2 client sends the bodyless halt twice |
 | `objstore` (runs only if `S3_*` is set) | `If-None-Match: *` and `If-Match` on an existing bucket | state-store locking |
+| `tentnode` (alone, not in the default list) | A development build of tent-node on instance T, booted with the user data of `hack/tent-node-userdata`. Over SSH: node.json arrives intact (its sha256 against the gz+b64 payload), `cloud-init status --wait --long`, the OS and its time sync (`timedatectl`, the NTP units, systemd-timesyncd and chrony), the units active and enabled, `status.json` (phases, instance id, zone, private IP against the API, version), `systemd-analyze critical-chain tent-node.service` (marked UNEXPECTED when it passes cloud-final, cloud-config or cloud-init.target), what `systemctl is-enabled no-such.service` prints on stdout and stderr and its exit code, the cloud-init output, and that all nine files tent-node writes exist. Then a reboot from inside: cloud-init and `NTPSynchronized` again, `status.json` again (every phase unchanged), the modification time and sha256 of tent-node's files before and after (only `status.json` may change), how long preflight's metadata read took after the reboot and on the first boot, the boot order (multi-user.target orders after tent-node.service, which became active before multi-user.target, before cloud-final.service started), the critical chains of cloud-final.service and of the default target as records, and the journal of both boots | the M2.5 exit check on a real VM; platform notes §3.4 and §3.16 |
 
 ## Cost and duration
 
@@ -47,6 +48,8 @@ Run it once before starting milestone M1, and again whenever Vultr changes somet
   `--only vpcpending,fwinuse,halttwice` and `--only sshdup,lengths,rules,fwinuse,patchtags,vpcpending,halttwice`
   create one instance (A): about **$0.01** and 5–10 minutes. `--only sshdup,lengths,rules` creates no instance:
   free, 1–3 minutes.
+- **tentnode.** One instance (T), one VPC (the first of `VPC_MASKS` alone, no test VPCs) and one SSH key: about
+  **$0.01** and 10–15 minutes with the reboot.
 
 ## Prerequisites
 
@@ -64,6 +67,12 @@ Run it once before starting milestone M1, and again whenever Vultr changes somet
   error and the checks that need it are skipped.
 - **Reachability.** For the checks that need SSH, your machine must reach the instances' public IPs on ports 22 and
   4646. The firewall check probes port 4646 from your side.
+- **For `tentnode`:** `go` and `gzip`, and a development build of tent-node uploaded with `make dev-upload`
+  ([hack/tent-node-upload](../tent-node-upload/README.md)), which sets `TENT_NODE_URL` and `TENT_NODE_SHA256`. The
+  script takes the version of that tent-node from `bin/tent` of the same build, after it checks that
+  `bin/tent-node_linux_amd64` has the sha256 `TENT_NODE_SHA256`; set `TENT_NODE_VERSION` to skip both. The plan must
+  be amd64, as the default `vc2-1c-1gb` is. The script never prints the URL, and masks its signature and credential
+  in what it records from the instance.
 
 ## Usage
 
@@ -94,9 +103,24 @@ S3_ENDPOINT=https://ams1.vultrobjects.com S3_BUCKET=my-bucket \
 S3_ACCESS_KEY=... S3_SECRET_KEY=... ./hack/vultr-spike/spike.sh --only objstore
 ```
 
+The tent-node check, in fish:
+
+```fish
+make dev-upload | source             # needs TENT_DEV_S3_URL and the R2 token (hack/tent-node-upload)
+set -x VULTR_API_KEY (<password manager command>)
+./hack/vultr-spike/spike.sh --yes --only tentnode
+
+# The same on Ubuntu 26.04: by the image's exact name, or by its os_id (tent's image table says 2760).
+env OS_NAME="Ubuntu 26.04 LTS x64" ./hack/vultr-spike/spike.sh --yes --only tentnode
+env OS_ID=2760 ./hack/vultr-spike/spike.sh --yes --only tentnode
+```
+
+The script picks the image by `OS_ID` when it is set and by the exact name `OS_NAME` otherwise. The report's header
+and preflight row name the image that the run used, looked up by its `os_id` when only `OS_ID` is set.
+
 Options: `--preflight`, `--dry-run`, `--yes`, `--keep`, `--only LIST`, `--region ID`, `--plan ID`, `--out DIR`.
 Environment: `REGION`, `PLAN`, `OS_NAME` / `OS_ID`, `VPC_SUBNET`, `VPC_MASKS`, `READY_TIMEOUT`, `VENDOR_TIMEOUT`,
-`USERDATA_TARGET`, `S3_*`. See `--help`.
+`USERDATA_TARGET`, `S3_*`, `TENT_NODE_URL`, `TENT_NODE_SHA256`, `TENT_NODE_VERSION`. See `--help`.
 
 ## Output
 

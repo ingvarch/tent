@@ -10,13 +10,13 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ingvarch/tent/internal/s3url/s3urltest"
 	"github.com/ingvarch/tent/internal/statestore"
 	"github.com/ingvarch/tent/internal/statestore/storetest"
 )
@@ -127,7 +127,7 @@ func wantMechanism(t *testing.T, s statestore.Store, want statestore.Mechanism) 
 }
 
 func TestOpenS3(t *testing.T) {
-	isolateAWS(t)
+	s3urltest.IsolateAWS(t)
 	for _, tc := range []struct{ name, url, want string }{
 		{"bucket", "s3://tent-state?region=eu-central-1", "s3://tent-state"},
 		{"trailing slash", "s3://tent-state/?region=eu-central-1", "s3://tent-state"},
@@ -164,7 +164,7 @@ func TestOpenS3(t *testing.T) {
 }
 
 func TestOpenS3RegionFromTheEnvironment(t *testing.T) {
-	isolateAWS(t)
+	s3urltest.IsolateAWS(t)
 	t.Setenv("AWS_REGION", "eu-central-1")
 	if _, err := statestore.Open(t.Context(), "s3://tent-state/prod"); err != nil {
 		t.Errorf("Open without a region in the URL but with AWS_REGION: %v", err)
@@ -172,7 +172,7 @@ func TestOpenS3RegionFromTheEnvironment(t *testing.T) {
 }
 
 func TestOpenS3Rejects(t *testing.T) {
-	isolateAWS(t)
+	s3urltest.IsolateAWS(t)
 	testRejects(t, []rejectCase{
 		{"empty", "s3://", "name a bucket"},
 		{"no bucket", "s3:///state?region=auto", "name a bucket"},
@@ -437,7 +437,7 @@ func TestS3AddressingStyle(t *testing.T) {
 				t.Skipf("%s does not resolve here: %v", tc.host, err)
 			}
 			f := newFakeS3(t)
-			isolateAWS(t)
+			s3urltest.IsolateAWS(t)
 			endpoint := strings.Replace(f.url, "127.0.0.1", "localhost", 1) // an IP address is always path-style
 			s := openS3(t, "s3://"+fakeBucket+"/state?endpoint="+endpoint+"&region=us-east-1&pathStyle="+tc.pathStyle)
 			mustPutS3(t, s, "a", "x")
@@ -540,7 +540,7 @@ func (c *offlineClient) Do(r *http.Request) (*http.Response, error) {
 // TestS3HetznerTakesNoConditionalPuts checks that a store on Hetzner Object Storage reports no conditional puts
 // without asking the server, and refuses them.
 func TestS3HetznerTakesNoConditionalPuts(t *testing.T) {
-	isolateAWS(t)
+	s3urltest.IsolateAWS(t)
 	for _, tc := range []struct{ name, endpoint string }{
 		{"location", "https://fsn1.your-objectstorage.com"},
 		{"domain", "https://your-objectstorage.com"},
@@ -825,23 +825,8 @@ func openS3(t *testing.T, rawURL string) statestore.Store {
 // fakeURL keeps the AWS environment out of the test and returns the URL of the prefix "state" in the fake's bucket.
 func fakeURL(t *testing.T, f *fakeS3) string {
 	t.Helper()
-	isolateAWS(t)
+	s3urltest.IsolateAWS(t)
 	return "s3://" + fakeBucket + "/state?endpoint=" + f.url + "&region=us-east-1&pathStyle=true"
-}
-
-// isolateAWS keeps the developer's AWS configuration out of a test: no shared files, and no region, endpoint or
-// retry settings. The keys are made up.
-func isolateAWS(t *testing.T) {
-	t.Helper()
-	missing := filepath.Join(t.TempDir(), "missing")
-	for _, kv := range [][2]string{
-		{"AWS_CONFIG_FILE", missing}, {"AWS_SHARED_CREDENTIALS_FILE", missing}, {"AWS_PROFILE", ""},
-		{"AWS_REGION", ""}, {"AWS_DEFAULT_REGION", ""}, {"AWS_ENDPOINT_URL", ""}, {"AWS_ENDPOINT_URL_S3", ""},
-		{"AWS_MAX_ATTEMPTS", ""}, {"AWS_RETRY_MODE", ""},
-		{"AWS_ACCESS_KEY_ID", "AKIAFAKE"}, {"AWS_SECRET_ACCESS_KEY", "fake-secret"}, {"AWS_SESSION_TOKEN", ""},
-	} {
-		t.Setenv(kv[0], kv[1])
-	}
 }
 
 // s3TestURL returns the URL of a new, empty prefix below the one in TENT_TEST_S3_URL, and deletes everything below

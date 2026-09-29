@@ -7,21 +7,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	mathrand "math/rand/v2"
 	"net/http"
 	"net/url"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
-	"github.com/aws/smithy-go/logging"
+
+	"github.com/ingvarch/tent/internal/s3url"
 )
 
 // A server throttles a request when it gets too many: Cloudflare R2 takes one write per second to a key and answers
@@ -46,45 +44,34 @@ type s3Store struct {
 	caps *Capabilities // the probe's answer, once there is one; set from the start for Hetzner
 }
 
-// s3Params are what an s3 URL says.
-type s3Params struct {
-	bucket, prefix, endpoint, region string
-	pathStyle                        bool
-}
-
-func newS3Store(ctx context.Context, u *url.URL) (*s3Store, error) {
-	p, err := parseS3URL(u)
+// newS3Store opens the bucket that rawURL names; Open has checked that the URL parses and has no user.
+func newS3Store(ctx context.Context, rawURL string) (*s3Store, error) {
+	p, err := s3url.Parse(rawURL, checkPrefix)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("state store URL: %w", err)
 	}
-	// The SDK logs to stderr by default.
-	opts := []func(*config.LoadOptions) error{config.WithLogger(logging.Nop{})}
-	if p.region != "" {
-		opts = append(opts, config.WithRegion(p.region))
+	client, err := p.Client(ctx)
+	switch {
+	case errors.Is(err, s3url.ErrNoRegion):
+		return nil, fmt.Errorf("state store URL: %w", err)
+	case err != nil:
+		return nil, fmt.Errorf("state store: %w", err)
 	}
-	cfg, err := config.LoadDefaultConfig(ctx, opts...)
-	if err != nil {
-		return nil, fmt.Errorf("state store: load the AWS configuration: %w", err)
-	}
-	if cfg.Region == "" {
-		return nil, errors.New("state store URL: no region: add region=… (Cloudflare R2 takes auto) " +
-			"or set AWS_REGION")
-	}
-	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
-		if p.endpoint != "" {
-			o.BaseEndpoint = aws.String(p.endpoint)
-		}
-		o.UsePathStyle = p.pathStyle
-		// Only where the API requires it: Ceph RGW sends no checksum with GET.
-		o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
-	})
-	s := &s3Store{client: client, bucket: p.bucket, prefix: p.prefix, url: p.String()}
+	s := &s3Store{client: client, bucket: p.Bucket, prefix: p.Prefix, url: p.String()}
 	// Hetzner Object Storage does not document conditional writes, so tent does not rely on them until end-to-end
 	// tests prove them.
-	if hetzner(p.endpoint) {
+	if hetzner(p.Endpoint) {
 		s.caps = &Capabilities{}
 	}
 	return s, nil
+}
+
+// checkPrefix checks the prefix of an s3 URL: its segments follow the rules of object paths.
+func checkPrefix(prefix string) error {
+	if why := badSegments(prefix); why != "" {
+		return errors.New(why)
+	}
+	return nil
 }
 
 // hetzner reports whether an endpoint is Hetzner Object Storage.
@@ -95,80 +82,6 @@ func hetzner(endpoint string) bool {
 	}
 	host := strings.ToLower(u.Hostname())
 	return host == "your-objectstorage.com" || strings.HasSuffix(host, ".your-objectstorage.com")
-}
-
-// parseS3URL reads s3://bucket[/prefix]?endpoint=…&region=…&pathStyle=…. Its errors never show a query value.
-func parseS3URL(u *url.URL) (s3Params, error) {
-	switch {
-	case u.Host == "":
-		return s3Params{}, errors.New("state store URL: name a bucket: s3://bucket[/prefix]")
-	case strings.Contains(u.Host, ":"):
-		return s3Params{}, errors.New("state store URL: a bucket has no port: name the server with " +
-			"endpoint=https://host:port")
-	case u.Fragment != "":
-		return s3Params{}, errors.New("state store URL: an s3 URL takes no fragment")
-	}
-	p := s3Params{bucket: u.Host, prefix: strings.TrimSuffix(strings.TrimPrefix(u.Path, "/"), "/")}
-	if p.prefix != "" {
-		if why := badSegments(p.prefix); why != "" {
-			return s3Params{}, errors.New("state store URL: invalid prefix: " + why)
-		}
-	}
-	q, err := url.ParseQuery(u.RawQuery)
-	if err != nil {
-		return s3Params{}, fmt.Errorf("state store URL: %w", err)
-	}
-	for _, key := range slices.Sorted(maps.Keys(q)) {
-		switch {
-		case key != "endpoint" && key != "region" && key != "pathStyle":
-			return s3Params{}, errors.New("state store URL: unknown query parameter: an s3 URL takes endpoint, " +
-				"region and pathStyle")
-		case len(q[key]) > 1:
-			return s3Params{}, fmt.Errorf("state store URL: %s is given more than once", key)
-		}
-	}
-	if v, ok := q["region"]; ok {
-		if p.region = v[0]; p.region == "" {
-			return s3Params{}, errors.New("state store URL: region is empty")
-		}
-	}
-	if v, ok := q["endpoint"]; ok {
-		if p.endpoint, err = parseEndpoint(v[0]); err != nil {
-			return s3Params{}, err
-		}
-	}
-	if v, ok := q["pathStyle"]; ok {
-		if p.pathStyle, err = strconv.ParseBool(v[0]); err != nil {
-			return s3Params{}, errors.New("state store URL: pathStyle must be true or false")
-		}
-	}
-	return p, nil
-}
-
-// parseEndpoint checks an endpoint, http or https and a host, and returns it as scheme://host.
-func parseEndpoint(raw string) (string, error) {
-	e, err := url.Parse(raw)
-	if err == nil && e.User != nil {
-		return "", errors.New("state store URL: remove the user and password from the endpoint: credentials come " +
-			"from the environment")
-	}
-	if err != nil || (e.Scheme != "https" && e.Scheme != "http") || e.Host == "" || (e.Path != "" && e.Path != "/") ||
-		e.RawQuery != "" || e.Fragment != "" {
-		return "", errors.New("state store URL: endpoint must be https:// or http:// and a host, without a path, " +
-			"query or fragment")
-	}
-	return e.Scheme + "://" + e.Host, nil
-}
-
-func (p s3Params) String() string {
-	s := "s3://" + p.bucket
-	if p.prefix != "" {
-		s += "/" + p.prefix
-	}
-	if p.endpoint != "" {
-		s += "?endpoint=" + p.endpoint
-	}
-	return s
 }
 
 // key returns the key of the object at path p, or of the objects below p when p ends with a slash or is empty.
