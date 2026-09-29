@@ -41,7 +41,7 @@ func Nomad(ctx context.Context, opts Options, version, arch string) (Asset, erro
 	if err != nil {
 		return Asset{}, err
 	}
-	err = verify(cmp.Or(opts.nomadKey, hashicorpKey), sums, sig, opts.now)
+	err = verify(cmp.Or(opts.nomadKey, hashicorpKey), sums, sig, opts.Now)
 	if errors.Is(err, pgperrors.ErrKeyExpired) && opts.nomadKey == "" {
 		err = fmt.Errorf("HashiCorp's release key embedded in this tent expired on %s: a newer tent, with the "+
 			"renewed key, is needed: %w", hashicorpKeyExpiry, err)
