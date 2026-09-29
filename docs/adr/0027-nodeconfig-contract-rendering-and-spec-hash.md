@@ -1,6 +1,9 @@
 # ADR-0027: NodeConfig contract, rendering and spec hash
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by [ADR-0028](0028-tent-node-agent-units-and-delivery.md) (NodeConfig gains
+  `provider`, validated and out of the spec hash; a kernel module or a sysctl key starts with a letter or a digit;
+  of the M2.5 follow-ups, `nomad config validate` moves to M2.6 and gz+b64 waits for the M2.5 VM check, which
+  verified it on 2026-09-29)
 - **Date:** 2026-09-29
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0006](0006-two-binaries-and-nodeconfig.md) (the size budget, the instance id),

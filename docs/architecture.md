@@ -418,7 +418,7 @@ github.com/ingvarch/tent
 ├── api/v1alpha1/        # public types: Cluster, NodeGroup, defaults, validation (stdlib only); tent.schema.json
 ├── cmd/
 │   ├── tent/            # CLI entrypoint; registers providers
-│   └── tent-node/       # node agent entrypoint
+│   └── tent-node/       # node agent: install, up, refresh-join, version (standard flag package)
 ├── internal/
 │   ├── cli/             # cobra commands, flags, output (table|yaml|json): a thin layer
 │   ├── spec/            # multi-document YAML specs: strict decoding with file lines, encoding in field order
@@ -433,8 +433,10 @@ github.com/ingvarch/tent
 │   │   │   └── vultrfake/ # in-memory fake of vultr.API for provider and core tests
 │   │   └── hetzner/     # hcloud-go wrapper, tasks, nodes, inventory, pricing, lock
 │   ├── nodeconfig/      # tent <-> tent-node contract: NodeConfig, Nomad config rendering, spec hash, user data
-│   ├── nodeup/          # tent-node phases: system, host firewall, runtime, CNI, nomad, join refresh
-│   │   └── env/         # metadata clients: vultr/, hetzner/ (IMDSv2 for AWS later)
+│   ├── nodeup/          # tent-node: phase runner over FS and exec, phases, systemd units, install; status.json
+│   │   ├── env/         # Environment: a cloud's metadata service, read once per run
+│   │   │   └── vultr/   # Vultr's /v1.json (hetzner/ in M4, IMDSv2 for AWS later)
+│   │   └── nodeuptest/  # tests only: in-memory FS, scripted runner, fake Ubuntu with systemd
 │   ├── nomadops/        # the ONLY importer of github.com/hashicorp/nomad/api: mTLS client, ACL bootstrap, waits
 │   │   └── nomadfake/   # in-memory Nomad cluster behind nomadops.API, for the app's tests
 │   ├── rollout/         # scale up/down, rolling update, server quorum safety
@@ -445,12 +447,14 @@ github.com/ingvarch/tent
 │   ├── english/         # lists as English sentences write them, "a, b and c", for messages
 │   ├── secrettest/      # tests only: looks for a secret in what tent prints or logs
 │   ├── statestore/      # Store interface, file:// and s3://, layout, locking
+│   ├── s3url/           # s3:// URLs of a bucket and prefix, and their S3 clients: the state store, dev uploads
+│   │   └── s3urltest/   # tests only: keeps the developer's AWS configuration out of a test
 │   ├── assets/          # Nomad, CNI and tent-node: URLs and sha256s; checks Nomad's signature
 │   ├── channels/        # embedded channel files: the Nomad versions allowed and tested, the CNI plugins
 │   ├── buildinfo/       # version, commit, date (ldflags); which release a version counts as
-│   └── buildconfig/     # tests only: CI workflows, Makefile and release config stay consistent
+│   └── buildconfig/     # tests only: CI, Makefile and release config agree; what tent-node links
 ├── test/e2e/            # //go:build e2e: black-box tests against real clouds (Vultr first)
-├── hack/                # janitor, dev upload of tent-node, vultr-spike/
+├── hack/                # tent-node-upload/ (dev builds), tent-node-userdata/ (VM check), vultr-spike/, janitor
 └── docs/                # this document, ADRs, platform notes, roadmap
 ```
 
@@ -467,8 +471,15 @@ to `internal/rollout` with the drain and the quorum checks
   `internal/cloud`, so no package reaches a provider through another one. Tests are exempt, and so is code under
   `internal/cloud/<provider>/`, so a provider can have subpackages.
 - Cloud SDKs (govultr, hcloud-go) are imported only by their provider's packages, tests included.
-- `internal/nodeup` and `internal/nodeconfig`, tests included, never import `internal/cloud/...`. No code that can
-  create or delete cloud resources ever runs on a node.
+- `internal/nodeup`, `internal/nodeconfig` and `cmd/tent-node`, tests included, never import `internal/cloud/...`
+  (`nodeup-no-cloud`). No code that can create or delete cloud resources ever runs on a node.
+- `internal/nodeup` and `cmd/tent-node` import only the standard library, `internal/nodeup` and its subpackages,
+  `internal/nodeconfig`, `internal/secret`, `internal/buildinfo` and `api/v1alpha1` (`tent-node-allowed`). Their tests
+  are exempt ([ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md)).
+- depguard checks each file's direct imports. A test in `internal/buildconfig` checks everything tent-node links, on
+  linux/amd64 and linux/arm64, with `go list -deps ./cmd/tent-node`: no `internal/cloud`, `internal/assets`,
+  `internal/channels`, `internal/statestore`, `internal/app` or `internal/nomadops`, no cloud SDK, no go-crypto, no
+  Nomad module and no cobra, and no module besides tent's own and `golang.org/x/mod`.
 - Only `internal/nomadops` imports `github.com/hashicorp/nomad/api`, tests included (`nomad-only-in-nomadops`). The
   root module `github.com/hashicorp/nomad` is BUSL-licensed and must never be imported: inside `internal/nomadops`
   only the API module is allowed (`nomadops-api-only`). Throw-away files proved both rules on 2026-09-29 (#92): an
@@ -480,7 +491,8 @@ to `internal/rollout` with the drain and the quorum checks
   code that makes the CA and the secrets never reaches a cloud or the state store. `internal/uuid`, `internal/secret`,
   `internal/english` and `internal/secrettest` import only the standard library. The tests of these five packages are
   exempt ([ADR-0025](adr/0025-stdlib-only-helper-packages.md),
-  [ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)). Only tests import `internal/secrettest`.
+  [ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)). Only tests import `internal/secrettest`,
+  `internal/nomadops/nomadfake`, `internal/nodeup/nodeuptest` and `internal/s3url/s3urltest`.
 - `internal/nodeconfig`, the contract that tent-node decodes, imports only the standard library, `internal/secret`
   and `api/v1alpha1`. Its tests are exempt ([ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)).
 - Only tests import `github.com/hashicorp/hcl`: they parse the rendered Nomad configuration back with HCL1. No code
@@ -491,6 +503,9 @@ to `internal/rollout` with the drain and the quorum checks
   ([ADR-0026](adr/0026-channels-and-release-assets.md)).
 - `internal/channels` imports only the standard library, the decoder of the specs (`sigs.k8s.io/yaml` and
   `sigs.k8s.io/json`) and `golang.org/x/mod/semver`. Its tests are exempt.
+- `internal/s3url` imports only the standard library, aws-sdk-go-v2's `aws`, `config` and `service/s3`, and
+  smithy-go's `logging` (`s3url-stdlib-and-aws`). Its tests are exempt
+  ([ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md)).
 - Everything except `api/` is `internal/`. The project makes no compatibility promises before it has to.
 
 ---
@@ -797,20 +812,38 @@ type Capabilities struct {
 }
 ```
 
-On the node side, `tent-node` uses a small per-provider environment interface:
-- **Vultr:** the metadata service at `http://169.254.169.254/v1.json`.
-- **Hetzner:** `http://169.254.169.254/hetzner/v1/...`.
-- **AWS:** IMDSv2 later.
+On the node side, `tent-node` reads its cloud's metadata service through `env.Environment` in `internal/nodeup/env`
+(M2.5, [ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md)):
 
 ```go
+// Environment is a cloud's metadata service, as the machine sees it.
 type Environment interface {
-	InstanceID(ctx context.Context) (string, error) // Vultr: instance-v2-id (the API UUID); into 11-instance.hcl
-	Zone(ctx context.Context) (string, error)       // normalised to lower case (Vultr reports "AMS")
-	PrivateIPv4(ctx context.Context) (netip.Addr, error)
-	UserData(ctx context.Context) ([]byte, error)
-	MetadataEndpoint() netip.Addr // blocked for workloads by the host firewall
+	// Read asks the metadata service about the machine. Each call reads the service anew, so tent-node calls it once
+	// per run.
+	Read(ctx context.Context) (Instance, error)
+}
+
+// Instance is the machine as its cloud describes it.
+type Instance struct {
+	ID        string     // the cloud's id of the machine, as its API names it; into 11-instance.hcl
+	Zone      string     // in lower case, such as ams (Vultr reports AMS)
+	PrivateIP netip.Addr // the IPv4 address on the cluster's private network
 }
 ```
+
+- **One snapshot per run.** `preflight` reads the service once and keeps the result for the other phases and
+  `status.json` ([8.2](#82-tent-node-phases)). There is no user data method: cloud-init has written `node.json`
+  already. There is no metadata address either: NodeConfig's `firewall.blockMetadata` is the one source of it.
+- **Chosen by NodeConfig's `provider`** (decision 20 of [18](#18-open-questions)). A provider without an environment
+  fails `up` with `tent-node does not support provider <name> yet`.
+- **Vultr** (`env/vultr`): `GET http://169.254.169.254/v1.json`, never through a proxy and without redirects, 5 s per
+  try with the body, 1 s between tries, until the context ends; `preflight` gives it 3 minutes. It tries again after
+  a failed connection, a try without a whole answer, a 429 or a 5xx other than 501, as the API client does
+  ([11.8](#118-api-client-rate-limits-cost)). Any other answer fails at once, 404 included: cloud-init read the
+  document earlier in the same boot. It takes `instance-v2-id`, `region.regioncode` in lower case and the IPv4 address
+  of exactly one interface with `network-type: private`; none, two, an empty address or `0.0.0.0` fails. No error
+  holds the document, which carries the user data.
+- **Hetzner** (`http://169.254.169.254/hetzner/v1/...`) comes with the Hetzner provider, and IMDSv2 for AWS later.
 
 ### 7.2 Intents (the provider's input)
 
@@ -878,10 +911,11 @@ See [ADR-0006](adr/0006-two-binaries-and-nodeconfig.md).
 cloud-init (user_data: minimal cloud-config; vendor package upgrades disabled)
   ├─ write /etc/tent/node.json            # NodeConfig, gzip+base64 in user data, mode 0600
   ├─ download tent-node: each URL in turn, until a file has the sha256
-  └─ exec tent-node install               # installs tent-node.service (oneshot, every boot)
-        │                                 # and tent-node-join.timer (join refresh, every 60 s)
-        └─ tent-node up                   # idempotent phases, see below
-              └─ systemctl start nomad
+  └─ exec tent-node install               # in cloud-final: writes and enables tent-node.service (oneshot, every
+        │                                 # boot) and tent-node-join.timer (join refresh, every 60 s), then starts
+        │                                 # the service and waits for it
+        └─ tent-node.service: tent-node up   # idempotent phases, see below
+              └─ systemctl start nomad       # M2.6: up starts Nomad itself
 ```
 
 - **No operator, no SSH.** The node bootstraps itself, without the operator being online and without SSH access. This
@@ -891,26 +925,51 @@ cloud-init (user_data: minimal cloud-config; vendor package upgrades disabled)
   same since at least 2026-09, but it may change, so tent sets it anyway. OS patching happens by replacing nodes.
 - **The user data** is built in M2.3 (`nodeconfig.UserData`, [Appendix B](#appendix-b-cloud-init-user-data-sketch)).
   `update` uses it from M2.7 and gives nodes a placeholder until then ([13.2](#132-tent-update-cluster---yes)).
-- **`tent-node install` runs inside cloud-final**, through `exec`. It must not wait for a unit that is ordered after
-  `cloud-final.service` or `cloud-init.target`, or the boot deadlocks (M2.5).
+- **The handover** (decision 19 of [18](#18-open-questions),
+  [ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md)).
+  - **First boot.** cloud-final runs `tent-node install` through `exec`. `install` starts `tent-node.service` and
+    waits until `up` has run, so cloud-init finishes after `up`, and fails when `up` fails. Then it starts the timer.
+  - **Every later boot.** `tent-node.service` starts with `multi-user.target`, which waits until `up` has run.
+    cloud-final is ordered after `multi-user.target`, so it waits too. `runcmd` does not run again.
+  - **No ordering that could hang.** No unit is ordered on `cloud-final.service`, `cloud-init.target` or
+    `cloud-config.service`: the first two would wait for the `install` that waits for them, and the third is left out
+    as a precaution. None is ordered after `multi-user.target`, which `WantedBy=` orders after the service, nor
+    before `nomad.service`, which `up` starts from inside the service.
+  - **Finite timeouts:** 45 minutes for `up`, 5 for a join refresh.
+- **Commands.** `tent-node install`, `up` and `refresh-join` take `--config`, `/etc/tent/node.json` by default.
+  `tent-node version` prints the version. The exit code is 0 on success, 1 when the command fails and 2 for a wrong
+  command line. tent-node logs to stderr, which systemd puts into the journal. `refresh-join` is a stub until M2.6.
 
 ### 8.2 tent-node phases
 
-`tent-node up` runs as a systemd oneshot on every boot. Every phase checks the current state before it acts, and
-Nomad is restarted only when its files actually changed.
+`tent-node up` runs as a systemd oneshot on every boot, and every boot runs every phase. Each phase compares the machine
+with NodeConfig and acts only on a difference, so a second run changes nothing but `status.json`, and Nomad is
+restarted only when its files changed. `up` runs the phases in the order of the table and stops at the first that
+fails ([ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md)).
+
+- **Results.** A phase ends `done` (it changed the machine), `unchanged`, `skipped` or `failed`, with a reason where
+  one helps. The phases after a failure are skipped with `not run: <phase> failed`. Once the context has ended, as
+  when systemd stops the unit, the next phase fails with `not started: …`.
+- **`/var/lib/tent/status.json`.** `up` writes it on every run, whatever happened, for the operator and
+  `tent toolbox dump`: tent-node's version, the spec hash, the start and end times, the instance (id, zone, private
+  IP) and each phase's result. Only root reads it: the directory has mode 0700 and the file 0600.
+- **Built in M2.5:** `preflight`, `system` and `verify`, over a filesystem and a program runner that tests replace
+  with fakes ([15](#15-testing)). `hostfirewall`, `runtime`, `cni`, `join` and `nomad` are skipped with
+  `not built yet` until M2.6.
 
 | Phase | What it does |
 |---|---|
-| `preflight` | Checks the OS and architecture. The hostname must be NodeConfig's `name`, which protects against mixed-up user data. NodeConfig carries no instance id. |
-| `system` | Hostname, the sysctls and kernel modules of NodeConfig's `system` ([8.3](#83-nodeconfig-contract)), time sync, journald limits. |
+| `preflight` | Checks linux on amd64 or arm64, root, that systemd runs the machine, and Ubuntu, with a warning as the reason outside 24.04 and 26.04. The host name must be NodeConfig's `name`, which protects against mixed-up user data, and tent-node's version that of NodeConfig's `tent-node` asset. Then it reads the metadata service, for at most 3 minutes ([7.1](#71-interfaces)); NodeConfig carries no instance id. It changes nothing. |
+| `system` | Writes the kernel modules of NodeConfig's `system` ([8.3](#83-nodeconfig-contract)) to `/etc/modules-load.d/tent.conf` and loads them with `modprobe`; writes its sysctls to `/etc/sysctl.d/99-tent.conf` and applies that file with `sysctl -p`; turns on NTP with `timedatectl set-ntp true` where timedatectl can, and elsewhere requires `chrony.service` or `systemd-timesyncd.service` to be active; limits the journal to 1 GiB with a drop-in and restarts journald. A command runs only when its file changed, and when it fails, the file goes, so that the next run tries again. A node without modules or sysctls, such as a server, gets no file for them. It does not set the host name. |
 | `hostfirewall` | **Owns the host firewall.** Disables ufw or firewalld if the image enabled them (Vultr images do). Applies tent's nftables ruleset from NodeConfig's `firewall` ([8.3](#83-nodeconfig-contract)) and drops traffic to its `blockMetadata` address (`169.254.169.254`) from forwarded (container) traffic and non-root processes. Exempting root does not stop root containers with host networking or `raw_exec` tasks; matching workloads by cgroup is sturdier (M2.6). Bridge-mode workloads reach the host from Nomad's bridge subnet, `172.26.64.0/20`, which the ruleset must allow. Their port mappings arrive as forwarded, DNAT-ed traffic, and a drop in any nftables base chain wins, so tent's forward chain must not drop what the chains of Nomad's CNI plugins and Docker accept. |
 | `runtime` | Docker from the distribution package when `system.docker` is set, plus `daemon.json` (log limits, live-restore). |
 | `cni` | CNI reference plugins into `/opt/cni/bin`, verified by sha256, on client and combined nodes. |
 | `join` | Renders `05-join.hcl` with `nodeconfig.RenderJoin`: the seed from NodeConfig's `join`, or the slot list, refreshed from the live peer set when a server is reachable ([ADR-0016](adr/0016-server-discovery-seed-and-refresh.md)). |
-| `nomad` | Downloads the Nomad zip (verified by sha256); creates the directories; writes NodeConfig's files with their owners and modes ([8.4](#84-nomad-configuration-rendering)): keys and the intro token 0600, certificates and the CA 0644, and `/var/lib/nomad/client` is made with 0700 before the token goes into it; on client and combined nodes, renders `11-instance.hcl` with the instance id from the metadata service (`nodeconfig.RenderInstance`); writes the systemd unit, which stops Nomad with SIGTERM, not HashiCorp's stock SIGINT, and a `TimeoutStopSec` above the drain deadline, or `leave_on_terminate` and `drain_on_shutdown` never act; starts Nomad. The agent runs as root. |
-| `verify` | Checks the local `/v1/agent/health`. Writes `/var/lib/tent/status.json` for `tent toolbox dump`. |
+| `nomad` | Downloads the Nomad zip (verified by sha256); creates the directories; writes NodeConfig's files with their owners and modes ([8.4](#84-nomad-configuration-rendering)): keys and the intro token 0600, certificates and the CA 0644, and `/var/lib/nomad/client` is made with 0700 before the token goes into it; on client and combined nodes, renders `11-instance.hcl` with the instance id from the metadata service (`nodeconfig.RenderInstance`); writes `nomad.service`, which tent renders as a NodeConfig file, so it is in the spec hash: it stops Nomad with SIGTERM, not HashiCorp's stock SIGINT, and has a `TimeoutStopSec` above the drain deadline, or `leave_on_terminate` and `drain_on_shutdown` never act, and it has no `After=` or `Requires=` on `tent-node.service`; starts Nomad. The agent runs as root. |
+| `verify` | Checks that `tent-node.service` and `tent-node-join.timer` are enabled. From M2.6 it also checks the local `/v1/agent/health` without waiting for a leader: a leader needs other servers, which may boot later. It changes nothing. |
 
-`tent-node refresh-join` runs from a systemd timer every 60 seconds:
+`tent-node refresh-join` runs from `tent-node-join.timer`, every `join.refreshInterval` (60 seconds) from boot on,
+and after `tent-node.service`. Until M2.6 it is a stub that changes nothing. Then:
 1. It calls `GET https://<known server>:4646/v1/status/peers`, authenticating with the node's own certificate. The
    endpoint needs no ACL token.
 2. It rewrites `05-join.hcl` atomically when the peer set changes.
@@ -925,25 +984,27 @@ Built in M2.3 in `internal/nodeconfig` ([ADR-0027](adr/0027-nodeconfig-contract-
 ```go
 // NodeConfig is the contract between tent (producer) and tent-node (consumer).
 type NodeConfig struct {
-	APIVersion string        // "tent/v1alpha1"
-	Kind       string        // "NodeConfig"
+	APIVersion string            // "tent/v1alpha1"
+	Kind       string            // "NodeConfig"
 	Cluster    string
+	Provider   v1alpha1.Provider // the cloud, which picks tent-node's metadata service; not in the spec hash
 	NodeGroup  string
-	Name       string        // the node's name, also its hostname; no cloud instance id
-	Role       v1alpha1.Role // server | client | combined
-	Assets     []Asset       // {Name, Version, URLs (mirrors), SHA256}: nomad, tent-node; cni-plugins on clients
-	Files      []File        // {Path, Mode, Owner, Content, PerNode, Secret} (8.4)
-	Join       Join          // {Strategy: seed-and-refresh, Servers []netip.Addr, RefreshInterval}
-	System     System        // {Sysctls, KernelModules, Docker}
-	Firewall   HostFirewall  // {Rules []Rule{Name, Protocol, Ports, From}, BlockMetadata netip.Addr}
-	SpecHash   string        // the group's spec hash (8.4)
+	Name       string            // the node's name, also its hostname; no cloud instance id
+	Role       v1alpha1.Role     // server | client | combined
+	Assets     []Asset           // {Name, Version, URLs (mirrors), SHA256}: nomad, tent-node; cni-plugins on clients
+	Files      []File            // {Path, Mode, Owner, Content, PerNode, Secret} (8.4)
+	Join       Join              // {Strategy: seed-and-refresh, Servers []netip.Addr, RefreshInterval}
+	System     System            // {Sysctls, KernelModules, Docker}
+	Firewall   HostFirewall      // {Rules []Rule{Name, Protocol, Ports, From}, BlockMetadata netip.Addr}
+	SpecHash   string            // the group's spec hash (8.4)
 }
 ```
 
-- **Checks and encoding.** `Validate` checks the header, the names, the role and the form of every asset, file, join
-  setting, system setting and firewall rule, and that a stored spec hash is the config's own. `Encode` writes indented
-  JSON, the same bytes for the same config. `Decode` refuses unknown fields and anything after the object, then
-  validates.
+- **Checks and encoding.** `Validate` checks the header, the names, the provider, the role and the form of every
+  asset, file, join setting, system setting and firewall rule, and that a stored spec hash is the config's own. A
+  kernel module or a sysctl key must start with a letter or a digit: `modprobe` would read a leading dash as an
+  option, and `sysctl.d` ignores the errors of a line whose key starts with one. `Encode` writes indented JSON, the
+  same bytes for the same config. `Decode` refuses unknown fields and anything after the object, then validates.
 - **Printing.** A file prints only its path and size, and an asset its URLs without their query or password. fmt,
   slog and encoding/json show the same, and `Encode` writes the content and the URLs as they are. Keys and tokens use
   the `Secret` type of `internal/secret`, which prints only its size.
@@ -951,10 +1012,10 @@ type NodeConfig struct {
   ([8.5](#85-artifacts-and-verification)) to it, so tent-node never imports `internal/assets`. Every node gets `nomad`
   and `tent-node`, and client and combined nodes `cni-plugins` too: servers run no workloads, and a new CNI version
   would otherwise mark every server out of date.
-- **Built by `internal/app`.** `groupTemplates` makes a template per node group: the agent configuration from the
-  completed specs, the CA bundle, the assets, the join strategy, the system settings, the host firewall and the spec
-  hash. `nodeConfig` adds what one node has: its name, `10-node.hcl`, its certificate and key, the seed of servers,
-  and on client and combined nodes the intro token.
+- **Built by `internal/app`.** `groupTemplates` makes a template per node group: the model's provider, the agent
+  configuration from the completed specs, the CA bundle, the assets, the join strategy, the system settings, the host
+  firewall and the spec hash. `nodeConfig` adds what one node has: its name, `10-node.hcl`, its certificate and key,
+  the seed of servers, and on client and combined nodes the intro token.
 - **Join:** `seed-and-refresh`, the private addresses of the servers that exist when the node is created, and a
   refresh every minute ([11.2](#112-server-discovery-seed-and-refresh)).
 - **System**, per role. Servers get none.
@@ -1041,14 +1102,14 @@ type NodeConfig struct {
     bundle) with their path, mode, owner and content; each asset's name, version and sha256, tent-node's included;
     the system settings; the host firewall.
   - Excluded: the node's name, the per-node files (`05-join.hcl`, `10-node.hcl`, `11-instance.hcl`, the certificate,
-    the key, the intro token), the secret files (`01-gossip.hcl`), the join settings and mirror URLs. The hash does
-    not depend on the order of rules, files or assets.
+    the key, the intro token), the secret files (`01-gossip.hcl`), the join settings, mirror URLs and the provider,
+    which a cluster never changes. The hash does not depend on the order of rules, files or assets.
   - So a different download mirror never rolls the cluster (a kops pitfall), and a new CA does. A new tent version
     that changes rendering or tent-node rolls nodes, and the plan says why.
   - A test pins the hash of a fixed config. A change of the canonical form raises the format.
 - **Format.** Nomad parses the agent configuration with HCL1. Rendering uses text templates with strict quoting. The
   golden files are authoritative, and tests parse each one back with `github.com/hashicorp/hcl` v1.
-  `nomad config validate` checks them from M2.5.
+  `nomad config validate` does not check them yet; M2.5 left it to M2.6.
 
 The golden files and a sketch: [Appendix A](#appendix-a-nomad-agent-configuration-sketches).
 
@@ -1058,7 +1119,7 @@ The golden files and a sketch: [Appendix A](#appendix-a-nomad-agent-configuratio
 |---|---|---|
 | Nomad | `https://releases.hashicorp.com/nomad/<v>/nomad_<v>_linux_<arch>.zip` | The **CLI** downloads `nomad_<v>_SHA256SUMS` and verifies its detached signature with HashiCorp's release key, which is embedded in tent. Only SHA-256, SHA-384 and SHA-512 signatures count. The node verifies only the sha256 carried in NodeConfig. |
 | CNI plugins | `https://github.com/containernetworking/plugins/releases/download/v<v>/cni-plugins-linux-<arch>-v<v>.tgz`, the version from the channel | The channel holds the sha256 per architecture, fixed when tent is released: CNI releases carry no signature. NodeConfig carries it to client and combined nodes. |
-| tent-node | GitHub release of tent (`tent-node_linux_<arch>` + `checksums.txt`) | A release build of the CLI reads `checksums.txt` of its own tag over TLS, without checking its cosign signature, and puts the sha256 into user data. A development build takes `TENT_NODE_URL` and `TENT_NODE_SHA256` (below). |
+| tent-node | GitHub release of tent: the bare binaries `tent-node_linux_amd64` and `tent-node_linux_arm64`, listed in `checksums.txt` (M2.5, [16](#16-technology-stack-and-releases)) | A release build of the CLI reads `checksums.txt` of its own tag over TLS, without checking its cosign signature, and puts the sha256 into user data. A development build takes `TENT_NODE_URL` and `TENT_NODE_SHA256` (below). |
 | Docker | the distribution's package repository | distribution package signatures |
 
 - Trust is established once, on the operator's side, so nodes need no PGP.
@@ -1089,6 +1150,14 @@ The golden files and a sketch: [Appendix A](#appendix-a-nomad-agent-configuratio
     set is built (`devVariablesWarning` in `internal/app`) and shows from M2.7, when `update` fetches the assets, such
     as `TENT_NODE_URL is set, but tent v0.3.0 is a release build and ignores it: its nodes download the tent-node of
     release v0.3.0`.
+  - **Where it lives** (decision 18 of [18](#18-open-questions),
+    [ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md)). `make dev-upload` builds tent and tent-node, and
+    `hack/tent-node-upload` puts tent-node into the CI R2 bucket at `dev/tent-node/<sha256>/tent-node_linux_amd64`,
+    presigns a GET for at most 7 days and prints the two variables for fish or sh
+    ([README](../hack/tent-node-upload/README.md)). The maintainer's machine uses its own R2 token, and a lifecycle
+    rule deletes `dev/` objects after 8 days.
+  - `make build` builds tent-node for linux/amd64 only, so a development build's clusters need amd64 plans. On an
+    arm64 plan the node fails at cloud-init with an exec format error.
 
 ### 8.6 Operating systems
 
@@ -1331,6 +1400,8 @@ backend sees them, and it names the operation and the path in every error.
 - **The state store does not depend on the compute provider.** A Vultr cluster may keep its state in R2, for example.
 - **Credentials** come from the standard AWS credential chain: the environment, the shared files, or the machine's
   role. They never go in the URL: `Open` rejects a URL that contains `@`, and its errors never repeat the URL.
+- **`internal/s3url`** reads the s3 URL and makes its client, for this backend and for `hack/tent-node-upload`
+  ([8.5](#85-artifacts-and-verification)); its errors never show the URL or a value of its query.
 - **Bucket versioning** is recommended.
 - **Tests.** Every backend runs the conformance suites in `internal/statestore/storetest`. CI runs the s3 backend's
   suites against a Cloudflare R2 bucket ([platform notes §5.1](platform-notes.md#51-conditional-writes-)).
@@ -1577,7 +1648,8 @@ create that may have been carried out is never sent again.
    an answer (`ErrUnavailable`), or with an answer that holds no instance id, it searches by the `op` tag once more
    and adopts what it finds. When that search fails or lists nothing yet, the error matches `ErrUnavailable`, and a
    `Create` with the same `op` searches before it creates. Vultr listed each new instance by tag on the first request
-   after the create answer (spikes 2026-09-25 and 2026-09-27).
+   after the create answer (spikes 2026-09-25 and 2026-09-27); on 2026-09-29 one of two needed a second request,
+   about 1 s later ([platform notes §3.3](platform-notes.md#33-instances)).
 5. **Readiness.** It reads the instance at once, then every 5 s. `server_status` goes through `installingbooting`.
    The node is ready when the status fields read `active`, `running` and `ok` and `GET /v2/instances/{id}/vpcs`
    lists its address in the VPC; `0.0.0.0` counts as no address. The wait has no deadline of its own: the caller
@@ -1725,7 +1797,8 @@ create that may have been carried out is never sent again.
   ([8.3](#83-nodeconfig-contract)).
 - **Contents.** The cloud-config of [Appendix B](#appendix-b-cloud-init-user-data-sketch): package update and upgrade
   off (Vultr's vendor data sets the same today; tent keeps it explicit), the NodeConfig as a gz+b64 `write_files`
-  entry, and the tent-node download. The spike wrote a `b64` payload; gz+b64 on Vultr is checked in M2.5
+  entry, and the tent-node download. The M2.5 VM check found node.json intact from the gz+b64 payload on Vultr's
+  Ubuntu 24.04 and 26.04 images on 2026-09-29
   ([platform notes §3.4](platform-notes.md#34-user_data-metadata-and-identity)). Until M2.7, `update` gives nodes
   the placeholder of [13.2](#132-tent-update-cluster---yes).
 - **Scrubbing.** Once the node has joined the cluster, the core calls `Nodes.ScrubUserData`. It PATCHes the user
@@ -2568,6 +2641,22 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
      - The fake's hook (`SetHook`) makes the cuts and the lost answers.
 4. **tent-node tests.** Phases run with an abstracted filesystem and exec. Occasionally they run in a
    systemd-enabled container or a VM.
+   - **Built in M2.5.** `internal/nodeup/nodeuptest` holds the fakes: an in-memory filesystem that behaves as
+     `nodeup.OSFS` does on Linux and records what changed, a runner that answers commands from a script and records
+     them, a fake Ubuntu 24.04 whose systemd (unit states, enabling, `NeedDaemonReload`) and `timedatectl` keep state,
+     a host and a metadata service. The Vultr metadata client runs against an `httptest` server that stands in for
+     `169.254.169.254`, with a document of the form a Vultr instance served on 2026-09-25, its ids and addresses
+     replaced by documentation values.
+   - Golden files hold the units, the files of `system` and `status.json`. The tests check the exact order of the
+     commands, that a second `up` or `install` runs no command that changes anything and writes nothing but
+     `status.json`, that no unit is ordered on cloud-init, `multi-user.target` or `nomad.service`, the context ending
+     between phases and inside a command, and that no secret reaches a log, an error or `status.json`.
+   - The tests run on Linux, macOS and Windows. `OSFS` sets and compares modes and owners only on Unix, and the tests
+     of modes and owners skip Windows.
+   - A test in `internal/buildconfig` lists what `./cmd/tent-node` links with `go list -deps`
+     ([5](#5-repository-layout-and-dependency-rules)).
+   - `hack/vultr-spike/spike.sh --only tentnode` boots a development build of tent-node on a real Vultr VM and
+     reboots it.
 5. **E2E on Vultr** (`//go:build e2e`, black box):
    - Region `ams`, falling back to `fra` or `lhr`.
    - Scenarios: `smoke`, `ha`, `upgrade` and `security`.
@@ -2593,7 +2682,7 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
 - **Go.** `go 1.26` or newer in `go.mod`: `github.com/hashicorp/nomad/api` requires it. hcloud-go needs 1.25+, and
   govultr 1.23+.
 - **Libraries:**
-  - `spf13/cobra`;
+  - `spf13/cobra`, in tent only: tent-node parses its flags with the standard `flag` package;
   - `vultr/govultr/v3`, pinned at v3.33.0, with its retries off: tent's own transport retries idempotent calls and
     limits the rate ([11.8](#118-api-client-rate-limits-cost));
   - `hetznercloud/hcloud-go/v2`;
@@ -2603,7 +2692,8 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
     [18](#18-open-questions)). The modules it brings are in
     [platform notes §1.5](platform-notes.md#15-licensing);
   - `hashicorp/go-cleanhttp`, for the pooled transport of the Nomad API client;
-  - `aws-sdk-go-v2` (`config`, `service/s3`) and `aws/smithy-go` for the s3 state store;
+  - `aws-sdk-go-v2` (`config`, `service/s3`) and `aws/smithy-go` for the s3 state store and the upload of development
+    builds (`internal/s3url`);
   - `gofrs/flock` for the file store's locks (`flock` on Unix, `LockFileEx` on Windows);
   - `golang.org/x/mod/semver` for the version guard and the channels, pinned at v0.40.0 because v0.41.0 declares
     `go 1.26.0` and would rewrite `go.mod`;
@@ -2631,21 +2721,28 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
     key, and fail when the key expires within 180 days ([8.5](#85-artifacts-and-verification)). The job can also be
     run by hand (`workflow_dispatch`); a manual run starts only this job, and every other job of `ci.yml` skips it.
     `internal/buildconfig` checks that every test that reads `TENT_TEST_ONLINE` has such a name;
-  - the licences of every module tent links, on each platform the release builds for: each must be Apache-2.0,
-    BSD-2-Clause, BSD-3-Clause, ISC, MIT or MPL-2.0, and every licence file other than a NOTICE must name one. A
-    licence file the classifier cannot name, such as BUSL-1.1 or a proprietary text, fails even when the module has
-    another, allowed licence (`make licenses`, in the lint job);
-  - a release snapshot on every pull request;
-  - `make check` runs fmt, lint, licenses, test and build locally;
+  - the licences of every module tent or tent-node links, on each platform the release builds for: each must be
+    Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT or MPL-2.0, and every licence file other than a NOTICE must name
+    one. A licence file the classifier cannot name, such as BUSL-1.1 or a proprietary text, fails even when the module
+    has another, allowed licence (`make licenses`, in the lint job);
+  - a release snapshot on every pull request, which fails when `checksums.txt` lacks either tent-node binary;
+  - `make check` runs fmt, lint, licenses, test and build locally. `make build` also builds
+    `bin/tent-node_linux_amd64`, which `make dev-upload` uploads for a development build
+    ([8.5](#85-artifacts-and-verification));
   - Renovate.
 - **Releases** use GoReleaser on `v*` tags:
   - `tent` for linux, darwin and windows on amd64 and arm64: archives, a Homebrew cask with signed and notarized
     macOS binaries, and deb and rpm packages;
-  - every archive and package carries `LICENSE` and `THIRD_PARTY_NOTICES`. A GoReleaser hook writes the notices
-    before the build, as `make notices` does: the licence and notice files of the Go standard library and of every
-    module tent links, with each module's version and where to download its source;
-  - `tent-node` for linux on amd64 and arm64, as raw binaries, from M2;
-  - `checksums.txt` with a keyless cosign signature, and an SBOM per archive;
+  - every archive and package of tent carries `LICENSE` and `THIRD_PARTY_NOTICES`. A GoReleaser hook writes the
+    notices before the build, as `make notices` does: the licence and notice files of the Go standard library and of
+    every module tent or tent-node links on any platform the release builds for, with each module's version and where
+    to download its source;
+  - `tent-node` for linux on amd64 and arm64 from M2.5, as the bare binaries `tent-node_linux_amd64` and
+    `tent-node_linux_arm64`, the names that `internal/assets` reads. They have no room for the notices, so
+    `THIRD_PARTY_NOTICES` is also a file of the release. Only tent's macOS binaries are notarized
+    ([ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md));
+  - `checksums.txt` with a keyless cosign signature, which also lists the tent-node binaries and the notices; an SBOM
+    per archive and per tent-node binary;
   - tent-node's version always equals the CLI's;
   - nothing is released while the repository is private.
 
@@ -2664,9 +2761,10 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
 | Nomad 2.x version skew rules not yet restated | broken upgrades | channels allow one major version from a minimum, and tent warns about versions they have not tested; servers before clients |
 | HashiCorp's embedded release key expires on 2030-03-01, or is rotated or revoked | tent cannot verify Nomad downloads, or trusts a revoked key | a weekly CI job fails 180 days before the expiry; a tent release embeds the new key ([8.5](#85-artifacts-and-verification)) |
 | BUSL licence of Nomad | a paid managed offering would need a commercial licence | tent downloads official binaries and never redistributes them; stays free (not legal advice) |
-| Nomad reads a rendered value differently from the HCL1 that the tests use: Nomad parses with its fork `v1.0.1-nomad-1`, the tests with upstream v1.0.0 | a node does not start, or runs with another setting | strict quoting refuses what HCL1 cannot read back; tests parse every golden back; `nomad config validate` checks the goldens from M2.5 |
+| Nomad reads a rendered value differently from the HCL1 that the tests use: Nomad parses with its fork `v1.0.1-nomad-1`, the tests with upstream v1.0.0 | a node does not start, or runs with another setting | strict quoting refuses what HCL1 cannot read back; tests parse every golden back; `nomad config validate` of the goldens, left to M2.6 |
 | nomadops relies on Nomad answers read in the v1.11.3 source, not in 2.0.7: the text `ACL bootstrap already done`, 403 from `token/self` for an unknown secret, the report in the 429 of an unhealthy cluster | a repeated bootstrap fails, or a health wait runs out | nomadops matches status codes and one message prefix; E2E runs real Nomad from M2.9 ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)) |
 | `extraConfig` overrides tent's settings, such as `data_dir`, the TLS paths or the dynamic ports | a node cannot find its files, a client is refused, or the host firewall blocks workloads | documented as unsupported ([3.3](#33-api-rules), [8.4](#84-nomad-configuration-rendering)) |
+| A unit ordering between cloud-init, tent-node and Nomad hangs the boot, or `up` hangs | the node never comes up; cloud-init never finishes | `install` waits for `up`, and no unit is ordered on cloud-init, `multi-user.target` or `nomad.service` (a unit test checks); finite start timeouts (45 minutes for `up`); `status.json` on every run; the M2.5 VM check boots and reboots a node ([8.1](#81-bootstrap-chain)) |
 | Secrets in user data | node impersonation if metadata leaks | mitigations in [9.4](#94-secrets-on-nodes-threat-model), including scrubbing on Vultr; bootstrap controller in v2 |
 | Hetzner rate limit (3600/h per project) | slow or failing large rollouts | snapshots, batched waits, adaptive throttling, targeted rollouts, one project per cluster |
 
@@ -2728,6 +2826,18 @@ Decided on 2026-09-29:
 17. **Node pools:** tent does not create them. Nomad creates a pool when its first client registers
     ([9.3](#93-client-introduction), [13.2](#132-tent-update-cluster---yes)). Pool descriptions or meta come when the
     spec has such fields.
+18. **Where development builds of tent-node live:** in the CI R2 bucket under `dev/`, served by presigned URLs valid
+    for at most 7 days. The maintainer's machine uploads with its own R2 token, not CI's, and a lifecycle rule deletes
+    `dev/` objects after 8 days ([8.5](#85-artifacts-and-verification)).
+19. **The handover from cloud-init to tent-node:** `tent-node install` starts `tent-node.service` and waits for it.
+    The unit is not ordered on `cloud-final.service`, `cloud-init.target`, `cloud-config.service`,
+    `multi-user.target` or `nomad.service`, and has a finite `TimeoutStartSec`. `up` starts Nomad itself (M2.6), and
+    `verify` checks Nomad without waiting for a leader ([8.1](#81-bootstrap-chain), [8.2](#82-tent-node-phases)).
+20. **The provider on the node:** NodeConfig carries `provider`, validated and outside the spec hash, since a
+    cluster's provider never changes (decision 7). tent-node picks its metadata service by it
+    ([7.1](#71-interfaces), [8.3](#83-nodeconfig-contract)).
+
+Decisions 18 to 20 are recorded in [ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md).
 
 ---
 
@@ -2922,10 +3032,35 @@ runcmd:
 - **`exec`** hands cloud-final over to `tent-node install` ([8.1](#81-bootstrap-chain)).
 - **Size.** The whole cloud-config must fit in 24 KiB ([8.3](#83-nodeconfig-contract)).
 
-`tent-node install` writes and starts two units:
+`tent-node install` writes three units into `/etc/systemd/system` (mode 0644, `root:root`), has systemd read them
+again only when `systemctl show -p NeedDaemonReload` asks for it, enables the service and the timer, starts the
+service and waits until `up` has run, then starts the timer ([8.1](#81-bootstrap-chain)). The golden files in
+[`internal/nodeup/testdata/`](../internal/nodeup/testdata/) are authoritative; this is `tent-node.service`:
 
-- **`/etc/systemd/system/tent-node.service`:** `Type=oneshot`, `RemainAfterExit=yes`, ordered
-  `Before=nomad.service`, runs `tent-node up`.
-- **`tent-node-join.timer`:** runs `tent-node refresh-join` every 60 seconds.
+```ini
+# Rendered by tent-node. Do not edit: changes are overwritten.
+[Unit]
+Description=tent-node up: set the machine up as a Nomad agent of its node group
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/tent-node up --config /etc/tent/node.json
+TimeoutStartSec=45min
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
+```
+
+- **No other ordering** ([8.1](#81-bootstrap-chain)): `up` starts Nomad itself.
+- **`KillMode=mixed`:** systemd sends SIGTERM to tent-node alone, which cancels its context and stops the program it
+  runs, and kills whatever is left when the stop times out.
+- **`tent-node-join.service`:** `Type=oneshot`, `After=tent-node.service`, runs `tent-node refresh-join` with
+  `TimeoutStartSec=5min`. It has no `[Install]` section: the timer starts it.
+- **`tent-node-join.timer`:** `OnBootSec` and `OnUnitActiveSec` set to NodeConfig's `join.refreshInterval` (60 s),
+  `AccuracySec=1s`, `WantedBy=timers.target`.
 
 On Vultr, tent replaces this user data with a non-secret stub once the node has registered (§9.4).

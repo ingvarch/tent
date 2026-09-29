@@ -4,7 +4,10 @@
   CNI plugins and tent-node, and which builds count as development builds); amended by
   [ADR-0027](0027-nodeconfig-contract-rendering-and-spec-hash.md)
   (the size budget is 24 KiB for the whole user data on every provider; NodeConfig carries the node's name, not the
-  instance id; tent-node renders `11-instance.hcl` and `05-join.hcl`)
+  instance id; tent-node renders `11-instance.hcl` and `05-join.hcl`) and by
+  [ADR-0028](0028-tent-node-agent-units-and-delivery.md) (`install` waits for `up`, and no unit is ordered on
+  cloud-init, `multi-user.target` or `nomad.service`; a timer runs the join refresh; NodeConfig names the provider,
+  which picks the metadata service; development builds live in the CI R2 bucket under `dev/`)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md), [ADR-0008](0008-node-credential-delivery.md),

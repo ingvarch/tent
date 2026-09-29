@@ -30,7 +30,7 @@ and, from M2 on, in the E2E suite on Vultr.
 ## Maintainer decisions
 
 These come from [architecture §18](architecture.md#18-open-questions). The first six were decided on 2026-09-25, the
-seventh to the fifteenth on 2026-09-28, and the sixteenth and seventeenth on 2026-09-29.
+seventh to the fifteenth on 2026-09-28, and the sixteenth to the twentieth on 2026-09-29.
 
 | # | Question | Decision |
 |---|---|---|
@@ -51,6 +51,9 @@ seventh to the fifteenth on 2026-09-28, and the sixteenth and seventeenth on 202
 | 15 | The host firewall and `access` | the host does not copy `access`: SSH, ICMP and 4646 on servers are open on the host and the cloud firewall filters their sources; Nomad's and the dynamic ports only from the cluster CIDR; a change of `access` never changes the spec hash |
 | 16 | The Nomad API module | pinned to the commit of the Nomad tag that the channel recommends (v2.0.7 now) and moved by hand with the channel; Renovate is off for it |
 | 17 | Node pools | tent creates none; Nomad creates a pool when its first client registers; pool descriptions or meta come when the spec has such fields |
+| 18 | Where development builds of tent-node live | the CI R2 bucket under `dev/`, served by presigned URLs valid for at most 7 days; the maintainer's machine has its own R2 token; a lifecycle rule deletes `dev/` after 8 days ([ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md)) |
+| 19 | The handover from cloud-init to tent-node | `install` starts `tent-node.service` and waits for it; the unit is not ordered on `cloud-final.service`, `cloud-init.target`, `cloud-config.service`, `multi-user.target` or `nomad.service`, and has a finite `TimeoutStartSec`; `up` starts Nomad itself, and `verify` checks it without waiting for a leader |
+| 20 | The provider on the node | NodeConfig carries `provider`, validated and outside the spec hash; tent-node picks its metadata service by it |
 
 New questions for the maintainer are issues with the `decision` label.
 

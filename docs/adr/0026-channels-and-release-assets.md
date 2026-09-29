@@ -1,7 +1,10 @@
 # ADR-0026: Channels and release assets
 
 - **Status:** Accepted; its M2.3 follow-ups moved to M2.7 by
-  [ADR-0027](0027-nodeconfig-contract-rendering-and-spec-hash.md)
+  [ADR-0027](0027-nodeconfig-contract-rendering-and-spec-hash.md); amended by
+  [ADR-0028](0028-tent-node-agent-units-and-delivery.md) (the M2.5 follow-up is built: the release lists the
+  tent-node binaries in `checksums.txt`, and development builds upload to the CI R2 bucket; the one URL of a
+  development build serves an amd64 binary, so its clusters need amd64 plans)
 - **Date:** 2026-09-28
 - **Deciders:** ingvarch
 - **Related:** extends [ADR-0006](0006-two-binaries-and-nodeconfig.md),
