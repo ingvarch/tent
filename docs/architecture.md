@@ -168,7 +168,7 @@ spec:
     region: global
     tls: {verifyHTTPSClient: true}
     clientIntroduction: strict   # strict | warn | none
-    extraConfig:                 # escape hatch, rendered into 99-user.hcl
+    extraConfig:                 # escape hatch, rendered into 98-user-server.hcl and 99-user-client.hcl
       server: ""
       client: ""
 ---
@@ -295,8 +295,17 @@ This table is also the check that the abstraction survives several providers.
   that per-zone counts stay balanced. On Vultr, `cloud.zones` left out defaults to `[cloud.region]`, the only value it
   accepts, and `validate` warns that the cluster has a single failure domain. On Hetzner, `cloud.zones` lists
   locations and is required.
-- **Escape hatch.** `nomad.extraConfig` is rendered verbatim into `99-user.hcl`. Nomad merges configuration files in
-  lexicographic order, so user settings win. This is documented as unsupported.
+- **Client settings.** tent writes a group's `nomad` settings into the Nomad agent configuration, so it refuses values
+  that Nomad would misread ([ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)):
+  - a meta key is one or more words of letters, digits, `_` and `-`, joined by dots
+    (`^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$`), and must not start with `tent_`, which tent keeps for `tent_cluster`,
+    `tent_nodegroup` and `tent_instance_id`;
+  - a meta value must not hold a control character, U+E123 or `${` ([8.4](#84-nomad-configuration-rendering));
+  - `nodePool` must not be `all`, Nomad's built-in pool of every node, which no client joins.
+- **Escape hatch.** `nomad.extraConfig` is added as given: `server` as `98-user-server.hcl` on server and combined
+  nodes, `client` as `99-user-client.hcl` on client and combined nodes. Nomad merges configuration files in the order
+  of their names, so the operator's settings win over tent's ([8.4](#84-nomad-configuration-rendering)). This is
+  documented as unsupported.
 - **No secrets in specs.** Cloud credentials come from environment variables. SSH keys are public keys only.
 
 ### 3.4 Naming and ownership markers
@@ -363,7 +372,7 @@ Since Nomad 1.5 jobs default to `datacenters = ["*"]`, so mapping zones to datac
 ┌─────▼──────────────────────────── tent (CLI) ──────────────────────────────┐
 │ cli (cobra) ─► app: use cases (create / update / rollout / validate / ...)  │
 │                  │                                                          │
-│   statestore ◄───┼──► model (spec → intents, NodeConfig) ──► pki           │
+│   statestore ◄───┼──► model (spec → intents) ──► nodeconfig ◄── pki        │
 │   (spec, PKI,    │         │                                                │
 │    lock)         │         ▼                                                │
 │                  │   cloud.Provider ──► engine (plan/apply DAG)             │
@@ -391,7 +400,8 @@ This split is the central decision.
    - Nodes are **not** tasks in the engine graph. In kops the Hetzner "ServerGroup" is a task, so replacing one node
      re-runs the whole plan.
 3. **Nomad configuration**: agent config, TLS material, ACL bootstrap, node pools and the rest of day-1 setup. It
-   does not depend on the cloud and lives in the core.
+   does not depend on the cloud and lives in the core. tent renders the agent configuration into NodeConfig
+   (`internal/nodeconfig`), and tent-node writes it on the node ([8.4](#84-nomad-configuration-rendering)).
 
 ### 4.2 Two binaries
 
@@ -415,20 +425,21 @@ github.com/ingvarch/tent
 │   ├── apischema/       # generates api/v1alpha1/tent.schema.json (make generate); not linked into tent
 │   ├── licenses/        # licence check and THIRD_PARTY_NOTICES (make licenses, make notices); not linked into tent
 │   ├── app/             # use cases; used by the CLI, e2e tests and a future controller
-│   ├── model/           # spec -> cloud-agnostic intents (network, access, groups, join)
+│   ├── model/           # spec -> cloud-agnostic intents (network, access, rules between nodes, join, groups)
 │   ├── engine/          # task graph: plan/apply, diff rendering, retries, concurrency
 │   │   └── enginetest/  # ApplyReplan for provider task tests: apply, plan again, expect no changes
 │   ├── cloud/           # Provider / Nodes interfaces, capabilities, registry, common types
 │   │   ├── vultr/       # govultr wrapper, label codec, tasks, nodes, inventory, pricing
 │   │   │   └── vultrfake/ # in-memory fake of vultr.API for provider and core tests
 │   │   └── hetzner/     # hcloud-go wrapper, tasks, nodes, inventory, pricing, lock
-│   ├── nodeconfig/      # versioned tent <-> tent-node contract, Nomad config rendering
+│   ├── nodeconfig/      # tent <-> tent-node contract: NodeConfig, Nomad config rendering, spec hash, user data
 │   ├── nodeup/          # tent-node phases: system, host firewall, runtime, CNI, nomad, join refresh
 │   │   └── env/         # metadata clients: vultr/, hetzner/ (IMDSv2 for AWS later)
 │   ├── nomadops/        # the ONLY importer of github.com/hashicorp/nomad/api
 │   ├── rollout/         # scale up/down, rolling update, server quorum safety
 │   ├── validate/        # cloud + Nomad health checks
 │   ├── pki/             # CA, node and operator certificates, gossip key, ACL bootstrap secret
+│   ├── secret/          # the Secret type of keys and tokens, which never prints
 │   ├── uuid/            # random lower-case UUIDs of version 4: operation ids, the ACL bootstrap secret
 │   ├── english/         # lists as English sentences write them, "a, b and c", for messages
 │   ├── secrettest/      # tests only: looks for a secret in what tent prints or logs
@@ -455,14 +466,19 @@ to `internal/rollout` with the drain and the quorum checks
   `internal/cloud`, so no package reaches a provider through another one. Tests are exempt, and so is code under
   `internal/cloud/<provider>/`, so a provider can have subpackages.
 - Cloud SDKs (govultr, hcloud-go) are imported only by their provider's packages, tests included.
-- `internal/nodeup` never imports `internal/cloud/...`. No code that can create or delete cloud resources ever runs
-  on a node.
+- `internal/nodeup` and `internal/nodeconfig`, tests included, never import `internal/cloud/...`. No code that can
+  create or delete cloud resources ever runs on a node.
 - Only `internal/nomadops` imports `github.com/hashicorp/nomad/api`. The root module `github.com/hashicorp/nomad` is
   BUSL-licensed and must never be imported.
-- `internal/pki` imports only the standard library, `internal/uuid` and `api/v1alpha1`, so the code that makes the
-  CA and the secrets never reaches a cloud or the state store. `internal/uuid`, `internal/english` and
-  `internal/secrettest` import only the standard library. The tests of these four packages are exempt
-  ([ADR-0025](adr/0025-stdlib-only-helper-packages.md)). Only tests import `internal/secrettest`.
+- `internal/pki` imports only the standard library, `internal/uuid`, `internal/secret` and `api/v1alpha1`, so the
+  code that makes the CA and the secrets never reaches a cloud or the state store. `internal/uuid`, `internal/secret`,
+  `internal/english` and `internal/secrettest` import only the standard library. The tests of these five packages are
+  exempt ([ADR-0025](adr/0025-stdlib-only-helper-packages.md),
+  [ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)). Only tests import `internal/secrettest`.
+- `internal/nodeconfig`, the contract that tent-node decodes, imports only the standard library, `internal/secret`
+  and `api/v1alpha1`. Its tests are exempt ([ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)).
+- Only tests import `github.com/hashicorp/hcl`: they parse the rendered Nomad configuration back with HCL1. No code
+  that tent runs parses HCL.
 - Only `internal/assets` imports `github.com/ProtonMail/go-crypto`, tests included. `internal/nodeup`,
   `internal/nodeconfig` and `cmd/tent-node`, tests included, import neither `internal/assets` nor
   `internal/channels`: tent-node gets its versions and sha256s in NodeConfig and carries no PGP code
@@ -737,7 +753,8 @@ type UserData []byte
 
 **Target, not built yet.** The other methods join `Provider` with the code that first uses them:
 - `Join` with server discovery in tent-node;
-- `PackUserData` with NodeConfig;
+- `PackUserData` only with a provider that needs another envelope than the cloud-config that `nodeconfig.UserData`
+  makes for every provider ([8.3](#83-nodeconfig-contract));
 - `Locker` with the Hetzner lock firewall;
 - `Capabilities` with the first core code that depends on one;
 - `Default` with the first provider default that `v1alpha1.SetDefaults` does not fill in.
@@ -769,7 +786,7 @@ type Capabilities struct {
 	FailureDomains        bool // Hetzner eu-central: 3 locations. Vultr: none
 	SpreadPlacement       bool // Hetzner: placement groups. Vultr: none
 	MutableUserData       bool // Vultr: PATCH user_data -> scrub secrets after bootstrap
-	MaxUserDataBytes      int  // Hetzner: 32 KiB. Vultr: 64 KiB budget (the API accepts at least 4 MiB)
+	MaxUserDataBytes      int  // only below tent's 24 KiB budget, such as AWS's 16 KB (8.3)
 	CostEstimates         bool // Hetzner /pricing, Vultr /plans
 }
 ```
@@ -781,7 +798,7 @@ On the node side, `tent-node` uses a small per-provider environment interface:
 
 ```go
 type Environment interface {
-	InstanceID(ctx context.Context) (string, error) // Vultr: instance-v2-id (the API UUID)
+	InstanceID(ctx context.Context) (string, error) // Vultr: instance-v2-id (the API UUID); into 11-instance.hcl
 	Zone(ctx context.Context) (string, error)       // normalised to lower case (Vultr reports "AMS")
 	PrivateIPv4(ctx context.Context) (netip.Addr, error)
 	UserData(ctx context.Context) ([]byte, error)
@@ -803,17 +820,29 @@ zones and SSH public keys, and:
 
   Sources are sorted, IPv4 first, without repeats. A rule without sources opens nothing and is left out, so an empty
   `access.ssh` closes SSH.
+- **Rules between nodes** (`Intra`, M2.3). Vultr and Hetzner firewalls do not filter private traffic, so their
+  providers map only the access rules, and the host firewall of each node enforces these
+  ([8.3](#83-nodeconfig-contract)). All come from the cluster CIDR, in this order:
+  - `nomad-http`: 4646/tcp to every node;
+  - `nomad-rpc`: 4647/tcp to the servers. Clients do not listen on it. A combined node's client reaches its own server
+    through it, over the private address ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on));
+  - `serf`: 4648/tcp and 4648/udp to the servers;
+  - `dynamic`: 20000–32000/tcp and /udp to the clients, the nodes of the client and combined groups, which run the
+    workloads. This is Nomad's default range of dynamic ports, and tent writes it into the agent configuration too
+    (`model.DynamicPorts`).
+- **Join strategy** (`Join`, M2.3): `seed-and-refresh` ([ADR-0016](adr/0016-server-discovery-seed-and-refresh.md)).
+- **Targets.** A rule opens all nodes, the servers or the clients. `Target.Includes(role)` says which roles a rule
+  reaches; the Vultr firewall groups and the host firewall both use it.
 - **Node groups**, sorted by name: role, machine type, image by name, zones and size.
 
+The model holds no Nomad settings. `internal/app` builds each group's NodeConfig from the model and the completed specs
+([8.3](#83-nodeconfig-contract), [ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)).
+
 **Target, not built yet.**
-- **Intra-cluster rules** (4646–4648 and the dynamic port range between nodes) come with tent-node. Vultr and Hetzner
-  firewalls cannot filter private traffic, so their providers map only the internet-facing rules, and tent-node's
-  host firewall enforces the intra-cluster ones. AWS will map all of them to Security Groups.
-- **Join strategy**, with tent-node: fixed slots on Hetzner, seed plus refresh on Vultr, and cloud auto-join tags on
-  AWS.
+- **Join strategies of other providers:** fixed slots on Hetzner and cloud auto-join tags on AWS. AWS will also map the
+  rules between nodes to Security Groups.
 - **Named subnets** where the provider supports fixed IPs: on Hetzner `control` for fixed addresses and `nodes` for
   automatic ones.
-- **Per group:** the NodeConfig template and the spec hash.
 - **Load balancers** (optional): the API load balancer, and later an internal one and ingress.
 
 ### 7.3 Provider comparison (what the core must not assume)
@@ -842,8 +871,8 @@ See [ADR-0006](adr/0006-two-binaries-and-nodeconfig.md).
 ```
 cloud-init (user_data: minimal cloud-config; vendor package upgrades disabled)
   ├─ write /etc/tent/node.json            # NodeConfig, gzip+base64 in user data, mode 0600
-  ├─ download tent-node (mirrors) + verify sha256
-  └─ tent-node install                    # installs tent-node.service (oneshot, every boot)
+  ├─ download tent-node: each URL in turn, until a file has the sha256
+  └─ exec tent-node install               # installs tent-node.service (oneshot, every boot)
         │                                 # and tent-node-join.timer (join refresh, every 60 s)
         └─ tent-node up                   # idempotent phases, see below
               └─ systemctl start nomad
@@ -854,6 +883,10 @@ cloud-init (user_data: minimal cloud-config; vendor package upgrades disabled)
   (`tent toolbox dump`).
 - **No vendor package upgrades.** The cloud-config disables package update and upgrade. Vultr's vendor data has set the
   same since at least 2026-09, but it may change, so tent sets it anyway. OS patching happens by replacing nodes.
+- **The user data** is built in M2.3 (`nodeconfig.UserData`, [Appendix B](#appendix-b-cloud-init-user-data-sketch)).
+  `update` uses it from M2.7 and gives nodes a placeholder until then ([13.2](#132-tent-update-cluster---yes)).
+- **`tent-node install` runs inside cloud-final**, through `exec`. It must not wait for a unit that is ordered after
+  `cloud-final.service` or `cloud-init.target`, or the boot deadlocks (M2.5).
 
 ### 8.2 tent-node phases
 
@@ -862,13 +895,13 @@ Nomad is restarted only when its files actually changed.
 
 | Phase | What it does |
 |---|---|
-| `preflight` | Checks the OS and architecture. The instance id and hostname from the metadata service must match NodeConfig, which protects against mixed-up user data. |
-| `system` | Hostname, sysctls, kernel modules (`br_netfilter`, `overlay`), time sync, journald limits. |
-| `hostfirewall` | **Owns the host firewall.** Disables ufw or firewalld if the image enabled them (Vultr images do). Applies tent's nftables ruleset: SSH, Nomad ports 4646–4648 and the dynamic port range only from the cluster CIDR, and a drop rule for `169.254.169.254` from forwarded (container) traffic and non-root processes. |
-| `runtime` | Docker from the distribution package by default, plus `daemon.json` (log limits, live-restore). |
-| `cni` | CNI reference plugins into `/opt/cni/bin`, verified by sha256. |
-| `join` | Writes `05-join.hcl`: the seed or slot list from NodeConfig, refreshed from the live peer set when a server is reachable ([ADR-0016](adr/0016-server-discovery-seed-and-refresh.md)). |
-| `nomad` | Downloads the Nomad zip (verified by sha256); creates the user and directories; writes the TLS files (mode 0600), the agent configuration files, the intro token into `<client state_dir>/intro_token.jwt` and the systemd unit; starts Nomad. |
+| `preflight` | Checks the OS and architecture. The hostname must be NodeConfig's `name`, which protects against mixed-up user data. NodeConfig carries no instance id. |
+| `system` | Hostname, the sysctls and kernel modules of NodeConfig's `system` ([8.3](#83-nodeconfig-contract)), time sync, journald limits. |
+| `hostfirewall` | **Owns the host firewall.** Disables ufw or firewalld if the image enabled them (Vultr images do). Applies tent's nftables ruleset from NodeConfig's `firewall` ([8.3](#83-nodeconfig-contract)) and drops traffic to its `blockMetadata` address (`169.254.169.254`) from forwarded (container) traffic and non-root processes. Exempting root does not stop root containers with host networking or `raw_exec` tasks; matching workloads by cgroup is sturdier (M2.6). Bridge-mode workloads reach the host from Nomad's bridge subnet, `172.26.64.0/20`, which the ruleset must allow. Their port mappings arrive as forwarded, DNAT-ed traffic, and a drop in any nftables base chain wins, so tent's forward chain must not drop what the chains of Nomad's CNI plugins and Docker accept. |
+| `runtime` | Docker from the distribution package when `system.docker` is set, plus `daemon.json` (log limits, live-restore). |
+| `cni` | CNI reference plugins into `/opt/cni/bin`, verified by sha256, on client and combined nodes. |
+| `join` | Renders `05-join.hcl` with `nodeconfig.RenderJoin`: the seed from NodeConfig's `join`, or the slot list, refreshed from the live peer set when a server is reachable ([ADR-0016](adr/0016-server-discovery-seed-and-refresh.md)). |
+| `nomad` | Downloads the Nomad zip (verified by sha256); creates the directories; writes NodeConfig's files with their owners and modes ([8.4](#84-nomad-configuration-rendering)): keys and the intro token 0600, certificates and the CA 0644, and `/var/lib/nomad/client` is made with 0700 before the token goes into it; on client and combined nodes, renders `11-instance.hcl` with the instance id from the metadata service (`nodeconfig.RenderInstance`); writes the systemd unit, which stops Nomad with SIGTERM, not HashiCorp's stock SIGINT, and a `TimeoutStopSec` above the drain deadline, or `leave_on_terminate` and `drain_on_shutdown` never act; starts Nomad. The agent runs as root. |
 | `verify` | Checks the local `/v1/agent/health`. Writes `/var/lib/tent/status.json` for `tent toolbox dump`. |
 
 `tent-node refresh-join` runs from a systemd timer every 60 seconds:
@@ -880,28 +913,69 @@ Nomad is restarted only when its files actually changed.
 
 ### 8.3 NodeConfig contract
 
+Built in M2.3 in `internal/nodeconfig` ([ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)).
+`update` uses it from M2.7 ([13.2](#132-tent-update-cluster---yes)).
+
 ```go
-// NodeConfig is the versioned contract between tent (producer) and tent-node (consumer).
+// NodeConfig is the contract between tent (producer) and tent-node (consumer).
 type NodeConfig struct {
-	APIVersion string  // "tent/v1alpha1"
-	Kind       string  // "NodeConfig"
+	APIVersion string        // "tent/v1alpha1"
+	Kind       string        // "NodeConfig"
 	Cluster    string
 	NodeGroup  string
-	Instance   string  // expected hostname / cloud machine name
-	Role       Role    // server | client | combined
-	Assets     []Asset // {Name, URLs (mirrors), SHA256}: nomad, cni-plugins
-	Files      []File  // {Path, Mode, Owner, Content, PerNode}: Nomad config, TLS material, intro token
-	Join       Join    // {Strategy: slots|seed-refresh, Addresses []netip.Addr, RefreshInterval}
-	System     System  // sysctls, kernel modules, container runtime settings
-	Firewall   HostFirewall
-	SpecHash   string  // semantic hash of the group-level configuration (see 8.4)
+	Name       string        // the node's name, also its hostname; no cloud instance id
+	Role       v1alpha1.Role // server | client | combined
+	Assets     []Asset       // {Name, Version, URLs (mirrors), SHA256}: nomad, tent-node; cni-plugins on clients
+	Files      []File        // {Path, Mode, Owner, Content, PerNode, Secret} (8.4)
+	Join       Join          // {Strategy: seed-and-refresh, Servers []netip.Addr, RefreshInterval}
+	System     System        // {Sysctls, KernelModules, Docker}
+	Firewall   HostFirewall  // {Rules []Rule{Name, Protocol, Ports, From}, BlockMetadata netip.Addr}
+	SpecHash   string        // the group's spec hash (8.4)
 }
 ```
 
-- **Size.** The encoded NodeConfig must stay well below the provider's user data limit.
-  - Hetzner: 32 KiB, so tests fail above 24 KiB.
-  - Vultr: the API accepts at least 4 MiB. tent's budget is 64 KiB, verified end to end through the metadata service
-    and cloud-init (spike 2026-09-25).
+- **Checks and encoding.** `Validate` checks the header, the names, the role and the form of every asset, file, join
+  setting, system setting and firewall rule, and that a stored spec hash is the config's own. `Encode` writes indented
+  JSON, the same bytes for the same config. `Decode` refuses unknown fields and anything after the object, then
+  validates.
+- **Printing.** A file prints only its path and size, and an asset its URLs without their query or password. fmt,
+  slog and encoding/json show the same, and `Encode` writes the content and the URLs as they are. Keys and tokens use
+  the `Secret` type of `internal/secret`, which prints only its size.
+- **Assets.** `nodeconfig.Asset` is NodeConfig's own type. `internal/app` converts the assets of `internal/assets`
+  ([8.5](#85-artifacts-and-verification)) to it, so tent-node never imports `internal/assets`. Every node gets `nomad`
+  and `tent-node`, and client and combined nodes `cni-plugins` too: servers run no workloads, and a new CNI version
+  would otherwise mark every server out of date.
+- **Built by `internal/app`.** `groupTemplates` makes a template per node group: the agent configuration from the
+  completed specs, the CA bundle, the assets, the join strategy, the system settings, the host firewall and the spec
+  hash. `nodeConfig` adds what one node has: its name, `10-node.hcl`, its certificate and key, the seed of servers,
+  and on client and combined nodes the intro token.
+- **Join:** `seed-and-refresh`, the private addresses of the servers that exist when the node is created, and a
+  refresh every minute ([11.2](#112-server-discovery-seed-and-refresh)).
+- **System**, per role. Servers get none.
+  - Client and combined nodes get the kernel module `br_netfilter` and the sysctls
+    `net.bridge.bridge-nf-call-arptables`, `-ip6tables` and `-iptables` set to 1, as Nomad's bridge networking asks.
+  - They get Docker, and with it the kernel module `overlay`, unless the group's drivers leave `docker` out. A group
+    without drivers keeps Nomad's own, Docker among them.
+  - tent installs nothing else for drivers: `raw_exec` stays disabled unless the operator enables it in `extraConfig`,
+    and `java` and `qemu` need packages that tent does not install.
+- **Host firewall**, per role (decision 15 of [18](#18-open-questions)):
+  - `ssh` (22/tcp), `icmp` and, on server and combined nodes, `api` (4646/tcp), each from `0.0.0.0/0` and `::/0`. The
+    cloud firewall filters their sources by `access`, so a change of `access` leaves the nodes as they are. The ports
+    come from the model's constants (`model.SSHPort`, `model.APIPort`), not from `access`: an empty `access.ssh`
+    closes SSH on the cloud firewall only. The `icmp` rule's IPv6 prefix means ICMPv6; tent does not turn on IPv6 on
+    Vultr instances yet;
+  - the rules between nodes that reach the role, from the cluster CIDR ([7.2](#72-intents-the-providers-input)): on a
+    server `nomad-http`, `nomad-rpc` and `serf`, on a client `nomad-http` and `dynamic`, on a combined node all four;
+  - `blockMetadata`: `169.254.169.254` on Vultr and Hetzner, which workloads must not reach.
+- **Size.** One budget for every provider: the whole cloud-config must fit in 24 KiB (`nodeconfig.MaxUserDataBytes`),
+  which leaves headroom under Hetzner's 32 KiB (decision 14 of [18](#18-open-questions)). Above it `UserData` fails
+  with `user data: node group <group> needs <n> bytes, more than the 24576 that fit`.
+  - The largest config of each role leaves at least 8 KiB for `extraConfig`. With two CAs, a 2 KiB intro token, a
+    1.5 KiB presigned tent-node URL, a mirror per asset and 5 seeds, the user data takes 8.9 KiB on a server and
+    11.5 KiB on a combined node (tests, 2026-09-29). A combined node built from real data, with 621 bytes of
+    `extraConfig`, takes about 10.3 KiB.
+  - Vultr's API accepts at least 4 MiB, and 64 KiB worked end to end ([11.6](#116-user_data)). A provider that allows
+    less than 24 KiB, such as AWS with 16 KB, brings `Capabilities.MaxUserDataBytes`.
   - Fallback if a provider's limit is too small: user data carries only a short-lived presigned URL and a key for an
     encrypted NodeConfig object in the state bucket.
 - **Versioning.** The contract is versioned, and tent-node always has the CLI's version. Version skew therefore
@@ -910,38 +984,74 @@ type NodeConfig struct {
 
 ### 8.4 Nomad configuration rendering
 
-- **The CLI renders the final Nomad agent configuration**, and tent-node only writes files. So:
+- **The CLI renders the Nomad agent configuration**, and tent-node writes the files. So:
   - `tent update` can show a diff of the Nomad configuration per group;
   - the hash of the rendered configuration is exactly the "node is outdated" signal;
   - tent-node stays thin.
-- **Files in `/etc/nomad.d/`**, merged by Nomad in lexicographic order:
 
-  | File | Contents | Scope |
-  |---|---|---|
-  | `00-tent.hcl` | group configuration | identical on all nodes of a group |
-  | `05-join.hcl` | `server_join { retry_join = [...] }` | per node; maintained by tent-node, never part of the hash |
-  | `10-node.hcl` | `name`, `datacenter`, `tent_instance_id` meta | per node |
-  | `99-user.hcl` | `extraConfig` | group |
+  tent-node renders two small per-node files itself, with the same package: `05-join.hcl`, which the refresh
+  rewrites, and `11-instance.hcl`, since only the node knows its instance id.
+- **Files in `/etc/nomad.d/`**, merged by Nomad in the order of their names. Root owns every file
+  (`nodeconfig.Owner`, `root:root`).
+
+  | File | Contents | Scope | Mode | Roles | Written by |
+  |---|---|---|---|---|---|
+  | `00-tent.hcl` | tent's settings: `server` and `client` blocks by role, ACL, TLS, telemetry | group, in the hash | 0644 | all | tent |
+  | `01-gossip.hcl` | `server { encrypt }` | group, secret, not in the hash | 0600 | server, combined | tent |
+  | `05-join.hcl` | `server_join { retry_join = [...] }` | node, kept current by tent-node | 0644 | all | tent-node |
+  | `10-node.hcl` | `name`, `datacenter`; `bootstrap_expect` on servers | node | 0644 | all | tent |
+  | `11-instance.hcl` | the meta `tent_instance_id` | node | 0644 | client, combined | tent-node |
+  | `98-user-server.hcl` | `extraConfig.server` as given | group, in the hash | 0600 | server, combined | tent |
+  | `99-user-client.hcl` | `extraConfig.client` as given | group, in the hash | 0600 | client, combined | tent |
+  | `tls/ca.pem` | the CA bundle | group, in the hash | 0644 | all | tent |
+  | `tls/agent.pem` | the node's certificate | node | 0644 | all | tent |
+  | `tls/agent-key.pem` | the node's key | node, secret | 0600 | all | tent |
+
+  The user files exist only when their part of `extraConfig` is set. The intro token goes to
+  `/var/lib/nomad/client/intro_token.jwt` (0600, secret) on client and combined nodes
+  ([9.3](#93-client-introduction)).
 - **Values known only at runtime** (private IP, interface name) are go-sockaddr templates that select the interface by
   cluster CIDR. Nomad supports them in `bind_addr`, `addresses`, `advertise` and `client.network_interface`.
   Interface names vary on both Vultr and Hetzner, so this matters on both.
-- **Spec hash:** the first 16 hex characters of sha256 over the canonical group-level content.
-  - Included: `00-tent.hcl`, `99-user.hcl`, asset versions and sha256s, system settings, the host firewall and the
-    tent-node version.
-  - Excluded: per-node files (certificates, keys, intro token, `05-join.hcl`, `10-node.hcl`) and mirror URLs.
-  - So a different download mirror never rolls the cluster (a kops pitfall). A new tent version that changes rendering
-    does roll nodes, and the plan says why.
-- **Format.** The agent configuration is parsed by HCL1. Rendering uses text templates with strict escaping and
-  golden-file tests.
+- **Joining.** A server joins the servers' Serf port, 4648, in `server { server_join { retry_join } }`, and a client
+  their RPC port, 4647, in `client { server_join { retry_join } }`. A combined node takes the server form: Nomad gives
+  its client the RPC address of the server in the same agent, which the client reaches over the private network, and
+  the client learns the other servers from it. tent never writes `server.retry_join`, which Nomad 2.1 removes.
+- **ACLs on every role.** `acl { enabled = true }` is in the `00-tent.hcl` of clients too: a client with ACLs off
+  grants every request to its own endpoints ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)).
+- **`bootstrap_expect`** is per node, in `10-node.hcl`, so a resize of the server group does not mark every server out
+  of date.
+- **The operator's files come last** and can override anything, tent's settings included, such as `data_dir`,
+  `client.state_dir`, the `tls` file paths and the dynamic ports. The host firewall does not follow them. After such
+  an override Nomad looks for the TLS files or the intro token where tent did not write them, and under strict client
+  introduction the client is refused ([9.3](#93-client-introduction)). tent does not check `extraConfig`.
+- **Quoting.** Every value is an HCL1 string: in double quotes, with `"` and `\` escaped by a backslash. A value that
+  HCL1 cannot read back as itself is refused: invalid UTF-8, a control character, U+E123, or `${`, which starts an
+  interpolation and has no escape ([ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)). Errors name
+  the setting, never the value.
+- **Spec hash** (`nodeconfig.SpecHash`): the first 16 lower-case hex digits of the sha256 of a canonical JSON of the
+  group-level configuration, in format 1.
+  - Included: the group files that are not secret (`00-tent.hcl`, `98-user-server.hcl`, `99-user-client.hcl`, the CA
+    bundle) with their path, mode, owner and content; each asset's name, version and sha256, tent-node's included;
+    the system settings; the host firewall.
+  - Excluded: the node's name, the per-node files (`05-join.hcl`, `10-node.hcl`, `11-instance.hcl`, the certificate,
+    the key, the intro token), the secret files (`01-gossip.hcl`), the join settings and mirror URLs. The hash does
+    not depend on the order of rules, files or assets.
+  - So a different download mirror never rolls the cluster (a kops pitfall), and a new CA does. A new tent version
+    that changes rendering or tent-node rolls nodes, and the plan says why.
+  - A test pins the hash of a fixed config. A change of the canonical form raises the format.
+- **Format.** Nomad parses the agent configuration with HCL1. Rendering uses text templates with strict quoting. The
+  golden files are authoritative, and tests parse each one back with `github.com/hashicorp/hcl` v1.
+  `nomad config validate` checks them from M2.5.
 
-Full sketches: [Appendix A](#appendix-a-nomad-agent-configuration-sketches).
+The golden files and a sketch: [Appendix A](#appendix-a-nomad-agent-configuration-sketches).
 
 ### 8.5 Artifacts and verification
 
 | Artifact | Source | Verification |
 |---|---|---|
 | Nomad | `https://releases.hashicorp.com/nomad/<v>/nomad_<v>_linux_<arch>.zip` | The **CLI** downloads `nomad_<v>_SHA256SUMS` and verifies its detached signature with HashiCorp's release key, which is embedded in tent. Only SHA-256, SHA-384 and SHA-512 signatures count. The node verifies only the sha256 carried in NodeConfig. |
-| CNI plugins | `https://github.com/containernetworking/plugins/releases/download/v<v>/cni-plugins-linux-<arch>-v<v>.tgz`, the version from the channel | The channel holds the sha256 per architecture, fixed when tent is released: CNI releases carry no signature. NodeConfig carries it to the node. |
+| CNI plugins | `https://github.com/containernetworking/plugins/releases/download/v<v>/cni-plugins-linux-<arch>-v<v>.tgz`, the version from the channel | The channel holds the sha256 per architecture, fixed when tent is released: CNI releases carry no signature. NodeConfig carries it to client and combined nodes. |
 | tent-node | GitHub release of tent (`tent-node_linux_<arch>` + `checksums.txt`) | A release build of the CLI reads `checksums.txt` of its own tag over TLS, without checking its cosign signature, and puts the sha256 into user data. A development build takes `TENT_NODE_URL` and `TENT_NODE_SHA256` (below). |
 | Docker | the distribution's package repository | distribution package signatures |
 
@@ -950,9 +1060,12 @@ Full sketches: [Appendix A](#appendix-a-nomad-agent-configuration-sketches).
   security incident.
 - **Built in M2.2** (`internal/assets`, [ADR-0026](adr/0026-channels-and-release-assets.md)). Each artifact resolves
   to a name, a version, its URLs (one for now; NodeConfig adds mirrors) and a sha256. Each file is read with one
-  request, which the caller's context bounds, and errors name the URL. Nothing is cached. NodeConfig takes the assets
-  in M2.3, and `update` reads the release files then, so a plan will need releases.hashicorp.com, and for a release
-  build github.com.
+  request, which the caller's context bounds, and errors name the URL. Nothing is cached. The time at which the
+  signature is checked is injectable (`assets.Options.Now`).
+- **NodeConfig carries the assets** from M2.3: `internal/app` resolves them (`resolveAssets`) and converts them to
+  NodeConfig's own type ([8.3](#83-nodeconfig-contract)). `update` reads the release files from M2.7, with its own
+  clock for the signature check, so from then a plan needs releases.hashicorp.com, and for a release build github.com
+  (decision 12 of [18](#18-open-questions)).
 - **The key expires.** HashiCorp's key and its signing subkey expire on 2030-03-01
   ([platform notes §1.4](platform-notes.md#14-downloads-and-verification)). tent checks a signature at the current
   time, so from then on it verifies no Nomad download, older releases included, and fails with `HashiCorp's release
@@ -966,8 +1079,10 @@ Full sketches: [Appendix A](#appendix-a-nomad-agent-configuration-sketches).
   commit, and a node runs the CLI's own tent-node.
   - A development build's tent-node is uploaded to object storage and served through a presigned URL:
     `TENT_NODE_URL` plus `TENT_NODE_SHA256`. One URL and one sha256 serve every architecture.
-  - Without them a development build fails and names them. A release build ignores them, and from M2.3 warns when
-    they are set.
+  - Without them a development build fails and names them. A release build ignores them. Its warning when they are
+    set is built (`devVariablesWarning` in `internal/app`) and shows from M2.7, when `update` fetches the assets, such
+    as `TENT_NODE_URL is set, but tent v0.3.0 is a release build and ignores it: its nodes download the tent-node of
+    release v0.3.0`.
 
 ### 8.6 Operating systems
 
@@ -1037,13 +1152,18 @@ certificate details are in [ADR-0024](adr/0024-cluster-pki-storage-and-certifica
 
 ### 9.3 Client introduction
 
-Servers run with `client_introduction { enforcement = "strict" }` (Nomad 1.11+).
+Servers run with `client_introduction { enforcement = "strict" }` by default (Nomad 1.11+). A cluster with a combined
+group defaults to `warn`, and `strict` is refused there: the combined node's client registers before intro tokens
+exist ([ADR-0019](adr/0019-combined-server-client-role.md)).
 
 - **Issuing.** Right before each client VM is created, tent requests an introduction token with
   `POST /v1/acl/identity/client-introduction-token`. The token is bound to the node name and node pool, with a TTL
   of at most 30 minutes.
-- **Delivery.** tent-node writes the token to `<client state_dir>/intro_token.jwt`, because the agent configuration
-  file cannot carry it.
+- **Delivery.** NodeConfig carries the token as a secret file, and tent-node writes it to
+  `<client state_dir>/intro_token.jwt`, because the agent configuration file cannot carry it. With tent's `data_dir`
+  that is `/var/lib/nomad/client/intro_token.jwt` ([8.4](#84-nomad-configuration-rendering)). An `extraConfig` that
+  moves `data_dir` or `client.state_dir` makes Nomad look for the token elsewhere, and under `strict` the client is
+  refused.
 - **Lifetime.** Nomad uses the token only for the first registration. After that the node holds a self-renewing node
   identity.
 - **Gotchas.**
@@ -1060,7 +1180,7 @@ the VM, and by default that includes containers.
 |---|---|---|
 | CA certificate | none (public) | — |
 | Node certificate and key | impersonate that node | nftables blocks the metadata endpoint for containers and non-root processes; servers run no workloads (except combined nodes, [ADR-0019](adr/0019-combined-server-client-role.md)); **Vultr: user data is scrubbed after bootstrap** |
-| Gossip key (servers only) | join the server gossip pool | servers run no workloads (except combined nodes); Serf and RPC listen only on the private network |
+| Gossip key (servers only, `01-gossip.hcl`, mode 0600) | join the server gossip pool | servers run no workloads (except combined nodes); Serf and RPC listen only on the private network |
 | Intro token (clients only) | register a fake client | TTL ≤ 30 min, bound to one node name and pool, used once at first registration |
 | Cloud API token | — | **never on nodes** |
 | State store credentials | — | **never on nodes** (unlike kops on Hetzner) |
@@ -1073,6 +1193,9 @@ Scrubbing on Vultr works like this:
 The spike confirmed on 2026-09-25 that this works: the metadata service serves the updated value within seconds, and
 cloud-init does not re-run after a restart ([ADR-0018](adr/0018-vultr-provider-design.md)). Hetzner user data is
 immutable, so there it stays for the node's lifetime.
+
+The scrub needs a registered node, which the bootstrap of M2.7 brings. Until then `update` gives nodes a placeholder
+without secrets (decision 12 of [18](#18-open-questions)).
 
 ### 9.5 Target architecture: bootstrap controller
 
@@ -1110,8 +1233,10 @@ User data then carries no secrets at all. Credential delivery is therefore a str
   group at instance creation. Either way the machine is protected from its first packet.
 - **Binding.** RPC and Serf bind only to the private address. HTTP on clients binds to localhost plus the private
   address. HTTP on servers binds to all addresses, behind the cloud firewall.
-- **Private traffic is not filtered by either cloud.** tent-node's nftables ruleset allows Nomad ports only from the
-  cluster CIDR.
+- **Private traffic is not filtered by either cloud.** tent-node's nftables ruleset allows Nomad's ports and the
+  dynamic ports only from the cluster CIDR, each on the roles it reaches. It opens SSH, ICMP and, on servers, 4646 to
+  every source and leaves their sources to the cloud firewall, so a change of `access` never changes the nodes
+  ([8.3](#83-nodeconfig-contract), decision 15 of [18](#18-open-questions)).
 - **Load balancers:** Vultr load balancers are always public, and Hetzner firewalls do not apply to load balancers. An
   optional API load balancer is therefore safe only because of mTLS plus ACL. Vultr load balancer firewall rules can
   narrow the sources.
@@ -1381,8 +1506,9 @@ Vultr's own Nomad guide puts static private IPs into `retry_join`, which goes st
 tent therefore uses the generic seed-and-refresh strategy
 ([ADR-0016](adr/0016-server-discovery-seed-and-refresh.md)):
 
-1. **Seed.** At creation, tent renders the private IPs of the servers that already exist into the node's
-   `05-join.hcl`. It takes them from `GET /v2/instances/{id}/vpcs` (`ip_address`, `mac_address`). On first bootstrap,
+1. **Seed.** At creation, tent puts the private IPs of the servers that already exist into the node's NodeConfig
+   (`join.servers`), and tent-node renders them into `05-join.hcl` ([8.4](#84-nomad-configuration-rendering)). tent
+   takes them from `GET /v2/instances/{id}/vpcs` (`ip_address`, `mac_address`). On first bootstrap,
    `server-0` is created first, and the remaining servers get `[server-0]`. Serf join is transitive, so
    `bootstrap_expect` sees every server.
 2. **Refresh.** On boot and every 60 seconds, tent-node asks a known server for `GET /v1/status/peers` and rewrites
@@ -1565,11 +1691,15 @@ create that may have been carried out is never sent again.
 
 ### 11.6 user_data
 
-- **Size.** The API accepts at least 4 MiB (spike 2026-09-25). tent keeps its own 64 KiB budget for NodeConfig. A
-  65,508-byte user_data worked end to end: the metadata service served all of it, and cloud-init wrote its
-  `write_files` payload intact. Larger payloads are pointless and were not tested on an instance.
-- **Contents.** A cloud-config that disables package update and upgrade (Vultr's vendor data sets the same today; tent
-  keeps it explicit), plus the NodeConfig.
+- **Size.** The API accepts at least 4 MiB (spike 2026-09-25). A 65,508-byte user_data worked end to end: the
+  metadata service served all of it, and cloud-init wrote its `write_files` payload intact. Larger payloads were not
+  tested on an instance. tent's budget is 24 KiB for the whole cloud-config, as on every provider
+  ([8.3](#83-nodeconfig-contract)).
+- **Contents.** The cloud-config of [Appendix B](#appendix-b-cloud-init-user-data-sketch): package update and upgrade
+  off (Vultr's vendor data sets the same today; tent keeps it explicit), the NodeConfig as a gz+b64 `write_files`
+  entry, and the tent-node download. The spike wrote a `b64` payload; gz+b64 on Vultr is checked in M2.5
+  ([platform notes §3.4](platform-notes.md#34-user_data-metadata-and-identity)). Until M2.7, `update` gives nodes
+  the placeholder of [13.2](#132-tent-update-cluster---yes).
 - **Scrubbing.** Once the node has joined the cluster, the core calls `Nodes.ScrubUserData`. It PATCHes the user
   data to a stub that holds no secrets and no modules:
 
@@ -1913,7 +2043,8 @@ in the completed spec ([ADR-0026](adr/0026-channels-and-release-assets.md)).
   a plan that writes `cluster.completed.yaml` and nothing else. So is the first plan of a cluster whose completed spec
   an older tent wrote without a version. The completed spec is written only after every other step has succeeded
   (step 11), so a first `update` that is cut and then run again by a newer tent pins that tent's recommendation. From
-  M2.3 nodes run Nomad, and the pin must be written before the first node is created, with the secrets.
+  M2.7 nodes run Nomad, and the pin must be written before the first node is created, with the secrets (decision 12
+  of [18](#18-open-questions)).
 - **A pin outside the channel** fails the plan before it writes anything or reaches the cloud, such as `cluster prod
   is pinned to Nomad 2.0.7 (prod/cluster.completed.yaml), which is older than 2.1.0, the oldest Nomad that channel
   stable allows; set spec.nomad.version to a version that the channel allows`.
@@ -1924,8 +2055,16 @@ in the completed spec ([ADR-0026](adr/0026-channels-and-release-assets.md)).
 - **Untested versions.** When the version, set in the spec or pinned, is one that the channel has not tested,
   `update --yes` warns before it applies changes ([14](#14-cli)). A plan without `--yes`, or a run without changes,
   does not warn.
-- **No downloads yet.** Nodes still boot the placeholder. NodeConfig takes the assets in M2.3
-  ([8.5](#85-artifacts-and-verification)), and `update` fetches them then.
+- **No downloads yet.** Nodes still boot the placeholder. NodeConfig carries the assets from M2.3, and `update`
+  fetches them from M2.7 ([8.5](#85-artifacts-and-verification)).
+
+**Built in M2.3, not used yet.** NodeConfig, the rendering of the Nomad configuration, the spec hash and the user data
+exist ([8.3](#83-nodeconfig-contract), [8.4](#84-nomad-configuration-rendering),
+[ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)), and `internal/app` can build the NodeConfig of a
+node. `update` does not call it: until M2.7 nodes boot the placeholder, carry no `tent/spec-hash` label and get no
+secrets (decision 12 of [18](#18-open-questions)). M2.7 adds to the flow the assets, fetched once per run; a
+NodeConfig per node; the spec hash as a label; real user data, its size checked at plan time; the Nomad pin, written
+before the first node; and the warning about development variables on a release build.
 
 **Target, with Nomad.** The whole flow:
 
@@ -1948,7 +2087,7 @@ in the completed spec ([ADR-0026](adr/0026-channels-and-release-assets.md)).
 
 - The secrets (step 2) are built (M2.1, above), but no node uses them yet. The NodeConfig with the seed of server
   addresses and the intro tokens (steps 4 and 7), the ACL bootstrap (step 5), the day-1 configuration (step 6) and
-  the scrub (step 8) come with Nomad in M2.
+  the scrub (step 8) come with Nomad in M2.7.
 - The drain and the purge (step 9), `validate` and the history (step 11) and the report of outdated nodes (step 12)
   are not built yet.
 
@@ -2305,7 +2444,8 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
 1. **Unit tests:**
    - defaults and validation;
    - PKI;
-   - Nomad config rendering (golden HCL);
+   - Nomad config rendering (golden HCL, parsed back with HCL1), the spec hash (a pinned canary) and the user data
+     size (the largest config of each role);
    - the label codecs;
    - the address plan;
    - the engine: golden plans, apply with fake time (`testing/synctest`);
@@ -2408,7 +2548,8 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
     ([ADR-0026](adr/0026-channels-and-release-assets.md));
   - `golang.org/x/sync/errgroup`;
   - `log/slog`;
-  - tests: `google/go-cmp`, and `santhosh-tekuri/jsonschema/v6` to check examples against the schema.
+  - tests: `google/go-cmp`, `santhosh-tekuri/jsonschema/v6` to check examples against the schema, and
+    `hashicorp/hcl` v1 (MPL-2.0) to parse the rendered Nomad configuration back.
 - **Quality gates:**
   - golangci-lint with the depguard layer rules; `go vet` runs as its govet linter;
   - `go test -race` on Linux, macOS and Windows with the Go from `go.mod`, which builds the release, and on Linux with
@@ -2456,6 +2597,8 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
 | Nomad 2.x version skew rules not yet restated | broken upgrades | channels allow one major version from a minimum, and tent warns about versions they have not tested; servers before clients |
 | HashiCorp's embedded release key expires on 2030-03-01, or is rotated or revoked | tent cannot verify Nomad downloads, or trusts a revoked key | a weekly CI job fails 180 days before the expiry; a tent release embeds the new key ([8.5](#85-artifacts-and-verification)) |
 | BUSL licence of Nomad | a paid managed offering would need a commercial licence | tent downloads official binaries and never redistributes them; stays free (not legal advice) |
+| Nomad reads a rendered value differently from the HCL1 that the tests use: Nomad parses with its fork `v1.0.1-nomad-1`, the tests with upstream v1.0.0 | a node does not start, or runs with another setting | strict quoting refuses what HCL1 cannot read back; tests parse every golden back; `nomad config validate` checks the goldens from M2.5 |
+| `extraConfig` overrides tent's settings, such as `data_dir`, the TLS paths or the dynamic ports | a node cannot find its files, a client is refused, or the host firewall blocks workloads | documented as unsupported ([3.3](#33-api-rules), [8.4](#84-nomad-configuration-rendering)) |
 | Secrets in user data | node impersonation if metadata leaks | mitigations in [9.4](#94-secrets-on-nodes-threat-model), including scrubbing on Vultr; bootstrap controller in v2 |
 | Hetzner rate limit (3600/h per project) | slow or failing large rollouts | snapshots, batched waits, adaptive throttling, targeted rollouts, one project per cluster |
 
@@ -2483,8 +2626,8 @@ Decided on 2026-09-28:
 8. **CA validity:** 10 years, until CA rotation exists ([9.1](#91-pki)).
 9. **Nomad's sha256s:** checked at run time. The CLI downloads `nomad_<v>_SHA256SUMS` and its detached signature and
    verifies them with HashiCorp's release key, which tent embeds ([8.5](#85-artifacts-and-verification),
-   [ADR-0026](adr/0026-channels-and-release-assets.md)). So a plan needs releases.hashicorp.com once NodeConfig uses
-   the assets (M2.3).
+   [ADR-0026](adr/0026-channels-and-release-assets.md)). So a plan needs releases.hashicorp.com once `update` fetches
+   the assets (M2.7).
 10. **The Nomad version of a spec without one:** the first `update` records the channel's recommended version in
     `cluster.completed.yaml`, and later runs keep it. A newer tent does not move nodes to another version by itself;
     `upgrade cluster` does ([13.2](#132-tent-update-cluster---yes), [13.5](#135-tent-upgrade-cluster---yes)).
@@ -2493,40 +2636,90 @@ Decided on 2026-09-28:
     versions only decide whether tent warns.
 11. **What a channel holds:** Nomad and the CNI plugins only. Images stay in the provider's table
     ([ADR-0023](adr/0023-vultr-inventory-dedupe-and-images.md)) and the API default (decision 4).
+12. **When NodeConfig reaches `update`:** in M2.7, with tent-node, intro tokens and the bootstrap. Until then nodes
+    boot the placeholder, because real user data holds node keys and the gossip key, and the scrub runs only after
+    registration. The assets, the warning about development variables and the Nomad pin written before the first node
+    move to M2.7 too ([13.2](#132-tent-update-cluster---yes),
+    [ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)).
+13. **The instance id:** NodeConfig carries the node's name, not a cloud instance id. tent-node reads the id from the
+    metadata service and writes `tent_instance_id` into its own `11-instance.hcl` on client and combined nodes.
+    Preflight compares the hostname with the name ([8.2](#82-tent-node-phases)).
+14. **The user data budget:** 24 KiB for the whole cloud-config on every provider, headroom under 32 KiB. A
+    per-provider `Capabilities.MaxUserDataBytes` comes when a provider needs less, such as AWS with 16 KB. An
+    `extraConfig` that does not fit fails with the group's name and the size ([8.3](#83-nodeconfig-contract)).
+15. **The host firewall and `access`:** the host does not copy `access.ssh` or `access.api`. SSH, ICMP and, on server
+    and combined nodes, 4646 are open on the host, and the cloud firewall filters their sources. The host opens
+    Nomad's ports and the dynamic ports only to the cluster CIDR and blocks the metadata address for workloads. A
+    change of `access` never changes the spec hash ([8.3](#83-nodeconfig-contract)).
 
 ---
 
 ## Appendix A: Nomad agent configuration sketches
 
-These are illustrative. Once the golden files exist in the repository, they are authoritative.
+The golden files in [`internal/nodeconfig/testdata/`](../internal/nodeconfig/testdata/) are authoritative.
+`go test ./internal/nodeconfig -update` rewrites them, and the tests parse each one back with HCL1. Their inputs are a
+cluster `prod` with the CIDR `10.64.0.0/16`, the groups `servers`, `workers` and `core`, meta values with quotes,
+backslashes, `%{`, `{{` and Unicode, and a seed with an IPv6 address.
 
-**Server: `/etc/nomad.d/00-tent.hcl`** (group level, part of the spec hash):
+| File | Server | Client | Combined |
+|---|---|---|---|
+| `00-tent.hcl` | [`server_00-tent.hcl`](../internal/nodeconfig/testdata/server_00-tent.hcl.golden) | [`client_00-tent.hcl`](../internal/nodeconfig/testdata/client_00-tent.hcl.golden) | [`combined_00-tent.hcl`](../internal/nodeconfig/testdata/combined_00-tent.hcl.golden) |
+| `01-gossip.hcl` | [`server_01-gossip.hcl`](../internal/nodeconfig/testdata/server_01-gossip.hcl.golden) | — | [`combined_01-gossip.hcl`](../internal/nodeconfig/testdata/combined_01-gossip.hcl.golden) |
+| `05-join.hcl` | [`server_05-join.hcl`](../internal/nodeconfig/testdata/server_05-join.hcl.golden) | [`client_05-join.hcl`](../internal/nodeconfig/testdata/client_05-join.hcl.golden) | [`combined_05-join.hcl`](../internal/nodeconfig/testdata/combined_05-join.hcl.golden) |
+| `10-node.hcl` | [`server_10-node.hcl`](../internal/nodeconfig/testdata/server_10-node.hcl.golden) | [`client_10-node.hcl`](../internal/nodeconfig/testdata/client_10-node.hcl.golden) | [`combined_10-node.hcl`](../internal/nodeconfig/testdata/combined_10-node.hcl.golden) |
+| `11-instance.hcl` | — | [`11-instance.hcl`](../internal/nodeconfig/testdata/11-instance.hcl.golden) | [`11-instance.hcl`](../internal/nodeconfig/testdata/11-instance.hcl.golden) |
+| `98-user-server.hcl` | [`server_98-user-server.hcl`](../internal/nodeconfig/testdata/server_98-user-server.hcl.golden) | — | [`combined_98-user-server.hcl`](../internal/nodeconfig/testdata/combined_98-user-server.hcl.golden) |
+| `99-user-client.hcl` | — | [`client_99-user-client.hcl`](../internal/nodeconfig/testdata/client_99-user-client.hcl.golden) | [`combined_99-user-client.hcl`](../internal/nodeconfig/testdata/combined_99-user-client.hcl.golden) |
+
+[`node.json`](../internal/nodeconfig/testdata/node.json.golden) is an encoded NodeConfig, and
+[`user-data.yaml`](../internal/nodeconfig/testdata/user-data.yaml.golden) the user data with its payload masked
+([Appendix B](#appendix-b-cloud-init-user-data-sketch)).
+
+**Client: `00-tent.hcl`**, from `client_00-tent.hcl.golden` with its meta cut to five keys. `<private>` stands for
+`{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}`, and `<interface>` for the
+same template with `attr \"name\"`.
 
 ```hcl
 # Rendered by tent. Do not edit: changes are overwritten on the next boot.
 region             = "global"
 data_dir           = "/var/lib/nomad"
-leave_on_terminate = true # graceful leave where the provider can shut down via ACPI
+leave_on_terminate = true # leave the cluster gracefully when Nomad stops
 
 addresses {
-  http = "0.0.0.0" # reached by the tent CLI through the cloud firewall (access.api)
-  rpc  = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
-  serf = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+  http = "127.0.0.1 <private>"
+  rpc  = "<private>"
 }
 
 advertise {
-  http = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
-  rpc  = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
-  serf = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
+  http = "<private>"
+  rpc  = "<private>"
 }
 
-server {
-  enabled          = true
-  bootstrap_expect = 3
-  encrypt          = "<gossip key>"
+client {
+  enabled           = true
+  node_pool         = "batch"
+  node_class        = "general"
+  network_interface = "<interface>"
+  min_dynamic_port  = 20000
+  max_dynamic_port  = 32000
 
-  client_introduction {
-    enforcement = "strict"
+  drain_on_shutdown {
+    deadline           = "10m"
+    ignore_system_jobs = true
+  }
+
+  options {
+    "driver.allowlist"     = "docker,exec"
+    # Cloud fingerprinters only slow down startup on Vultr and Hetzner.
+    "fingerprint.denylist" = "env_aws,env_gce,env_azure,env_digitalocean"
+  }
+
+  meta {
+    "tent_cluster"   = "prod"
+    "tent_nodegroup" = "workers"
+    "quote"          = "say \"hi\""
+    "rack.id"        = "r1"
+    "team"           = "platform"
   }
 }
 
@@ -2546,99 +2739,59 @@ tls {
   verify_https_client    = true
 }
 
-autopilot {
-  cleanup_dead_servers = true
-}
-
 telemetry {
   prometheus_metrics   = true
   publish_node_metrics = true
 }
 ```
 
-**Client: `/etc/nomad.d/00-tent.hcl`** (group level):
+A server's `00-tent.hcl` differs:
+- `addresses` has `http = "0.0.0.0"`, which the tent CLI reaches through the cloud firewall, and a `serf` address, and
+  `advertise` a `serf` address too;
+- it has `server { enabled = true }` with `client_introduction { enforcement = "strict" }` instead of the `client`
+  block, and `autopilot { cleanup_dead_servers = true }`.
+
+A combined node's has the server's addresses and both blocks, with `enforcement = "warn"` by default.
+
+**Server and combined: `01-gossip.hcl`** (the only secret file of the group, mode 0600):
 
 ```hcl
 # Rendered by tent. Do not edit: changes are overwritten on the next boot.
-region             = "global"
-data_dir           = "/var/lib/nomad"
-leave_on_terminate = true # also triggers drain_on_shutdown as a safety net
-
-addresses {
-  http = "127.0.0.1 {{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
-  rpc  = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
-}
-
-advertise {
-  http = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
-  rpc  = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
-}
-
-client {
-  enabled           = true
-  node_pool         = "default"
-  node_class        = "general"
-  network_interface = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"name\" }}"
-
-  drain_on_shutdown {
-    deadline           = "10m"
-    ignore_system_jobs = true
-  }
-
-  options {
-    # Cloud environment fingerprinters only slow down startup on Vultr and Hetzner.
-    "fingerprint.denylist" = "env_aws,env_gce,env_azure,env_digitalocean"
-  }
-
-  meta {
-    tent_cluster   = "prod"
-    tent_nodegroup = "workers"
-    team           = "platform"
-  }
-}
-
-tls {
-  http = true
-  rpc  = true
-
-  ca_file   = "/etc/nomad.d/tls/ca.pem"
-  cert_file = "/etc/nomad.d/tls/agent.pem"
-  key_file  = "/etc/nomad.d/tls/agent-key.pem"
-
-  verify_server_hostname = true
-  verify_https_client    = true
-}
-
-telemetry {
-  prometheus_metrics   = true
-  publish_node_metrics = true
+server {
+  encrypt = "<gossip key>"
 }
 ```
 
-**Join list: `/etc/nomad.d/05-join.hcl`** (per node, maintained by tent-node, excluded from the spec hash):
+**Client: `05-join.hcl`** (rendered by tent-node; servers and combined nodes use `server { … }` and port 4648):
 
 ```hcl
-# Maintained by tent-node (join refresh). Do not edit.
-# Servers use the serf port (4648), clients the RPC port (4647).
+# Rendered by tent-node. Do not edit: changes are overwritten.
 client {
   server_join {
-    retry_join = ["10.64.0.5:4647", "10.64.0.9:4647", "10.64.0.12:4647"]
+    retry_join = ["10.64.0.5:4647", "10.64.0.9:4647", "[fd00:64::c]:4647"]
   }
 }
 ```
 
-On servers the same file sets `server { server_join { retry_join = [...] } }`. On Hetzner it lists the seven slot IPs.
-
-**Per node: `/etc/nomad.d/10-node.hcl`** (excluded from the spec hash):
+**Combined: `10-node.hcl`** (a client's has no `server` block):
 
 ```hcl
-# Rendered by tent for this node only.
-name       = "prod-workers-3"
+# Rendered by tent. Do not edit: changes are overwritten on the next boot.
+name       = "prod-core-0"
 datacenter = "ams"
 
+server {
+  bootstrap_expect = 3
+}
+```
+
+**Client and combined: `11-instance.hcl`** (rendered by tent-node from the metadata service):
+
+```hcl
+# Rendered by tent-node. Do not edit: changes are overwritten.
 client {
   meta {
-    tent_instance_id = "cb676a46-66fd-4dfb-b839-443f2e6c0b60"
+    "tent_instance_id" = "cb676a46-66fd-4dfb-b839-443f2e6c0b60"
   }
 }
 ```
@@ -2647,28 +2800,50 @@ client {
 
 ## Appendix B: cloud-init user data sketch
 
+`nodeconfig.UserData` renders the user data ([`userdata.go`](../internal/nodeconfig/userdata.go)).
+[`user-data.yaml.golden`](../internal/nodeconfig/testdata/user-data.yaml.golden) holds a real one, with its payload
+masked and the exact curl options. In this sketch `<…>` marks what differs per node or per release:
+
 ```yaml
 #cloud-config
-package_update: false    # OS patching happens by node replacement
-package_upgrade: false   # Vultr's vendor data sets this too (2026-09); kept explicit in case it changes
+package_update: false
+package_upgrade: false
 write_files:
   - path: /etc/tent/node.json
     encoding: gz+b64
     owner: root:root
     permissions: "0600"
-    content: H4sIAAAAAAAA...   # gzip+base64 NodeConfig
+    content: <node.json, compressed with gzip, then base64>
 runcmd:
   - - /bin/sh
     - -c
     - |
       set -eu
-      for url in "https://github.com/ingvarch/tent/releases/download/v0.1.0/tent-node_linux_amd64" "<mirror>"; do
-        curl -fsSL --retry 5 -o /usr/local/bin/tent-node "$url" && break
+      mkdir -p /usr/local/bin
+      for url in 'https://github.com/ingvarch/tent/releases/download/v0.1.0/tent-node_linux_amd64' '<mirror>'; do
+        if curl -fsSL <timeouts and retries> -o /usr/local/bin/tent-node.download "$url" &&
+          echo '<sha256>  /usr/local/bin/tent-node.download' | sha256sum -c -; then
+          chmod 0755 /usr/local/bin/tent-node.download
+          mv /usr/local/bin/tent-node.download /usr/local/bin/tent-node
+          exec /usr/local/bin/tent-node install --config /etc/tent/node.json
+        fi
       done
-      echo "<sha256>  /usr/local/bin/tent-node" | sha256sum -c -
-      chmod 0755 /usr/local/bin/tent-node
-      /usr/local/bin/tent-node install --config /etc/tent/node.json
+      echo "tent-node: no URL gave a file with the expected sha256" >&2
+      exit 1
 ```
+
+- **Package updates stay off.** OS patching happens by replacing nodes. Vultr's vendor data sets the same (2026-09),
+  and tent keeps it explicit in case that changes.
+- **The payload** is NodeConfig's JSON, compressed without a name or a time, so the same config always gives the same
+  user data. Only root reads `/etc/tent/node.json`.
+- **The download.** The script tries the tent-node URLs in turn and installs the first file whose sha256 matches.
+  curl retries every failure of one URL, a refused connection included, as when the network is not up yet at boot,
+  and starts no new try after 10 minutes. A try fails when it stalls below 1 KiB/s for 30 s or runs for 10 minutes, so
+  one URL takes at most about 20 minutes before the next mirror gets its turn. When no URL gives the right file, the
+  script fails. The URLs are printable ASCII in single quotes, one inert shell word each. `mkdir` makes
+  `/usr/local/bin` with mode 0755 where an image lacks it.
+- **`exec`** hands cloud-final over to `tent-node install` ([8.1](#81-bootstrap-chain)).
+- **Size.** The whole cloud-config must fit in 24 KiB ([8.3](#83-nodeconfig-contract)).
 
 `tent-node install` writes and starts two units:
 

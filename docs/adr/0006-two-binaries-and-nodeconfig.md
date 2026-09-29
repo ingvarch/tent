@@ -1,7 +1,10 @@
 # ADR-0006: Two binaries and a versioned NodeConfig contract
 
 - **Status:** Accepted; extended by [ADR-0026](0026-channels-and-release-assets.md) (how the CLI checks Nomad, the
-  CNI plugins and tent-node, and which builds count as development builds)
+  CNI plugins and tent-node, and which builds count as development builds); amended by
+  [ADR-0027](0027-nodeconfig-contract-rendering-and-spec-hash.md)
+  (the size budget is 24 KiB for the whole user data on every provider; NodeConfig carries the node's name, not the
+  instance id; tent-node renders `11-instance.hcl` and `05-join.hcl`)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md), [ADR-0008](0008-node-credential-delivery.md),

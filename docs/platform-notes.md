@@ -98,15 +98,66 @@ Facts about Nomad, Hetzner Cloud, Vultr, S3-compatible object stores and prior a
     space-separated IPs, plus `HCLOUD_TOKEN` on the node.
 
 **Agent configuration:**
+
+The items that name a source file were checked in the Nomad **v1.11.3** source (the Go module cache) on 2026-09-29.
+The source of 2.0.7 was not checked offline. ⏳ Re-check them against the version tent runs.
+
 - **go-sockaddr templates** work in `bind_addr`, `addresses.*`, `advertise.*` and `client.network_interface`.
   `addresses.http` accepts several space-separated addresses.
-- **File merging.** `.hcl` and `.json` files in a configuration directory are merged in lexicographic order.
-- **Parser.** Agent configuration is still parsed with **HCL1**, with no HCL2 functions.
+- **File merging.** `LoadConfigDir` (`command/agent/config.go`) reads the `.hcl` and `.json` files of a directory,
+  skips temporary files, sorts the paths and merges the files in that order. A later file's single values win.
+  `client.meta` and `client.options` merge key by key. A later, non-empty `server_join.retry_join` replaces the
+  earlier list (`ServerJoin.Merge`).
+- **Unknown keys are errors.** Each file is checked for keys that no field takes (`extraKeys` in
+  `command/agent/config_parse.go`, `helper.UnusedKeys` in `helper/funcs.go`).
+- **Parser.** Agent configuration is still parsed with **HCL1**, with no HCL2 functions. Nomad's `go.mod` replaces
+  `github.com/hashicorp/hcl` with its fork `v1.0.1-nomad-1`. Upstream v1.0.0, which tent's tests use, shows
+  (`hcl/scanner/scanner.go`, `hcl/strconv/quote.go`):
+  - the scanner refuses U+E123 anywhere in a file, as "reserved for internal use";
+  - in a quoted string, `${` opens a span that runs to its matching `}`. Quotes inside it do not end the string, and
+    backslash escapes inside it are kept as written. HCL1 has no escape for `${`.
+
+  The fork was not checked. ⏳ `nomad config validate` of tent's golden files settles it (M2.5).
 - **Graceful shutdown settings.**
   - `leave_on_interrupt` and `leave_on_terminate` default to false.
-  - With them enabled, a server leaves the peer set gracefully.
+  - With them enabled, a server leaves the peer set gracefully. SIGTERM leaves only with `leave_on_terminate`, and
+    SIGINT only with `leave_on_interrupt` (`handleSignals` in `command/agent/command.go`).
   - Clients with `drain_on_shutdown { deadline, force, ignore_system_jobs }` drain themselves on shutdown.
 - **Jobs default to `datacenters = ["*"]`** (since 1.5).
+
+**Client settings tent writes** (v1.11.3 source, 2026-09-29, as above):
+- **`client.options."driver.allowlist"`** is a comma-separated list of driver names, each trimmed of white space
+  (`splitValue` in `client/config/config.go`). A non-empty list starts only those drivers
+  (`client/pluginmanager/drivermanager/manager.go`); an empty one starts all. `driver.whitelist` is the old name.
+  `raw_exec` stays disabled until its plugin sets `enabled = true` (`drivers/rawexec/driver.go`).
+- **Dynamic ports.** `client.min_dynamic_port` and `max_dynamic_port` default to 20000 and 32000
+  (`nomad/structs/network.go`, `DefaultConfig` in `command/agent/config.go`).
+- **ACLs on clients.** A client takes `acl.enabled` from the agent configuration (`convertClientConfig` in
+  `command/agent/agent.go`). With it off, the client resolves every token to an ACL that allows everything
+  (`resolveTokenAndACL` in `client/acl.go`) and accepts any migrate token (`ValidateMigrateToken` in
+  `client/client.go`). So `acl { enabled = true }` belongs on clients too.
+- **The state directory and the intro token.** `client.state_dir` defaults to `<data_dir>/client`
+  (`convertClientConfig`). When no token came by flag or environment, the agent reads `intro_token.jwt` in that
+  directory; a missing file is no error (`readIntroTokenFile` in `command/agent/agent.go`).
+- **Joining.** `server { server_join { retry_join } }` joins the servers' Serf, whose default port is 4648.
+  `client { server_join { retry_join } }` sets the client's servers, and an address without a port gets 4647
+  (`resolveServer` in `client/rpc.go`). One agent may have both blocks.
+  - `server.retry_join` still works, with a deprecation warning, and cannot be combined with `server_join`
+    (`handleRetryJoin` in `command/agent/command.go`, `retryJoiner.Validate` in `command/agent/retry_join.go`).
+  - `start_join` is refused for clients.
+- **A combined agent's client reaches its own server over the network.** When the agent runs a server, it adds the
+  server's RPC bind and advertise addresses to the client's servers (`finalizeClientConfig` in
+  `command/agent/agent.go`). No code outside tests sets the client's in-process `RPCHandler`
+  (`client/config/config.go`, `client/rpc.go`). So a combined node must be able to reach its own RPC port on its
+  private address.
+- **Bridge networking.**
+  - Nomad's CNI page asks for `net.bridge.bridge-nf-call-arptables`, `-ip6tables` and `-iptables` set to 1 (docs,
+    read 2026-09-29). These sysctls exist only while the `br_netfilter` module is loaded.
+  - The default bridge subnet is `172.26.64.0/20` (`client/allocrunner/networking_bridge_linux.go`). Bridge-mode
+    workloads reach the host from it.
+  - tent's choice for client and combined nodes: load `br_netfilter` and set the three sysctls; install Docker from
+    the distribution's packages, with the `overlay` module for its storage, unless the group's drivers leave `docker`
+    out. Servers get none of it.
 
 **TLS:**
 - **Recommended:** `rpc = true`, `http = true`, `verify_server_hostname = true`, `verify_https_client = true`.
@@ -538,9 +589,12 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
 - **user_data.**
   - Base64-encoded. The size limit is not documented anywhere. **Spike 2026-09-25:**
     - The API has no limit up to **4 MiB**. Both `PATCH` and create accepted 4 MiB and stored it intact.
-    - A 65,508-byte user_data (tent's 64 KiB budget) works end to end: the metadata service served all of it, and a
-      45 KB `write_files` payload (`encoding: b64`) landed on disk with the right sha256.
+    - A 65,508-byte user_data (tent's budget then, 64 KiB) works end to end: the metadata service served all of it,
+      and a 45 KB `write_files` payload (`encoding: b64`) landed on disk with the right sha256. tent's budget is now
+      24 KiB on every provider ([ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)).
     - Larger payloads were not tested on the instance.
+    - ⏳ tent writes `node.json` with `encoding: gz+b64`, which cloud-init's `write_files` accepts. The spike wrote
+      only a `b64` payload, so gz+b64 on Vultr is checked on a real VM in M2.5 or E2E.
   - It can be updated through `PATCH`, with no rebuild. **Spike 2026-09-25:**
     - The metadata service served the new value 4 s after the `PATCH`, at both `/latest/user-data` and `/v1.json`.
     - After `halt` and `start`, the instance-id was unchanged and `runcmd` did not run again. cloud-init only cached
@@ -1103,6 +1157,9 @@ Nomad:
 - go-discover: <https://github.com/hashicorp/go-discover>
 - Release signing key: <https://www.hashicorp.com/.well-known/pgp-key.txt>
 - CNI plugins releases: <https://github.com/containernetworking/plugins/releases>
+- CNI and bridge networking: <https://developer.hashicorp.com/nomad/docs/networking/cni>
+- Source of v1.11.3: <https://github.com/hashicorp/nomad/tree/v1.11.3>
+- HCL1 v1.0.0, which Nomad forks as `v1.0.1-nomad-1`: <https://github.com/hashicorp/hcl/tree/v1.0.0>
 
 Hetzner:
 - Cloud API OpenAPI spec: <https://docs.hetzner.cloud/cloud.spec.json>
