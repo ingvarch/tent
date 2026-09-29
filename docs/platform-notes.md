@@ -9,8 +9,8 @@ Facts about Nomad, Hetzner Cloud, Vultr, S3-compatible object stores and prior a
 > cloud-init). The confidence is high unless marked otherwise.
 >
 > Items marked 🔬 are **unverified** and are checked with `hack/vultr-spike` against a real account before code
-> depends on them. Facts marked "spike 2026-09-25" or "spike 2026-09-27" were measured by the spike runs of those
-> days (see [3.16](#316-spike-runs)).
+> depends on them. Facts marked "spike" or "VM check" with a date were measured by the spike runs of that day (see
+> [3.16](#316-spike-runs)).
 >
 > Items marked ⏳ are **volatile**: prices, availability, versions, incidents. Re-check them before relying on them.
 > When a fact here turns out wrong, fix it and note the date.
@@ -131,7 +131,7 @@ checked offline. ⏳ Re-check them against the version tent runs.
   - in a quoted string, `${` opens a span that runs to its matching `}`. Quotes inside it do not end the string, and
     backslash escapes inside it are kept as written. HCL1 has no escape for `${`.
 
-  The fork was not checked. ⏳ `nomad config validate` of tent's golden files settles it (M2.5).
+  The fork was not checked. ⏳ `nomad config validate` of tent's golden files settles it (M2.6; M2.5 did not run it).
 - **Graceful shutdown settings.**
   - `leave_on_interrupt` and `leave_on_terminate` default to false.
   - With them enabled, a server leaves the peer set gracefully. SIGTERM leaves only with `leave_on_terminate`, and
@@ -600,7 +600,9 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
     `firewall_group_id`. **Spike 2026-09-25:** `?tag=` is an **exact but case-insensitive** match (no prefix or
     suffix matches), and `?label=` is exact (no prefix match).
   - A new instance was listed by `?tag=` on the first request after the create response (5 of 5 instances on
-    2026-09-25, 1 of 1 on 2026-09-27), so a search by operation tag right after a lost response finds it.
+    2026-09-25, 1 of 1 on 2026-09-27). On 2026-09-29 one of two was listed on the first request, and the other only
+    on the second, about 1 s after the create response. So a search by operation tag right after a lost response can
+    miss the instance for about a second.
 - **`PATCH /v2/instances/{id}`** returns 202 with `job_ids`. It can change:
   - `tags` (replaces the whole set);
   - `user_data`;
@@ -638,8 +640,9 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
       and a 45 KB `write_files` payload (`encoding: b64`) landed on disk with the right sha256. tent's budget is now
       24 KiB on every provider ([ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)).
     - Larger payloads were not tested on the instance.
-    - ⏳ tent writes `node.json` with `encoding: gz+b64`, which cloud-init's `write_files` accepts. The spike wrote
-      only a `b64` payload, so gz+b64 on Vultr is checked on a real VM in M2.5 or E2E.
+    - tent writes `node.json` with `encoding: gz+b64`, which cloud-init's `write_files` accepts. **VM check
+      2026-09-29 (M2.5):** on Ubuntu 24.04 and 26.04 the node.json on the instance had the sha256 of the payload,
+      mode 0600 and owner `root:root`.
   - It can be updated through `PATCH`, with no rebuild. **Spike 2026-09-25:**
     - The metadata service served the new value 4 s after the `PATCH`, at both `/latest/user-data` and `/v1.json`.
     - After `halt` and `start`, the instance-id was unchanged and `runcmd` did not run again. cloud-init only cached
@@ -653,6 +656,18 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
   - Vultr's docs: "cloud-init updates all the system packages before it enables SSH. This takes several minutes.
     The directive is in Vultr's vendor-data." **This is outdated (spike 2026-09-25):** the vendor data now sets
     `package_upgrade: false` itself, and the `package-update-upgrade-install` module took 2 ms.
+  - **Ordering.** cloud-init runs `runcmd` in `cloud-final.service`, so `tent-node install` runs there. On Ubuntu,
+    cloud-init's unit orders `cloud-final.service` after `multi-user.target` (upstream
+    `systemd/cloud-final.service.tmpl`), so on a reboot cloud-final waits for `tent-node.service`, which
+    `multi-user.target` wants. **VM check 2026-09-29 (M2.5), Ubuntu 24.04 and 26.04:**
+    - After the reboot, `After=` of `multi-user.target` listed `tent-node.service`. `tent-node.service` became
+      active, then `multi-user.target`, then `cloud-final.service` started: at 25.3 s, 25.8 s and 26.0 s on 24.04,
+      and 22.2 s, 23.0 s and 23.0 s on 26.04 (monotonic).
+    - `cloud-init status --wait --long` was `done`, with no errors, on both boots.
+    - The critical chain of `tent-node.service` passed no `cloud-final`, `cloud-config` or `cloud-init.target`.
+    - Both images run cloud-init 26.1, under different unit names. The critical chains pass
+      `cloud-init-local.service` and `cloud-init.service` on 24.04, and `cloud-init-main.service`,
+      `cloud-init-local.service` and `cloud-init-network.service` on 26.04.
   - **How SSH is enabled.** The image's sshd listens on `127.0.0.1` only. A vendor-data script removes that
     `ListenAddress` and reloads sshd. Port 22 became public 31 s after kernel start.
   - **Boot timeline (spike 2026-09-25, `vc2-1c-1gb`, `ams`, Ubuntu 24.04), counted from the create call:**
@@ -670,6 +685,10 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
     - In `cloud-init analyze blame` no module took more than 5 s; the largest was the Vultr datasource search.
     - The first run's figures (SSH after 365 s; over 900 s with the default vendor data) did not reproduce. The
       on-instance timestamps show no step that slow.
+    - **VM check 2026-09-29 (M2.5)**, with tent-node's user data, on Ubuntu 24.04 and 26.04: API `active/running/ok`
+      after 52–55 s, SSH login after 102 s, and `cloud-init status: done` at 104–105 s. After a reboot from inside,
+      SSH answered on the new boot after 52–53 s. By `status.json`, `up` ran for about 0.3 s on the first boot and
+      1.1–1.3 s after the reboot. By the critical chain, `tent-node.service` took 0.3 s and 1.6–1.7 s.
   - **Vendor data** (six MIME parts, read on the instance on 2026-09-25). User data does not replace them: they ran on
     instances with and without user data.
     - A cloud-config: a root password, `ssh_pwauth: true`, `disable_root: false`, a `linuxuser` account,
@@ -692,6 +711,14 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
       leaves through the public NIC.
     - `/latest/user-data` answered HTTP 200 from inside the instance.
   - `/v1.json` also carries `user-data`, `vendor-data` and `startup-script`.
+  - **What tent-node reads** ([ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md)): `instance-v2-id`,
+    `regioncode` in lower case, and the IPv4 address of the one interface with `network-type: private`, from one GET
+    of `/v1.json` per run. Its tests use a document of the form an instance in `ams` served on 2026-09-25, with
+    documentation values in place of its ids and public addresses.
+    - **VM check 2026-09-29 (M2.5):** on Ubuntu 24.04 and 26.04 the read succeeded at the first try, on the first
+      boot and after a reboot. The read and the rest of `preflight` took 145 ms and 163 ms on 24.04, and 123 ms and
+      136 ms on 26.04, under the 1 s that a failed try waits before the next. The instance id, zone and private IP in
+      `status.json` matched the API.
   - **`tags` is present but was empty** even though the instance had tags (both spike runs on 2026-09-25), so do not
     rely on it.
     Label and plan are not exposed.
@@ -702,6 +729,22 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
     `addresses: [10.64.0.3/16]` and `mtu: 1450`. Both were matched by MAC with `set-name`: `enp1s0` public, `enp8s0`
     private on `vc2-1c-1gb` in `ams`.
 - **No signed instance identity** document or attestation.
+- **systemd and time sync on the image, as tent-node uses them.**
+  - **VM check 2026-09-29 (M2.5):** `systemctl is-enabled` of a unit without a file prints `not-found` on stdout and
+    nothing on stderr, and exits with 4, on systemd 255 (`255.4-1ubuntu8.17`, Ubuntu 24.04) and 259
+    (`259.5-0ubuntu3.4`, Ubuntu 26.04). tent-node's `install` and `verify` read the state from stdout and fail when it
+    is empty.
+  - **VM check 2026-09-29 (M2.5):** Vultr's Ubuntu 24.04 and 26.04 images both run systemd-timesyncd.
+    `/usr/lib/systemd/ntp-units.d/` holds only `80-systemd-timesync.list`, chrony is inactive, and after `up`
+    `timedatectl show` gave `CanNTP=yes` and `NTP=yes`. `NTPSynchronized` was `no` at the first check on 24.04 and
+    `yes` after the reboot; on 26.04 it was `yes` both times.
+    - Ubuntu moved its default to chrony in 25.10, but Vultr's 26.04 image does not use it. The earlier guess here
+      that 26.04 runs chrony was wrong for Vultr's image.
+    - tent-node turns NTP on through `timedatectl` where it can, and otherwise requires `chrony.service` or
+      `systemd-timesyncd.service` to be active, so it also accepts an image that runs chrony.
+  - ⏳ Whether the first `tent-node install` runs no `daemon-reload`, and `systemctl status tent-node.service` shows no
+    "changed on disk" warning. The VM check of 2026-09-29 did not record it: `install` logs only "start the unit", and
+    the spike captured neither PID 1's reload messages nor `systemctl status`. It moves to the M2.6 VM check.
 
 ### 3.5 VPC
 
@@ -728,7 +771,8 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
 - **Deleting.** After the instances disappeared from `GET /v2/instances`, `DELETE /v2/vpcs/{id}` still failed for
   14–20 s with `400 The following servers are attached to this VPC network: <IPs>` (spike 2026-09-25). Retry it.
   On 2026-09-28 the delete succeeded 12 s after the instance was gone, on the second request; the `<IPs>` in the
-  refusal were the instance's public address, not its VPC address.
+  refusal were the instance's public address, not its VPC address. On 2026-09-29 it succeeded 21 s and 25 s after the
+  instance was gone, each time on the second request, after the same refusal.
 - **MTU and interfaces.** MTU is 1450. Private interface names vary (`enp6s0`, `enp7s0`, `enp8s0`, `ens7`), so match
   by MAC.
 - **No VPC peering API.** Cross-region connectivity is do-it-yourself, for example with WireGuard.
@@ -936,9 +980,10 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
 
 ### 3.16 Spike runs
 
-All runs: region `ams`, plan `vc2-1c-1gb`, Ubuntu 24.04 (`os_id` 2284). Runs 1 to 3 ran on 2026-09-25, run 4 on
-2026-09-27 and run 5 on 2026-09-28. Reports are in `hack/vultr-spike/results/` (git-ignored). The M1 exit run below
-was not a spike run.
+All runs: region `ams`, plan `vc2-1c-1gb`, Ubuntu 24.04 (`os_id` 2284), except one of the M2.5 VM checks, which ran
+Ubuntu 26.04 (`os_id` 2760). Runs 1 to 3 ran on 2026-09-25, run 4 on 2026-09-27, run 5 on 2026-09-28 and the M2.5 VM
+checks on 2026-09-29. Reports are in `hack/vultr-spike/results/` (git-ignored). The M1 exit run below was not a spike
+run.
 
 **Run 1 (`tt3s1g`, spike v1)** verified:
 - the tag syntax, limits and filter semantics;
@@ -1005,9 +1050,25 @@ and one worker, then two workers.
   API then listed no instance, VPC, firewall group or SSH key with the cluster's marker.
 - Each list call took 0.9–2 s ([3.1](#31-api-basics-and-access-control)).
 
+**M2.5 VM checks (`ppssbr` and `yccsoc`, spike v5, `--only tentnode`, 2026-09-29)** each booted one instance from the
+user data of `hack/tent-node-userdata`: `ppssbr` on Ubuntu 24.04 (`os_id` 2284), `yccsoc` on Ubuntu 26.04
+(`os_id` 2760). Both ran one development build of tent-node, `v0.1.0-rc.2-18-g4fc8be6-dirty`, which `make dev-upload`
+put into the CI R2 bucket; the object was deleted afterwards. Both passed. They verified:
+- that node.json arrives intact from the gz+b64 user data ([3.4](#34-user_data-metadata-and-identity));
+- that `up` ran on the first boot, and after a reboot changed nothing but `status.json`;
+- the order of `tent-node.service`, `multi-user.target` and cloud-final after the reboot, and that cloud-init finished
+  with no errors on both boots;
+- that the metadata read succeeded at the first try on both boots;
+- what `systemctl is-enabled` prints for a unit without a file on systemd 255 and 259;
+- that both images run systemd-timesyncd, not chrony;
+- that a new instance can need a second request, about 1 s after the create response, to be listed by tag
+  ([3.3](#33-instances));
+- that the VPC delete succeeded 21–25 s after the instances were gone ([3.5](#35-vpc)).
+
 **Still open:**
 - Object Storage conditional writes ([3.12](#312-object-storage-)).
-- Images other than Ubuntu 24.04 (for example 26.04) were not checked.
+- Images other than Ubuntu 24.04 were not checked, except Ubuntu 26.04 by one M2.5 VM check, for tent-node only.
+- Whether the first `tent-node install` runs a `daemon-reload` ([3.4](#34-user_data-metadata-and-identity)).
 - Account limits beyond 3 concurrent instances were not tested.
 - What `/vpcs` answers in the first 30 s after a create ([3.5](#35-vpc)).
 

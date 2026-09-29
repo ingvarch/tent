@@ -42,7 +42,12 @@ Providers, in order:
   - M2.4 added nomadops (`internal/nomadops`, `nomadfake`): the mTLS client of a server's HTTP API, the ACL
     bootstrap that is safe to repeat, intro tokens, the leader, the nodes, autopilot health and waits over them.
     `nomad/api` is pinned at the commit of Nomad v2.0.7 and moved by hand. Nothing calls nomadops until M2.7.
-  - Next: M2.5 tent-node.
+  - M2.5 added tent-node (`cmd/tent-node`, `internal/nodeup`, ADR-0028): `install`, `up`, `version` and a stub
+    `refresh-join`; the phase runner over a filesystem and exec, with fakes in `nodeuptest`; the Vultr metadata
+    client; the systemd units; `status.json`; and the phases `preflight`, `system` and `verify`, the others being
+    stubs. NodeConfig names the provider. The release ships `tent-node_linux_amd64` and `_arm64`; `make dev-upload`
+    puts a development build into the CI R2 bucket (`hack/tent-node-upload`).
+  - Next: M2.6 tent-node phases.
 
 ## Read before changing anything
 
@@ -68,8 +73,11 @@ Providers, in order:
     `internal/model`, `internal/rollout` and `internal/app` included, uses the interfaces in `internal/cloud`.
     Tests and the provider packages themselves are exempt.
   - Cloud SDKs (govultr, hcloud-go) are imported only by their provider package, tests included.
-  - `internal/nodeup` (the tent-node agent) and `internal/nodeconfig`, tests included, never import
+  - `internal/nodeup` (the tent-node agent), `internal/nodeconfig` and `cmd/tent-node`, tests included, never import
     `internal/cloud/...`.
+  - `internal/nodeup` and `cmd/tent-node` import only the standard library, `internal/nodeup/...`,
+    `internal/nodeconfig`, `internal/secret`, `internal/buildinfo` and `api/v1alpha1` (`tent-node-allowed`); their
+    tests are exempt (ADR-0028). A test in `internal/buildconfig` checks all that `./cmd/tent-node` links.
   - Only `internal/nomadops` imports `github.com/hashicorp/nomad/api`; `internal/nomadops/nomadfake`, tests
     included, imports no Nomad module.
   - Never import the root module `github.com/hashicorp/nomad`; it is BUSL-licensed.
@@ -78,12 +86,16 @@ Providers, in order:
     Their tests are exempt (ADR-0025, ADR-0027).
   - `internal/nodeconfig` imports only the standard library, `internal/secret` and `api/v1alpha1`; its tests are
     exempt (ADR-0027).
-  - Only tests import `internal/secrettest` and `github.com/hashicorp/hcl`.
+  - Only tests import `internal/secrettest`, `internal/nomadops/nomadfake`, `internal/nodeup/nodeuptest`,
+    `internal/s3url/s3urltest` and `github.com/hashicorp/hcl`.
   - Only `internal/assets` imports `github.com/ProtonMail/go-crypto`, tests included (ADR-0026).
   - `internal/nodeup`, `internal/nodeconfig` and `cmd/tent-node`, tests included, import neither `internal/assets`
     nor `internal/channels`; tent-node gets its assets in NodeConfig (ADR-0026).
   - `internal/channels` imports only the standard library, `sigs.k8s.io/yaml`, `sigs.k8s.io/json` and
     `golang.org/x/mod/semver`; its tests are exempt (ADR-0026).
+  - `internal/s3url`, which the s3 state store and `hack/tent-node-upload` share, imports only the standard library,
+    aws-sdk-go-v2's `aws`, `config` and `service/s3`, and `github.com/aws/smithy-go/logging`; its tests are exempt
+    (ADR-0028).
 - **Visibility.** Everything is under `internal/` except the public API types in `api/`.
 - **Weakest primitives.** Core mechanisms assume the weakest cloud primitives: non-unique names, no fixed IPs, no
   graceful shutdown. Richer primitives are optimizations behind `Capabilities` (ADR-0015 to ADR-0017).

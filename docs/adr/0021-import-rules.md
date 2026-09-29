@@ -5,7 +5,10 @@
   channels kept out of tent-node; `internal/channels` limited to the standard library, the YAML decoder and semver)
   and [ADR-0027](0027-nodeconfig-contract-rendering-and-spec-hash.md) (`internal/nodeconfig` limited to
   the standard library, `internal/secret` and the API types; `github.com/hashicorp/hcl` only in tests;
-  `nodeup-no-cloud` covers `internal/nodeconfig`)
+  `nodeup-no-cloud` covers `internal/nodeconfig`) and [ADR-0028](0028-tent-node-agent-units-and-delivery.md)
+  (`tent-node-allowed` lists what `internal/nodeup` and `cmd/tent-node` may import; `nodeup-no-cloud` covers
+  `cmd/tent-node`; `nodeuptest` and `s3urltest` only in tests; the follow-up `go list -deps ./cmd/tent-node` test is
+  built; `internal/s3url` imports only the standard library and the AWS SDK's S3 client)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0004](0004-layered-architecture.md), [ADR-0006](0006-two-binaries-and-nodeconfig.md),

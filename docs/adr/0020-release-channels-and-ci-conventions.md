@@ -6,7 +6,11 @@
   `make check` started to check the licences of the modules tent links (`internal/licenses`,
   [architecture §16](../architecture.md#16-technology-stack-and-releases)); go-licenses was not used because it
   misses modules linked only into the Windows binaries and NOTICE files, and as a tool in `go.mod` it would raise the
-  versions of modules tent shares with it
+  versions of modules tent shares with it; amended by [ADR-0028](0028-tent-node-agent-units-and-delivery.md)
+  (decision 1 and its M2 follow-up: tent-node joins the release in M2.5 as the bare binaries
+  `tent-node_linux_amd64` and `tent-node_linux_arm64`, listed in `checksums.txt`, each with an SBOM, not
+  notarized; one `THIRD_PARTY_NOTICES` covers both binaries and is also a file of the release, so not every copy
+  carries it; the licence check and the CI snapshot cover tent-node)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0006](0006-two-binaries-and-nodeconfig.md), [ADR-0011](0011-nomad-only-scope-and-licensing.md),
