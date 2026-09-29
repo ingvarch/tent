@@ -11,7 +11,9 @@ require (
 	github.com/gofrs/flock v0.13.1
 	github.com/google/go-cmp v0.7.0
 	github.com/google/licenseclassifier/v2 v2.0.0
+	github.com/hashicorp/go-cleanhttp v0.5.2
 	github.com/hashicorp/hcl v1.0.0
+	github.com/hashicorp/nomad/api v0.0.0-20260917172403-9dcbdc5e64ec
 	github.com/invopop/jsonschema v0.14.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/spf13/cobra v1.10.2
@@ -41,10 +43,14 @@ require (
 	github.com/buger/jsonparser v1.1.2 // indirect
 	github.com/cloudflare/circl v1.6.5 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/google/go-querystring v1.2.0 // indirect
-	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
+	github.com/hashicorp/cronexpr v1.1.3 // indirect
 	github.com/hashicorp/go-retryablehttp v0.7.8 // indirect
+	github.com/hashicorp/go-rootcerts v1.0.2 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
 	github.com/sergi/go-diff v1.1.0 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
