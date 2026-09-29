@@ -46,9 +46,9 @@ type canonAsset struct {
 //   - the host firewall, its rules sorted by name, protocol, ports and sources, and the sources of each rule sorted.
 //
 // Every node of a group has the same hash, and a node whose hash differs from its group's is out of date. The node's
-// name, its own files, its join settings, the secret files and where the assets come from leave the hash as it is, so
-// neither a new mirror nor a new server marks a node out of date. The order of the files, the assets, the rules and
-// their sources leaves it as it is too. For nil it returns "".
+// name, its own files, its join settings, the secret files, where the assets come from and the provider, which a
+// cluster never changes, leave the hash as it is, so neither a new mirror nor a new server marks a node out of date.
+// The order of the files, the assets, the rules and their sources leaves it as it is too. For nil it returns "".
 func SpecHash(nc *NodeConfig) string {
 	if nc == nil {
 		return ""

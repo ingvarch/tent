@@ -39,17 +39,20 @@ const (
 // NodeConfig is everything tent-node needs to turn a fresh machine into a Nomad agent of its node group. Encode and
 // Decode convert it to and from the JSON that the node reads.
 type NodeConfig struct {
-	APIVersion string        `json:"apiVersion"` // v1alpha1.APIVersion
-	Kind       string        `json:"kind"`       // Kind
-	Cluster    string        `json:"cluster"`
-	NodeGroup  string        `json:"nodeGroup"`
-	Name       string        `json:"name"` // the node's name, which is also its host name
-	Role       v1alpha1.Role `json:"role"`
-	Assets     []Asset       `json:"assets,omitempty"` // what the node downloads
-	Files      []File        `json:"files,omitempty"`  // what the node writes; Encode writes their content
-	Join       Join          `json:"join"`
-	System     System        `json:"system,omitzero"`
-	Firewall   HostFirewall  `json:"firewall"`
+	APIVersion string `json:"apiVersion"` // v1alpha1.APIVersion
+	Kind       string `json:"kind"`       // Kind
+	Cluster    string `json:"cluster"`
+	// Provider is the cloud that the cluster runs on, which tells tent-node whose metadata service to read. A cluster
+	// never changes it, so it leaves the spec hash as it is.
+	Provider  v1alpha1.Provider `json:"provider"`
+	NodeGroup string            `json:"nodeGroup"`
+	Name      string            `json:"name"` // the node's name, which is also its host name
+	Role      v1alpha1.Role     `json:"role"`
+	Assets    []Asset           `json:"assets,omitempty"` // what the node downloads
+	Files     []File            `json:"files,omitempty"`  // what the node writes; Encode writes their content
+	Join      Join              `json:"join"`
+	System    System            `json:"system,omitzero"`
+	Firewall  HostFirewall      `json:"firewall"`
 	// SpecHash is empty or SpecHash(nc), the hash of the node group's configuration, which tells a node that is out of
 	// date.
 	SpecHash string `json:"specHash,omitempty"`
@@ -171,13 +174,15 @@ var (
 	hostNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 	sha256Pattern   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	ownerPattern    = regexp.MustCompile(`^[a-z_][a-z0-9_-]*:[a-z_][a-z0-9_-]*$`)
-	sysctlPattern   = regexp.MustCompile(`^[a-z0-9_-]+(\.[a-z0-9_-]+)+$`)
-	modulePattern   = regexp.MustCompile(`^[a-z0-9_-]+$`)
+	// sysctl.d ignores the errors of a line whose key starts with a dash.
+	sysctlPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*(\.[a-z0-9_-]+)+$`)
+	// modprobe would read a leading dash as an option.
+	modulePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 )
 
-// Validate checks that tent-node can act on the NodeConfig: its header, names and role, the form of every asset, file,
-// join setting, system setting and firewall rule, and that a spec hash, when there is one, is SpecHash(nc). It returns
-// the first problem it finds.
+// Validate checks that tent-node can act on the NodeConfig: its header, names, provider and role, the form of every
+// asset, file, join setting, system setting and firewall rule, and that a spec hash, when there is one, is
+// SpecHash(nc). It returns the first problem it finds.
 func (nc *NodeConfig) Validate() error {
 	if nc == nil {
 		return errors.New("no node config")
@@ -203,6 +208,9 @@ func (nc *NodeConfig) checkHeader() error {
 	if err := v1alpha1.ValidateName(v1alpha1.KindCluster, nc.Cluster); err != nil {
 		return err
 	}
+	if err := checkProvider(nc.Provider); err != nil {
+		return err
+	}
 	if err := v1alpha1.ValidateName(v1alpha1.KindNodeGroup, nc.NodeGroup); err != nil {
 		return err
 	}
@@ -219,6 +227,19 @@ func checkHostName(name string) error {
 			"ending with a letter or digit", name)
 	}
 	return nil
+}
+
+// checkProvider checks that p is one of v1alpha1.Providers.
+func checkProvider(p v1alpha1.Provider) error {
+	known := v1alpha1.Providers()
+	if slices.Contains(known, p) {
+		return nil
+	}
+	names := make([]string, len(known))
+	for i, k := range known {
+		names[i] = string(k)
+	}
+	return fmt.Errorf("provider %q is not one of %s", p, strings.Join(names, ", "))
 }
 
 // checkRole checks that r is server, client or combined.

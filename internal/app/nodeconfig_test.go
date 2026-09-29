@@ -320,8 +320,8 @@ func TestGroupTemplates(t *testing.T) {
 			}
 			tmpl.Files = nil
 			want := nodeconfig.NodeConfig{
-				APIVersion: v1alpha1.APIVersion, Kind: nodeconfig.Kind, Cluster: "prod", NodeGroup: tc.group,
-				Role: tc.agent.Role, Assets: tc.assets,
+				APIVersion: v1alpha1.APIVersion, Kind: nodeconfig.Kind, Cluster: "prod",
+				Provider: v1alpha1.ProviderVultr, NodeGroup: tc.group, Role: tc.agent.Role, Assets: tc.assets,
 				Join:   nodeconfig.Join{Strategy: nodeconfig.JoinSeedAndRefresh, RefreshInterval: time.Minute},
 				System: tc.system,
 				Firewall: nodeconfig.HostFirewall{
@@ -379,6 +379,22 @@ func TestGroupTemplatesSpecHash(t *testing.T) {
 		nodeWorkersYAML) {
 		if tmpl.SpecHash == tmpls[name].SpecHash {
 			t.Errorf("a new CA bundle leaves the spec hash of %s as it is", name)
+		}
+	}
+}
+
+// TestGroupTemplatesProvider checks that every template names the model's provider, which tells tent-node whose
+// metadata service to read.
+func TestGroupTemplatesProvider(t *testing.T) {
+	m, c, groups := nodeSpecs(t, nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
+	m.Provider = v1alpha1.ProviderHetzner
+	tmpls, err := groupTemplates(m, c, groups, testAssets(), pki.NewGossipKey(), testCA(t).Bundle())
+	if err != nil {
+		t.Fatalf("groupTemplates: %v", err)
+	}
+	for name, tmpl := range tmpls {
+		if tmpl.Provider != v1alpha1.ProviderHetzner {
+			t.Errorf("the template of %s names the provider %q, want hetzner", name, tmpl.Provider)
 		}
 	}
 }

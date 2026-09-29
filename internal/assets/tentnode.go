@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/ingvarch/tent/internal/buildinfo"
+	"github.com/ingvarch/tent/internal/nodeconfig"
 )
 
 // TentNode returns the tent-node for linux on arch that goes with tent of the given version. A release or
@@ -21,13 +22,16 @@ func TentNode(ctx context.Context, opts Options, version, arch string) (Asset, e
 	if err != nil {
 		return Asset{}, err
 	}
-	file := "tent-node_linux_" + arch
+	file := TentNodeFile(arch)
 	sum, err := sumOf(sumsURL, sums, file)
 	if err != nil {
 		return Asset{}, err
 	}
-	return Asset{Name: "tent-node", Version: version, URLs: []string{dir + file}, SHA256: sum}, nil
+	return Asset{Name: nodeconfig.TentNodeAsset, Version: version, URLs: []string{dir + file}, SHA256: sum}, nil
 }
+
+// TentNodeFile is the name of tent-node for linux on arch in tent's release and its checksums.txt.
+func TentNodeFile(arch string) string { return "tent-node_linux_" + arch }
 
 // devTentNode returns the tent-node of a development build of tent, which no release holds.
 func devTentNode(opts Options, version string) (Asset, error) {
@@ -42,5 +46,7 @@ func devTentNode(opts Options, version string) (Asset, error) {
 	if !sha256Hex.MatchString(opts.DevSHA256) {
 		return Asset{}, fmt.Errorf("TENT_NODE_SHA256 is %q, want 64 lower-case hex digits", opts.DevSHA256)
 	}
-	return Asset{Name: "tent-node", Version: version, URLs: []string{opts.DevURL}, SHA256: opts.DevSHA256}, nil
+	return Asset{
+		Name: nodeconfig.TentNodeAsset, Version: version, URLs: []string{opts.DevURL}, SHA256: opts.DevSHA256,
+	}, nil
 }
