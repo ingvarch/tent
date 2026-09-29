@@ -35,7 +35,11 @@ Providers, in order:
   - M2.2 added the release channels and assets (`internal/channels`, `internal/assets`, ADR-0026): the embedded
     `stable` channel, the Nomad version pin in `cluster.completed.yaml`, and Nomad, CNI and tent-node downloads
     verified by signature or sha256. Nothing downloads on nodes yet.
-  - Next: M2.3 NodeConfig.
+  - M2.3 added NodeConfig (`internal/nodeconfig`, `internal/app/nodeconfig.go`, ADR-0027): the model's join strategy
+    and rules between nodes, the NodeConfig types and strict codec, the Nomad agent configuration with golden files,
+    the spec hash and the cloud-config within 24 KiB. `update` does not use it until M2.7; nodes still boot the
+    placeholder.
+  - Next: M2.4 nomadops.
 
 ## Read before changing anything
 
@@ -61,12 +65,16 @@ Providers, in order:
     `internal/model`, `internal/rollout` and `internal/app` included, uses the interfaces in `internal/cloud`.
     Tests and the provider packages themselves are exempt.
   - Cloud SDKs (govultr, hcloud-go) are imported only by their provider package, tests included.
-  - `internal/nodeup` (the tent-node agent) never imports `internal/cloud/...`.
+  - `internal/nodeup` (the tent-node agent) and `internal/nodeconfig`, tests included, never import
+    `internal/cloud/...`.
   - Only `internal/nomadops` imports `github.com/hashicorp/nomad/api`.
   - Never import the root module `github.com/hashicorp/nomad`; it is BUSL-licensed.
-  - `internal/pki` imports only the standard library, `internal/uuid` and `api/v1alpha1`; `internal/uuid`,
-    `internal/english` and `internal/secrettest` import only the standard library. Their tests are exempt (ADR-0025).
-  - Only tests import `internal/secrettest`.
+  - `internal/pki` imports only the standard library, `internal/uuid`, `internal/secret` and `api/v1alpha1`;
+    `internal/uuid`, `internal/secret`, `internal/english` and `internal/secrettest` import only the standard library.
+    Their tests are exempt (ADR-0025, ADR-0027).
+  - `internal/nodeconfig` imports only the standard library, `internal/secret` and `api/v1alpha1`; its tests are
+    exempt (ADR-0027).
+  - Only tests import `internal/secrettest` and `github.com/hashicorp/hcl`.
   - Only `internal/assets` imports `github.com/ProtonMail/go-crypto`, tests included (ADR-0026).
   - `internal/nodeup`, `internal/nodeconfig` and `cmd/tent-node`, tests included, import neither `internal/assets`
     nor `internal/channels`; tent-node gets its assets in NodeConfig (ADR-0026).

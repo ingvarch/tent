@@ -1,6 +1,8 @@
 # ADR-0016: Nomad server discovery with a seed list and tent-node refresh
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by [ADR-0027](0027-nodeconfig-contract-rendering-and-spec-hash.md)
+  (tent sends the seed in NodeConfig, and tent-node renders `05-join.hcl`, the seed included; a combined node joins as
+  a server does)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** complements [ADR-0009](0009-server-discovery-fixed-ip-slots.md) (Hetzner slots become a provider

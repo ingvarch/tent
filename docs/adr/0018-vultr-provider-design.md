@@ -16,7 +16,9 @@
   it. See [platform notes §3.16](../platform-notes.md#316-spike-runs).
 
   Amended by [ADR-0023](0023-vultr-inventory-dedupe-and-images.md) (items 1, 2 and 4: the account-wide inventory, the
-  image table, and which firewall groups a cluster has).
+  image table, and which firewall groups a cluster has) and by
+  [ADR-0027](0027-nodeconfig-contract-rendering-and-spec-hash.md) (item 5: one budget of 24 KiB for the
+  whole user data on every provider, instead of the measured limit minus 25% and the 64 KiB budget).
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0014](0014-vultr-first-provider-and-e2e.md), [ADR-0015](0015-idempotency-without-unique-names.md),

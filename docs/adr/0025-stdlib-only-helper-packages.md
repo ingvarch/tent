@@ -1,6 +1,7 @@
 # ADR-0025: Standard-library-only helper packages
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by [ADR-0027](0027-nodeconfig-contract-rendering-and-spec-hash.md)
+  (`internal/secret` is one more standard-library-only helper, and `internal/pki` may import it)
 - **Date:** 2026-09-28
 - **Deciders:** ingvarch
 - **Related:** extends [ADR-0021](0021-import-rules.md); [ADR-0006](0006-two-binaries-and-nodeconfig.md),

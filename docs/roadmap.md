@@ -30,7 +30,7 @@ and, from M2 on, in the E2E suite on Vultr.
 ## Maintainer decisions
 
 These come from [architecture §18](architecture.md#18-open-questions). The first six were decided on 2026-09-25, and
-the seventh to the eleventh on 2026-09-28.
+the seventh to the fifteenth on 2026-09-28.
 
 | # | Question | Decision |
 |---|---|---|
@@ -45,6 +45,10 @@ the seventh to the eleventh on 2026-09-28.
 | 9 | Nomad's sha256s | checked at run time against the signed `SHA256SUMS`, with HashiCorp's key embedded in tent ([ADR-0026](adr/0026-channels-and-release-assets.md)) |
 | 10 | Nomad version of a spec without one | the channel's recommended one, pinned in `cluster.completed.yaml` by the first `update`; any release from the channel's minimum up to the next major is allowed, and untested ones get a warning |
 | 11 | What a channel holds | Nomad and the CNI plugins only; images stay in the provider's table and the API default |
+| 12 | When NodeConfig reaches `update` | in M2.7, with tent-node, intro tokens and the bootstrap; until then nodes boot a placeholder without secrets, and the asset downloads, the development-variable warning and the Nomad pin before the first node move there too ([ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)) |
+| 13 | The instance id | NodeConfig carries the node's name; tent-node reads the instance id from the metadata service and writes it into `11-instance.hcl` |
+| 14 | The user data budget | 24 KiB for the whole cloud-config on every provider; a per-provider limit comes when a provider needs less |
+| 15 | The host firewall and `access` | the host does not copy `access`: SSH, ICMP and 4646 on servers are open on the host and the cloud firewall filters their sources; Nomad's and the dynamic ports only from the cluster CIDR; a change of `access` never changes the spec hash |
 
 New questions for the maintainer are issues with the `decision` label.
 

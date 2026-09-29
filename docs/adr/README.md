@@ -27,7 +27,7 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0003](0003-cloud-is-source-of-truth.md) | The cloud is the source of truth: ownership labels and deterministic names | Accepted; extended by 0015 |
 | [0004](0004-layered-architecture.md) | Layered architecture: a cloud-agnostic core and providers that translate intents | Accepted; provider order changed by 0014; narrowed by 0021 |
 | [0005](0005-immutable-nodes-and-nomad-aware-rollouts.md) | Immutable nodes and Nomad-aware rolling updates | Accepted; amended by 0017 |
-| [0006](0006-two-binaries-and-nodeconfig.md) | Two binaries and a versioned NodeConfig contract | Accepted; extended by 0026 |
+| [0006](0006-two-binaries-and-nodeconfig.md) | Two binaries and a versioned NodeConfig contract | Accepted; extended by 0026; amended by 0027 |
 | [0007](0007-security-baseline.md) | Security baseline: PKI, mTLS, ACL, client introduction | Accepted; see 0019; amended by 0024 |
 | [0008](0008-node-credential-delivery.md) | Node credential delivery: user data in v1, bootstrap controller as the target | Accepted; exception in 0019 |
 | [0009](0009-server-discovery-fixed-ip-slots.md) | Nomad server discovery on Hetzner through fixed private IP slots | Accepted (Hetzner-specific; generic strategy in 0016) |
@@ -37,14 +37,15 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0013](0013-technology-stack.md) | Technology stack and release engineering | Accepted; govultr added by 0018; extended by 0020; JSON Schema generator and spec decoding libraries added by 0022 |
 | [0014](0014-vultr-first-provider-and-e2e.md) | Implement Vultr first and run the E2E suite on Vultr | Accepted |
 | [0015](0015-idempotency-without-unique-names.md) | Idempotent creation on clouds without unique names | Accepted; amended by 0023 |
-| [0016](0016-server-discovery-seed-and-refresh.md) | Nomad server discovery with a seed list and tent-node refresh | Accepted |
+| [0016](0016-server-discovery-seed-and-refresh.md) | Nomad server discovery with a seed list and tent-node refresh | Accepted; amended by 0027 |
 | [0017](0017-api-driven-server-removal.md) | Remove Nomad servers through the Nomad API; ACPI shutdown is an optimization | Accepted |
-| [0018](0018-vultr-provider-design.md) | Vultr provider design | Accepted (item 11 still provisional); amended by 0023 |
+| [0018](0018-vultr-provider-design.md) | Vultr provider design | Accepted (item 11 still provisional); amended by 0023 and 0027 |
 | [0019](0019-combined-server-client-role.md) | A combined server+client role for dev and small clusters | Accepted |
 | [0020](0020-release-channels-and-ci-conventions.md) | Release channels and CI conventions | Accepted |
-| [0021](0021-import-rules.md) | Import rules that list the allowed importers | Accepted; extended by 0025 and 0026 |
+| [0021](0021-import-rules.md) | Import rules that list the allowed importers | Accepted; extended by 0025, 0026 and 0027 |
 | [0022](0022-json-schema-from-go-types.md) | Generate the JSON Schema from the Go types | Accepted |
 | [0023](0023-vultr-inventory-dedupe-and-images.md) | Vultr inventory, dedupe, images and firewall groups | Accepted |
 | [0024](0024-cluster-pki-storage-and-certificates.md) | Cluster PKI storage and certificate details | Accepted |
-| [0025](0025-stdlib-only-helper-packages.md) | Standard-library-only helper packages | Accepted |
-| [0026](0026-channels-and-release-assets.md) | Channels and release assets | Accepted |
+| [0025](0025-stdlib-only-helper-packages.md) | Standard-library-only helper packages | Accepted; amended by 0027 |
+| [0026](0026-channels-and-release-assets.md) | Channels and release assets | Accepted; M2.3 follow-ups moved to M2.7 by 0027 |
+| [0027](0027-nodeconfig-contract-rendering-and-spec-hash.md) | NodeConfig contract, rendering and spec hash | Accepted |

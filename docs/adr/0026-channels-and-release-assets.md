@@ -1,6 +1,7 @@
 # ADR-0026: Channels and release assets
 
-- **Status:** Accepted
+- **Status:** Accepted; its M2.3 follow-ups moved to M2.7 by
+  [ADR-0027](0027-nodeconfig-contract-rendering-and-spec-hash.md)
 - **Date:** 2026-09-28
 - **Deciders:** ingvarch
 - **Related:** extends [ADR-0006](0006-two-binaries-and-nodeconfig.md),

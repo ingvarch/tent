@@ -1,8 +1,11 @@
 # ADR-0021: Import rules that list the allowed importers
 
 - **Status:** Accepted; extended by [ADR-0025](0025-stdlib-only-helper-packages.md) (standard-library-only helper
-  packages) and [ADR-0026](0026-channels-and-release-assets.md) (go-crypto only in `internal/assets`; assets and
+  packages), [ADR-0026](0026-channels-and-release-assets.md) (go-crypto only in `internal/assets`; assets and
   channels kept out of tent-node; `internal/channels` limited to the standard library, the YAML decoder and semver)
+  and [ADR-0027](0027-nodeconfig-contract-rendering-and-spec-hash.md) (`internal/nodeconfig` limited to
+  the standard library, `internal/secret` and the API types; `github.com/hashicorp/hcl` only in tests;
+  `nodeup-no-cloud` covers `internal/nodeconfig`)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0004](0004-layered-architecture.md), [ADR-0006](0006-two-binaries-and-nodeconfig.md),
