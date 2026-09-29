@@ -197,6 +197,26 @@ func TestEnumLists(t *testing.T) {
 	}
 }
 
+func TestRoleRuns(t *testing.T) {
+	for _, tc := range []struct {
+		role           Role
+		server, client bool
+	}{
+		{RoleServer, true, false},
+		{RoleClient, false, true},
+		{RoleCombined, true, true},
+		{"", false, false},
+		{"worker", false, false},
+	} {
+		if got := tc.role.RunsServer(); got != tc.server {
+			t.Errorf("Role(%q).RunsServer() = %t, want %t", tc.role, got, tc.server)
+		}
+		if got := tc.role.RunsClient(); got != tc.client {
+			t.Errorf("Role(%q).RunsClient() = %t, want %t", tc.role, got, tc.client)
+		}
+	}
+}
+
 // checkRoundTrip decodes testdata/<file> strictly, compares it with want, and checks that encoding it gives the file
 // back byte for byte. encoding/json matches keys case-insensitively, so only the bytes catch a misspelled tag such as
 // "nodeclass".
