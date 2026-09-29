@@ -31,3 +31,23 @@ func TestFirewallTaskPlanUnknownLimit(t *testing.T) {
 		t.Errorf("Plan action = %v, want update", ch.Action)
 	}
 }
+
+// TestReaches checks which firewall groups an access rule to each target reaches: the servers' group holds server and
+// combined nodes, the clients' group client nodes.
+func TestReaches(t *testing.T) {
+	for _, tc := range []struct {
+		target         model.Target
+		server, client bool
+	}{
+		{model.AllNodes, true, true},
+		{model.Servers, true, false},
+		{model.Clients, true, true}, // the combined nodes of the servers' group run clients
+		{model.Target(0), false, false},
+	} {
+		for role, want := range map[string]bool{roleServer: tc.server, roleClient: tc.client} {
+			if got := reaches(tc.target, role); got != want {
+				t.Errorf("reaches(%v, %s) = %t, want %t", tc.target, role, got, want)
+			}
+		}
+	}
+}

@@ -95,6 +95,20 @@ func icmp() model.AccessRule {
 	}
 }
 
+// intra is the rules between the nodes of every cluster whose private network is cidr.
+func intra(cidr string) []model.IntraRule {
+	from := prefixes(cidr)
+	ports := func(first, last uint16) model.PortRange { return model.PortRange{First: first, Last: last} }
+	return []model.IntraRule{
+		{Name: "nomad-http", To: model.AllNodes, Protocol: "tcp", Ports: ports(4646, 4646), From: from},
+		{Name: "nomad-rpc", To: model.Servers, Protocol: "tcp", Ports: ports(4647, 4647), From: from},
+		{Name: "serf", To: model.Servers, Protocol: "tcp", Ports: ports(4648, 4648), From: from},
+		{Name: "serf", To: model.Servers, Protocol: "udp", Ports: ports(4648, 4648), From: from},
+		{Name: "dynamic", To: model.Clients, Protocol: "tcp", Ports: ports(20000, 32000), From: from},
+		{Name: "dynamic", To: model.Clients, Protocol: "udp", Ports: ports(20000, 32000), From: from},
+	}
+}
+
 // exampleModel is the model of the example cluster.
 func exampleModel() *model.Cluster {
 	return &model.Cluster{
@@ -109,6 +123,8 @@ func exampleModel() *model.Cluster {
 			icmp(),
 			{Name: "api", To: model.Servers, Protocol: "tcp", Port: 4646, From: prefixes("0.0.0.0/0")},
 		},
+		Intra: intra("10.64.0.0/16"),
+		Join:  model.JoinSeedAndRefresh,
 		Groups: []model.NodeGroup{
 			{
 				Name: "servers", Role: v1alpha1.RoleServer, MachineType: "vc2-2c-4gb", Image: "ubuntu-24.04",
@@ -153,6 +169,7 @@ func TestNew(t *testing.T) {
 				m.Zones = []string{"fsn1", "nbg1", "hel1"}
 				m.CIDR = netip.MustParsePrefix("172.16.0.0/20")
 				m.Access[2].From = prefixes("198.51.100.0/24")
+				m.Intra = intra("172.16.0.0/20")
 				for i := range m.Groups {
 					m.Groups[i].MachineType = "cx23"
 					m.Groups[i].Image = "ubuntu-26.04"
@@ -211,6 +228,36 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestNewNetworkIntents(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		groups []*v1alpha1.NodeGroup
+	}{
+		{"servers without clients", []*v1alpha1.NodeGroup{group("servers", v1alpha1.RoleServer, 3)}},
+		{"combined group only", []*v1alpha1.NodeGroup{group("dev", v1alpha1.RoleCombined, 1)}},
+		{
+			name: "combined group and clients",
+			groups: []*v1alpha1.NodeGroup{
+				group("dev", v1alpha1.RoleCombined, 3), group("workers", v1alpha1.RoleClient, 2),
+			},
+		},
+		{"no groups", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := model.New(cluster(), tc.groups)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if diff := cmp.Diff(intra("10.64.0.0/16"), got.Intra, equatePrefixes); diff != "" {
+				t.Errorf("Intra (-want +got):\n%s", diff)
+			}
+			if got.Join != model.JoinSeedAndRefresh {
+				t.Errorf("Join = %v, want %v", got.Join, model.JoinSeedAndRefresh)
+			}
+		})
+	}
+}
+
 func TestNewKeepsInputs(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -230,6 +277,13 @@ func TestNewKeepsInputs(t *testing.T) {
 			m.SSHKeys[0] = "changed"
 			m.Access[0].From[0] = netip.Prefix{}
 			m.Groups[1].Zones[0] = "changed"
+			// A change to one rule between nodes must not reach the others.
+			m.Intra[0].From[0] = netip.Prefix{}
+			for i, r := range m.Intra[1:] {
+				if len(r.From) != 1 || r.From[0] != m.CIDR {
+					t.Errorf("Intra[%d].From = %v after a change to Intra[0].From, want [%v]", i+1, r.From, m.CIDR)
+				}
+			}
 
 			wantCluster, wantGroups := tc.specs()
 			if diff := cmp.Diff(wantCluster, c); diff != "" {
@@ -277,7 +331,7 @@ func TestNewErrors(t *testing.T) {
 	}
 }
 
-func TestHasClients(t *testing.T) {
+func TestHasClientGroup(t *testing.T) {
 	groupsOf := func(roles ...v1alpha1.Role) []model.NodeGroup {
 		gs := make([]model.NodeGroup, len(roles))
 		for i, r := range roles {
@@ -303,8 +357,8 @@ func TestHasClients(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &model.Cluster{Groups: tc.groups}
-			if got := m.HasClients(); got != tc.want {
-				t.Errorf("HasClients() = %v, want %v", got, tc.want)
+			if got := m.HasClientGroup(); got != tc.want {
+				t.Errorf("HasClientGroup() = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -317,12 +371,76 @@ func TestTargetString(t *testing.T) {
 	}{
 		{model.AllNodes, "all-nodes"},
 		{model.Servers, "servers"},
+		{model.Clients, "clients"},
 		{model.Target(0), "Target(0)"}, // the zero Target opens nothing
 		{model.Target(7), "Target(7)"},
 		{model.Target(-1), "Target(-1)"},
 	} {
 		if got := tc.target.String(); got != tc.want {
 			t.Errorf("Target(%d).String() = %q, want %q", int(tc.target), got, tc.want)
+		}
+	}
+}
+
+func TestTargetIncludes(t *testing.T) {
+	for _, tc := range []struct {
+		target model.Target
+		role   v1alpha1.Role
+		want   bool
+	}{
+		{model.AllNodes, v1alpha1.RoleServer, true},
+		{model.AllNodes, v1alpha1.RoleClient, true},
+		{model.AllNodes, v1alpha1.RoleCombined, true},
+		{model.AllNodes, "", false},
+		{model.AllNodes, "worker", false},
+		{model.Servers, v1alpha1.RoleServer, true},
+		{model.Servers, v1alpha1.RoleClient, false},
+		{model.Servers, v1alpha1.RoleCombined, true}, // combined nodes run a server
+		{model.Servers, "", false},
+		{model.Clients, v1alpha1.RoleServer, false},
+		{model.Clients, v1alpha1.RoleClient, true},
+		{model.Clients, v1alpha1.RoleCombined, true}, // combined nodes run a client
+		{model.Clients, "", false},
+		{model.Target(0), v1alpha1.RoleServer, false}, // the zero Target opens nothing
+		{model.Target(0), v1alpha1.RoleClient, false},
+		{model.Target(7), v1alpha1.RoleCombined, false},
+	} {
+		if got := tc.target.Includes(tc.role); got != tc.want {
+			t.Errorf("%v.Includes(%q) = %t, want %t", tc.target, tc.role, got, tc.want)
+		}
+	}
+}
+
+// TestDynamicPorts checks that the dynamic ports are the ports that the dynamic rules open.
+func TestDynamicPorts(t *testing.T) {
+	want := model.PortRange{First: 20000, Last: 32000}
+	if got := model.DynamicPorts(); got != want {
+		t.Errorf("DynamicPorts() = %v, want %v", got, want)
+	}
+	m, err := model.New(cluster(), groups())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, r := range m.Intra {
+		if r.Name == "dynamic" && r.Ports != model.DynamicPorts() {
+			t.Errorf("the dynamic rule over %s opens %v, want DynamicPorts() %v", r.Protocol, r.Ports,
+				model.DynamicPorts())
+		}
+	}
+}
+
+func TestJoinStrategyString(t *testing.T) {
+	for _, tc := range []struct {
+		strategy model.JoinStrategy
+		want     string
+	}{
+		{model.JoinSeedAndRefresh, "seed-and-refresh"},
+		{model.JoinStrategy(0), "JoinStrategy(0)"}, // the zero JoinStrategy finds no servers
+		{model.JoinStrategy(7), "JoinStrategy(7)"},
+		{model.JoinStrategy(-1), "JoinStrategy(-1)"},
+	} {
+		if got := tc.strategy.String(); got != tc.want {
+			t.Errorf("JoinStrategy(%d).String() = %q, want %q", int(tc.strategy), got, tc.want)
 		}
 	}
 }
