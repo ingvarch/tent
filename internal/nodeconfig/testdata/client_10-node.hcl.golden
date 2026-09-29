@@ -1,0 +1,3 @@
+# Rendered by tent. Do not edit: changes are overwritten on the next boot.
+name       = "prod-workers-3"
+datacenter = "ams"

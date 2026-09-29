@@ -1,0 +1,4 @@
+# Rendered by tent. Do not edit: changes are overwritten on the next boot.
+server {
+  encrypt = "c2VjcmV0LWdvc3NpcC1rZXktZm9yLXRlc3RzLW9ubHk="
+}

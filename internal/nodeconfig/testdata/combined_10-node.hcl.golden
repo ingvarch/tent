@@ -1,0 +1,7 @@
+# Rendered by tent. Do not edit: changes are overwritten on the next boot.
+name       = "prod-core-0"
+datacenter = "ams"
+
+server {
+  bootstrap_expect = 3
+}

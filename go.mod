@@ -11,6 +11,7 @@ require (
 	github.com/gofrs/flock v0.13.1
 	github.com/google/go-cmp v0.7.0
 	github.com/google/licenseclassifier/v2 v2.0.0
+	github.com/hashicorp/hcl v1.0.0
 	github.com/invopop/jsonschema v0.14.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/spf13/cobra v1.10.2

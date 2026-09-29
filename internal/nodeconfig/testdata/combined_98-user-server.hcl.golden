@@ -1,0 +1,4 @@
+# spec.nomad.extraConfig.server of the cluster, added as given. Do not edit: changes are overwritten on the next boot.
+server {
+  raft_multiplier = 2
+}

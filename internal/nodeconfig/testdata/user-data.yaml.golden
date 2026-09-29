@@ -1,0 +1,26 @@
+#cloud-config
+package_update: false
+package_upgrade: false
+write_files:
+  - path: /etc/tent/node.json
+    encoding: gz+b64
+    owner: root:root
+    permissions: "0600"
+    content: [gz+b64 of node.json]
+runcmd:
+  - - /bin/sh
+    - -c
+    - |
+      set -eu
+      mkdir -p /usr/local/bin
+      for url in 'https://tent-dev.s3.example.com/tent-node_linux_amd64?X-Amz-Expires=900&X-Amz-Signature=9f2c6e1ab47d03e58c1f6a2b7d4e90c3a5f81b6d2e7c409a3f5b8d1e6c2a7f40'; do
+        if curl -fsSL --connect-timeout 10 --speed-limit 1024 --speed-time 30 --max-time 600 --retry 5 \
+          --retry-all-errors --retry-max-time 600 -o /usr/local/bin/tent-node.download "$url" &&
+          echo '3c7d1e9a5b2f8046c1e7a3d9b5f20864e1c7a3d9b5f20864e1c7a3d9b5f20864  /usr/local/bin/tent-node.download' | sha256sum -c -; then
+          chmod 0755 /usr/local/bin/tent-node.download
+          mv /usr/local/bin/tent-node.download /usr/local/bin/tent-node
+          exec /usr/local/bin/tent-node install --config /etc/tent/node.json
+        fi
+      done
+      echo "tent-node: no URL gave a file with the expected sha256" >&2
+      exit 1
