@@ -8,6 +8,16 @@ import (
 	"github.com/ingvarch/tent/internal/nodeup/env"
 )
 
+// TestMetadataMark checks that the mark shares no bit with the marks that others set on a node's packets: CNI's
+// portmap, kube-proxy, Tailscale and Calico. Their rules test their own bits, so a shared bit would let them act on
+// tent-node's packets.
+func TestMetadataMark(t *testing.T) {
+	const others = 0x2000 | 0x4000 | 0x8000 | 0xff0000 | 0xffff0000
+	if env.MetadataMark == 0 || env.MetadataMark&others != 0 {
+		t.Errorf("MetadataMark = %#x, want a mark without the bits %#x", env.MetadataMark, others)
+	}
+}
+
 // TestInstanceJSON checks the JSON of an Instance, as the status file shows it: a part the cloud did not report is
 // left out.
 func TestInstanceJSON(t *testing.T) {

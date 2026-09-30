@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ingvarch/tent/internal/nodeup/env"
+	"github.com/ingvarch/tent/internal/nodeup/retry"
 )
 
 const (
@@ -32,9 +33,10 @@ type Environment struct {
 
 var _ env.Environment = (*Environment)(nil)
 
-// New returns the metadata service of the Vultr instance that tent-node runs on.
+// New returns the metadata service of the Vultr instance that tent-node runs on. On Linux it marks each socket with
+// env.MetadataMark, which needs CAP_NET_ADMIN or CAP_NET_RAW; a failed mark fails the try.
 func New() *Environment {
-	var d net.Dialer
+	d := net.Dialer{Control: markSocket}
 	return newEnvironment(d.DialContext, tryTimeout, func(int) time.Duration { return retryWait })
 }
 
@@ -70,16 +72,16 @@ func (e *Environment) Read(ctx context.Context) (env.Instance, error) {
 	var last error // the failure of the last try that ctx did not cut short
 	for tries := 0; ; tries++ {
 		if tries > 0 {
-			sleep(ctx, e.wait(tries))
+			retry.Sleep(ctx, e.wait(tries))
 		}
 		if cause := context.Cause(ctx); cause != nil {
 			return env.Instance{}, stopped(cause, last)
 		}
-		body, retry, err := e.fetch(ctx)
+		body, again, err := e.fetch(ctx)
 		switch {
 		case err == nil:
 			return parse(body)
-		case !retry:
+		case !again:
 			return env.Instance{}, fmt.Errorf("vultr metadata: %w", err)
 		case ctx.Err() == nil:
 			last = err
@@ -87,9 +89,9 @@ func (e *Environment) Read(ctx context.Context) (env.Instance, error) {
 	}
 }
 
-// fetch gets the document once, its body included, in at most e.try. retry reports whether a failure is worth another
-// try: a failed connection, no whole answer in time, or an answer that retryStatus takes.
-func (e *Environment) fetch(ctx context.Context) (body []byte, retry bool, err error) {
+// fetch gets the document once, its body included, in at most e.try. again reports whether a failure is worth another
+// try: a failed connection, no whole answer in time, or an answer that retry.Status takes.
+func (e *Environment) fetch(ctx context.Context) (body []byte, again bool, err error) {
 	tryCtx, cancel := context.WithTimeout(ctx, e.try)
 	defer cancel()
 	req, err := http.NewRequestWithContext(tryCtx, http.MethodGet, documentURL, nil)
@@ -101,7 +103,7 @@ func (e *Environment) fetch(ctx context.Context) (body []byte, retry bool, err e
 		defer func() { _ = resp.Body.Close() }() // the connection is never reused, so an unread body costs nothing
 		if resp.StatusCode != http.StatusOK {
 			// The body stays unread: it may be the document.
-			return nil, retryStatus(resp.StatusCode), fmt.Errorf("GET %s answered %s", documentURL, resp.Status)
+			return nil, retry.Status(resp.StatusCode), fmt.Errorf("GET %s answered %s", documentURL, resp.Status)
 		}
 		if body, err = io.ReadAll(resp.Body); err == nil {
 			return body, false, nil
@@ -114,28 +116,12 @@ func (e *Environment) fetch(ctx context.Context) (body []byte, retry bool, err e
 	return nil, true, err
 }
 
-// retryStatus reports whether an answer with the status is worth another try: 429, or a 5xx other than 501, which
-// says the service will never serve the request.
-func retryStatus(status int) bool {
-	return status == http.StatusTooManyRequests || (status >= 500 && status <= 599 && status != http.StatusNotImplemented)
-}
-
 // stopped returns the error of a read that ctx ended with cause, after a try that failed with last, if any.
 func stopped(cause, last error) error {
 	if last == nil {
 		return fmt.Errorf("vultr metadata: %w", cause)
 	}
 	return fmt.Errorf("vultr metadata: %w; the last try: %w", cause, last)
-}
-
-// sleep waits for d, or until ctx ends.
-func sleep(ctx context.Context, d time.Duration) {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-	case <-t.C:
-	}
 }
 
 // document is what Read takes from the metadata document. The document holds more, the user data among it, which
