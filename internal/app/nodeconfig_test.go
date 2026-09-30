@@ -222,9 +222,17 @@ var (
 	dynTCP   = nodeconfig.Rule{Name: "dynamic", Protocol: "tcp", Ports: ports(20000, 32000), From: clusterFrom}
 	dynUDP   = nodeconfig.Rule{Name: "dynamic", Protocol: "udp", Ports: ports(20000, 32000), From: clusterFrom}
 
-	// A server runs no workloads, so only nodes that run a client open the dynamic ports.
+	// Nomad's and Docker's default bridges, where workloads reach the node itself.
+	bridgeFrom = []netip.Prefix{netip.MustParsePrefix("172.26.64.0/20"), netip.MustParsePrefix("172.17.0.0/16")}
+	bridgeHTTP = nodeconfig.Rule{Name: "bridge-http", Protocol: "tcp", Ports: ports(4646, 4646), From: bridgeFrom}
+	bridgeTCP  = nodeconfig.Rule{Name: "bridge-dynamic", Protocol: "tcp", Ports: ports(20000, 32000), From: bridgeFrom}
+	bridgeUDP  = nodeconfig.Rule{Name: "bridge-dynamic", Protocol: "udp", Ports: ports(20000, 32000), From: bridgeFrom}
+
+	// A server runs no workloads, so only nodes that run a client open the dynamic ports and the bridge rules.
 	serverRules   = []nodeconfig.Rule{sshRule, icmpRule, apiRule, httpRule, rpcRule, serfTCP, serfUDP}
-	combinedRules = []nodeconfig.Rule{sshRule, icmpRule, apiRule, httpRule, rpcRule, serfTCP, serfUDP, dynTCP, dynUDP}
+	clientRules   = []nodeconfig.Rule{sshRule, icmpRule, httpRule, dynTCP, dynUDP, bridgeHTTP, bridgeTCP, bridgeUDP}
+	combinedRules = []nodeconfig.Rule{sshRule, icmpRule, apiRule, httpRule, rpcRule, serfTCP, serfUDP, dynTCP, dynUDP,
+		bridgeHTTP, bridgeTCP, bridgeUDP}
 )
 
 func ports(first, last uint16) nodeconfig.PortRange {
@@ -283,7 +291,7 @@ func TestGroupTemplates(t *testing.T) {
 			assets: []nodeconfig.Asset{testNomad, testCNI, testTentNode},
 			// Its drivers leave Docker out.
 			system:   nodeconfig.System{Sysctls: bridgeSysctls, KernelModules: []string{"br_netfilter"}},
-			firewall: []nodeconfig.Rule{sshRule, icmpRule, httpRule, dynTCP, dynUDP},
+			firewall: clientRules,
 		},
 		{
 			name:  "combined",
@@ -396,6 +404,57 @@ func TestGroupTemplatesProvider(t *testing.T) {
 		if tmpl.Provider != v1alpha1.ProviderHetzner {
 			t.Errorf("the template of %s names the provider %q, want hetzner", name, tmpl.Provider)
 		}
+	}
+}
+
+// TestHostFirewall checks the host firewall of each role in a cluster whose private network is 10.10.0.0/16: the
+// rules that the templates of the test cluster carry, and the metadata service blocked.
+func TestHostFirewall(t *testing.T) {
+	cidr := netip.MustParsePrefix("10.10.0.0/16")
+	for _, tc := range []struct {
+		role  v1alpha1.Role
+		rules []nodeconfig.Rule
+	}{
+		{v1alpha1.RoleServer, serverRules},
+		{v1alpha1.RoleClient, clientRules},
+		{v1alpha1.RoleCombined, combinedRules},
+	} {
+		t.Run(string(tc.role), func(t *testing.T) {
+			want := nodeconfig.HostFirewall{Rules: tc.rules, BlockMetadata: netip.MustParseAddr("169.254.169.254")}
+			if diff := cmp.Diff(want, HostFirewall(cidr, tc.role), equateNetip); diff != "" {
+				t.Errorf("HostFirewall (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestNodeSystem checks the system settings of each role: bridge networking on a node that runs a client, and Docker
+// with its storage module unless the drivers leave the docker driver out.
+func TestNodeSystem(t *testing.T) {
+	withDocker := nodeconfig.System{
+		Sysctls: bridgeSysctls, KernelModules: []string{"br_netfilter", "overlay"}, Docker: true,
+	}
+	for _, tc := range []struct {
+		name    string
+		role    v1alpha1.Role
+		drivers []string
+		want    nodeconfig.System
+	}{
+		{"server", v1alpha1.RoleServer, nil, nodeconfig.System{}},
+		{"server with docker in its drivers", v1alpha1.RoleServer, []string{"docker"}, nodeconfig.System{}},
+		{"client with every driver", v1alpha1.RoleClient, nil, withDocker},
+		{"client with docker", v1alpha1.RoleClient, []string{"exec", "docker"}, withDocker},
+		{
+			"client without docker", v1alpha1.RoleClient, []string{"exec"},
+			nodeconfig.System{Sysctls: bridgeSysctls, KernelModules: []string{"br_netfilter"}},
+		},
+		{"combined with every driver", v1alpha1.RoleCombined, nil, withDocker},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if diff := cmp.Diff(tc.want, NodeSystem(tc.role, tc.drivers)); diff != "" {
+				t.Errorf("NodeSystem (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 

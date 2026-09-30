@@ -168,7 +168,7 @@ func New(c *v1alpha1.Cluster, groups []*v1alpha1.NodeGroup) (*Cluster, error) {
 		CIDR:     cidr,
 		SSHKeys:  slices.Clone(s.SSHKeys),
 		Access:   access,
-		Intra:    intraRules(cidr),
+		Intra:    IntraRules(cidr),
 		Join:     JoinSeedAndRefresh,
 		Groups:   nodeGroups(groups),
 	}, nil
@@ -218,9 +218,9 @@ func accessRules(a v1alpha1.Access) ([]AccessRule, error) {
 // DynamicPorts returns the ports that Nomad gives workloads, which the dynamic rules open to the clients.
 func DynamicPorts() PortRange { return PortRange{First: dynamicFirst, Last: dynamicLast} }
 
-// intraRules returns the rules that open the nodes to each other over the private network cidr: the Nomad HTTP API
+// IntraRules returns the rules that open the nodes to each other over the private network cidr: the Nomad HTTP API
 // to every node, RPC and Serf to the servers, and the dynamic ports of workloads to the clients.
-func intraRules(cidr netip.Prefix) []IntraRule {
+func IntraRules(cidr netip.Prefix) []IntraRule {
 	rule := func(name string, to Target, protocol string, first, last uint16) IntraRule {
 		return IntraRule{
 			Name:     name,

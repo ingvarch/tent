@@ -411,6 +411,22 @@ func TestTargetIncludes(t *testing.T) {
 	}
 }
 
+// TestIntraRules checks the rules between the nodes of a cluster whose private network is the given one, which New
+// gives the model, and that no two rules share their sources.
+func TestIntraRules(t *testing.T) {
+	cidr := netip.MustParsePrefix("172.16.0.0/20")
+	got := model.IntraRules(cidr)
+	if diff := cmp.Diff(intra("172.16.0.0/20"), got, equatePrefixes); diff != "" {
+		t.Errorf("IntraRules (-want +got):\n%s", diff)
+	}
+	got[0].From[0] = netip.Prefix{}
+	for i, r := range got[1:] {
+		if len(r.From) != 1 || r.From[0] != cidr {
+			t.Errorf("rule %d: From = %v after a change to rule 0, want [%v]", i+1, r.From, cidr)
+		}
+	}
+}
+
 // TestDynamicPorts checks that the dynamic ports are the ports that the dynamic rules open.
 func TestDynamicPorts(t *testing.T) {
 	want := model.PortRange{First: 20000, Last: 32000}
