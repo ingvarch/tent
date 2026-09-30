@@ -10,7 +10,7 @@
 # Portable bash (3.2+, macOS default), requires: curl, jq 1.6+, ssh, ssh-keygen, awk, od; tentnode also go and gzip.
 set -euo pipefail
 
-readonly SPIKE_VERSION="5"
+readonly SPIKE_VERSION="6"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 readonly SCRIPT_DIR
 REPO_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
@@ -102,6 +102,7 @@ V_DONE=""
 TN_UD=""        # tentnode: instance T's user data, from hack/tent-node-userdata
 TN_JSON_SHA=""  # tentnode: the sha256 of the node.json in it
 TN_REBOOT_S=""  # tentnode: seconds from the reboot to SSH on the new boot
+TN_COMMENT=""   # tentnode: the comment of tent's nftables table on the first boot
 VPC_MARKER="" SSH_MARKER="" FG_MARKER=""
 SSH_NAME_USED=""
 
@@ -1518,21 +1519,32 @@ check_objstore() {
 }
 
 # ---------------------------------------------------------------------------------------------------------------
-# tentnode: a development build of tent-node on instance T, booted with the user data of hack/tent-node-userdata,
-# the M2.5 check on a real machine. TENT_NODE_URL carries a signature: nothing logs it, and hide_url masks it in what
-# the report takes from the instance.
+# tentnode: a development build of tent-node on instance T, a client booted with the user data of
+# hack/tent-node-userdata, checked on a real machine. TENT_NODE_URL carries a signature: nothing logs it, and hide_url
+# masks it in what the report takes from the instance.
 
-# The files that tent-node's install and up write. After a reboot, up must change none but status.json.
-readonly TN_FILES="/etc/tent/node.json /usr/local/bin/tent-node /etc/systemd/system/tent-node.service
+# The plugins of Nomad's bridge network, which the cni phase must put into /opt/cni/bin.
+readonly TN_PLUGINS="bridge firewall host-local loopback portmap"
+# The files that tent-node's install and up write; of /opt/cni/bin, the plugins of Nomad's bridge network. After a
+# reboot, up must change none but status.json.
+TN_FILES="/etc/tent/node.json /usr/local/bin/tent-node /etc/systemd/system/tent-node.service
 /etc/systemd/system/tent-node-join.service /etc/systemd/system/tent-node-join.timer /etc/modules-load.d/tent.conf
-/etc/sysctl.d/99-tent.conf /etc/systemd/journald.conf.d/tent.conf /var/lib/tent/status.json"
+/etc/sysctl.d/99-tent.conf /etc/systemd/journald.conf.d/tent.conf /etc/tent/firewall.nft /etc/docker/daemon.json
+/var/lib/tent/assets/cni-plugins $(for p in $TN_PLUGINS; do printf '/opt/cni/bin/%s ' "$p"; done)/var/lib/tent/status.json"
+readonly TN_FILES
+# The metadata probes: the image of their containers, the URL they must not reach, and a URL that a container with a
+# network reaches, so that a probe that fails for want of any network is not taken for a block. The verdicts match
+# the messages of busybox 1.38's wget: "download timed out" and "server returned error".
+readonly TN_IMAGE="busybox:1.38"
+readonly TN_METADATA_URL="http://169.254.169.254/v1.json"
+readonly TN_CONTROL_URL="http://archive.ubuntu.com/ubuntu/"
 
 hide_url() { sed -E 's/(X-Amz-(Signature|Credential|Security-Token))=[^&[:space:]"'"'"']*/\1=[hidden]/g'; }
 
 # prepare_tentnode: checks the variables of the tent-node under test, finds its version, writes instance T's user
 # data to TN_UD and sets TN_JSON_SHA to the sha256 of the node.json in it.
 prepare_tentnode() {
-  local bin="$REPO_DIR/bin/tent-node_linux_amd64" sum bytes
+  local bin="$REPO_DIR/bin/tent-node_linux_amd64" sum bytes cidr
   [ -n "${TENT_NODE_URL:-}" ] && [ -n "${TENT_NODE_SHA256:-}" ] ||
     die "tentnode needs TENT_NODE_URL and TENT_NODE_SHA256: run make dev-upload (hack/tent-node-upload/README.md)"
   if [ -z "$TENT_NODE_VERSION" ]; then
@@ -1545,14 +1557,16 @@ prepare_tentnode() {
     TENT_NODE_VERSION=$("$REPO_DIR/bin/tent" version -o json | jq -r .version) || die "bin/tent version failed"
   fi
   TN_UD="$WORK/tentnode-ud.yaml"
-  # The name is instance T's host name: create_instance names T $RUN_TAG-t.
-  (cd "$REPO_DIR" && go run ./hack/tent-node-userdata -name "$RUN_TAG-t" -version "$TENT_NODE_VERSION") >"$TN_UD" ||
-    die "hack/tent-node-userdata failed"
+  # The name is instance T's host name: create_instance names T $RUN_TAG-t. The CIDR is the VPC's: tentnode makes one
+  # VPC, with the first of VPC_MASKS.
+  cidr="$VPC_SUBNET/${VPC_MASKS%% *}"
+  (cd "$REPO_DIR" && go run ./hack/tent-node-userdata -name "$RUN_TAG-t" -version "$TENT_NODE_VERSION" \
+    -role client -cidr "$cidr") >"$TN_UD" || die "hack/tent-node-userdata failed"
   TN_JSON_SHA=$(awk '/encoding: gz\+b64/ {f = 1} f && $1 == "content:" {print $2; exit}' "$TN_UD" | b64dec |
     gzip -dc | sha256) || die "the user data holds no gz+b64 node.json"
   bytes=$(wc -c <"$TN_UD" | tr -d ' ')
-  row "tent-node under test" "version $TENT_NODE_VERSION, sha256 $TENT_NODE_SHA256; user data $bytes bytes, node.json sha256 $TN_JSON_SHA" \
-    "a client NodeConfig without secrets whose only asset is tent-node"
+  row "tent-node under test" "version $TENT_NODE_VERSION, sha256 $TENT_NODE_SHA256; user data $bytes bytes, node.json sha256 $TN_JSON_SHA; cluster CIDR $cidr" \
+    "a client NodeConfig without secrets: tent-node and the CNI plugins, Docker, and tent's host firewall for the CIDR"
 }
 
 tn_ssh() { ssh_x "$T_PUB" "$@" 2>/dev/null; } # tn_ssh COMMAND...: runs on instance T
@@ -1581,9 +1595,11 @@ tn_status() { # tn_status FILE: reads T's status.json into FILE and prints its p
     printf 'unreadable'
 }
 
-tn_phases_are() { # tn_phases_are FILE STATUS_OF_SYSTEM: are the phases in FILE those of a run on a fresh or a set-up node?
-  jq -e --arg sys "$2" '[.phases[]? | [.name, .status]] == [["preflight", "unchanged"], ["system", $sys],
-    ["hostfirewall", "skipped"], ["runtime", "skipped"], ["cni", "skipped"], ["join", "skipped"], ["nomad", "skipped"],
+tn_phases_are() { # tn_phases_are FILE MACHINE FIREWALL: are the phases in FILE those of a client's up, with system,
+  # runtime and cni MACHINE and hostfirewall FIREWALL? The first up gives done and done; one after a reboot unchanged
+  # and done, since the kernel forgets tent's table; another on a set-up node unchanged and unchanged.
+  jq -e --arg m "$2" --arg f "$3" '[.phases[]? | [.name, .status]] == [["preflight", "unchanged"], ["system", $m],
+    ["hostfirewall", $f], ["runtime", $m], ["cni", $m], ["join", "skipped"], ["nomad", "skipped"],
     ["verify", "unchanged"]]' "$1" >/dev/null 2>&1
 }
 
@@ -1687,7 +1703,7 @@ tn_reboot() { # reboots T from inside and waits for SSH on the new boot; sets TN
 
 # shellcheck disable=SC2016 # the single-quoted commands expand on instance T
 tn_first_boot() { # checks T after the first boot: cloud-init wrote node.json, downloaded tent-node and ran install
-  local out sha res missing s1="$WORK/status-1.json" units="tent-node.service active/enabled; tent-node-join.timer active/enabled; "
+  local out sha res s1="$WORK/status-1.json" units="tent-node.service active/enabled; tent-node-join.timer active/enabled; "
   out=$(tn_ssh 'f=/etc/tent/node.json; if [ -f "$f" ]; then sha256sum "$f" | cut -d" " -f1; stat -c "%a %U:%G" "$f"; else echo missing; fi' || true)
   sha=${out%%$'\n'*}
   case "$out" in
@@ -1707,8 +1723,9 @@ tn_first_boot() { # checks T after the first boot: cloud-init wrote node.json, d
   if [ "$out" = "$units" ]; then res="as expected: $out"; else res="UNEXPECTED: $out"; fi
   row "tent-node units (active/enabled)" "$res" "want tent-node.service and tent-node-join.timer active and enabled"
   res=$(tn_status "$s1" | hide_url)
-  if tn_phases_are "$s1" "done"; then res="as expected: $res"; else res="UNEXPECTED: $res"; fi
-  row "status.json after the first boot" "$res" "preflight unchanged, system done, the stubs skipped, verify unchanged"
+  if tn_phases_are "$s1" "done" "done"; then res="as expected: $res"; else res="UNEXPECTED: $res"; fi
+  row "status.json after the first boot" "$res" \
+    "preflight unchanged; system, hostfirewall, runtime and cni done; join and nomad skipped; verify unchanged"
   out=$(tn_out "stat -c '%a %U:%G %n' /var/lib/tent /var/lib/tent/status.json | paste -sd ';' -")
   row "status.json: instance and version" "$(tn_instance "$s1"); modes $out" \
     "the metadata environment on a real Vultr instance (nodeup/env/vultr)"
@@ -1720,6 +1737,10 @@ tn_first_boot() { # checks T after the first boot: cloud-init wrote node.json, d
   row "systemctl is-enabled no-such.service" "$(printf '%s' "$out" | oneline 400)" \
     "Systemd.IsEnabled fails on an empty stdout; verify and install depend on it"
   tn_ssh 'tail -n 60 /var/log/cloud-init-output.log' | hide_url | detail "/var/log/cloud-init-output.log tail (T, first boot)" || true
+}
+
+tn_first_files() { # records the modification time and sha256 of tent-node's files before the reboot, and that all exist
+  local res missing
   tn_files >"$WORK/files-1.txt" || true
   missing=$(tn_missing "$WORK/files-1.txt")
   if [ ! -s "$WORK/files-1.txt" ]; then
@@ -1729,11 +1750,314 @@ tn_first_boot() { # checks T after the first boot: cloud-init wrote node.json, d
   else
     res="all $(wc -l <"$WORK/files-1.txt" | tr -d ' ') present"
   fi
-  row "tent-node's files after the first boot" "$res" "install writes the units, the system phase its three files, up status.json"
+  row "tent-node's files after the first boot" "$res" \
+    "install writes the units; system, hostfirewall, runtime and cni their files; up status.json"
+}
+
+tn_mono() { # tn_mono MICROSECONDS: a monotonic timestamp as seconds, or "-" when the event did not happen this boot
+  case "$1" in "" | 0) echo "-" ;; *) tn_seconds "$1" ;; esac
+}
+
+# tn_image: what Vultr's image brings and what tent-node found: the packages, the units, the iptables alternative, the
+# apt sources, and whether apt's timers ran while up did.
+# shellcheck disable=SC2016 # the single-quoted commands expand on instance T
+tn_image() {
+  local out res u s a e
+  tn_out 'dpkg -l nftables iptables firewalld docker.io 2>&1; echo; apt-cache policy docker.io 2>&1' |
+    detail "dpkg -l nftables iptables firewalld docker.io; apt-cache policy docker.io (T, first boot)"
+  out=$(tn_out 'dpkg-query -W -f "\${Package} \${Version} \${db:Status-Abbrev}\n" nftables iptables firewalld docker.io 2>&1')
+  row "Packages (first boot)" "$(printf '%s' "$out" | oneline 400)" \
+    "nft must be there; docker.io comes from the updates pocket once apt-get update ran"
+  out=$(tn_out 'for u in nftables ufw docker; do printf "%s %s; " "$u" "$(systemctl is-enabled "$u" 2>&1)"; done')
+  row "Units enabled: nftables, ufw, docker (first boot)" "$(printf '%s' "$out" | oneline 300)" \
+    "nftables.service stays off (its config flushes every table); ufw disabled; docker enabled"
+  out=$(tn_out 'update-alternatives --query iptables 2>&1')
+  printf '%s\n' "$out" | detail "update-alternatives --query iptables (T)"
+  res=$(printf '%s\n' "$out" | sed -n 's/^Value: //p' | head -1)
+  row "iptables alternative" "${res:-$(printf '%s' "$out" | oneline 200)}" "Docker's iptables rules land in nftables with iptables-nft"
+  tn_out 'for f in /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list /etc/apt/sources.list; do [ -f "$f" ] && { echo "== $f"; cat "$f"; }; done' |
+    detail "apt sources (T)"
+  if ! out=$(tn_ssh 'grep -hE "^(Components:|deb )" /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list \
+    /etc/apt/sources.list 2>/dev/null | sort -u; true'); then
+    res=$(ssh_unknown "$T_PUB")
+  else
+    case "$out" in *universe*) res="universe listed" ;; *) res="NO universe" ;; esac
+    res="$res: $(printf '%s' "${out:-no Components or deb line}" | oneline 300 || true)"
+  fi
+  row "apt sources: components" "$res" "docker.io is in universe"
+  tn_out 'ls -la --time-style=full-iso /var/lib/apt/lists 2>&1 | head -20; du -sh /var/lib/apt/lists 2>&1' |
+    detail "ls -la /var/lib/apt/lists; du -sh /var/lib/apt/lists (T, first boot)"
+  out=$(tn_out 'd=/var/lib/apt/lists; n=$(find "$d" -maxdepth 1 -type f ! -name lock 2>/dev/null | wc -l)
+    m=$(TZ=UTC0 find "$d" -maxdepth 1 -type f ! -name lock -printf "%T+ %f\n" 2>/dev/null | sort | tail -1)
+    echo "$n files; newest ${m:-none} (UTC)"')
+  row "apt lists" "$(printf '%s' "$out" | oneline 300)" \
+    "a record: runtime's apt-get update ran before this, so older files are the image's and the newest may be the update's"
+  tn_out 'journalctl -b -u apt-daily.service -u apt-daily-upgrade.service -u unattended-upgrades.service --no-pager -o short-monotonic 2>&1 | tail -n 40' |
+    detail "journalctl -u apt-daily -u apt-daily-upgrade -u unattended-upgrades (T, first boot)"
+  out=$(tn_ssh 'for u in apt-daily.service apt-daily-upgrade.service unattended-upgrades.service tent-node.service; do
+      echo "$u $(systemctl show -p InactiveExitTimestampMonotonic --value "$u") $(systemctl show -p ActiveEnterTimestampMonotonic --value "$u") $(systemctl show -p InactiveEnterTimestampMonotonic --value "$u")"
+    done' || true)
+  res=""
+  while read -r u s a e; do
+    if [ -n "$u" ]; then res="$res$u started $(tn_mono "$s"), active $(tn_mono "$a"), stopped $(tn_mono "$e"); "; fi
+  done <<<"$out"
+  row "apt's timers and up (first boot, monotonic)" "${res:-$(ssh_unknown "$T_PUB")}" \
+    "runtime retries each apt command for up to 10 min while apt-daily or unattended-upgrades holds dpkg's locks"
+}
+
+tn_tables() { # tn_tables FILE: reads nft -j list tables on T into FILE and prints its tables as "family name (comment)"
+  tn_ssh 'nft -j list tables' >"$1" 2>/dev/null || true
+  jq -r '[.nftables[]?.table? // empty | "\(.family) \(.name)" + (if .comment then " (\(.comment))" else "" end)]
+    | join(", ")' "$1" 2>/dev/null || true
+}
+
+tn_comment() { # tn_comment FILE: the comment of tent's table in FILE, as tn_tables read it; empty when there is none
+  jq -r '[.nftables[]?.table? // empty | select(.family == "inet" and .name == "tent") | .comment // ""][0] // ""' \
+    "$1" 2>/dev/null || true
+}
+
+tn_drops() { # tn_drops CHAIN: the packets that the metadata drop of CHAIN in tent's table on T counted, or "?"
+  local n
+  n=$(tn_ssh "nft -j list chain inet tent $1" | jq -r '[.nftables[]?.rule? // empty
+    | select(any(.expr[]?; type == "object" and has("drop"))) | .expr[] | select(type == "object" and has("counter"))
+    | .counter.packets][0] // empty' 2>/dev/null || true)
+  printf '%s' "${n:-?}"
+}
+
+# tn_machine: what hostfirewall, runtime and cni left on T: tent's table among the others, ufw off, Docker with tent's
+# daemon.json and its FORWARD policy, and the CNI plugins.
+# shellcheck disable=SC2016 # the single-quoted commands expand on instance T
+tn_machine() {
+  local out res f="$WORK/tables-1.json" info="$WORK/docker-info.json" state missing
+  tn_out 'nft list ruleset 2>&1' | detail "nft list ruleset (T, first boot)"
+  res=$(tn_tables "$f")
+  { jq . "$f" 2>/dev/null || cat "$f"; } | detail "nft -j list tables (T, first boot)"
+  TN_COMMENT=$(tn_comment "$f")
+  if printf '%s' "$TN_COMMENT" | grep -Eq '^tent-node [0-9a-f]{64}$' &&
+    jq -e '[.nftables[]?.table? // empty | "\(.family) \(.name)"] | index("ip filter") != null and index("ip nat") != null' \
+      "$f" >/dev/null 2>&1; then
+    res="as expected: $res"
+  else
+    res="UNEXPECTED: ${res:-$(ssh_unknown "$T_PUB")}"
+  fi
+  row "nftables tables (first boot)" "$res" "tent's table with the ruleset's sha256 in its comment, next to Docker's ip filter and ip nat"
+  tn_out 'cat /etc/ufw/ufw.conf 2>&1' | detail "/etc/ufw/ufw.conf (T, first boot)"
+  if ! out=$(tn_ssh 'if [ -z "$(systemctl list-unit-files --no-legend ufw.service 2>/dev/null)" ]; then echo "no ufw unit"
+    else printf "%s; unit %s/%s\n" "$(sed -n "/^ENABLED=/p" /etc/ufw/ufw.conf 2>&1 | tail -1)" \
+      "$(systemctl is-enabled ufw 2>&1)" "$(systemctl is-active ufw 2>&1)"; fi'); then
+    res=$(ssh_unknown "$T_PUB")
+  else
+    case "$out" in
+      "no ufw unit") res="as expected: no ufw unit, so nothing to turn off" ;;
+      "ENABLED=no; unit disabled/"*) res="as expected: $out" ;;
+      *) res="UNEXPECTED: $out" ;;
+    esac
+  fi
+  row "ufw (first boot)" "$res" "hostfirewall runs ufw disable while ufw.conf says ENABLED=yes, then disables the unit"
+  tn_ssh 'docker info --format "{{json .}}"' >"$info" 2>/dev/null || true
+  tn_out 'docker info 2>&1' | detail "docker info (T, first boot)"
+  state=$(tn_ssh 'systemctl is-active docker' || true)
+  res=$(jq -r '"server \(.ServerVersion // "?"), storage driver \(.Driver // "?"), cgroup driver \(.CgroupDriver // "?")"
+    + " (cgroup v\(.CgroupVersion // "?")), live-restore \(.LiveRestoreEnabled | tostring), logging driver"
+    + " \(.LoggingDriver // "?"), firewall backend \(.FirewallBackend.Driver // "not reported")"' "$info" 2>/dev/null || true)
+  if [ -z "$res" ]; then
+    res="UNKNOWN: docker info printed no JSON; docker.service ${state:-$(ssh_unknown "$T_PUB")}"
+  elif [ "$state" = active ] && jq -e '.LiveRestoreEnabled == true and .LoggingDriver == "json-file"' "$info" >/dev/null 2>&1; then
+    res="as expected: docker.service active; $res"
+  else
+    res="UNEXPECTED: docker.service ${state:-?}; $res"
+  fi
+  row "Docker (first boot)" "$res" "runtime: docker.io with daemon.json (live-restore, json-file logs); firewall backend iptables"
+  out=$(tn_out 'cat /etc/docker/daemon.json 2>&1')
+  printf '%s\n' "$out" | detail "/etc/docker/daemon.json (T)"
+  row "/etc/docker/daemon.json" "$(printf '%s\n' "$out" | jq -c . 2>/dev/null || printf '%s' "$out" | oneline 300)" \
+    "written before the install, so the first start reads it"
+  out=$(tn_out 'iptables -S FORWARD 2>&1 | head -1; ip6tables -S FORWARD 2>&1 | head -1')
+  row "iptables and ip6tables FORWARD policy" "$(printf '%s' "$out" | oneline 200)" \
+    "Docker sets DROP when it turns ip_forward on; ufw disable would set ACCEPT"
+  tn_out 'ls -l /opt/cni/bin /var/lib/tent/assets 2>&1; stat -c "%a %U:%G %n" /opt/cni /opt/cni/bin /var/lib/tent/assets 2>&1' |
+    detail "ls -l /opt/cni/bin /var/lib/tent/assets (T, first boot)"
+  out=$(tn_ssh "for p in $TN_PLUGINS; do [ -x \"/opt/cni/bin/\$p\" ] || printf '%s ' \"\$p\"; done; echo; ls /opt/cni/bin | wc -l" || true)
+  missing=$(printf '%s\n' "$out" | sed -n 1p | sed 's/ *$//')
+  if [ -z "$out" ]; then
+    res=$(ssh_unknown "$T_PUB")
+  elif [ -n "$missing" ]; then
+    res="MISSING: $missing"
+  else
+    res="as expected: $(printf '%s\n' "$out" | sed -n 2p | tr -d ' ') files, among them $TN_PLUGINS, executable"
+  fi
+  row "CNI plugins in /opt/cni/bin" "$res" "cni: the plugins of Nomad's bridge network, from the cached cni-plugins asset"
+}
+
+# tn_reloads: which units asked PID 1 for a reload during the first boot, and how often, as PID 1 logs them. install
+# runs in cloud-final.service, or cloud-init-main.service where cloud-init runs every stage in one process, and its
+# systemctl enable asks for a reload by itself; apt's reloads during up come from tent-node.service.
+tn_reloads() {
+  local out res units need
+  if ! out=$(tn_ssh 'journalctl -b _PID=1 -o short-monotonic --no-pager | grep -i reload; true'); then
+    row "Reloads of systemd during the first boot" "$(ssh_unknown "$T_PUB")" ""
+    return 0
+  fi
+  printf '%s\n' "${out:-no reload in the PID 1 journal}" | detail "journalctl -b _PID=1 | grep -i reload (T, first boot)"
+  # systemd 255 logs "Reloading requested from client …", 259 "Reload requested from client …".
+  units=$(printf '%s\n' "$out" | sed -nE 's/.*Reload(ing)? requested from client.*\(unit ([^)]*)\).*/\2/p' | sort | uniq -c |
+    awk '{printf "%s%s x%s", (NR > 1 ? ", " : ""), $2, $1}')
+  if [ -z "$out" ]; then
+    res="none"
+  elif [ -n "$units" ]; then
+    res="asked by $units"
+  else
+    res="PID 1 names no unit: $(printf '%s' "$out" | oneline 300 || true)"
+  fi
+  row "Reloads of systemd during the first boot" "$res" \
+    "a record: install's systemctl enable asks for one from cloud-init's unit, apt's from tent-node.service"
+  if ! out=$(tn_ssh 'systemctl status tent-node.service --no-pager -l 2>&1 | head -n 30; true'); then
+    row "systemctl status tent-node.service: changed on disk" "$(ssh_unknown "$T_PUB")" ""
+    return 0
+  fi
+  out=$(printf '%s\n' "$out" | hide_url)
+  printf '%s\n' "$out" | detail "systemctl status tent-node.service (T, first boot)"
+  need=$(tn_ssh 'systemctl show -p NeedDaemonReload --value tent-node.service' || true)
+  case "$out" in
+    *"changed on disk"*) res="UNEXPECTED: systemctl status warns that the unit changed on disk; NeedDaemonReload ${need:-?}" ;;
+    *) case "$need" in
+        no) res="as expected: no warning; NeedDaemonReload no" ;;
+        "") res=$(ssh_unknown "$T_PUB") ;;
+        *) res="UNEXPECTED: NeedDaemonReload $need" ;;
+      esac ;;
+  esac
+  row "systemctl status tent-node.service: changed on disk" "$res" \
+    "apt's reloads during up would clear the warning"
+}
+
+# tn_dropped BEFORE AFTER PASS: the verdict of a probe that timed out, from the counter of the metadata drop it meets in
+# tent's table before and after it: PASS when the counter grew, a failed check when it did not, since then something
+# other than tent's rule stopped the probe, and unknown when the counter cannot be read or went down.
+tn_dropped() {
+  case "$1:$2" in
+    *[!0-9:]* | :* | *:) echo "unknown: timed out, but the drop counter is unreadable" ;;
+    *) if [ "$2" -gt "$1" ]; then echo "$3"
+      elif [ "$2" -eq "$1" ]; then echo "FAILED: timed out, but tent's drop did not count it"
+      else echo "unknown: timed out, and the drop counter went down"; fi ;;
+  esac
+}
+
+# tn_host_probe: root curl on T's host must not reach the metadata service. It prints its exit code, the HTTP code and
+# the time it took to connect. tent's rule drops, so a pass is a timeout (28) before any connection that the counter of
+# tent's output drop saw; an answer (0), a connection that then timed out, or a timeout that the counter did not see
+# is a failed check; anything else, such as a refused connection (7), is unknown.
+# shellcheck disable=SC2016 # the single-quoted command expands on instance T
+tn_host_probe() {
+  local title="Metadata from the host (root curl)" out res before after
+  before=$(tn_drops output)
+  out=$(tn_ssh 'o=$(curl -sS -m 3 -o /dev/null -w "HTTP %{http_code}, connect %{time_connect}\n" '"$TN_METADATA_URL"' 2>&1)
+    echo "exit $? $o"' || true)
+  after=$(tn_drops output)
+  { printf '%s\n' "${out:-$(ssh_unknown "$T_PUB")}"
+    printf "drops in tent's output chain: %s packets before the probe, %s after\n" "$before" "$after"; } |
+    detail "$title (T)"
+  out=$(printf '%s' "$out" | oneline 200 || true)
+  case "$out" in
+    "") res=$(ssh_unknown "$T_PUB") ;;
+    "exit 0 "*) res="FAILED: reached the metadata service" ;;
+    "exit 28 "*"connect 0.000000"*) res=$(tn_dropped "$before" "$after" blocked) ;;
+    "exit 28 "*) res="FAILED: connected to the metadata service, then timed out" ;;
+    *) res="unknown" ;;
+  esac
+  row "$title" "$res; drops in tent's output chain $before, then $after${out:+: $out}" \
+    "decision 21: the output chain drops what lacks tent-node's mark"
+}
+
+# tn_container_probe TITLE PULLED CHAIN [DOCKER_RUN_OPTION]: probes the metadata service from a container on T, after
+# the control URL. PULLED is the output of the image's pull; CHAIN is the chain of tent's table whose metadata drop the
+# probe meets: output on the host's network, forward on a bridge. The container prints wget's exit code and message for
+# the metadata service after "metadata-exit". busybox prints "download timed out" for a connection that stalls as for
+# one that is dropped, so a pass is that timeout with a reached control and a drop counter that grew during the probe.
+# An answer, an HTTP error among them, or a timeout that the counter did not see is a failed check; anything else, such
+# as a refused connection, is unknown.
+# shellcheck disable=SC2016 # the single-quoted part expands in the container
+tn_container_probe() {
+  local script out res before after
+  script="wget -q -T 5 -O /dev/null $TN_CONTROL_URL && echo control-ok || echo control-failed
+"'o=$(wget -q -T 3 -O /dev/null '"$TN_METADATA_URL"' 2>&1); echo "metadata-exit $? $o"'
+  case "$2" in
+    *"exit 0") ;;
+    *) row "$1" "unknown: docker pull $TN_IMAGE failed: $(printf '%s' "${2:-$(ssh_unknown "$T_PUB")}" | oneline 200)" ""
+      return 0 ;;
+  esac
+  before=$(tn_drops "$3")
+  out=$(tn_ssh "timeout 120 docker run --rm ${4:-} $TN_IMAGE sh -c '$script' 2>&1; echo \"exit \$?\"" || true)
+  after=$(tn_drops "$3")
+  { printf '%s\n' "${out:-$(ssh_unknown "$T_PUB")}"
+    printf "drops in tent's %s chain: %s packets before the probe, %s after\n" "$3" "$before" "$after"; } |
+    detail "$1 (T)"
+  case "$out" in
+    "") res=$(ssh_unknown "$T_PUB") ;;
+    *"metadata-exit 0 "*) res="FAILED: reached the metadata service" ;;
+    *"metadata-exit "*"server returned error"*) res="FAILED: the metadata service answered with an HTTP error" ;;
+    *control-ok*"metadata-exit "*"download timed out"*)
+      res=$(tn_dropped "$before" "$after" "blocked; the container reached $TN_CONTROL_URL") ;;
+    *control-failed*"metadata-exit "*"download timed out"*)
+      res="unknown: timed out, but the container reached no network: $TN_CONTROL_URL failed too" ;;
+    *) res="unknown" ;;
+  esac
+  row "$1" "$res; drops in tent's $3 chain $before, then $after: $(printf '%s' "$out" | oneline 200)" \
+    "decision 21: tent's chains drop what lacks tent-node's mark"
+}
+
+# tn_metadata_block: nothing on T reaches the metadata service but tent-node: root on the host, a root container on the
+# host's network, a container on Docker's bridge; then up by hand, whose read carries the mark, and the counters of
+# the two drops.
+# shellcheck disable=SC2016 # the single-quoted commands expand on instance T
+tn_metadata_block() {
+  local out res pulled before after fwd s="$WORK/status-up.json"
+  tn_host_probe
+  pulled=$(tn_ssh "timeout 300 docker pull -q $TN_IMAGE 2>&1; echo \"exit \$?\"" || true)
+  tn_container_probe "Metadata from a root container on the host network" "$pulled" output "--network host"
+  tn_container_probe "Metadata from a container on Docker's bridge" "$pulled" forward ""
+  before=$(tn_drops output)
+  fwd=$(tn_drops forward)
+  case "$before:$fwd" in
+    *\?* | 0:* | *:0) res="UNEXPECTED: output $before packets, forward $fwd packets" ;;
+    *) res="as expected: output $before packets, forward $fwd packets" ;;
+  esac
+  row "Metadata drops after the probes" "$res" "the host and host-network probes count in output, the bridge probe in forward"
+  out=$(tn_ssh 'o=$(/usr/local/bin/tent-node up 2>&1); rc=$?; printf "%s\n" "$o" | tail -n 40; echo "exit $rc"' | hide_url || true)
+  printf '%s\n' "${out:-$(ssh_unknown "$T_PUB")}" | detail "tent-node up by hand (T, first boot)"
+  case "$(printf '%s\n' "$out" | tail -1)" in
+    "exit 0") res="as expected: exit 0" ;;
+    "") res=$(ssh_unknown "$T_PUB") ;;
+    *) res="FAILED: $(printf '%s\n' "$out" | tail -3 | oneline 300 || true)" ;;
+  esac
+  row "tent-node up by hand" "$res" "its metadata read carries the mark, so the output chain lets it through"
+  after=$(tn_drops output)
+  if [ "$before" != "?" ] && [ "$before" = "$after" ]; then res="as expected"; else res="UNEXPECTED"; fi
+  row "Output drops during up by hand" "$res: $before packets before, $after after" "up sends nothing unmarked to the metadata service"
+  res=$(tn_status "$s" | hide_url)
+  if tn_phases_are "$s" unchanged unchanged; then res="as expected: $res"; else res="UNEXPECTED: $res"; fi
+  row "status.json after up by hand" "$res" "every phase unchanged: tent's table is loaded with the same comment"
+  tn_out 'nft list chain inet tent output 2>&1; nft list chain inet tent forward 2>&1' |
+    detail "nft list chain inet tent output and forward (T, after the probes and up by hand)"
+}
+
+# tn_listeners: what listens on T right after SSH came back after the reboot, and whether up had run by then.
+# shellcheck disable=SC2016 # the single-quoted command expands on instance T
+tn_listeners() {
+  local out sockets
+  out=$(tn_ssh 'printf "uptime %ss, tent-node.service %s\n" "$(cut -d" " -f1 /proc/uptime)" "$(systemctl is-active tent-node.service)"
+    ss -Htulpn' || true)
+  printf '%s\n' "${out:-$(ssh_unknown "$T_PUB")}" | detail "ss -tulpn right after SSH came back (T, after the reboot)"
+  sockets=$(printf '%s\n' "$out" | sed 1d | awk '{p = $7; sub(/^users:\(\("/, "", p); sub(/".*/, "", p)
+    printf "%s%s %s %s", (NR > 1 ? "; " : ""), $1, $5, p}')
+  row "Listening right after SSH came back (after the reboot)" \
+    "${out:+$(printf '%s\n' "$out" | sed -n 1p); }${sockets:-$(ssh_unknown "$T_PUB")}" \
+    "until up loads tent's table after a reboot, only sshd and systemd's own sockets should listen"
 }
 
 tn_second_boot() { # checks T after the reboot: tent-node.service ran up again, which changed nothing but status.json
-  local out sys res t1 t2 changed missing s1="$WORK/status-1.json" s2="$WORK/status-2.json"
+  local out sys res t1 t2 changed missing s1="$WORK/status-1.json" s2="$WORK/status-2.json" f="$WORK/tables-2.json"
+  # First, as close to the boot as SSH allows.
+  tn_listeners
   sys=$(tn_ssh 'timeout 600 systemctl is-system-running --wait' || true)
   out=$(tn_ssh 'systemctl is-active tent-node.service' || true)
   row "Reboot T" "SSH on the new boot after ${TN_REBOOT_S}s; systemctl is-system-running: ${sys:-?}; tent-node.service ${out:-?}" \
@@ -1744,10 +2068,23 @@ tn_second_boot() { # checks T after the reboot: tent-node.service ran up again, 
   res=$(tn_status "$s2" | hide_url)
   t1=$(jq -r '.started // ""' "$s1" 2>/dev/null || true)
   t2=$(jq -r '.started // ""' "$s2" 2>/dev/null || true)
-  if [ -n "$t2" ] && [ "$t2" != "$t1" ] && tn_phases_are "$s2" unchanged; then res="as expected: $res"; else res="UNEXPECTED: $res"; fi
-  row "status.json after the reboot" "$res; started $t1, then $t2" "every phase unchanged: a second up changes nothing"
+  if [ -n "$t2" ] && [ "$t2" != "$t1" ] && tn_phases_are "$s2" unchanged "done"; then res="as expected: $res"; else res="UNEXPECTED: $res"; fi
+  row "status.json after the reboot" "$res; started $t1, then $t2" \
+    "every phase unchanged but hostfirewall done: the kernel forgot tent's table"
   row "status.json after the reboot: instance and version" "$(tn_instance "$s2")" ""
   { jq . "$s2" 2>/dev/null || cat "$s2"; } | hide_url | detail "/var/lib/tent/status.json (T, after the reboot)"
+  res=$(tn_tables "$f")
+  { jq . "$f" 2>/dev/null || cat "$f"; } | detail "nft -j list tables (T, after the reboot)"
+  out=$(tn_comment "$f")
+  if [ -n "$out" ] && [ "$out" = "$TN_COMMENT" ]; then
+    res="as expected: loaded again with the comment of the first boot; $res"
+  else
+    res="UNEXPECTED: comment ${out:-none}, first boot ${TN_COMMENT:-none}; ${res:-$(ssh_unknown "$T_PUB")}"
+  fi
+  row "tent's table after the reboot" "$res" "the kernel forgets tables at a reboot; up loads tent's again, the same ruleset"
+  tn_out 'nft list table inet tent 2>&1' | detail "nft list table inet tent (T, after the reboot)"
+  row "Metadata drops after the reboot" "output $(tn_drops output) packets, forward $(tn_drops forward) packets" \
+    "what asked the metadata service without tent-node's mark since up loaded the table; cloud-init asks before, if at all"
   tn_files >"$WORK/files-2.txt" || true
   changed=$(diff "$WORK/files-1.txt" "$WORK/files-2.txt" | sed -n 's/^> \([^ ]*\) .*/\1/p' | paste -sd ' ' - || true)
   missing=$(tn_missing "$WORK/files-2.txt")
@@ -1793,6 +2130,11 @@ check_tentnode() {
     return 0
   fi
   tn_first_boot
+  tn_image
+  tn_machine
+  tn_reloads
+  tn_metadata_block
+  tn_first_files
   # A reboot runs up again at boot: it must change nothing but status.json.
   if ! tn_reboot; then
     row "Reboot T" "no boot id before the reboot, or no SSH on a new boot within ${READY_TIMEOUT}s: $(ssh_unknown "$T_PUB")" \
@@ -1970,6 +2312,8 @@ main() {
   esac
   # Without SSH the checks start once the API reports A ready, about a minute after the create.
   if [ "$instances" -gt 0 ] && [ "$NEED_SSH" = 0 ]; then duration="5-10 minutes"; fi
+  # tentnode waits for Docker's install on the first boot, then reboots.
+  if want tentnode; then duration="10-20 minutes"; fi
   if [ "$KEEP" = 1 ]; then keep_note=" (NOT deleted: --keep given)"; fi
   cat >&2 <<EOF
 

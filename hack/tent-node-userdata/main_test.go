@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,8 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
+	"github.com/ingvarch/tent/internal/assets"
+	"github.com/ingvarch/tent/internal/channels"
 	"github.com/ingvarch/tent/internal/nodeconfig"
 )
 
@@ -87,46 +91,157 @@ func decoded(t *testing.T, userData string) *nodeconfig.NodeConfig {
 	return nc
 }
 
-func TestUserDataHoldsAClientConfigWithTentNodeOnly(t *testing.T) {
+// ruleText writes a host firewall rule as the tests expect it: name, protocol, ports and sources.
+func ruleText(r nodeconfig.Rule) string {
+	from := make([]string, len(r.From))
+	for i, p := range r.From {
+		from[i] = p.String()
+	}
+	return fmt.Sprintf("%s %s %d-%d from %s", r.Name, r.Protocol, r.Ports.First, r.Ports.Last, strings.Join(from, " "))
+}
+
+// rulesText writes the rules of a host firewall as ruleText does, in their order.
+func rulesText(f nodeconfig.HostFirewall) []string {
+	texts := make([]string, len(f.Rules))
+	for i, r := range f.Rules {
+		texts[i] = ruleText(r)
+	}
+	return texts
+}
+
+// The host firewall rules of a node in the VPC 10.64.0.0/16, in the order tent writes them.
+const (
+	sshRule        = "ssh tcp 22-22 from 0.0.0.0/0 ::/0"
+	icmpRule       = "icmp icmp 0-0 from 0.0.0.0/0 ::/0"
+	apiRule        = "api tcp 4646-4646 from 0.0.0.0/0 ::/0"
+	httpRule       = "nomad-http tcp 4646-4646 from 10.64.0.0/16"
+	rpcRule        = "nomad-rpc tcp 4647-4647 from 10.64.0.0/16"
+	serfTCP        = "serf tcp 4648-4648 from 10.64.0.0/16"
+	serfUDP        = "serf udp 4648-4648 from 10.64.0.0/16"
+	dynamicTCP     = "dynamic tcp 20000-32000 from 10.64.0.0/16"
+	dynamicUDP     = "dynamic udp 20000-32000 from 10.64.0.0/16"
+	bridgeHTTP     = "bridge-http tcp 4646-4646 from 172.26.64.0/20 172.17.0.0/16"
+	bridgeDynamicT = "bridge-dynamic tcp 20000-32000 from 172.26.64.0/20 172.17.0.0/16"
+	bridgeDynamicU = "bridge-dynamic udp 20000-32000 from 172.26.64.0/20 172.17.0.0/16"
+)
+
+// stableCNI returns the CNI plugins for amd64 that the embedded stable channel pins.
+func stableCNI(t *testing.T) nodeconfig.Asset {
+	t.Helper()
+	ch, err := channels.Load("stable")
+	if err != nil {
+		t.Fatalf("load the stable channel: %v", err)
+	}
+	a, err := assets.CNI(ch, "amd64")
+	if err != nil {
+		t.Fatalf("CNI: %v", err)
+	}
+	return nodeconfig.Asset(a)
+}
+
+// TestUserDataByRole checks the NodeConfig of each role, client when -role is not given, in the VPC 10.64.0.0/16 when
+// -cidr is not given: the tent-node under test; the CNI plugins, Docker and the bridge settings only on a node that
+// runs a client; the host firewall that tent gives the role; and no files, so no secrets.
+func TestUserDataByRole(t *testing.T) {
+	tentNode := nodeconfig.Asset{Name: nodeconfig.TentNodeAsset, Version: testVersion, URLs: []string{testURL},
+		SHA256: testSum}
+	withDocker := nodeconfig.System{
+		Sysctls: map[string]string{
+			"net.bridge.bridge-nf-call-arptables": "1",
+			"net.bridge.bridge-nf-call-ip6tables": "1",
+			"net.bridge.bridge-nf-call-iptables":  "1",
+		},
+		KernelModules: []string{"br_netfilter", "overlay"},
+		Docker:        true,
+	}
+	clientRules := []string{
+		sshRule, icmpRule, httpRule, dynamicTCP, dynamicUDP, bridgeHTTP, bridgeDynamicT, bridgeDynamicU,
+	}
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		role   v1alpha1.Role
+		assets []nodeconfig.Asset
+		system nodeconfig.System
+		rules  []string
+	}{
+		{
+			name: "client by default", role: v1alpha1.RoleClient,
+			assets: []nodeconfig.Asset{stableCNI(t), tentNode}, system: withDocker, rules: clientRules,
+		},
+		{
+			name: "client", args: []string{"-role", "client"}, role: v1alpha1.RoleClient,
+			assets: []nodeconfig.Asset{stableCNI(t), tentNode}, system: withDocker, rules: clientRules,
+		},
+		{
+			name: "server", args: []string{"-role", "server"}, role: v1alpha1.RoleServer,
+			assets: []nodeconfig.Asset{tentNode}, system: nodeconfig.System{},
+			rules: []string{sshRule, icmpRule, apiRule, httpRule, rpcRule, serfTCP, serfUDP},
+		},
+		{
+			name: "combined", args: []string{"-role", "combined"}, role: v1alpha1.RoleCombined,
+			assets: []nodeconfig.Asset{stableCNI(t), tentNode}, system: withDocker,
+			rules: []string{
+				sshRule, icmpRule, apiRule, httpRule, rpcRule, serfTCP, serfUDP, dynamicTCP, dynamicUDP, bridgeHTTP,
+				bridgeDynamicT, bridgeDynamicU,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setNode(t, testURL, testSum)
+			code, out, errOut := runTool(t, append([]string{"-name", testName, "-version", testVersion}, tc.args...)...)
+			if code != 0 {
+				t.Fatalf("exit %d, stderr:\n%s", code, errOut)
+			}
+			if len(out) > nodeconfig.MaxUserDataBytes {
+				t.Errorf("the user data is %d bytes, more than %d", len(out), nodeconfig.MaxUserDataBytes)
+			}
+			nc := decoded(t, out)
+			if diff := cmp.Diff(tc.rules, rulesText(nc.Firewall)); diff != "" {
+				t.Errorf("host firewall rules (-want +got):\n%s", diff)
+			}
+			want := &nodeconfig.NodeConfig{
+				APIVersion: v1alpha1.APIVersion, Kind: nodeconfig.Kind, Cluster: "tent-node-check",
+				Provider: v1alpha1.ProviderVultr, NodeGroup: "nodes", Name: testName, Role: tc.role, Assets: tc.assets,
+				Join:   nodeconfig.Join{Strategy: nodeconfig.JoinSeedAndRefresh, RefreshInterval: time.Minute},
+				System: tc.system,
+				Firewall: nodeconfig.HostFirewall{
+					Rules: nc.Firewall.Rules, BlockMetadata: netip.MustParseAddr("169.254.169.254"),
+				},
+			}
+			// The rules are the ones checked above by their text.
+			want.SpecHash = nodeconfig.SpecHash(want)
+			// Asset prints its URLs without their query: compare the URLs themselves.
+			asset := cmp.Transformer("asset", func(a nodeconfig.Asset) []string {
+				return append([]string{a.Name, a.Version, a.SHA256}, a.URLs...)
+			})
+			equate := cmpopts.EquateComparable(netip.Addr{}, netip.Prefix{})
+			if diff := cmp.Diff(want, nc, equate, asset); diff != "" {
+				t.Errorf("node.json (-want +got):\n%s", diff)
+			}
+			if len(nc.Files) != 0 {
+				t.Errorf("node.json holds %d files, want none: no certificate, key or token", len(nc.Files))
+			}
+			if errOut != "" {
+				t.Errorf("stderr is not empty:\n%s", errOut)
+			}
+		})
+	}
+}
+
+// TestCIDRGivesTheRulesBetweenNodes checks that -cidr is the source of the rules between nodes.
+func TestCIDRGivesTheRulesBetweenNodes(t *testing.T) {
 	setNode(t, testURL, testSum)
-	code, out, errOut := runTool(t, "-name", testName, "-version", testVersion)
+	code, out, errOut := runTool(t, "-name", testName, "-version", testVersion, "-cidr", "10.20.0.0/20")
 	if code != 0 {
 		t.Fatalf("exit %d, stderr:\n%s", code, errOut)
 	}
-	nc := decoded(t, out)
-
-	want := &nodeconfig.NodeConfig{
-		APIVersion: v1alpha1.APIVersion, Kind: nodeconfig.Kind, Cluster: "tent-node-check",
-		Provider: v1alpha1.ProviderVultr, NodeGroup: "clients", Name: testName, Role: v1alpha1.RoleClient,
-		Assets: []nodeconfig.Asset{
-			{Name: nodeconfig.TentNodeAsset, Version: testVersion, URLs: []string{testURL}, SHA256: testSum},
-		},
-		Join: nodeconfig.Join{Strategy: nodeconfig.JoinSeedAndRefresh, RefreshInterval: time.Minute},
-		// As tent gives a client whose node group keeps the docker driver.
-		System: nodeconfig.System{
-			Sysctls: map[string]string{
-				"net.bridge.bridge-nf-call-arptables": "1",
-				"net.bridge.bridge-nf-call-ip6tables": "1",
-				"net.bridge.bridge-nf-call-iptables":  "1",
-			},
-			KernelModules: []string{"br_netfilter", "overlay"},
-			Docker:        true,
-		},
-		Firewall: nodeconfig.HostFirewall{BlockMetadata: netip.MustParseAddr("169.254.169.254")},
+	want := []string{
+		sshRule, icmpRule, "nomad-http tcp 4646-4646 from 10.20.0.0/20", "dynamic tcp 20000-32000 from 10.20.0.0/20",
+		"dynamic udp 20000-32000 from 10.20.0.0/20", bridgeHTTP, bridgeDynamicT, bridgeDynamicU,
 	}
-	want.SpecHash = nodeconfig.SpecHash(want)
-	// Asset prints its URLs without their query: compare the URLs themselves.
-	asset := cmp.Transformer("asset", func(a nodeconfig.Asset) []string {
-		return append([]string{a.Name, a.Version, a.SHA256}, a.URLs...)
-	})
-	if diff := cmp.Diff(want, nc, cmpopts.EquateComparable(netip.Addr{}), asset); diff != "" {
-		t.Errorf("node.json (-want +got):\n%s", diff)
-	}
-	if len(nc.Files) != 0 {
-		t.Errorf("node.json holds %d files, want none: no certificate, key or token", len(nc.Files))
-	}
-	if errOut != "" {
-		t.Errorf("stderr is not empty:\n%s", errOut)
+	if diff := cmp.Diff(want, rulesText(decoded(t, out).Firewall)); diff != "" {
+		t.Errorf("host firewall rules (-want +got):\n%s", diff)
 	}
 }
 
@@ -136,8 +251,12 @@ func TestFlagsWinOverTheEnvironment(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d, stderr:\n%s", code, errOut)
 	}
-	a := decoded(t, out).Assets[0]
-	if len(a.URLs) != 1 || a.URLs[0] != testURL || a.SHA256 != testSum {
+	nc := decoded(t, out)
+	i := slices.IndexFunc(nc.Assets, func(a nodeconfig.Asset) bool { return a.Name == nodeconfig.TentNodeAsset })
+	if i < 0 {
+		t.Fatalf("node.json has no tent-node asset")
+	}
+	if a := nc.Assets[i]; len(a.URLs) != 1 || a.URLs[0] != testURL || a.SHA256 != testSum {
 		t.Errorf("the tent-node asset has the sha256 %s and %d URLs, want the flags' values", a.SHA256, len(a.URLs))
 	}
 }
@@ -155,6 +274,10 @@ func TestMissingValues(t *testing.T) {
 		{"no sha256", testURL, "", []string{"-name", testName, "-version", testVersion}, "TENT_NODE_SHA256"},
 		{"an argument", testURL, testSum, []string{"-name", testName, "-version", testVersion, "x"}, "no arguments"},
 		{"an unknown flag", testURL, testSum, []string{"-cluster", "x"}, "-cluster"},
+		{
+			"a CIDR without a length", testURL, testSum,
+			[]string{"-name", testName, "-version", testVersion, "-cidr", "10.64.0.0"}, "-cidr",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setNode(t, tc.url, tc.sum)
@@ -170,16 +293,25 @@ func TestMissingValues(t *testing.T) {
 func TestInvalidValuesFail(t *testing.T) {
 	for _, tc := range []struct {
 		name, nodeName, url, sum string
+		args                     []string
 		says                     string
 	}{
-		{"a name that is no host name", "Tent_Spike", testURL, testSum, "is not a host name"},
-		{"a short sha256", testName, testURL, testSum[1:], "is not 64 lower-case hex digits"},
-		{"a URL that is not http", testName, "ftp://h/x?X-Amz-Signature=" + testSig, testSum, "URLs[0]"},
-		{"a URL with a space", testName, "https://h/x y?X-Amz-Signature=" + testSig, testSum, "printable ASCII"},
+		{"a name that is no host name", "Tent_Spike", testURL, testSum, nil, "is not a host name"},
+		{"a short sha256", testName, testURL, testSum[1:], nil, "is not 64 lower-case hex digits"},
+		{"a URL that is not http", testName, "ftp://h/x?X-Amz-Signature=" + testSig, testSum, nil, "URLs[0]"},
+		{"a URL with a space", testName, "https://h/x y?X-Amz-Signature=" + testSig, testSum, nil, "printable ASCII"},
+		{
+			"an unknown role", testName, testURL, testSum, []string{"-role", "worker"},
+			`role "worker" is not server, client or combined`,
+		},
+		{
+			"a CIDR that is no network", testName, testURL, testSum, []string{"-cidr", "10.64.0.5/16"},
+			"10.64.0.5/16 has bits set after /16",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setNode(t, tc.url, tc.sum)
-			code, out, errOut := runTool(t, "-name", tc.nodeName, "-version", testVersion)
+			code, out, errOut := runTool(t, append([]string{"-name", tc.nodeName, "-version", testVersion}, tc.args...)...)
 			if code != exitError || out != "" || !strings.Contains(errOut, tc.says) {
 				t.Errorf("exit %d, stdout %q, stderr %q; want exit %d and an error that says %q", code, out, errOut,
 					exitError, tc.says)
