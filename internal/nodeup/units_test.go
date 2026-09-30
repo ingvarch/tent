@@ -71,11 +71,13 @@ func unitValues(content []byte) map[string][]string {
 
 // TestUnitsWaitForNoCloudInit checks the orderings that would hang or break the boot. tent-node install runs inside
 // cloud-final.service and waits for tent-node.service, so no unit may wait for cloud-final.service or
-// cloud-init.target: the first boot would hang. cloud-config.service is left out as a precaution.
+// cloud-init.target: the first boot would hang. cloud-config.service is left out as a precaution, and so is
+// cloud-init-main.service, which runs every stage in one process on Ubuntu 26.04.
 // WantedBy=multi-user.target orders the target after tent-node.service, so an order after multi-user.target would be
 // a cycle. Nomad is started by up itself, not ordered after it.
 func TestUnitsWaitForNoCloudInit(t *testing.T) {
-	forbidden := []string{"cloud-final.service", "cloud-init.target", "cloud-config.service", "multi-user.target"}
+	forbidden := []string{"cloud-final.service", "cloud-init.target", "cloud-config.service",
+		"cloud-init-main.service", "multi-user.target"}
 	for _, f := range renderUnits(t) {
 		values := unitValues(f.Content)
 		for _, key := range []string{"After", "Requires", "Wants", "Requisite", "BindsTo"} {

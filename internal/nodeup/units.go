@@ -27,8 +27,9 @@ var unitPath = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
 
 // serviceTemplate is tent-node.service. It waits only for the network. tent-node install runs inside cloud-final and
 // waits for it, so an order after cloud-final or cloud-init.target would hang the first boot; cloud-config is left out
-// as a precaution. WantedBy=multi-user.target orders the target after the service, so an order after
-// multi-user.target would be a cycle. up starts Nomad itself.
+// as a precaution, and so is cloud-init-main, which runs every stage in one process on Ubuntu 26.04.
+// WantedBy=multi-user.target orders the target after the service, so an order after multi-user.target would be a
+// cycle. up starts Nomad itself.
 const serviceTemplate = nodeconfig.NodeHeader + `[Unit]
 Description=tent-node up: set the machine up as a Nomad agent of its node group
 Wants=network-online.target
