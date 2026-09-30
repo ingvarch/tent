@@ -3,6 +3,7 @@ package nodeuptest_test
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
@@ -86,6 +87,21 @@ func TestNewHost(t *testing.T) {
 	}
 	if first, second := h.Now(), h.Now(); first.IsZero() || !first.Equal(second) || first.Location() != time.UTC {
 		t.Errorf("the clock read %v and then %v, want a time in UTC that stands still", first, second)
+	}
+	// A test serves what the machine downloads; nothing reaches the network.
+	if h.Transport == nil {
+		t.Fatal("the host has no transport, so it would use the network")
+	}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://github.com/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := h.Transport.RoundTrip(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if want := "nodeuptest: the machine has no network: serve the files with httptest"; errText(err) != want {
+		t.Errorf("a request: %q, want %q", errText(err), want)
 	}
 }
 

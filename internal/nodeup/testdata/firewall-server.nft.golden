@@ -1,0 +1,33 @@
+# Rendered by tent-node. Do not edit: changes are overwritten.
+table inet tent
+delete table inet tent
+table inet tent {
+  comment "tent-node c0936b40e2cb6f443d3562ec7b671886c58560aa10e22ba76cafddfba1119389"
+  chain input {
+    type filter hook input priority filter; policy drop;
+    ct state established,related accept
+    ct state invalid drop
+    iif "lo" accept
+    icmpv6 type { nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept
+    udp sport 67 udp dport 68 accept
+    ip saddr { 0.0.0.0/0 } tcp dport 22 accept comment "ssh"
+    ip6 saddr { ::/0 } tcp dport 22 accept comment "ssh"
+    ip saddr { 0.0.0.0/0 } meta l4proto icmp accept comment "icmp"
+    ip6 saddr { ::/0 } meta l4proto icmpv6 accept comment "icmp"
+    ip saddr { 0.0.0.0/0 } tcp dport 4646 accept comment "api"
+    ip6 saddr { ::/0 } tcp dport 4646 accept comment "api"
+    ip saddr { 10.64.0.0/16 } tcp dport 4646 accept comment "nomad-http"
+    ip saddr { 10.64.0.0/16 } tcp dport 4647 accept comment "nomad-rpc"
+    ip saddr { 10.64.0.0/16 } tcp dport 4648 accept comment "serf"
+    ip saddr { 10.64.0.0/16 } udp dport 4648 accept comment "serf"
+  }
+  chain forward {
+    type filter hook forward priority filter; policy accept;
+    ip daddr 169.254.169.254 counter drop
+  }
+  chain output {
+    type filter hook output priority filter; policy accept;
+    ip daddr 169.254.169.254 meta mark 0x00000747 accept
+    ip daddr 169.254.169.254 counter drop
+  }
+}

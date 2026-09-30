@@ -21,6 +21,8 @@ func TestSystemdCommands(t *testing.T) {
 		sd.Enable(ctx, "tent-node.service", "tent-node-join.timer"),
 		sd.Start(ctx, "tent-node.service"),
 		sd.Restart(ctx, "systemd-journald.service"),
+		sd.Disable(ctx, "ufw.service"),
+		sd.DisableNow(ctx, "firewalld.service"),
 	} {
 		if err != nil {
 			t.Fatal(err)
@@ -31,6 +33,8 @@ func TestSystemdCommands(t *testing.T) {
 		"systemctl enable tent-node.service tent-node-join.timer",
 		"systemctl start tent-node.service",
 		"systemctl restart systemd-journald.service",
+		"systemctl disable ufw.service",
+		"systemctl disable --now firewalld.service",
 	}
 	if diff := cmp.Diff(want, r.Commands()); diff != "" {
 		t.Errorf("commands (-want +got):\n%s", diff)
@@ -114,29 +118,57 @@ func TestSystemdStates(t *testing.T) {
 	}
 }
 
-func TestSystemdNeedsReload(t *testing.T) {
-	const command = "systemctl show -p NeedDaemonReload --value tent-node.service"
-	cases := []struct {
+func TestSystemdShow(t *testing.T) {
+	type showCase struct {
 		name   string
 		answer nodeuptest.Answer
 		want   bool
-		err    string
-	}{
-		{"yes", nodeuptest.Output("yes\n"), true, ""},
-		{"no", nodeuptest.Output("no\n"), false, ""},
-		{"something else", nodeuptest.Output("maybe\n"), false, command + `: printed "maybe", not yes or no`},
-		{"no systemd", nodeuptest.Exit(1, "Failed to connect to bus: No such file or directory"), false,
-			command + ": exit status 1: Failed to connect to bus: No such file or directory"},
+		err    string // after the command
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			r := &nodeuptest.Runner{}
-			r.On(command, c.answer)
-			got, err := nodeup.Systemd{Runner: r}.NeedsReload(t.Context(), "tent-node.service")
-			if got != c.want || errText(err) != c.err {
-				t.Errorf("NeedsReload: %v, %q; want %v, %q", got, errText(err), c.want, c.err)
-			}
-		})
+	checks := []struct {
+		command string
+		call    func(context.Context, nodeup.Systemd) (bool, error)
+		cases   []showCase
+	}{
+		{
+			"systemctl show -p NeedDaemonReload --value tent-node.service",
+			func(ctx context.Context, sd nodeup.Systemd) (bool, error) {
+				return sd.NeedsReload(ctx, "tent-node.service")
+			},
+			[]showCase{
+				{"yes", nodeuptest.Output("yes\n"), true, ""},
+				{"no", nodeuptest.Output("no\n"), false, ""},
+				{"something else", nodeuptest.Output("maybe\n"), false, `printed "maybe", not yes or no`},
+			},
+		},
+		{
+			// systemd 255 and 259 print the job's id, or an empty line when the unit has none.
+			"systemctl show -p Job --value docker.service",
+			func(ctx context.Context, sd nodeup.Systemd) (bool, error) { return sd.HasJob(ctx, "docker.service") },
+			[]showCase{
+				{"a job", nodeuptest.Output("172\n"), true, ""},
+				{"no job", nodeuptest.Output("\n"), false, ""},
+				{"something else", nodeuptest.Output("start\n"), false, `printed "start", not a job id`},
+			},
+		},
+	}
+	noBus := showCase{"no systemd", nodeuptest.Exit(1, "Failed to connect to bus: No such file or directory"), false,
+		"exit status 1: Failed to connect to bus: No such file or directory"}
+	for _, check := range checks {
+		for _, c := range append(check.cases, noBus) {
+			t.Run(check.command+" "+c.name, func(t *testing.T) {
+				r := &nodeuptest.Runner{}
+				r.On(check.command, c.answer)
+				got, err := check.call(t.Context(), nodeup.Systemd{Runner: r})
+				want := ""
+				if c.err != "" {
+					want = check.command + ": " + c.err
+				}
+				if got != c.want || errText(err) != want {
+					t.Errorf("%s: %v, %q; want %v, %q", check.command, got, errText(err), c.want, want)
+				}
+			})
+		}
 	}
 }
 

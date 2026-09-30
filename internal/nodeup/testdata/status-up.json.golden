@@ -1,6 +1,6 @@
 {
   "version": "v0.3.0",
-  "specHash": "27e4cf146a55384d",
+  "specHash": "ace7c719de320307",
   "started": "2026-09-29T12:00:01Z",
   "finished": "2026-09-29T12:00:02Z",
   "instance": {
@@ -19,18 +19,15 @@
     },
     {
       "name": "hostfirewall",
-      "status": "skipped",
-      "reason": "not built yet"
+      "status": "done"
     },
     {
       "name": "runtime",
-      "status": "skipped",
-      "reason": "not built yet"
+      "status": "done"
     },
     {
       "name": "cni",
-      "status": "skipped",
-      "reason": "not built yet"
+      "status": "done"
     },
     {
       "name": "join",

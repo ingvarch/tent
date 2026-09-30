@@ -28,21 +28,8 @@ const journaldConf = nodeconfig.NodeHeader + "[Journal]\nSystemMaxUse=1G\n"
 // journal. A node without kernel modules or sysctls, such as a server, gets no file for them. A command that applies a
 // file runs only when the file changed, and when it fails, the file goes, so that the next run tries again.
 func system(ctx context.Context, h *Host, nc *nodeconfig.NodeConfig) (Result, error) {
-	changed := false
-	for _, step := range []func(context.Context, *Host, *nodeconfig.NodeConfig) (bool, error){
-		// The modules come first: sysctls such as net.bridge.bridge-nf-call-iptables exist once br_netfilter is loaded.
-		loadModules, applySysctls, syncTime, limitJournal,
-	} {
-		c, err := step(ctx, h, nc)
-		if err != nil {
-			return Result{}, err
-		}
-		changed = changed || c
-	}
-	if changed {
-		return Result{Status: Done}, nil
-	}
-	return Result{Status: Unchanged}, nil
+	// The modules come first: sysctls such as net.bridge.bridge-nf-call-iptables exist once br_netfilter is loaded.
+	return runSteps(ctx, h, nc, loadModules, applySysctls, syncTime, limitJournal)
 }
 
 // loadModules writes the kernel modules of nc into modulesFile and loads each with modprobe.
@@ -142,7 +129,7 @@ func limitJournal(ctx context.Context, h *Host, _ *nodeconfig.NodeConfig) (bool,
 //
 // A run killed between the write and then, as by SIGKILL, leaves the file without its command: the next run finds the
 // file as it should be and does not run the command. The next boot heals it, as systemd-modules-load, systemd-sysctl
-// and journald read the files at boot; a run by hand before it does not.
+// and journald read the files at boot, and Docker reads daemon.json at its start; a run by hand before it does not.
 func writeThen(ctx context.Context, fsys FS, p, content string, then func(context.Context) error) (bool, error) {
 	dirChanged, err := fsys.EnsureDir(path.Dir(p), 0o755, nodeconfig.Owner)
 	if err != nil {
