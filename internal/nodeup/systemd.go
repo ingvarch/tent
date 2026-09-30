@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -18,6 +19,16 @@ func (s Systemd) DaemonReload(ctx context.Context) error { return s.run(ctx, "da
 // Enable makes the units start at boot.
 func (s Systemd) Enable(ctx context.Context, units ...string) error {
 	return s.run(ctx, append([]string{"enable"}, units...)...)
+}
+
+// Disable makes the units no longer start at boot. It does not stop them.
+func (s Systemd) Disable(ctx context.Context, units ...string) error {
+	return s.run(ctx, append([]string{"disable"}, units...)...)
+}
+
+// DisableNow makes the units no longer start at boot, and stops them.
+func (s Systemd) DisableNow(ctx context.Context, units ...string) error {
+	return s.run(ctx, append([]string{"disable", "--now"}, units...)...)
 }
 
 // Start starts the unit and waits until it has started; for a oneshot service, until it has run.
@@ -59,6 +70,24 @@ func (s Systemd) NeedsReload(ctx context.Context, unit string) (bool, error) {
 	default:
 		return false, fmt.Errorf("%s: printed %q, not yes or no", CommandLine("systemctl", args...), value)
 	}
+}
+
+// HasJob reports whether systemd has a job queued or running for the unit, such as the start job of a boot, as
+// systemctl show -p Job says: the job's id, or nothing.
+func (s Systemd) HasJob(ctx context.Context, unit string) (bool, error) {
+	args := []string{"show", "-p", "Job", "--value", unit}
+	out, err := s.Runner.Run(ctx, "systemctl", args...)
+	if err != nil {
+		return false, err
+	}
+	value := strings.TrimSpace(string(out))
+	if value == "" {
+		return false, nil
+	}
+	if _, err := strconv.ParseUint(value, 10, 32); err != nil {
+		return false, fmt.Errorf("%s: printed %q, not a job id", CommandLine("systemctl", args...), value)
+	}
+	return true, nil
 }
 
 func (s Systemd) run(ctx context.Context, args ...string) error {

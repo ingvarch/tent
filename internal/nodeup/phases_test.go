@@ -44,13 +44,20 @@ const (
 // make it, its filesystem and runner, and a metadata service that describes instance.
 func ubuntu(t *testing.T) (*nodeup.Host, *nodeuptest.FS, *nodeuptest.Runner, *nodeuptest.Environment) {
 	t.Helper()
-	h, fsys, r := machine(t)
-	nodeuptest.Ubuntu(t, fsys, r, units...)
+	h, fsys, r, _ := ubuntuMachine(t)
 	return h, fsys, r, &nodeuptest.Environment{Instance: instance}
 }
 
-// combined returns the sample with a tent-node asset of the fake host's version and the system settings of a
-// combined node that runs Docker.
+// ubuntuMachine returns the machine that ubuntu returns, without the metadata service, and the state of the fake
+// Ubuntu.
+func ubuntuMachine(t *testing.T) (*nodeup.Host, *nodeuptest.FS, *nodeuptest.Runner, *nodeuptest.Machine) {
+	t.Helper()
+	h, fsys, r := machine(t)
+	return h, fsys, r, nodeuptest.Ubuntu(t, fsys, r, units...)
+}
+
+// combined returns the sample with a tent-node asset of the fake host's version, the cni-plugins asset of the tests'
+// archive, and the system settings of a combined node that runs Docker.
 func combined(t *testing.T) *nodeconfig.NodeConfig {
 	t.Helper()
 	nc := sample(t)
@@ -58,7 +65,7 @@ func combined(t *testing.T) *nodeconfig.NodeConfig {
 		Name: nodeconfig.TentNodeAsset, Version: nodeuptest.Version,
 		URLs:   []string{"https://github.com/ingvarch/tent/releases/download/v0.3.0/tent-node_linux_amd64"},
 		SHA256: "3c7d1e9a5b2f8046c1e7a3d9b5f20864e1c7a3d9b5f20864e1c7a3d9b5f20864",
-	}}
+	}, cniPlugins(t)}
 	nc.System = nodeconfig.System{
 		Sysctls: map[string]string{
 			"net.bridge.bridge-nf-call-arptables": "1", "net.bridge.bridge-nf-call-ip6tables": "1",
@@ -93,12 +100,18 @@ func runPhase(t *testing.T, name string, h *nodeup.Host, nc *nodeconfig.NodeConf
 	nodeup.Result, error,
 ) {
 	t.Helper()
+	return phaseNamed(t, name, e).Run(t.Context(), h, nc)
+}
+
+// phaseNamed returns the phase name of the phases on the metadata service e.
+func phaseNamed(t *testing.T, name string, e env.Environment) nodeup.Phase {
+	t.Helper()
 	phases := nodeup.Phases(e)
 	i := slices.IndexFunc(phases, func(p nodeup.Phase) bool { return p.Name == name })
 	if i < 0 {
 		t.Fatalf("no phase %s", name)
 	}
-	return phases[i].Run(t.Context(), h, nc)
+	return phases[i]
 }
 
 // addUnits puts tent-node's units into fsys, as a test's setup that records no change.
@@ -509,7 +522,7 @@ func countOf(list []string, s string) int {
 }
 
 func TestStubs(t *testing.T) {
-	for _, name := range []string{"hostfirewall", "runtime", "cni", "join", "nomad"} {
+	for _, name := range []string{"join", "nomad"} {
 		t.Run(name, func(t *testing.T) {
 			h, fsys, r, e := ubuntu(t)
 			res, err := runPhase(t, name, h, combined(t), e)
@@ -568,7 +581,8 @@ func TestVerifyFails(t *testing.T) {
 }
 
 func TestUpWithThePhases(t *testing.T) {
-	h, fsys, r, e := ubuntu(t)
+	h, fsys, r, m := ubuntuMachine(t)
+	e := &nodeuptest.Environment{Instance: instance}
 	// A clock that moves, as a real one does, so that the status changes on the second run.
 	now := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
 	h.Now = func() time.Time {
@@ -577,6 +591,7 @@ func TestUpWithThePhases(t *testing.T) {
 	}
 	enableUnits(t, fsys, r)
 	nc := combined(t)
+	srv := serveCNI(t, h, nc, cniArchive(t))
 	first, err := nodeup.Up(t.Context(), h, nc, nodeup.Phases(e))
 	if err != nil {
 		t.Fatal(err)
@@ -602,9 +617,45 @@ func TestUpWithThePhases(t *testing.T) {
 	}
 	want := []string{
 		"timedatectl show -p CanNTP -p NTP",
+		firewalldActive, firewalldEnabled, listTables, ufwEnabled,
+		dpkgQuery, dockerEnabled, dockerActive,
 		"systemctl is-enabled tent-node.service", "systemctl is-enabled tent-node-join.timer",
 	}
 	if diff := cmp.Diff(want, r.Commands()[commands:]); diff != "" {
 		t.Errorf("the second run's commands, which must only read (-want +got):\n%s", diff)
+	}
+
+	// A reboot drops tent's table from the kernel, and only the host firewall loads it again.
+	m.Reboot()
+	changes, commands = len(fsys.Changes()), len(r.Commands())
+	third, err := nodeup.Up(t.Context(), h, nc, nodeup.Phases(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range third.Phases {
+		status := nodeup.Unchanged
+		switch p.Name {
+		case "hostfirewall":
+			status = nodeup.Done
+		case "join", "nomad":
+			status = nodeup.Skipped
+		}
+		if p.Status != status {
+			t.Errorf("phase %s is %s after the reboot, want %s", p.Name, p.Status, status)
+		}
+	}
+	if diff := cmp.Diff([]string{nodeup.StatusFile}, fsys.Changes()[changes:]); diff != "" {
+		t.Errorf("the run after the reboot changed files (-want +got):\n%s", diff)
+	}
+	// Docker's start job is still queued: runtime waits for it.
+	i := slices.Index(want, listTables) + 1
+	want = slices.Insert(want, i, loadTent)
+	i = slices.Index(want, dockerActive) + 1
+	want = slices.Insert(want, i, dockerJob, dockerStart)
+	if diff := cmp.Diff(want, r.Commands()[commands:]); diff != "" {
+		t.Errorf("the commands after the reboot (-want +got):\n%s", diff)
+	}
+	if got := srv.Requests(); len(got) != 1 {
+		t.Errorf("the runs asked for %q, want the CNI plugins once", got)
 	}
 }

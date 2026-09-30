@@ -1,11 +1,15 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
 	"net/netip"
 	"slices"
 	"strings"
@@ -41,7 +45,7 @@ var secrets = map[string][]byte{
 	"the gossip key": gossipKey, "the node's key": nodeKey, "the URL's signature": urlSignature,
 }
 
-// nodeConfig returns a valid NodeConfig of prod-core-0, a combined node on Vultr that runs tent-node
+// nodeConfig returns a valid NodeConfig of prod-core-0, a combined node on Vultr with Docker that runs tent-node
 // nodeuptest.Version from a presigned URL, with the node's key and the gossip key.
 func nodeConfig(t *testing.T) *nodeconfig.NodeConfig {
 	t.Helper()
@@ -67,7 +71,8 @@ func nodeConfig(t *testing.T) *nodeconfig.NodeConfig {
 		},
 		System: nodeconfig.System{
 			Sysctls:       map[string]string{"net.bridge.bridge-nf-call-iptables": "1"},
-			KernelModules: []string{"br_netfilter"},
+			KernelModules: []string{"br_netfilter", "overlay"},
+			Docker:        true,
 		},
 		Firewall: nodeconfig.HostFirewall{BlockMetadata: netip.MustParseAddr("169.254.169.254")},
 	}
@@ -199,8 +204,32 @@ func TestInstallCommandTakesTheConfigsPath(t *testing.T) {
 	}
 }
 
+// cniPath is where serveCNI serves the archive of the CNI plugins.
+const cniPath = "/cni-plugins-linux-amd64-v1.9.1.tgz"
+
+// serveCNI serves an archive of the CNI plugins over HTTPS, and adds it to nc as its cni-plugins asset.
+func serveCNI(t *testing.T, nc *nodeconfig.NodeConfig) *nodeuptest.Server {
+	t.Helper()
+	archive := nodeuptest.Tgz(t, nodeuptest.TarFile{
+		Header: tar.Header{Name: "./bridge", Mode: 0o755}, Content: []byte("bridge plugin\n"),
+	})
+	srv := nodeuptest.Serve(t, map[string]http.HandlerFunc{
+		cniPath: func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(archive) },
+	})
+	sum := sha256.Sum256(archive)
+	nc.Assets = append(nc.Assets, nodeconfig.Asset{
+		Name: nodeconfig.CNIPluginsAsset, Version: "1.9.1", URLs: []string{srv.URL + cniPath},
+		SHA256: hex.EncodeToString(sum[:]),
+	})
+	nc.SpecHash = nodeconfig.SpecHash(nc)
+	return srv
+}
+
 func TestUpCommand(t *testing.T) {
-	m := newMachine(t, nodeConfig(t))
+	nc := nodeConfig(t)
+	srv := serveCNI(t, nc)
+	m := newMachine(t, nc)
+	m.host.Transport = srv.Client().Transport
 	// A clock that moves, as a real one does, so that the status changes on the second run.
 	now := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
 	m.host.Now = func() time.Time {
@@ -226,7 +255,7 @@ func TestUpCommand(t *testing.T) {
 		phases = append(phases, p.Name+" "+string(p.Status))
 	}
 	want := []string{
-		"preflight unchanged", "system done", "hostfirewall skipped", "runtime skipped", "cni skipped",
+		"preflight unchanged", "system done", "hostfirewall done", "runtime done", "cni done",
 		"join skipped", "nomad skipped", "verify unchanged",
 	}
 	if diff := cmp.Diff(want, phases); diff != "" {
@@ -240,10 +269,17 @@ func TestUpCommand(t *testing.T) {
 	}
 	reads := []string{
 		"timedatectl show -p CanNTP -p NTP",
+		"systemctl is-active firewalld.service", "systemctl is-enabled firewalld.service",
+		"nft -j list tables", "systemctl is-enabled ufw.service",
+		"dpkg-query -W -f=${Status} docker.io", "systemctl is-enabled docker.service",
+		"systemctl is-active docker.service",
 		"systemctl is-enabled tent-node.service", "systemctl is-enabled tent-node-join.timer",
 	}
 	if diff := cmp.Diff(reads, m.runner.Commands()[commands:]); diff != "" {
 		t.Errorf("the second up's commands, which must only read (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{cniPath}, srv.Requests()); diff != "" {
+		t.Errorf("the two runs' downloads (-want +got):\n%s", diff)
 	}
 }
 

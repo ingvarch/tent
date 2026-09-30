@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path"
 	"runtime"
@@ -27,7 +28,9 @@ const StatusFile = "/var/lib/tent/status.json"
 type Host struct {
 	FS     FS
 	Runner Runner
-	Log    *slog.Logger // nil logs nothing
+	// Transport downloads the assets; nil uses http.DefaultTransport.
+	Transport http.RoundTripper
+	Log       *slog.Logger // nil logs nothing
 
 	Version  string // tent-node's version
 	HostName string
