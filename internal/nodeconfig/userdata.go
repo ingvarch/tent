@@ -15,8 +15,15 @@ import (
 // of the providers tent supports.
 const MaxUserDataBytes = 24 << 10
 
-// TentNodeAsset is the name of the asset that holds the tent-node binary.
-const TentNodeAsset = "tent-node"
+// Names of the assets.
+const (
+	// NomadAsset is the name of the asset that holds the Nomad zip.
+	NomadAsset = "nomad"
+	// CNIPluginsAsset is the name of the asset that holds the CNI plugins, which only nodes that run a client get.
+	CNIPluginsAsset = "cni-plugins"
+	// TentNodeAsset is the name of the asset that holds the tent-node binary.
+	TentNodeAsset = "tent-node"
+)
 
 // ConfigPath is where the user data writes the NodeConfig, and where tent-node reads it.
 const ConfigPath = "/etc/tent/node.json"
