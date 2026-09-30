@@ -310,13 +310,18 @@ func worstCase(t *testing.T, role v1alpha1.Role) *nodeconfig.NodeConfig {
 		c.Join.Servers = append(c.Join.Servers, netip.AddrFrom4([4]byte{10, 64, 0, byte(100 + i)}))
 	}
 	cidr := []netip.Prefix{netip.MustParsePrefix("10.64.0.0/16")}
+	bridges := []netip.Prefix{netip.MustParsePrefix("172.26.64.0/20"), netip.MustParsePrefix("172.17.0.0/16")}
 	for _, r := range []struct {
 		name        string
 		first, last uint16
-	}{{"nomad-http", 4646, 4646}, {"nomad-rpc", 4647, 4647}, {"serf", 4648, 4648}, {"dynamic", 20000, 32000}} {
+		from        []netip.Prefix
+	}{
+		{"nomad-http", 4646, 4646, cidr}, {"nomad-rpc", 4647, 4647, cidr}, {"serf", 4648, 4648, cidr},
+		{"dynamic", 20000, 32000, cidr}, {"bridge-http", 4646, 4646, bridges}, {"bridge-dynamic", 20000, 32000, bridges},
+	} {
 		for _, proto := range []string{nodeconfig.ProtocolTCP, nodeconfig.ProtocolUDP} {
 			c.Firewall.Rules = append(c.Firewall.Rules, nodeconfig.Rule{Name: r.name, Protocol: proto,
-				Ports: nodeconfig.PortRange{First: r.first, Last: r.last}, From: cidr})
+				Ports: nodeconfig.PortRange{First: r.first, Last: r.last}, From: r.from})
 		}
 	}
 	c.SpecHash = nodeconfig.SpecHash(c)
@@ -370,6 +375,20 @@ func TestUserDataOversize(t *testing.T) {
 	for name, s := range map[string][]byte{"the gossip key": gossipKey, "the URL's signature": urlSignature} {
 		if secrettest.Shows(errText(err), s) {
 			t.Errorf("the error shows %s", name)
+		}
+	}
+}
+
+// TestAssetNames checks the names that node.json gives the assets: tent-node finds each asset by its name, and the
+// names are part of the NodeConfig contract.
+func TestAssetNames(t *testing.T) {
+	for _, tc := range []struct{ got, want string }{
+		{nodeconfig.NomadAsset, "nomad"},
+		{nodeconfig.CNIPluginsAsset, "cni-plugins"},
+		{nodeconfig.TentNodeAsset, "tent-node"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("an asset is named %q, want %q", tc.got, tc.want)
 		}
 	}
 }

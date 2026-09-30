@@ -72,18 +72,22 @@ type Asset struct {
 func (a Asset) String() string {
 	shown := make([]string, len(a.URLs))
 	for i, raw := range a.URLs {
-		u, err := url.Parse(raw)
-		switch {
-		case err != nil:
-			shown[i] = "[a URL that does not parse]"
-		case u.RawQuery != "":
-			u.RawQuery = "[query hidden]"
-			fallthrough
-		default:
-			shown[i] = u.Redacted()
-		}
+		shown[i] = RedactURL(raw)
 	}
 	return fmt.Sprintf("%s %s sha256 %s from %s", a.Name, a.Version, a.SHA256, strings.Join(shown, ", "))
+}
+
+// RedactURL returns the URL raw without its query, which may carry a signature, and without its password, such as
+// https://ops:xxxxx@bucket.example.com/tent-node?[query hidden].
+func RedactURL(raw string) string {
+	u, err := url.Parse(raw)
+	switch {
+	case err != nil:
+		return "[a URL that does not parse]"
+	case u.RawQuery != "":
+		u.RawQuery = "[query hidden]"
+	}
+	return u.Redacted()
 }
 
 // GoString returns what String does.
@@ -171,9 +175,10 @@ type PortRange struct {
 }
 
 var (
-	hostNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	sha256Pattern   = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	ownerPattern    = regexp.MustCompile(`^[a-z_][a-z0-9_-]*:[a-z_][a-z0-9_-]*$`)
+	// labelPattern is the form of host names and of firewall rules' names, which the host firewall puts inside quotes.
+	labelPattern  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	ownerPattern  = regexp.MustCompile(`^[a-z_][a-z0-9_-]*:[a-z_][a-z0-9_-]*$`)
 	// sysctl.d ignores the errors of a line whose key starts with a dash.
 	sysctlPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*(\.[a-z0-9_-]+)+$`)
 	// modprobe would read a leading dash as an option.
@@ -220,11 +225,13 @@ func (nc *NodeConfig) checkHeader() error {
 	return checkRole(nc.Role)
 }
 
+// labelForm describes labelPattern in errors.
+const labelForm = "1 to 63 lower-case letters, digits and dashes, starting and ending with a letter or digit"
+
 // checkHostName checks that a node's name is a host name, as it becomes the node's host name.
 func checkHostName(name string) error {
-	if !hostNamePattern.MatchString(name) {
-		return fmt.Errorf("name %q is not a host name: 1 to 63 lower-case letters, digits and dashes, starting and "+
-			"ending with a letter or digit", name)
+	if !labelPattern.MatchString(name) {
+		return fmt.Errorf("name %q is not a host name: %s", name, labelForm)
 	}
 	return nil
 }
@@ -255,6 +262,10 @@ func (nc *NodeConfig) checkAssets() error {
 	for i, a := range nc.Assets {
 		if a.Name == "" {
 			return fmt.Errorf("assets[%d]: no name", i)
+		}
+		// tent-node names the asset's file in its cache after it.
+		if !labelPattern.MatchString(a.Name) {
+			return fmt.Errorf("assets[%d]: name %q is not %s", i, a.Name, labelForm)
 		}
 		if named[a.Name] {
 			return fmt.Errorf("two assets are named %s", a.Name)
@@ -362,16 +373,27 @@ func (s System) check() error {
 
 func (fw HostFirewall) check() error {
 	for i, r := range fw.Rules {
-		if r.Name == "" {
+		switch {
+		case r.Name == "":
 			return fmt.Errorf("firewall rules[%d]: no name", i)
+		case !labelPattern.MatchString(r.Name):
+			return fmt.Errorf("firewall rules[%d]: name %q is not %s", i, r.Name, labelForm)
 		}
 		if err := r.check(); err != nil {
 			// Rules share names, such as serf over tcp and over udp.
 			return fmt.Errorf("firewall rule %s/%s: %w", r.Name, r.Protocol, err)
 		}
 	}
-	if !fw.BlockMetadata.IsValid() {
+	a := fw.BlockMetadata
+	switch {
+	case !a.IsValid():
 		return errors.New("firewall: no metadata address to block")
+	// tent-node writes the address into the host firewall's ruleset, which a zone's text could break out of.
+	case a.Zone() != "":
+		return fmt.Errorf("firewall: metadata address %q has an IPv6 zone", a)
+	// The ruleset would match it as IPv6, which no IPv4 packet is, and block nothing.
+	case a.Is4In6():
+		return fmt.Errorf("firewall: metadata address %s is an IPv4 address in IPv6 form; write %s", a, a.Unmap())
 	}
 	return nil
 }
@@ -408,13 +430,19 @@ func (p PortRange) check() error {
 	return nil
 }
 
-// checkNetwork checks that p is a network: a valid prefix with no bits set after its length.
+// checkNetwork checks that p is a network: a valid prefix with no bits set after its length, and an IPv4 network
+// written as such. A prefix holds no IPv6 zone: netip refuses and drops them.
 func checkNetwork(p netip.Prefix) error {
 	switch {
 	case !p.IsValid():
 		return errors.New("is not a prefix")
 	case p != p.Masked():
 		return fmt.Errorf("%s has bits set after /%d", p, p.Bits())
+	// The host firewall would match it as IPv6, which no IPv4 packet is. With no bits set after its length, it has at
+	// least the 96 bits of the IPv6 form.
+	case p.Addr().Is4In6():
+		return fmt.Errorf("%s is an IPv4 network in IPv6 form; write %s", p,
+			netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96))
 	}
 	return nil
 }

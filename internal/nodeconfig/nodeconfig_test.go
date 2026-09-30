@@ -48,6 +48,13 @@ func TestValidate(t *testing.T) {
 		{"role", func(c *nc) { c.Role = "worker" }, `node config: role "worker" is not server, client or combined`},
 
 		{"asset without a name", func(c *nc) { c.Assets[1].Name = "" }, "node config: assets[1]: no name"},
+		// The name is the name of the asset's file in tent-node's cache.
+		{"asset name with a slash", func(c *nc) { c.Assets[1].Name = "cni/plugins" },
+			`node config: assets[1]: name "cni/plugins" is not 1 to 63 lower-case letters, digits and dashes, ` +
+				"starting and ending with a letter or digit"},
+		{"asset name in upper case", func(c *nc) { c.Assets[0].Name = "Nomad" },
+			`node config: assets[0]: name "Nomad" is not 1 to 63 lower-case letters, digits and dashes, ` +
+				"starting and ending with a letter or digit"},
 		{"asset without a version", func(c *nc) { c.Assets[0].Version = "" }, "node config: asset nomad: no version"},
 		{"asset without URLs", func(c *nc) { c.Assets[0].URLs = nil }, "node config: asset nomad: no URLs"},
 		{"asset URL not http", func(c *nc) { c.Assets[0].URLs[1] = "ftp://mirror.example.com/nomad.zip" },
@@ -120,6 +127,23 @@ func TestValidate(t *testing.T) {
 
 		{"rule without a name", func(c *nc) { c.Firewall.Rules[2].Name = "" },
 			"node config: firewall rules[2]: no name"},
+		// tent-node puts a rule's name into the host firewall's ruleset, inside quotes.
+		{"rule name with a quote", func(c *nc) { c.Firewall.Rules[0].Name = `ssh" accept` },
+			`node config: firewall rules[0]: name "ssh\" accept" is not 1 to 63 lower-case letters, digits and ` +
+				"dashes, starting and ending with a letter or digit"},
+		{"rule name with a space", func(c *nc) { c.Firewall.Rules[0].Name = "nomad http" },
+			`node config: firewall rules[0]: name "nomad http" is not 1 to 63 lower-case letters, digits and ` +
+				"dashes, starting and ending with a letter or digit"},
+		{"rule name in upper case", func(c *nc) { c.Firewall.Rules[0].Name = "SSH" },
+			`node config: firewall rules[0]: name "SSH" is not 1 to 63 lower-case letters, digits and dashes, ` +
+				"starting and ending with a letter or digit"},
+		{"rule name with a leading dash", func(c *nc) { c.Firewall.Rules[0].Name = "-ssh" },
+			`node config: firewall rules[0]: name "-ssh" is not 1 to 63 lower-case letters, digits and dashes, ` +
+				"starting and ending with a letter or digit"},
+		{"rule name of 63 characters", func(c *nc) { c.Firewall.Rules[0].Name = strings.Repeat("a", 63) }, ""},
+		{"rule name of 64 characters", func(c *nc) { c.Firewall.Rules[0].Name = strings.Repeat("a", 64) },
+			`node config: firewall rules[0]: name "` + strings.Repeat("a", 64) + `" is not 1 to 63 lower-case ` +
+				"letters, digits and dashes, starting and ending with a letter or digit"},
 		{"rule protocol", func(c *nc) { c.Firewall.Rules[0].Protocol = "sctp" },
 			`node config: firewall rule ssh/sctp: protocol "sctp" is not tcp, udp or icmp`},
 		{"rule without ports", func(c *nc) { c.Firewall.Rules[0].Ports = nodeconfig.PortRange{} },
@@ -144,6 +168,22 @@ func TestValidate(t *testing.T) {
 		}, "node config: firewall rule serf/udp: no sources"},
 		{"no metadata address", func(c *nc) { c.Firewall.BlockMetadata = netip.Addr{} },
 			"node config: firewall: no metadata address to block"},
+		// tent-node writes the addresses into the host firewall's ruleset, which a zone could break out of.
+		{"metadata address with a zone", func(c *nc) {
+			c.Firewall.BlockMetadata = netip.MustParseAddr("fe80::1%x counter accept\n}\nflush ruleset\n#")
+		}, `node config: firewall: metadata address "fe80::1%x counter accept\n}\nflush ruleset\n#" has an IPv6 zone`},
+		{"metadata address with a zone of letters", func(c *nc) {
+			c.Firewall.BlockMetadata = netip.MustParseAddr("fe80::1%eth0")
+		}, `node config: firewall: metadata address "fe80::1%eth0" has an IPv6 zone`},
+		// The ruleset would match it as IPv6, which no IPv4 packet is.
+		{"metadata address in IPv6 form", func(c *nc) {
+			c.Firewall.BlockMetadata = netip.MustParseAddr("::ffff:169.254.169.254")
+		}, "node config: firewall: metadata address ::ffff:169.254.169.254 is an IPv4 address in IPv6 form; " +
+			"write 169.254.169.254"},
+		{"source in IPv6 form", func(c *nc) {
+			c.Firewall.Rules[2].From = []netip.Prefix{netip.MustParsePrefix("::ffff:10.64.0.0/112")}
+		}, "node config: firewall rule dynamic/udp: from[0] ::ffff:10.64.0.0/112 is an IPv4 network in IPv6 form; " +
+			"write 10.64.0.0/16"},
 
 		{"the first problem", func(c *nc) { c.Kind, c.Role = "", "" }, `node config: kind "" is not NodeConfig`},
 	} {
@@ -203,6 +243,19 @@ func TestAssetString(t *testing.T) {
 		}
 		if got := a.GoString(); got != tc.want {
 			t.Errorf("GoString() = %q, want %q", got, tc.want)
+		}
+	}
+}
+
+func TestRedactURL(t *testing.T) {
+	for _, tc := range []struct{ url, want string }{
+		{presignedURL, "https://tent-dev.s3.example.com/tent-node_linux_amd64?[query hidden]"},
+		{"https://b.example.com/y#part", "https://b.example.com/y#part"},
+		{"https://ops:pw@c.example.com/z?sig=1", "https://ops:xxxxx@c.example.com/z?[query hidden]"},
+		{"https://mirror.example.com/%zz?sig=1", "[a URL that does not parse]"},
+	} {
+		if got := nodeconfig.RedactURL(tc.url); got != tc.want {
+			t.Errorf("RedactURL(%q) = %q, want %q", tc.url, got, tc.want)
 		}
 	}
 }

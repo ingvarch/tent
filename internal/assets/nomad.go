@@ -14,6 +14,8 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp"
 	pgperrors "github.com/ProtonMail/go-crypto/openpgp/errors"
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
+
+	"github.com/ingvarch/tent/internal/nodeconfig"
 )
 
 // hashicorpKey is HashiCorp's release signing key, armored, from https://www.hashicorp.com/.well-known/pgp-key.txt.
@@ -54,7 +56,7 @@ func Nomad(ctx context.Context, opts Options, version, arch string) (Asset, erro
 	if err != nil {
 		return Asset{}, err
 	}
-	return Asset{Name: "nomad", Version: version, URLs: []string{dir + file}, SHA256: sum}, nil
+	return Asset{Name: nodeconfig.NomadAsset, Version: version, URLs: []string{dir + file}, SHA256: sum}, nil
 }
 
 // verify checks that sig is a detached signature of signed by the armored key, with one of signatureHashes, and that

@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/ingvarch/tent/internal/channels"
+	"github.com/ingvarch/tent/internal/nodeconfig"
 )
 
 // CNI returns the CNI plugins that the channel pins for linux on arch, with the sha256 the channel holds. CNI
@@ -15,5 +16,5 @@ func CNI(ch *channels.Channel, arch string) (Asset, error) {
 	}
 	v := ch.CNI.Version
 	file := fmt.Sprintf("%s/v%s/cni-plugins-linux-%s-v%s.tgz", cniReleases, v, arch, v)
-	return Asset{Name: "cni-plugins", Version: v, URLs: []string{file}, SHA256: sum}, nil
+	return Asset{Name: nodeconfig.CNIPluginsAsset, Version: v, URLs: []string{file}, SHA256: sum}, nil
 }
