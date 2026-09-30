@@ -47,14 +47,20 @@ Providers, in order:
     client; the systemd units; `status.json`; and the phases `preflight`, `system` and `verify`, the others being
     stubs. NodeConfig names the provider. The release ships `tent-node_linux_amd64` and `_arm64`; `make dev-upload`
     puts a development build into the CI R2 bucket (`hack/tent-node-upload`).
-  - Next: M2.6 tent-node phases.
+  - M2.6a added the machine phases of tent-node (`internal/nodeup`, ADR-0029): `hostfirewall` (tent's nftables table,
+    ufw off, the metadata service reachable only from tent-node's marked socket, maintainer decision 21), `runtime`
+    (Ubuntu's `docker.io` and `daemon.json`) and `cni` (the CNI plugins from a verified, cached download).
+    `ExecRunner` stops a program's whole process group. `internal/app` gives client and combined nodes host firewall
+    rules for traffic from Nomad's and Docker's bridges. `join` and `nomad` are still stubs.
+  - Next: M2.6b Nomad phases.
 
 ## Read before changing anything
 
 1. `docs/architecture.md`: the design and the source of truth.
 2. `docs/adr/`: accepted decisions. Do not diverge silently. If an implementation must deviate, write a superseding
    ADR first (see `docs/adr/README.md`).
-3. `docs/platform-notes.md`: verified Nomad, Hetzner and Vultr API facts and quirks as of 2026-09-25.
+3. `docs/platform-notes.md`: verified Nomad, Hetzner and Vultr API facts and quirks as of 2026-09-25, and facts about
+   Ubuntu on nodes as of 2026-09-29.
    - Re-verify items marked ⏳ (prices, availability, versions) before relying on them.
    - Items marked 🔬 are unverified until `hack/vultr-spike` has run.
 4. `docs/roadmap.md`: milestone goals and exit criteria. The work items are GitHub issues in milestones M0–M6

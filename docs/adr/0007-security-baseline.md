@@ -3,6 +3,8 @@
 - **Status:** Accepted; the `access.api` default was decided on 2026-09-25 (see below); combined nodes get both
   certificate names ([ADR-0019](0019-combined-server-client-role.md)); amended by
   [ADR-0024](0024-cluster-pki-storage-and-certificates.md) (the active signer, the CA's validity, certificate details)
+  and by [ADR-0029](0029-host-firewall-runtime-and-cni-on-nodes.md) (host nftables lets only tent-node's marked socket
+  reach the metadata service; a workload with CAP_NET_ADMIN or CAP_NET_RAW can still set the mark)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0008](0008-node-credential-delivery.md), [architecture §9](../architecture.md#9-security)

@@ -1,12 +1,14 @@
 # Platform notes
 
-Facts about Nomad, Hetzner Cloud, Vultr, S3-compatible object stores and prior art that tent's design relies on.
+Facts about Nomad, Hetzner Cloud, Vultr, S3-compatible object stores, prior art and Ubuntu on nodes that tent's
+design relies on.
 
-> **Verified on 2026-09-25**, and [section 5](#5-s3-compatible-object-stores) on 2026-09-26. Sources: official
-> documentation, the Hetzner Cloud OpenAPI spec (`https://docs.hetzner.cloud/cloud.spec.json`), the Vultr API
-> reference (OpenAPI spec from a Wayback copy of `https://www.vultr.com/api/`, 2026-09-12) plus live calls to public
-> Vultr endpoints, release APIs and upstream source code (Nomad `main`, kops `master`, hcloud-go, govultr,
-> cloud-init). The confidence is high unless marked otherwise.
+> **Verified on 2026-09-25**, [section 5](#5-s3-compatible-object-stores) on 2026-09-26 and
+> [section 6](#6-ubuntu-on-nodes) on 2026-09-29. Sources: official documentation, the Hetzner Cloud OpenAPI spec
+> (`https://docs.hetzner.cloud/cloud.spec.json`), the Vultr API reference (OpenAPI spec from a Wayback copy of
+> `https://www.vultr.com/api/`, 2026-09-12) plus live calls to public Vultr endpoints, release APIs and upstream
+> source code (Nomad `main`, kops `master`, hcloud-go, govultr, cloud-init). The confidence is high unless marked
+> otherwise.
 >
 > Items marked 🔬 are **unverified** and are checked with `hack/vultr-spike` against a real account before code
 > depends on them. Facts marked "spike" or "VM check" with a date were measured by the spike runs of that day (see
@@ -22,7 +24,8 @@ Facts about Nomad, Hetzner Cloud, Vultr, S3-compatible object stores and prior a
 3. [Vultr](#3-vultr) (spike results: [3.16](#316-spike-runs))
 4. [Prior art](#4-prior-art)
 5. [S3-compatible object stores](#5-s3-compatible-object-stores)
-6. [Sources](#6-sources)
+6. [Ubuntu on nodes](#6-ubuntu-on-nodes)
+7. [Sources](#7-sources)
 
 ---
 
@@ -47,7 +50,8 @@ Facts about Nomad, Hetzner Cloud, Vultr, S3-compatible object stores and prior a
 
 The items that name a source file were checked in the Nomad **v1.11.3** source (the Go module cache) on 2026-09-29.
 Files under `api/` are those of the API module at tent's pin ([1.5](#15-licensing)). The source of 2.0.7 was not
-checked offline. ⏳ Re-check them against the version tent runs.
+checked offline, except the items that say v2.0.7, which were read in that tag on 2026-09-29. ⏳ Re-check them against
+the version tent runs.
 
 **Client introduction** (1.11.0, CE):
 - **Server configuration.** In the `server` block:
@@ -131,7 +135,8 @@ checked offline. ⏳ Re-check them against the version tent runs.
   - in a quoted string, `${` opens a span that runs to its matching `}`. Quotes inside it do not end the string, and
     backslash escapes inside it are kept as written. HCL1 has no escape for `${`.
 
-  The fork was not checked. ⏳ `nomad config validate` of tent's golden files settles it (M2.6; M2.5 did not run it).
+  The fork was not checked. ⏳ `nomad config validate` of tent's golden files settles it (M2.6b; M2.5 did not run
+  it).
 - **Graceful shutdown settings.**
   - `leave_on_interrupt` and `leave_on_terminate` default to false.
   - With them enabled, a server leaves the peer set gracefully. SIGTERM leaves only with `leave_on_terminate`, and
@@ -172,6 +177,40 @@ checked offline. ⏳ Re-check them against the version tent runs.
   - tent's choice for client and combined nodes: load `br_netfilter` and set the three sysctls; install Docker from
     the distribution's packages, with the `overlay` module for its storage, unless the group's drivers leave `docker`
     out. Servers get none of it.
+  - **Nomad's CNI configuration** (v1.11.3 and v2.0.7, `client/allocrunner/cni/bridge.go`): cniVersion 0.4.0, name
+    `nomad`. `loopback`; `bridge` on the bridge `nomad` with `ipMasq`, `isGateway`, `forceAddress`, `hairpinMode` from
+    `bridge_network_hairpin_mode` (default false) and host-local IPAM on the bridge subnet; `firewall` with the
+    iptables backend and the admin chain `NOMAD-ADMIN`; `portmap` with `snat`.
+  - **In iptables** (CNI plugins v1.9.1 and Nomad v2.0.7 source): the firewall plugin puts `-j CNI-FORWARD` first in
+    `filter FORWARD`. `CNI-FORWARD` jumps to `NOMAD-ADMIN`, then accepts each allocation's replies
+    (`-d <IP> ctstate RELATED,ESTABLISHED`) and its own traffic (`-s <IP>`); Nomad adds
+    `-o nomad -d 172.26.64.0/20 -j ACCEPT` to `NOMAD-ADMIN`. So Docker's drop policy on `FORWARD`
+    ([6.2](#62-firewalls-on-the-host)) does not break the bridge. portmap DNATs mapped ports in `nat PREROUTING` and
+    `OUTPUT` (`CNI-HOSTPORT-DNAT`) and marks what it masquerades with `0x2000`.
+  - **A mapped port reached from another host never reaches the host's input chain:** the DNAT before routing makes
+    it forwarded traffic to the post-DNAT address (the hook order is verified; the rest is inferred). A workload on a
+    bridge that calls the local agent, or a task with host networking, at the node's address does reach input. So
+    does a Docker container that calls a published port of its own node: with `userland-proxy` on, the default, the
+    DNAT rule leaves out `docker0`, and docker-proxy answers (moby `iptabler/port.go`).
+  - **Backends.** The CNI plugins added nftables backends to `ipMasq` and `portmap` in v1.6.0 (2024-10-15); both use
+    iptables unless iptables is unusable (v1.9.1). The firewall plugin has only iptables and firewalld, and Nomad
+    picks iptables. ⏳ v1.9.1 (2026-03-16) is the latest; v1.9.0 fixed CVE-2025-67499 in the nftables portmap.
+
+**Workloads on a client** (read 2026-09-29), for the metadata block
+([architecture §9.4](architecture.md#94-secrets-on-nodes-threat-model)):
+- **Where they run** (v1.11.3 and v2.0.7):
+  - A client creates `/sys/fs/cgroup/nomad.slice/{share,reserve}.slice` as plain directories when the agent starts;
+    a server-only agent does not.
+  - exec, raw_exec and java tasks run in `nomad.slice/<share|reserve>.slice/<alloc>.<task>.scope`; raw_exec honours a
+    job's `cgroup_v2_override`.
+  - The docker driver sets no cgroup parent since 1.7.0 (GH-18371), so containers run in
+    `system.slice/docker-<id>.scope`, next to other services.
+  - The artifact fetcher runs as root inside `system.slice/nomad.service`.
+- **Capabilities.** Nomad's default capabilities give tasks neither CAP_NET_ADMIN nor CAP_NET_RAW (v2.0.7
+  `drivers/shared/capabilities/defaults.go`). An operator adds them with a driver's `allow_caps` and a task's
+  `cap_add`. Docker's own default set, outside Nomad, includes NET_RAW.
+- **Container logs.** Nomad's docker driver sets json-file with 2 files of 2 MB on each container it starts (v2.0.7
+  `drivers/docker/config.go`), whatever the daemon's defaults.
 
 **TLS:**
 - **Recommended:** `rpc = true`, `http = true`, `verify_server_hostname = true`, `verify_https_client = true`.
@@ -668,6 +707,9 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
     - Both images run cloud-init 26.1, under different unit names. The critical chains pass
       `cloud-init-local.service` and `cloud-init.service` on 24.04, and `cloud-init-main.service`,
       `cloud-init-local.service` and `cloud-init-network.service` on 26.04.
+    - **VM check 2026-09-30 (M2.6a)**, with Docker and the CNI plugins: the same order after the reboot, with
+      `tent-node.service` active, `multi-user.target` active and `cloud-final.service` started all at 28.3 s on 24.04
+      and 29.1 s on 26.04; `cloud-init status` `done` with no errors on both boots.
   - **How SSH is enabled.** The image's sshd listens on `127.0.0.1` only. A vendor-data script removes that
     `ListenAddress` and reloads sshd. Port 22 became public 31 s after kernel start.
   - **Boot timeline (spike 2026-09-25, `vc2-1c-1gb`, `ams`, Ubuntu 24.04), counted from the create call:**
@@ -689,6 +731,12 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
       after 52–55 s, SSH login after 102 s, and `cloud-init status: done` at 104–105 s. After a reboot from inside,
       SSH answered on the new boot after 52–53 s. By `status.json`, `up` ran for about 0.3 s on the first boot and
       1.1–1.3 s after the reboot. By the critical chain, `tent-node.service` took 0.3 s and 1.6–1.7 s.
+    - **VM check 2026-09-30 (M2.6a)**, with Docker and the CNI plugins, on Ubuntu 24.04 and 26.04: API
+      `active/running/ok` after 55 s and 67 s, SSH login after 102 s and 118 s, `cloud-init status: done` at 155 s and
+      138 s. On the first boot `up` ran for 50 s and 32.5 s: the Docker install took 43 s and 26 s, the CNI download
+      and unpack 4 s. `tent-node.service`'s memory peak on the first boot, apt and dpkg included, was 554 MiB and
+      473 MiB. After a reboot SSH answered after 53 s and 52 s, and `up` ran for 6.3 s and 6.8 s, of which the `cni`
+      phase's cache hit took 2.9 s and 3.2 s.
   - **Vendor data** (six MIME parts, read on the instance on 2026-09-25). User data does not replace them: they ran on
     instances with and without user data.
     - A cloud-config: a root password, `ssh_pwauth: true`, `disable_root: false`, a `linuxuser` account,
@@ -719,6 +767,18 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
       boot and after a reboot. The read and the rest of `preflight` took 145 ms and 163 ms on 24.04, and 123 ms and
       136 ms on 26.04, under the 1 s that a failed try waits before the next. The instance id, zone and private IP in
       `status.json` matched the API.
+    - **VM check 2026-09-30 (M2.6a):** again at the first try, in 164 ms and 204 ms on the first boot and 184 ms
+      and 383 ms after the reboot (24.04 and 26.04), now through the marked socket.
+  - **Who may ask it:** since M2.6a only tent-node's marked socket
+    ([ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md) decision 1).
+    - **VM check 2026-09-30 (M2.6a)**, Ubuntu 24.04 and 26.04: root `curl` on the host, a root `busybox:1.38`
+      container on the host network and one on Docker's bridge got no answer, each confirmed by the drop counter of
+      its chain (output 0, 3, then 6; forward 0, then 3). `tent-node up` by hand exited with 0, every phase
+      unchanged, and the output drops stayed at 6 during it.
+    - After the reboot both drop counters stayed at 0: nothing asked the service without the mark once `up` had
+      loaded the table. cloud-init's Vultr datasource keeps its cached data when the DMI id matches
+      (`DataSourceVultr.check_instance_id`, cloud-init source, read 2026-09-29; the images run cloud-init 26.1), and
+      cloud-final runs after `up`.
   - **`tags` is present but was empty** even though the instance had tags (both spike runs on 2026-09-25), so do not
     rely on it.
     Label and plan are not exposed.
@@ -730,6 +790,18 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
     private on `vc2-1c-1gb` in `ams`.
 - **No signed instance identity** document or attestation.
 - **systemd and time sync on the image, as tent-node uses them.**
+  - `systemctl show -p Job --value <unit>` prints the id of the unit's queued or running job, or an empty line when it
+    has none, on systemd 255 and 259 (systemd source at v255 and v259, `src/systemctl/systemctl-show.c` and
+    `src/shared/bus-print-properties.c`, read 2026-09-30: `-p` shows the property even when it is empty, and
+    `--value` prints only the value). `systemctl show` output is stable for programs
+    (`docs/PORTABILITY_AND_STABILITY.md`). `runtime` reads it for `docker.service`
+    ([ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md) decision 15). **VM check reruns 2026-09-30
+    (M2.6a):** exercised on systemd 255 and 259, by the timing: `runtime` waited 2.2 s and 1.5 s after the reboot
+    and reported `unchanged` on both, which a failed call or a wrong reading would not have allowed. The reports
+    show the waits and the statuses, not the job.
+  - A `systemctl start` of a service whose automatic restart waits out `RestartSec` (`SERVICE_AUTO_RESTART`): on
+    systemd 255 `service_start` returns `-EAGAIN`, so the start job waits for the automatic restart; on 259 it cuts
+    the wait short and starts the service at once (`src/core/service.c` at v255 and v259, read 2026-09-30).
   - **VM check 2026-09-29 (M2.5):** `systemctl is-enabled` of a unit without a file prints `not-found` on stdout and
     nothing on stderr, and exits with 4, on systemd 255 (`255.4-1ubuntu8.17`, Ubuntu 24.04) and 259
     (`259.5-0ubuntu3.4`, Ubuntu 26.04). tent-node's `install` and `verify` read the state from stdout and fail when it
@@ -742,9 +814,15 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
       that 26.04 runs chrony was wrong for Vultr's image.
     - tent-node turns NTP on through `timedatectl` where it can, and otherwise requires `chrony.service` or
       `systemd-timesyncd.service` to be active, so it also accepts an image that runs chrony.
-  - ⏳ Whether the first `tent-node install` runs no `daemon-reload`, and `systemctl status tent-node.service` shows no
-    "changed on disk" warning. The VM check of 2026-09-29 did not record it: `install` logs only "start the unit", and
-    the spike captured neither PID 1's reload messages nor `systemctl status`. It moves to the M2.6 VM check.
+  - **Reloads of PID 1.** `systemctl enable` without `--no-reload` asks PID 1 to reload by itself (systemctl(1),
+    `--no-reload`). The M2.5 VM check did not record the reloads.
+    - **VM check 2026-09-30 (M2.6a):** on the first boot PID 1 logged reloads requested by `cloud-final.service` ×2,
+      `cloud-init-local.service` ×1 and `tent-node.service` ×4 on 24.04, and by `cloud-init-main.service` ×3 and
+      `tent-node.service` ×4 on 26.04. systemd 255 logs them as "Reloading requested from client …", 259 as
+      "Reload requested from client …". By their times, three of tent-node.service's came while `hostfirewall` ran
+      and one during the Docker install, so docker.io's install reloads PID 1 too; whether through its debhelper
+      snippets or systemd's dpkg trigger was not checked.
+    - `systemctl status tent-node.service` showed no "changed on disk" warning, and `NeedDaemonReload` was `no`.
 
 ### 3.5 VPC
 
@@ -772,7 +850,9 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
   14–20 s with `400 The following servers are attached to this VPC network: <IPs>` (spike 2026-09-25). Retry it.
   On 2026-09-28 the delete succeeded 12 s after the instance was gone, on the second request; the `<IPs>` in the
   refusal were the instance's public address, not its VPC address. On 2026-09-29 it succeeded 21 s and 25 s after the
-  instance was gone, each time on the second request, after the same refusal.
+  instance was gone, each time on the second request, after the same refusal. On 2026-09-30 it took 73 s and
+  7 requests, refused with the instance's public address until then, and 4 s and 1 request; in the reruns of that
+  day 16 s and 2 requests, and 4 s and 1 request.
 - **MTU and interfaces.** MTU is 1450. Private interface names vary (`enp6s0`, `enp7s0`, `enp8s0`, `ens7`), so match
   by MAC.
 - **No VPC peering API.** Cross-region connectivity is do-it-yourself, for example with WireGuard.
@@ -827,6 +907,23 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
   - With these defaults :4646 is blocked from the internet **and from the VPC**. ICMP passes. With ufw disabled,
     both answered.
   - Other images (for example with firewalld) were not checked.
+  - What tent-node does with it: [architecture §11.5](architecture.md#115-firewall-and-host-firewall).
+  - **VM check 2026-09-30 (M2.6a)**, Ubuntu 24.04.5 (`os_id` 2284) and 26.04.1 (`os_id` 2760):
+    - The images: nftables 1.0.9-1ubuntu0.1 and 1.1.6-1, iptables 1.8.10-3ubuntu2 and 1.8.11-2ubuntu3, no firewalld;
+      `nftables.service` disabled; the iptables alternative is iptables-nft; the apt sources list
+      `main restricted universe multiverse`.
+    - The first boot: `unattended-upgrades.service` started at 26.4 s (24.04) and 24.6 s (26.04) (monotonic), but
+      only as the "Unattended Upgrades Shutdown" helper; apt-daily and apt-daily-upgrade did not run, and no install
+      command waited for a lock.
+    - After `up`: docker.io 29.1.3-0ubuntu3~24.04.2 and 29.1.3-0ubuntu4.1 from the updates pockets, and 65 and 62
+      files in `/var/lib/apt/lists`; `ufw.conf` says `ENABLED=no` and the unit is disabled; tent's table `inet tent`,
+      with its comment in `nft -j list tables`, next to Docker's `ip filter`, `ip6 filter`, `ip nat` and `ip6 nat`;
+      the `ip filter FORWARD` policy is Docker's drop and `ip6 filter FORWARD` accepts; Docker 29.1.3 runs with
+      overlayfs, the systemd cgroup driver on cgroup v2, live-restore, json-file logs and the iptables firewall
+      backend; `/opt/cni/bin` holds 20 files.
+    - After a reboot, as soon as SSH answered (uptime 33 s and 37 s, `up` already done): sshd on 22 (IPv4 and IPv6),
+      systemd-resolved on 127.0.0.53 and 127.0.0.54, the DHCP client (systemd-networkd) on udp 68 of the public
+      address, and containerd on a random 127.0.0.1 port listened, and nothing else.
 - **sshd defaults (same image).** `PermitRootLogin yes`, `PasswordAuthentication yes`, `MaxAuthTries 6`,
   `MaxStartups 10:30:100`. Password guessing from the internet reached a test instance within 12 minutes of boot.
 
@@ -980,10 +1077,10 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
 
 ### 3.16 Spike runs
 
-All runs: region `ams`, plan `vc2-1c-1gb`, Ubuntu 24.04 (`os_id` 2284), except one of the M2.5 VM checks, which ran
-Ubuntu 26.04 (`os_id` 2760). Runs 1 to 3 ran on 2026-09-25, run 4 on 2026-09-27, run 5 on 2026-09-28 and the M2.5 VM
-checks on 2026-09-29. Reports are in `hack/vultr-spike/results/` (git-ignored). The M1 exit run below was not a spike
-run.
+All runs: region `ams`, plan `vc2-1c-1gb`, Ubuntu 24.04 (`os_id` 2284), except one of the M2.5 VM checks and one M2.6a
+VM check and its rerun, which ran Ubuntu 26.04 (`os_id` 2760). Runs 1 to 3 ran on 2026-09-25, run 4 on 2026-09-27,
+run 5 on 2026-09-28, the M2.5 VM checks on 2026-09-29, and the M2.6a VM checks and their reruns on 2026-09-30.
+Reports are in `hack/vultr-spike/results/` (git-ignored). The M1 exit run below was not a spike run.
 
 **Run 1 (`tt3s1g`, spike v1)** verified:
 - the tag syntax, limits and filter semantics;
@@ -1065,10 +1162,44 @@ put into the CI R2 bucket; the object was deleted afterwards. Both passed. They 
   ([3.3](#33-instances));
 - that the VPC delete succeeded 21–25 s after the instances were gone ([3.5](#35-vpc)).
 
+**M2.6a VM checks (`3ornct` and `yqjlcb`, spike v6, `--only tentnode`, 2026-09-30)** each booted one client instance
+from the user data of `hack/tent-node-userdata`: `3ornct` on Ubuntu 24.04.5 (`os_id` 2284, systemd 255.4-1ubuntu8.17),
+`yqjlcb` on Ubuntu 26.04.1 (`os_id` 2760, systemd 259.5-0ubuntu3.4). Both ran one development build of tent-node,
+`v0.1.0-rc.2-30-ga41d6e1`. Both passed but for one finding. They verified:
+- the image's packages and firewalls, and that no apt timer held a lock on the first boot ([3.6](#36-firewall-groups));
+- ufw off, tent's table next to Docker's tables, Docker with `daemon.json`, and the CNI plugins in `/opt/cni/bin`;
+- that root `curl`, a root container on the host network and one on Docker's bridge get no answer from the metadata
+  service, while tent-node's marked read does, and that nothing asked it unmarked after the reboot
+  ([3.4](#34-user_data-metadata-and-identity));
+- PID 1's reloads during `install` and `up`, with no "changed on disk" warning;
+- after the reboot: tent's table loaded again with the same comment, only `status.json` changed among tent-node's
+  files, cloud-init done with no errors, the boot order as designed, and only sshd, systemd-resolved, the DHCP client
+  and containerd on loopback listening when SSH answered, after `up` had run;
+- that a new instance was listed by tag at the first request, and that the VPC delete took 73 s and 7 requests, then
+  4 s and 1 request, after the instance was gone ([3.5](#35-vpc)).
+
+The finding: after the reboot on 24.04 `runtime` reported `done`. By the timing, `docker.service` was still inactive
+with its start job queued, and `systemctl start` waited 2 s for it. On 26.04 `runtime` reported `unchanged`; it took
+1.9 s, so Docker was most likely still activating, which the old code counted as no change; with Docker active,
+`runtime` takes about 30 ms (`up` by hand). The fix followed: `runtime` now counts a pending job of `docker.service`
+as Docker starting on its own ([ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md) decision 15). The
+reruns below confirmed it.
+
+**M2.6a VM reruns (`7lhvvv` and `jcirel`, spike v6, `--only tentnode`, 2026-09-30)** ran the check again with the
+fix: `7lhvvv` on Ubuntu 24.04 (`os_id` 2284), `jcirel` on Ubuntu 26.04 (`os_id` 2760), both with one development
+build of tent-node, `v0.1.0-rc.2-30-ga41d6e1-dirty`, and the spike's parser for systemd 259's reload messages. Both
+passed, with no failed, unexpected, missing or unknown row. They verified:
+- the fix on a real VM: after the reboot `runtime` waited about 2.2 s for Docker on 24.04, as in the first run, and
+  reported `unchanged`; on 26.04 it reported `unchanged` after 1.5 s; only `hostfirewall` was `done` on both;
+- the reloads of the first boot, now parsed on both images, with the same counts as the first runs
+  ([3.4](#34-user_data-metadata-and-identity));
+- everything else as in the first runs: the metadata probes blocked with their counters, `up` by hand unchanged,
+  tent's table back after the reboot with the same comment, and only `status.json` changed.
+
 **Still open:**
 - Object Storage conditional writes ([3.12](#312-object-storage-)).
-- Images other than Ubuntu 24.04 were not checked, except Ubuntu 26.04 by one M2.5 VM check, for tent-node only.
-- Whether the first `tent-node install` runs a `daemon-reload` ([3.4](#34-user_data-metadata-and-identity)).
+- Images other than Ubuntu 24.04 were not checked, except Ubuntu 26.04 by one M2.5 VM check and one M2.6a VM check
+  and its rerun, for tent-node only.
 - Account limits beyond 3 concurrent instances were not tested.
 - What `/vpcs` answers in the first 30 s after a create ([3.5](#35-vpc)).
 
@@ -1244,7 +1375,105 @@ passes every check.
 
 ---
 
-## 6. Sources
+## 6. Ubuntu on nodes
+
+What tent-node's `hostfirewall` and `runtime` phases rely on in Ubuntu 24.04 and 26.04
+([ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md)). Read on 2026-09-29 in the packaging source,
+Launchpad, packages.ubuntu.com and the cloud image manifests, unless an item says otherwise. What Vultr's images hold
+is in [3.6](#36-firewall-groups).
+
+### 6.1 Packages ⏳
+
+- **docker.io** is built from the source package `docker.io-app`.
+  - 24.04 (noble-updates and -security): 29.1.3-0ubuntu3~24.04.2 (2026-05-05), with containerd 2.2.1 and runc 1.3.4.
+    The release pocket still has 24.0.7.
+  - 26.04 (resolute-updates): 29.1.3-0ubuntu4.1, with containerd 2.2.2 and runc 1.4.0.
+  - It is in `universe`, which Vultr's 24.04 and 26.04 images enable (VM check 2026-09-30,
+    [3.6](#36-firewall-groups)).
+  - It depends on `iptables` and `libnftables1`, and recommends git, ubuntu-fan, pigz, xz-utils, apparmor and
+    ca-certificates, which `--no-install-recommends` leaves out. Without pigz Docker unpacks layers with Go's gzip,
+    which is slower.
+  - Its unit (`debian/docker.io.docker.service` in the noble-updates branch of the Launchpad git, read 2026-09-29)
+    has `Type=notify`, `Requires=docker.socket`, `After=network-online.target firewalld.service containerd.service`
+    and `TimeoutSec=0`, so neither its start nor its stop times out. moby's own
+    `contrib/init/systemd/docker.service` (docker-v29.1.3) has `TimeoutStartSec=0`.
+  - Its postinst enables and starts Docker on the first install (`invoke-rc.d docker start` when Docker is not
+    running). It ships no files in `/etc/docker`, so a `daemon.json` written before the install is read by the first
+    start. An upgrade does not restart Docker (the debconf default is false).
+- **nftables and iptables** are in both cloud images: nftables 1.0.9 on 24.04 and 1.1.6 on 26.04 (manifests of
+  2026-09-26 and 2026-09-29). iptables-nft is the default alternative (the iptables postinst gives nft the priority 20
+  and legacy 10).
+- **firewalld** is in neither manifest, and Vultr's 24.04 image lacked it (spike 2026-09-25).
+
+### 6.2 Firewalls on the host
+
+- **Docker 29** keeps iptables as its firewall backend. Its nftables backend is experimental and only with
+  `"firewall-backend": "nftables"` (Docker 29 release notes; `selectFirewallBackend` in moby docker-v29.1.3).
+  - When Docker turns `ip_forward` on itself, it sets the policy of the `ip` and `ip6` `filter FORWARD` chains to drop;
+    `"ip-forward-no-drop": true` prevents that (Docker docs, packet filtering and firewalls). It may also set the
+    drop when `ip_forward` was already 1 (unverified).
+  - `log-driver` and `log-opts` are not among the settings that Docker reloads on SIGHUP, so a change needs a restart.
+    `live-restore` keeps the containers of a daemon that started with it running while it restarts (dockerd
+    reference). Neither Docker's nor Nomad's docs mention a conflict between live-restore and Nomad (read
+    2026-09-29). 🔬 Whether Nomad reattaches to its containers after `systemctl restart docker` (the M2.6b VM
+    check).
+- **nftables** (nftables wiki, "Configuring chains"):
+  - A drop in any base chain is final; an accept is not.
+  - `nft -f` applies a file as one transaction. `table inet tent`, `delete table inet tent`, `table inet tent { … }`
+    replaces one table atomically without `destroy table`, which needs kernel 6.3 or later.
+  - `nftables.service` is not enabled (`--no-enable --no-start`), and the default `/etc/nftables.conf` starts with
+    `flush ruleset`, which would wipe Docker's and the CNI plugins' tables.
+  - JSON: every `nft -j list` puts a `metainfo` object first in the `nftables` array (`src/json.c` of 1.0.9), so
+    `nft -j list tables` on an empty ruleset prints only that object and exits with 0. 1.0.9 and 1.1.6 print a table's
+    `comment`, on Vultr's images too (VM check 2026-09-30); Debian's 1.0.6 does not (the container runs in the next
+    item, and `table_print_json` in Ubuntu's 1.0.9 `src/json.c`).
+  - tent's rulesets for the three roles loaded on real nft 1.0.9 and 1.1.6 in containers on 2026-09-29, next to an
+    `ip filter` table as Docker leaves it, and loaded again over each other. nft refuses a set whose elements overlap,
+    and lists `ip saddr { 0.0.0.0/0 }` as `ip saddr 0.0.0.0/0`. IPv6 neighbour discovery is untracked, not invalid,
+    so an input chain that drops by default must accept it by type.
+  - **`socket cgroupv2 level N "<path>"`** (nftables 1.0.9 `src/datatype.c`, Linux 6.8 `net/netfilter/nft_socket.c`):
+    nft resolves the path to the cgroup's id when it parses the rule. A missing path fails the whole batch
+    (`Error: cgroupv2 path fails: No such file or directory`), and a cgroup removed and made again gets a new id, which
+    the rule silently stops matching. It needs kernel 5.13 or later, and on 6.8 works only in prerouting, input and
+    output. Ancestors match by level, and the first SYN matches.
+- **`SO_MARK`** needs CAP_NET_ADMIN, or CAP_NET_RAW since Linux 5.17 (`sk_setsockopt` in v6.8 `net/core/sock.c`;
+  checked on a 6.10 kernel on 2026-09-29).
+- **ufw** (Ubuntu's ufw packaging source, ufw 0.36.2: 0.36.2-6 in 24.04 and 0.36.2-9build1 in 26.04, read
+  2026-09-29):
+  - `ufw disable` always runs `ufw-init force-stop`: it writes `ENABLED=no` into `/etc/ufw/ufw.conf`, deletes ufw's
+    chains and sets the policies of the `ip` and `ip6` `filter` chains `INPUT`, `OUTPUT` and `FORWARD` to accept.
+    After Docker started, that undoes Docker's drop in `FORWARD`.
+  - At boot `ufw-init start` does nothing while `ENABLED=no`. `systemctl disable --now ufw` alone removes the rules
+    but leaves `ENABLED=yes`. Package upgrades never restart ufw.
+  - Removing the package takes the program and the unit and leaves `ufw.conf`, a configuration file.
+
+### 6.3 apt and dpkg
+
+Read in the source of apt 2.8.3 and 3.2.0 and of dpkg 1.22, on 2026-09-29.
+
+- **Locks.**
+  - dpkg takes its frontend and database locks without waiting (`lib/dpkg/dbmodify.c`).
+  - `apt-get update` never waits for the lock of the package lists (`pkgAcquire::GetLock` has no timeout).
+  - `apt-get install` takes `/var/cache/apt/archives/lock` without waiting, even with `-o DPkg::Lock::Timeout=<s>`,
+    which makes it wait for dpkg's lock only (`private-install.cc`, `acquire.cc`).
+  - So while unattended-upgrades installs, `apt-get install` fails on `/var/lib/dpkg/lock-frontend` with exit status
+    100, and while apt-daily downloads, on the lock of the archives.
+  - The errors: `apt-get update` prints `E: Could not get lock /var/lib/apt/lists/lock. It is held by process <pid>
+    (apt-get)` and exits with 100 (apt 2.8), and dpkg prints `dpkg: error: dpkg frontend lock was locked by another
+    process with pid <pid>` and exits with 2 (dpkg 1.22.6). 26.04's dpkg may word it differently (unverified).
+- **Package lists.** With `package_update: false` cloud-init does not refresh the package lists, so the image's lists
+  may be stale or missing (unverified).
+- **`dpkg-query -W -f='${Status}' <package>`** prints three words: the selection, a flag and the state, such as
+  `install ok installed`, `hold ok installed` or `deinstall ok installed`. The state is `config-files` after a remove
+  and `half-configured` after an install that stopped. It exits with 1 for a package that dpkg never had
+  (dpkg-query(1)). dpkg drops the `=` of a short option's value, so `-f=${Status}` works too.
+- **Configuration files.** With `--force-confdef --force-confold` dpkg takes its default, where it has one, and
+  otherwise keeps the installed file, when both the admin and the package changed it. Without them it asks, and
+  without a terminal the question fails (dpkg(1)).
+
+---
+
+## 7. Sources
 
 Nomad:
 - Releases API: <https://api.releases.hashicorp.com/v1/releases/nomad>
@@ -1265,6 +1494,7 @@ Nomad:
 - CNI plugins releases: <https://github.com/containernetworking/plugins/releases>
 - CNI and bridge networking: <https://developer.hashicorp.com/nomad/docs/networking/cni>
 - Source of v1.11.3: <https://github.com/hashicorp/nomad/tree/v1.11.3>
+- Source of v2.0.7: <https://github.com/hashicorp/nomad/tree/v2.0.7>
 - HCL1 v1.0.0, which Nomad forks as `v1.0.1-nomad-1`: <https://github.com/hashicorp/hcl/tree/v1.0.0>
 
 Hetzner:
@@ -1298,6 +1528,24 @@ Vultr:
 Nomad status and agent API:
 - <https://developer.hashicorp.com/nomad/api-docs/status>
 - <https://developer.hashicorp.com/nomad/api-docs/agent>
+
+Ubuntu on nodes:
+- docker.io source package: <https://launchpad.net/ubuntu/+source/docker.io-app>
+- docker.io packaging (unit and postinst): <https://git.launchpad.net/ubuntu/+source/docker.io-app>
+- moby's systemd unit: <https://github.com/moby/moby/blob/docker-v29.1.3/contrib/init/systemd/docker.service>
+- systemctl(1): <https://www.freedesktop.org/software/systemd/man/latest/systemctl.html>
+- Ubuntu packages: <https://packages.ubuntu.com/>
+- Ubuntu cloud images and their manifests: <https://cloud-images.ubuntu.com/>
+- ufw source package: <https://launchpad.net/ubuntu/+source/ufw>
+- Docker packet filtering and firewalls: <https://docs.docker.com/engine/network/packet-filtering-firewalls/>
+- Docker Engine 29 release notes: <https://docs.docker.com/engine/release-notes/29/>
+- dockerd reference (configuration reload): <https://docs.docker.com/reference/cli/dockerd/>
+- CNI plugins: <https://github.com/containernetworking/plugins>
+- nftables wiki, configuring chains: <https://wiki.nftables.org/wiki-nftables/index.php/Configuring_chains>
+- nftables source: <https://git.netfilter.org/nftables/>
+- apt source: <https://salsa.debian.org/apt-team/apt>
+- dpkg source: <https://git.dpkg.org/cgit/dpkg/dpkg.git/>
+- Linux v6.8 source: <https://github.com/torvalds/linux/tree/v6.8>
 
 S3-compatible object stores:
 - AWS S3 conditional writes: <https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html>
