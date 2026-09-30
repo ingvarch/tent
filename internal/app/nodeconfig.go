@@ -38,6 +38,24 @@ var publicRules = []struct {
 	{"api", model.Servers, nodeconfig.ProtocolTCP, model.APIPort},
 }
 
+// The bridges where workloads run on a node that runs a client.
+var (
+	nomadBridge  = netip.MustParsePrefix("172.26.64.0/20") // Nomad's default bridge_network_subnet
+	dockerBridge = netip.MustParsePrefix("172.17.0.0/16")  // Docker's default bridge
+)
+
+// bridgeRules are the host firewall's rules for workloads on the bridges. A workload that calls the local agent's HTTP
+// API, or a task with host networking on a dynamic port, at the node's address reaches the node itself.
+var bridgeRules = []struct {
+	name     string
+	protocol string
+	ports    model.PortRange
+}{
+	{"bridge-http", nodeconfig.ProtocolTCP, model.PortRange{First: model.APIPort, Last: model.APIPort}},
+	{"bridge-dynamic", nodeconfig.ProtocolTCP, model.DynamicPorts()},
+	{"bridge-dynamic", nodeconfig.ProtocolUDP, model.DynamicPorts()},
+}
+
 // nodeAssets are the files that nodes download.
 type nodeAssets struct {
 	nomad, cni, tentNode nodeconfig.Asset
@@ -155,7 +173,7 @@ func groupTemplates(m *model.Cluster, c *v1alpha1.Cluster, groups []*v1alpha1.No
 			Assets:     downloads.forRole(g.Role),
 			Files:      files,
 			Join:       nodeconfig.Join{Strategy: strategy, RefreshInterval: joinRefresh},
-			System:     nodeSystem(g.Role, gn.Drivers),
+			System:     NodeSystem(g.Role, gn.Drivers),
 			Firewall:   hostFirewall(m.Intra, g.Role),
 		}
 		tmpl.SpecHash = nodeconfig.SpecHash(&tmpl)
@@ -172,12 +190,12 @@ func joinStrategy(j model.JoinStrategy) (string, error) {
 	return nodeconfig.JoinSeedAndRefresh, nil
 }
 
-// nodeSystem returns how a node of the role sets up its operating system. A node that runs a client loads the kernel
+// NodeSystem returns how a node of the role sets up its operating system. A node that runs a client loads the kernel
 // module of bridge networking and passes bridged traffic through the firewall, as Nomad's bridge networking needs. It
 // installs Docker, and loads the overlay module of Docker's storage, unless the group's drivers leave the docker
 // driver out; an empty list keeps all of Nomad's built-in drivers, Docker among them. A server runs no workloads and
 // needs none of it.
-func nodeSystem(role v1alpha1.Role, drivers []string) nodeconfig.System {
+func NodeSystem(role v1alpha1.Role, drivers []string) nodeconfig.System {
 	if !role.RunsClient() {
 		return nodeconfig.System{}
 	}
@@ -196,8 +214,15 @@ func nodeSystem(role v1alpha1.Role, drivers []string) nodeconfig.System {
 	return s
 }
 
+// HostFirewall returns the host firewall that tent gives a node of the role in a cluster whose private network is
+// cidr, as the node's group template holds it.
+func HostFirewall(cidr netip.Prefix, role v1alpha1.Role) nodeconfig.HostFirewall {
+	return hostFirewall(model.IntraRules(cidr), role)
+}
+
 // hostFirewall returns the host firewall of a node of the role: the public rules, then the rules between nodes, each
-// when it reaches the role, and the metadata service blocked for workloads.
+// when it reaches the role, then the bridge rules on a node that runs a client, and the metadata service blocked for
+// workloads.
 func hostFirewall(intra []model.IntraRule, role v1alpha1.Role) nodeconfig.HostFirewall {
 	var rules []nodeconfig.Rule
 	for _, r := range publicRules {
@@ -214,6 +239,14 @@ func hostFirewall(intra []model.IntraRule, role v1alpha1.Role) nodeconfig.HostFi
 		if r.To.Includes(role) {
 			rules = append(rules, nodeconfig.Rule{
 				Name: r.Name, Protocol: r.Protocol, Ports: nodeconfig.PortRange(r.Ports), From: slices.Clone(r.From),
+			})
+		}
+	}
+	if role.RunsClient() {
+		for _, r := range bridgeRules {
+			rules = append(rules, nodeconfig.Rule{
+				Name: r.name, Protocol: r.protocol, Ports: nodeconfig.PortRange(r.ports),
+				From: []netip.Prefix{nomadBridge, dockerBridge},
 			})
 		}
 	}
