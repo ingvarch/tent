@@ -3,7 +3,10 @@
 - **Status:** Accepted; amended by [ADR-0028](0028-tent-node-agent-units-and-delivery.md) (NodeConfig gains
   `provider`, validated and out of the spec hash; a kernel module or a sysctl key starts with a letter or a digit;
   of the M2.5 follow-ups, `nomad config validate` moves to M2.6 and gz+b64 waits for the M2.5 VM check, which
-  verified it on 2026-09-29)
+  verified it on 2026-09-29) and by [ADR-0029](0029-host-firewall-runtime-and-cni-on-nodes.md) (the asset names are
+  constants of `nodeconfig`; rule and asset names are DNS labels; client and combined nodes get rules from Nomad's
+  and Docker's bridges; of the M2.6 follow-ups, the metadata block matches tent-node's socket mark, and the Nomad
+  items move to M2.6b)
 - **Date:** 2026-09-29
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0006](0006-two-binaries-and-nodeconfig.md) (the size budget, the instance id),

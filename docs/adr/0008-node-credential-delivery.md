@@ -1,7 +1,9 @@
 # ADR-0008: Node credential delivery: user data in v1, bootstrap controller as the target
 
 - **Status:** Accepted; combined server+client nodes are an exception to "servers run no workloads"
-  ([ADR-0019](0019-combined-server-client-role.md))
+  ([ADR-0019](0019-combined-server-client-role.md)); amended by
+  [ADR-0029](0029-host-firewall-runtime-and-cni-on-nodes.md) (only tent-node's marked socket reaches the metadata
+  service; root processes are not exempt)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0006](0006-two-binaries-and-nodeconfig.md), [ADR-0007](0007-security-baseline.md),

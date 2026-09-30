@@ -1,6 +1,9 @@
 # ADR-0028: tent-node agent, units and delivery
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by [ADR-0029](0029-host-firewall-runtime-and-cni-on-nodes.md) (`ExecRunner` stops a
+  program's process group; the Vultr client marks its socket; no tent unit is ordered on `cloud-init-main.service`
+  either; `systemctl enable` asks PID 1 to reload by itself, and item 11 is about `install`'s own reload;
+  `hostfirewall`, `runtime` and `cni` are built, and the other M2.6 follow-ups move to M2.6b)
 - **Date:** 2026-09-29
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0006](0006-two-binaries-and-nodeconfig.md) (the units, the provider on the node, where

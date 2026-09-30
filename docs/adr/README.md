@@ -28,8 +28,8 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0004](0004-layered-architecture.md) | Layered architecture: a cloud-agnostic core and providers that translate intents | Accepted; provider order changed by 0014; narrowed by 0021 |
 | [0005](0005-immutable-nodes-and-nomad-aware-rollouts.md) | Immutable nodes and Nomad-aware rolling updates | Accepted; amended by 0017 |
 | [0006](0006-two-binaries-and-nodeconfig.md) | Two binaries and a versioned NodeConfig contract | Accepted; extended by 0026; amended by 0027 and 0028 |
-| [0007](0007-security-baseline.md) | Security baseline: PKI, mTLS, ACL, client introduction | Accepted; see 0019; amended by 0024 |
-| [0008](0008-node-credential-delivery.md) | Node credential delivery: user data in v1, bootstrap controller as the target | Accepted; exception in 0019 |
+| [0007](0007-security-baseline.md) | Security baseline: PKI, mTLS, ACL, client introduction | Accepted; see 0019; amended by 0024 and 0029 |
+| [0008](0008-node-credential-delivery.md) | Node credential delivery: user data in v1, bootstrap controller as the target | Accepted; exception in 0019; amended by 0029 |
 | [0009](0009-server-discovery-fixed-ip-slots.md) | Nomad server discovery on Hetzner through fixed private IP slots | Accepted (Hetzner-specific; generic strategy in 0016) |
 | [0010](0010-state-store-and-locking.md) | State store backends, layout and locking | Accepted; see 0015 |
 | [0011](0011-nomad-only-scope-and-licensing.md) | Nomad-only scope for v1 and licensing boundaries | Accepted; extended by 0026 |
@@ -48,5 +48,6 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0024](0024-cluster-pki-storage-and-certificates.md) | Cluster PKI storage and certificate details | Accepted |
 | [0025](0025-stdlib-only-helper-packages.md) | Standard-library-only helper packages | Accepted; amended by 0027 |
 | [0026](0026-channels-and-release-assets.md) | Channels and release assets | Accepted; M2.3 follow-ups moved to M2.7 by 0027; amended by 0028 |
-| [0027](0027-nodeconfig-contract-rendering-and-spec-hash.md) | NodeConfig contract, rendering and spec hash | Accepted; amended by 0028 |
-| [0028](0028-tent-node-agent-units-and-delivery.md) | tent-node agent, units and delivery | Accepted |
+| [0027](0027-nodeconfig-contract-rendering-and-spec-hash.md) | NodeConfig contract, rendering and spec hash | Accepted; amended by 0028 and 0029 |
+| [0028](0028-tent-node-agent-units-and-delivery.md) | tent-node agent, units and delivery | Accepted; amended by 0029 |
+| [0029](0029-host-firewall-runtime-and-cni-on-nodes.md) | Host firewall, container runtime and CNI plugins on nodes | Accepted |
