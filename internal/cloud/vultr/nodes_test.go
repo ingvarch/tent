@@ -15,6 +15,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/vultr/govultr/v3"
+	"sigs.k8s.io/yaml"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/cloud"
@@ -711,6 +712,13 @@ func TestList(t *testing.T) {
 		x.f.AddInstance(t, govultr.Instance{ID: "staging", Label: "staging-servers-0",
 			Tags: []string{"tent/cluster=staging"}})
 		x.f.AddInstance(t, govultr.Instance{ID: "upper", Label: "prod-servers-2", Tags: []string{"tent/cluster=PROD"}})
+		// Only the value true marks a node as joined.
+		x.f.AddInstance(t, govultr.Instance{ID: "joined", Label: "prod-servers-3", DateCreated: "yesterday",
+			Status: "pending", PowerStatus: "stopped", ServerStatus: "none",
+			Tags: []string{"tent/cluster=prod", "tent/joined=true"}})
+		x.f.AddInstance(t, govultr.Instance{ID: "yes", Label: "prod-servers-4", DateCreated: "yesterday",
+			Status: "pending", PowerStatus: "stopped", ServerStatus: "none",
+			Tags: []string{"tent/cluster=prod", "tent/joined=yes"}})
 
 		got, err := p.List(t.Context(), "prod")
 		if err != nil {
@@ -721,8 +729,10 @@ func TestList(t *testing.T) {
 			ID: "booting", Name: "prod-servers-1", Cluster: "prod", Group: "servers", Role: v1alpha1.RoleServer,
 			Zone: "ams", Op: opC,
 		}
+		joined := cloud.Instance{ID: "joined", Name: "prod-servers-3", Cluster: "prod", Joined: true}
+		yes := cloud.Instance{ID: "yes", Name: "prod-servers-4", Cluster: "prod"}
 		// By name, as Create returned them.
-		if diff := cmp.Diff([]cloud.Instance{server, booting, worker}, got, equateAddrs); diff != "" {
+		if diff := cmp.Diff([]cloud.Instance{server, booting, joined, yes, worker}, got, equateAddrs); diff != "" {
 			t.Errorf("List (-want +got):\n%s", diff)
 		}
 		want := []map[string]string{{
@@ -939,8 +949,28 @@ func TestDelete(t *testing.T) {
 	})
 }
 
-// scrubbedUserData is the user data that ScrubUserData leaves on a node: a cloud-config without modules.
-const scrubbedUserData = "#cloud-config\n# tent removed this node's user data after the node joined the cluster\n"
+// scrubbedUserData is the user data that MarkJoined leaves on a node: a cloud-config without modules.
+const scrubbedUserData = "#cloud-config\n# tent removed this node's user data after the node joined the cluster\n{}\n"
+
+// TestScrubbedUserDataIsAMapping checks that the stub is a cloud-config that loads to a mapping: cloud-init refuses one
+// that loads to nothing.
+func TestScrubbedUserDataIsAMapping(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		x, _ := newNodesFixture(t, opsKey)
+		in := createNode(t, x.p, serverRequest(opA))
+		if err := x.p.MarkJoined(t.Context(), in); err != nil {
+			t.Fatalf("MarkJoined: %v", err)
+		}
+		raw, err := base64.StdEncoding.DecodeString(x.f.UserData(in.ID))
+		if err != nil {
+			t.Fatalf("the user data is not base64: %v", err)
+		}
+		var doc map[string]any
+		if err := yaml.Unmarshal(raw, &doc); err != nil || doc == nil || len(doc) != 0 {
+			t.Errorf("the stub loads to %#v (%v), want an empty mapping", doc, err)
+		}
+	})
+}
 
 // recordUpdates is a fake that records the request of each UpdateInstance call.
 type recordUpdates struct {
@@ -953,22 +983,42 @@ func (a *recordUpdates) UpdateInstance(ctx context.Context, id string, req *govu
 	return a.Fake.UpdateInstance(ctx, id, req)
 }
 
-func TestScrubUserData(t *testing.T) {
+// afterGet is a fake that runs hook after each GetInstance call.
+type afterGet struct {
+	*vultrfake.Fake
+	hook func()
+}
+
+func (a *afterGet) GetInstance(ctx context.Context, id string) (*govultr.Instance, error) {
+	in, err := a.Fake.GetInstance(ctx, id)
+	a.hook()
+	return in, err
+}
+
+func TestMarkJoined(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		x, _ := newNodesFixture(t, opsKey)
 		in := createNode(t, x.p, serverRequest(opA))
-		tags := instanceOf(t, x.f, in.ID).Tags
+		// An operator's tag stays, and its place in the list too.
+		tags := append([]string{"web"}, instanceOf(t, x.f, in.ID).Tags...)
+		if err := x.f.UpdateInstance(t.Context(), in.ID, &govultr.InstanceUpdateReq{Tags: tags}); err != nil {
+			t.Fatalf("UpdateInstance: %v", err)
+		}
 		rec := &recordUpdates{Fake: x.f}
+		p := opProvider(rec)
 		before := len(x.f.Calls())
 
-		if err := opProvider(rec).ScrubUserData(t.Context(), in); err != nil {
-			t.Fatalf("ScrubUserData: %v", err)
+		if err := p.MarkJoined(t.Context(), in); err != nil {
+			t.Fatalf("MarkJoined: %v", err)
 		}
 
-		wantCallsSince(t, x.f, before, vultrfake.Call{Name: "UpdateInstance", Arg: in.ID})
-		// The user data, base64 as Create sends it, and nothing else. Tags stays nil, which govultr sends as null
-		// and Vultr takes as "keep the tags".
-		want := []govultr.InstanceUpdateReq{{UserData: base64.StdEncoding.EncodeToString([]byte(scrubbedUserData))}}
+		wantCallsSince(t, x.f, before, vultrfake.Call{Name: "GetInstance", Arg: in.ID},
+			vultrfake.Call{Name: "UpdateInstance", Arg: in.ID})
+		// The whole tag list with the joined tag last, and the stub in base64 as Create sends user data.
+		want := []govultr.InstanceUpdateReq{{
+			Tags:     append(slices.Clone(tags), "tent/joined=true"),
+			UserData: base64.StdEncoding.EncodeToString([]byte(scrubbedUserData)),
+		}}
 		if diff := cmp.Diff(want, rec.reqs); diff != "" {
 			t.Errorf("update requests (-want +got):\n%s", diff)
 		}
@@ -976,13 +1026,143 @@ func TestScrubUserData(t *testing.T) {
 		if err != nil || string(got) != scrubbedUserData {
 			t.Errorf("the user data decodes to %q (%v), want %q", got, err, scrubbedUserData)
 		}
-		if diff := cmp.Diff(tags, instanceOf(t, x.f, in.ID).Tags); diff != "" {
-			t.Errorf("tags (-before +after):\n%s", diff)
+		if diff := cmp.Diff(want[0].Tags, instanceOf(t, x.f, in.ID).Tags); diff != "" {
+			t.Errorf("tags (-want +got):\n%s", diff)
+		}
+		listed, err := p.List(t.Context(), "prod")
+		if err != nil || len(listed) != 1 || !listed[0].Joined {
+			t.Errorf("List = %+v, %v; want the node, joined", listed, err)
 		}
 	})
 }
 
-// nodeCalls are the calls of cloud.Nodes that act on one machine.
+func TestMarkJoinedTwice(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		x, _ := newNodesFixture(t, opsKey)
+		in := createNode(t, x.p, serverRequest(opA))
+		if err := x.p.MarkJoined(t.Context(), in); err != nil {
+			t.Fatalf("MarkJoined: %v", err)
+		}
+		tags := instanceOf(t, x.f, in.ID).Tags
+		before := len(x.f.Calls())
+
+		if err := x.p.MarkJoined(t.Context(), in); err != nil {
+			t.Fatalf("second MarkJoined: %v", err)
+		}
+
+		wantCallsSince(t, x.f, before, vultrfake.Call{Name: "GetInstance", Arg: in.ID},
+			vultrfake.Call{Name: "UpdateInstance", Arg: in.ID})
+		if diff := cmp.Diff(tags, instanceOf(t, x.f, in.ID).Tags); diff != "" {
+			t.Errorf("tags after the second call (-first +second):\n%s", diff)
+		}
+	})
+}
+
+func TestMarkJoinedAScrubbedNodeWithoutTheTag(t *testing.T) {
+	f := vultrfake.New()
+	in := seededNode(t, f)
+	stub := base64.StdEncoding.EncodeToString([]byte(scrubbedUserData))
+	if err := f.UpdateInstance(t.Context(), in.ID, &govultr.InstanceUpdateReq{UserData: stub}); err != nil {
+		t.Fatalf("UpdateInstance: %v", err)
+	}
+
+	if err := opProvider(f).MarkJoined(t.Context(), in); err != nil {
+		t.Fatalf("MarkJoined: %v", err)
+	}
+
+	if diff := cmp.Diff([]string{"tent/cluster=prod", "tent/joined=true"}, instanceOf(t, f, in.ID).Tags); diff != "" {
+		t.Errorf("tags (-want +got):\n%s", diff)
+	}
+}
+
+func TestMarkJoinedReplacesAnotherValueOfTheTag(t *testing.T) {
+	for _, other := range []string{"tent/joined=yes", "tent/joined=false"} {
+		t.Run(other, func(t *testing.T) {
+			f := vultrfake.New()
+			in := seededNode(t, f)
+			tags := []string{"tent/cluster=prod", other}
+			if err := f.UpdateInstance(t.Context(), in.ID, &govultr.InstanceUpdateReq{Tags: tags}); err != nil {
+				t.Fatalf("UpdateInstance: %v", err)
+			}
+			p := opProvider(f)
+
+			if err := p.MarkJoined(t.Context(), in); err != nil {
+				t.Fatalf("MarkJoined: %v", err)
+			}
+
+			if diff := cmp.Diff([]string{"tent/cluster=prod", "tent/joined=true"}, instanceOf(t, f, in.ID).Tags); diff != "" {
+				t.Errorf("tags (-want +got):\n%s", diff)
+			}
+			listed, err := p.List(t.Context(), "prod")
+			if err != nil || len(listed) != 1 || !listed[0].Joined {
+				t.Errorf("List = %+v, %v; want the node, joined", listed, err)
+			}
+		})
+	}
+}
+
+func TestMarkJoinedOfAGoneInstance(t *testing.T) {
+	t.Run("at the read", func(t *testing.T) {
+		f := vultrfake.New()
+		in := seededNode(t, f)
+		if err := f.DeleteInstance(t.Context(), in.ID); err != nil {
+			t.Fatalf("DeleteInstance: %v", err)
+		}
+		before := len(f.Calls())
+
+		if err := opProvider(f).MarkJoined(t.Context(), in); err != nil {
+			t.Errorf("MarkJoined of an instance that is gone: %v, want success", err)
+		}
+
+		wantCallsSince(t, f, before, vultrfake.Call{Name: "GetInstance", Arg: in.ID})
+	})
+	t.Run("at the update", func(t *testing.T) {
+		f := vultrfake.New()
+		in := seededNode(t, f)
+		p := opProvider(&afterGet{Fake: f, hook: func() {
+			if err := f.DeleteInstance(t.Context(), in.ID); err != nil {
+				t.Errorf("DeleteInstance: %v", err)
+			}
+		}})
+
+		if err := p.MarkJoined(t.Context(), in); err != nil {
+			t.Errorf("MarkJoined of an instance deleted after the read: %v, want success", err)
+		}
+	})
+}
+
+func TestMarkJoinedFails(t *testing.T) {
+	for _, tc := range []struct {
+		name, api, method, path string
+	}{
+		{"read", "GetInstance", http.MethodGet, "/v2/instances/node"},
+		{"update", "UpdateInstance", http.MethodPatch, "/v2/instances/node"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := vultrfake.New()
+			in := seededNode(t, f)
+			// No answer that the transport's retries could get: the caller may call again.
+			f.Fail(t, tc.api, vultr.NewAPIError(tc.method, tc.path, http.StatusServiceUnavailable, "Try again later",
+				0), 1)
+
+			err := opProvider(f).MarkJoined(t.Context(), in)
+
+			want := "scrub the user data of node prod-servers-0 (node): vultr: " + tc.method + " " + tc.path +
+				": 503 Service Unavailable: Try again later"
+			if errText(err) != want {
+				t.Errorf("MarkJoined = %v, want %q", err, want)
+			}
+			if !errors.Is(err, vultr.ErrUnavailable) {
+				t.Errorf("errors.Is(%v, vultr.ErrUnavailable) = false", err)
+			}
+			if tags := instanceOf(t, f, in.ID).Tags; slices.Contains(tags, "tent/joined=true") {
+				t.Errorf("tags %v hold the joined tag after a failed call", tags)
+			}
+		})
+	}
+}
+
+// nodeCalls are the calls of cloud.Nodes that act on one machine with one API call.
 var nodeCalls = []struct {
 	name   string // the method of cloud.Nodes
 	call   func(cloud.Nodes, context.Context, cloud.Instance) error
@@ -995,8 +1175,6 @@ var nodeCalls = []struct {
 		"stop node prod-servers-0 (node): "},
 	{"Delete", cloud.Nodes.Delete, "DeleteInstance", http.MethodDelete, "/v2/instances/node",
 		"delete node prod-servers-0 (node): "},
-	{"ScrubUserData", cloud.Nodes.ScrubUserData, "UpdateInstance", http.MethodPatch, "/v2/instances/node",
-		"scrub the user data of node prod-servers-0 (node): "},
 }
 
 // seededNode stores the node prod-servers-0 of cluster prod with the id node in f, and returns it as List does.

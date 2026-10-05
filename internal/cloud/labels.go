@@ -22,6 +22,9 @@ const (
 	LabelOp = "tent/op"
 	// LabelLockFor holds the cluster name on the Hetzner lock firewall, which has no LabelCluster.
 	LabelLockFor = "tent/lock-for"
+	// LabelJoined is "true" on a machine whose node has joined its cluster. Where the cloud lets user data change, the
+	// user data holds no secrets any more.
+	LabelJoined = "tent/joined"
 	// LabelE2E is "true" on objects that end-to-end tests create.
 	LabelE2E = "tent/e2e"
 	// LabelE2ERun holds the id of the end-to-end test run that created the object.

@@ -41,8 +41,8 @@ import (
 // Seeding with AddSSHKey, AddVPC, AddFirewallGroup, AddFirewallRule and AddInstance stores objects as if they had
 // been created before, without a call. An empty id gets a new one, and an empty date_created the clock's time.
 // Seeding checks no other field, no limit and no second copy of a rule, and returns the object as stored. SSHKeys,
-// VPCs, FirewallGroups, FirewallRules, Instances, UserData and CreateRequest read the objects back without a call:
-// Calls does not log them, and no fault applies to them.
+// VPCs, FirewallGroups, FirewallRules, Instances, UserData, InstanceVPCs and CreateRequest read the objects back
+// without a call: Calls does not log them, and no fault applies to them.
 //
 // The fault and seeding methods take the test's testing.TB. They fail the test on a bug of the test, such as a name
 // that is not a vultr.API method or an id that is taken, at the line of the wrong call, rather than return an error
@@ -182,6 +182,17 @@ func (f *Fake) UserData(id string) string {
 		return in.userData
 	}
 	return ""
+}
+
+// InstanceVPCs returns the VPCs an instance is attached to, with its address and MAC in each, without a call and also
+// before the instance shows as active. It returns nil for an unknown instance.
+func (f *Fake) InstanceVPCs(id string) []govultr.VPCInfo {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if in := f.instance(id); in != nil {
+		return clone(in.vpcs)
+	}
+	return nil
 }
 
 // CreateRequest returns the request that created an instance, without a call. It reports false for an unknown or a

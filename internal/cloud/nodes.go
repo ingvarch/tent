@@ -26,10 +26,11 @@ type Nodes interface {
 	Stop(ctx context.Context, node Instance) error
 	// Delete destroys the machine, even while it runs. A machine that is gone counts as deleted.
 	Delete(ctx context.Context, node Instance) error
-	// ScrubUserData replaces the machine's user data, which holds secrets, with a stub that holds none, so that the
-	// cloud's metadata service stops serving them. The core calls it once the node has joined the cluster. A machine
-	// that is gone counts as scrubbed.
-	ScrubUserData(ctx context.Context, node Instance) error
+	// MarkJoined records on the machine that its node has joined the cluster, and replaces the machine's user data,
+	// which holds secrets, with a stub that holds none where the cloud lets user data change, so that the cloud's
+	// metadata service stops serving them. The core calls it once the node has joined. It is safe to repeat. A machine
+	// that is gone counts as marked.
+	MarkJoined(ctx context.Context, node Instance) error
 }
 
 // Instance is one machine of a cluster as the cloud reports it.
@@ -45,6 +46,7 @@ type Instance struct {
 	PrivateIP netip.Addr    // its address in the cluster's network; the invalid Addr until the cloud reports one
 	PublicIP  netip.Addr    // its public IPv4 address; the invalid Addr until the cloud reports one
 	Ready     bool          // the cloud reports it running and booted
+	Joined    bool          // it carries the label LabelJoined with the value true
 	Created   time.Time     // when the cloud created it; the zero time when the cloud gives none that parses
 }
 

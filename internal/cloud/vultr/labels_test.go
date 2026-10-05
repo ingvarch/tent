@@ -23,6 +23,7 @@ func allLabels() cloud.Labels {
 		cloud.LabelOp:        opID,
 		cloud.LabelLockFor:   "prod",
 		cloud.LabelE2E:       "true",
+		cloud.LabelJoined:    "true",
 		cloud.LabelE2ERun:    "run-7k2m9x",
 	}
 }
@@ -53,6 +54,7 @@ func TestEncodeTags(t *testing.T) {
 		"tent/cluster=prod",
 		"tent/e2e-run=run-7k2m9x",
 		"tent/e2e=true",
+		"tent/joined=true",
 		"tent/lock-for=prod",
 		"tent/nodegroup=workers",
 		"tent/op=" + opID,
