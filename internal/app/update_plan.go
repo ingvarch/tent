@@ -12,11 +12,12 @@ import (
 	"github.com/ingvarch/tent/internal/english"
 )
 
-// UpdatePlan is what an update of a cluster changes: its infrastructure, its nodes, and its secrets and completed
-// spec in the state store.
+// UpdatePlan is what an update of a cluster changes: its infrastructure, its nodes, Nomad, and its secrets, completed
+// spec and bootstrap mark in the state store.
 type UpdatePlan struct {
 	Infra *engine.Plan // the infrastructure's changes; nil stands for none
 	Nodes []NodeChange // the node changes in the order they run
+	Nomad *NomadStep   // what update does with Nomad; nil stands for nothing
 	// Secrets are the paths of the secrets that the store lacks and the update writes, such as pki/private/ca.key,
 	// relative to the cluster and in the order they are written.
 	Secrets []string
@@ -28,29 +29,40 @@ type UpdatePlan struct {
 	Applied bool
 }
 
-// HasChanges reports whether the plan changes the infrastructure, the nodes, the secrets or the completed spec.
+// NomadStep is what an update does with Nomad once the servers run: bootstrap the ACL system, and wait until the
+// servers are healthy and vote.
+type NomadStep struct {
+	Bootstrap bool `json:"bootstrap"` // bootstrap the ACL system and write its mark to the state store
+	Servers   int  `json:"servers"`   // how many servers must be healthy and vote
+}
+
+// HasChanges reports whether the plan changes the infrastructure, the nodes, Nomad, the secrets or the completed spec.
 func (p UpdatePlan) HasChanges() bool {
-	return p.infraChanges() || len(p.Nodes) > 0 || len(p.stateWrites()) > 0
+	return p.infraChanges() || len(p.Nodes) > 0 || p.Nomad != nil || len(p.stateWrites()) > 0
 }
 
 // infraChanges reports whether the plan changes the infrastructure.
 func (p UpdatePlan) infraChanges() bool { return p.Infra != nil && p.Infra.HasChanges() }
 
 // stateWrites returns the paths, relative to the cluster, of the objects that the plan writes to the state store, in
-// the order they are written: the secrets, then the completed spec.
+// the order they are written: the secrets, the completed spec, then the mark of the Nomad bootstrap.
 func (p UpdatePlan) stateWrites() []string {
-	if !p.Completed {
-		return p.Secrets
+	writes := slices.Clone(p.Secrets)
+	if p.Completed {
+		writes = append(writes, "cluster.completed.yaml")
 	}
-	return append(slices.Clone(p.Secrets), "cluster.completed.yaml")
+	if p.Nomad != nil && p.Nomad.Bootstrap {
+		writes = append(writes, "nomad/bootstrapped")
+	}
+	return writes
 }
 
 // WriteText writes the plan for people: the lines of the infrastructure's changes as the engine writes them, a line
-// for each node change, then a blank line and a line of counts for each of the two parts that changes, and last a
-// line that names the objects it writes to the state store in the order they are written, such as "State:
-// secrets/gossip.key and cluster.completed.yaml will be written.". A plan that changes only the state store is that
-// line alone, and a plan without changes is the line "No changes.". Operation ids and the secrets' contents do not
-// show.
+// for each node change, then a blank line and a line of counts for each of the two parts that changes, a line for the
+// Nomad step, such as "Nomad: bootstrap the ACL system and wait for 3 healthy servers.", and last a line that names
+// the objects it writes to the state store in the order they are written, such as "State: secrets/gossip.key and
+// cluster.completed.yaml will be written.". A plan that changes only the state store is that line alone, and a plan
+// without changes is the line "No changes.". Operation ids and the secrets' contents do not show.
 func (p UpdatePlan) WriteText(w io.Writer) error {
 	var lines, counts strings.Builder
 	if p.infraChanges() {
@@ -68,6 +80,9 @@ func (p UpdatePlan) WriteText(w io.Writer) error {
 	if counts.Len() > 0 {
 		text = lines.String() + "\n" + counts.String()
 	}
+	if p.Nomad != nil {
+		text += p.Nomad.planLine() + "\n"
+	}
 	if writes := p.stateWrites(); len(writes) > 0 {
 		text += "State: " + english.And(writes) + " will be written.\n"
 	}
@@ -75,6 +90,36 @@ func (p UpdatePlan) WriteText(w io.Writer) error {
 		text = "No changes.\n"
 	}
 	return writePlan(w, text)
+}
+
+// planLine returns the step's line in a text plan, without its newline.
+func (n NomadStep) planLine() string {
+	wait := fmt.Sprintf("wait for %d healthy %s", n.Servers, serverNoun(n.Servers))
+	if n.Bootstrap {
+		return "Nomad: bootstrap the ACL system and " + wait + "."
+	}
+	return "Nomad: " + wait + "."
+}
+
+// appliedLine returns the step's part of a summary of an applied plan.
+func (n NomadStep) appliedLine() string {
+	verb := "are"
+	if n.Servers == 1 {
+		verb = "is"
+	}
+	healthy := fmt.Sprintf("%d %s %s healthy.", n.Servers, serverNoun(n.Servers), verb)
+	if n.Bootstrap {
+		return "Nomad: bootstrapped the ACL system; " + healthy
+	}
+	return "Nomad: " + healthy
+}
+
+// serverNoun returns "server" for one and "servers" for any other count.
+func serverNoun(n int) string {
+	if n == 1 {
+		return "server"
+	}
+	return "servers"
 }
 
 // writePlan writes the text of a plan to w.
@@ -129,8 +174,9 @@ func countNodes(changes []NodeChange) map[NodeAction]int {
 
 // WriteApplied writes what applying the plan did, on one line in the past tense: the infrastructure's changes, such
 // as "Applied: 3 created, 0 updated, 0 replaced, 0 deleted.", the node changes, such as "Nodes: 6 created, 0 waited
-// for, 0 deleted.", and the objects it wrote to the state store, such as "Wrote secrets/gossip.key and
-// cluster.completed.yaml.", each only when that part changed. A plan without changes is the line "No changes.".
+// for, 0 deleted.", the Nomad step, such as "Nomad: bootstrapped the ACL system; 3 servers are healthy.", and the
+// objects it wrote to the state store, such as "Wrote secrets/gossip.key and cluster.completed.yaml.", each only when
+// that part changed. A plan without changes is the line "No changes.".
 func (p UpdatePlan) WriteApplied(w io.Writer) error {
 	var parts []string
 	if p.infraChanges() {
@@ -142,6 +188,9 @@ func (p UpdatePlan) WriteApplied(w io.Writer) error {
 		n := countNodes(p.Nodes)
 		parts = append(parts, fmt.Sprintf("Nodes: %d created, %d waited for, %d deleted.",
 			n[NodeCreate], n[NodeWait], n[NodeDelete]))
+	}
+	if p.Nomad != nil {
+		parts = append(parts, p.Nomad.appliedLine())
 	}
 	if writes := p.stateWrites(); len(writes) > 0 {
 		parts = append(parts, "Wrote "+english.And(writes)+".")
@@ -158,18 +207,20 @@ func writeSummary(w io.Writer, parts []string) error {
 }
 
 // MarshalJSON encodes the plan as {"applied": true, "infrastructure": <the engine's plan>, "nodes": [...],
-// "secrets": ["pki/private/ca.key", ...], "completedSpec": true}, the node changes in the order they run and the
-// secrets in the order they are written. Nodes is [] when nothing changes, infrastructure is null when the plan has no
-// infrastructure plan, and applied, secrets and completedSpec are left out when they are false or empty. It leaves
-// HTML characters such as < and & as they are, so the caller's encoder decides whether to escape them.
+// "nomad": {"bootstrap": true, "servers": 3}, "secrets": ["pki/private/ca.key", ...], "completedSpec": true}, the
+// node changes in the order they run and the secrets in the order they are written. Nodes is [] when nothing changes,
+// infrastructure is null when the plan has no infrastructure plan, and applied, nomad, secrets and completedSpec are
+// left out when they are false, nil or empty. It leaves HTML characters such as < and & as they are, so the caller's
+// encoder decides whether to escape them.
 func (p UpdatePlan) MarshalJSON() ([]byte, error) {
 	return marshalPlan(struct {
 		Applied        bool         `json:"applied,omitempty"`
 		Infrastructure *engine.Plan `json:"infrastructure"`
 		Nodes          []NodeChange `json:"nodes"`
+		Nomad          *NomadStep   `json:"nomad,omitempty"`
 		Secrets        []string     `json:"secrets,omitempty"`
 		CompletedSpec  bool         `json:"completedSpec,omitempty"`
-	}{p.Applied, p.Infra, orEmpty(p.Nodes), p.Secrets, p.Completed})
+	}{p.Applied, p.Infra, orEmpty(p.Nodes), p.Nomad, p.Secrets, p.Completed})
 }
 
 // marshalPlan encodes the plan v as JSON on one line, and leaves HTML characters such as < and & as they are.

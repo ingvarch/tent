@@ -24,7 +24,8 @@ const placeholderUserData = "#cloud-config\npackage_update: false\npackage_upgra
 const nodeTimeout = 10 * time.Minute
 
 // Progress is one thing that happened while an update or a delete applied its plan. When Infra is set, it is an event
-// of an infrastructure change. When Going is set, a delete starts to wait until the cloud stops listing that many
+// of an infrastructure change. When Nomad is set, it is a step of the Nomad step of an update, and Step and Err say how
+// far it got and why it failed. When Going is set, a delete starts to wait until the cloud stops listing that many
 // nodes that it deleted. Otherwise it is a step of the node change Node. Err says why a failed step failed, in the
 // provider's words. Instance is the machine of a create or a wait that is done, as the provider reports it, with its
 // ID and its private address when the cloud gave one; it is the zero Instance for the other steps.
@@ -35,6 +36,47 @@ type Progress struct {
 	Step     NodeStep
 	Err      error
 	Instance cloud.Instance
+	Nomad    *NomadEvent
+}
+
+// NomadAction is what the Nomad step of an update does.
+type NomadAction int
+
+// Nomad actions.
+const (
+	// NomadLeader waits for the servers to elect a leader.
+	NomadLeader NomadAction = iota + 1
+	// NomadBootstrap bootstraps the ACL system.
+	NomadBootstrap
+	// NomadHealthy waits until the servers are healthy and vote.
+	NomadHealthy
+	// NomadRegister waits until a node has registered with the servers.
+	NomadRegister
+)
+
+var nomadActionNames = [...]string{
+	NomadLeader: "leader", NomadBootstrap: "bootstrap", NomadHealthy: "healthy", NomadRegister: "register",
+}
+
+// String returns the action's name in lower case, such as leader.
+func (a NomadAction) String() string {
+	if a < NomadLeader || int(a) >= len(nomadActionNames) {
+		return fmt.Sprintf("NomadAction(%d)", int(a))
+	}
+	return nomadActionNames[a]
+}
+
+// MarshalText returns the action's name, as String does.
+func (a NomadAction) MarshalText() ([]byte, error) { return []byte(a.String()), nil }
+
+// NomadEvent is what a step of the Nomad step of an update works on. Node names the node that a register waits for.
+// Leader is the leader's RPC address once a leader wait is done. Voters is how many healthy servers a healthy wait
+// waits for, and once it is done how many of them vote.
+type NomadEvent struct {
+	Action NomadAction
+	Node   string
+	Leader string
+	Voters int
 }
 
 // NodeStep is how far a node change got.
