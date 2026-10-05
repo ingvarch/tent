@@ -1,0 +1,19 @@
+# Rendered by tent. Do not edit: changes are overwritten on the next boot.
+[Unit]
+Description=The Nomad agent of this node
+Documentation=https://developer.hashicorp.com/nomad
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/nomad agent -config /etc/nomad.d
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+KillSignal=SIGTERM
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+LimitNPROC=infinity
+TasksMax=infinity
+OOMScoreAdjust=-1000

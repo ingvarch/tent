@@ -165,6 +165,22 @@ func TestNomad(t *testing.T) {
 			})
 		}
 	}
+	t.Run("another os", func(t *testing.T) {
+		srv := serve(t, good)
+		got, err := nomadFor(t.Context(), opts(srv), "2.0.7", "darwin", "arm64")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := Asset{
+			Name:    "nomad",
+			Version: "2.0.7",
+			URLs:    []string{srv.URL + "/2.0.7/nomad_2.0.7_darwin_arm64.zip"},
+			SHA256:  strings.Repeat("1111", 16),
+		}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("nomadFor (-want +got):\n%s", diff)
+		}
+	})
 
 	changedSums := strings.Replace(testSums, "2222", "2223", 1)
 	withoutARM := strings.Replace(testSums, strings.Repeat("3", 64)+"  nomad_2.0.7_linux_arm64.zip\n", "", 1)

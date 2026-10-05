@@ -60,7 +60,7 @@ func TestOSFSSetsTheOwner(t *testing.T) {
 	}
 	root := t.TempDir()
 	fsys := nodeup.OSFS{Root: root}
-	for _, g := range groups[:2] {
+	for i, g := range groups[:2] {
 		owner := u.Username + ":" + g.Name
 		want, err := strconv.Atoi(g.Gid)
 		if err != nil {
@@ -68,9 +68,18 @@ func TestOSFSSetsTheOwner(t *testing.T) {
 		}
 		write(t, fsys, "/a.conf", "a\n", 0o644, owner, true)
 		write(t, fsys, "/a.conf", "a\n", 0o644, owner, false)
+		// The second group changes only the owner of the stream's file.
+		if i > 0 && hasContent(t, fsys, "/b.bin", "b\n", 0o755, owner) {
+			t.Errorf("b.bin of another group has the owner %s", owner)
+		}
+		writeStream(t, fsys, "/b.bin", "b\n", 0o755, owner, true)
+		writeStream(t, fsys, "/b.bin", "b\n", 0o755, owner, false)
+		if !hasContent(t, fsys, "/b.bin", "b\n", 0o755, owner) {
+			t.Errorf("b.bin does not have the owner %s", owner)
+		}
 		ensureDir(t, fsys, "/d", 0o755, owner, true)
 		ensureDir(t, fsys, "/d", 0o755, owner, false)
-		for _, name := range []string{"a.conf", "d"} {
+		for _, name := range []string{"a.conf", "b.bin", "d"} {
 			if got := groupOf(t, filepath.Join(root, name)); got != want {
 				t.Errorf("%s belongs to the group %d, want %s (%d)", name, got, g.Name, want)
 			}
@@ -178,6 +187,87 @@ func TestOSFSReplacesASymbolicLink(t *testing.T) {
 	wantRegular(t, filepath.Join(root, "dangling.conf"), "c\n")
 	if _, err := os.Lstat(missing); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("the target of the dangling link: %v, want it still missing", err)
+	}
+
+	// WriteStream and HasContent take a link as WriteFile does.
+	symlink(t, target, filepath.Join(root, "same.bin"))
+	if hasContent(t, fsys, "/same.bin", "a\n", 0o644, owner) {
+		t.Error("a link to a file with the content has it")
+	}
+	writeStream(t, fsys, "/same.bin", "a\n", 0o644, owner, true)
+	wantRegular(t, filepath.Join(root, "same.bin"), "a\n")
+	symlink(t, target, filepath.Join(root, "other.bin"))
+	writeStream(t, fsys, "/other.bin", "b\n", 0o644, owner, true)
+	wantRegular(t, filepath.Join(root, "other.bin"), "b\n")
+	wantRegular(t, target, "a\n")
+	symlink(t, missing, filepath.Join(root, "dangling.bin"))
+	writeStream(t, fsys, "/dangling.bin", "c\n", 0o644, owner, true)
+	wantRegular(t, filepath.Join(root, "dangling.bin"), "c\n")
+	if _, err := os.Lstat(missing); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the target of the dangling link: %v, want it still missing", err)
+	}
+}
+
+// TestOSFSRemovesStaleTemporaryFiles checks that a write removes the temporary files that an earlier write of the
+// same file left when it was killed before its rename, and nothing else: no directory, no link, no other file's.
+func TestOSFSRemovesStaleTemporaryFiles(t *testing.T) {
+	owner := localOwner(t)
+	for name, writeA := range map[string]func(t *testing.T, fsys nodeup.FS){
+		"WriteFile":   func(t *testing.T, fsys nodeup.FS) { write(t, fsys, "/d/a.bin", "a\n", 0o644, owner, true) },
+		"WriteStream": func(t *testing.T, fsys nodeup.FS) { writeStream(t, fsys, "/d/a.bin", "a\n", 0o644, owner, true) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "d")
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range []string{".a.bin.tmp123456", ".a.bin.tmp7", ".b.bin.tmp1", "a.bin.tmp1"} {
+				if err := os.WriteFile(filepath.Join(dir, f), []byte("half a binary"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Mkdir(filepath.Join(dir, ".a.bin.tmpdir"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			symlink(t, filepath.Join(dir, "a.bin.tmp1"), filepath.Join(dir, ".a.bin.tmplink"))
+			writeA(t, nodeup.OSFS{Root: root})
+			wantOnly(t, dir, "a.bin", ".a.bin.tmpdir", ".a.bin.tmplink", ".b.bin.tmp1", "a.bin.tmp1")
+		})
+	}
+}
+
+// TestOSFSFailsWhereItCannotLookForTemporaryFiles checks that a write into a directory that cannot be listed fails,
+// and writes nothing: it cannot remove what a killed write left.
+func TestOSFSFailsWhereItCannotLookForTemporaryFiles(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root lists any directory")
+	}
+	owner := localOwner(t)
+	for name, writeA := range map[string]func(fsys nodeup.FS) (bool, error){
+		"WriteFile": func(fsys nodeup.FS) (bool, error) {
+			return fsys.WriteFile("/d/a.bin", []byte("a\n"), 0o644, owner)
+		},
+		"WriteStream": func(fsys nodeup.FS) (bool, error) {
+			return fsys.WriteStream("/d/a.bin", strings.NewReader("a\n"), 0o644, owner)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "d")
+			if err := os.Mkdir(dir, 0o300); err != nil { // write and search, not read
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			changed, err := writeA(nodeup.OSFS{Root: root})
+			if !errors.Is(err, fs.ErrPermission) || changed {
+				t.Errorf("%s into an unlistable directory: %v, %v; want a permission error", name, changed, err)
+			}
+			if err := os.Chmod(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			wantOnly(t, dir)
+		})
 	}
 }
 

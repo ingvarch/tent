@@ -2,6 +2,7 @@ package nodeup_test
 
 import (
 	"archive/tar"
+	"bytes"
 	"io/fs"
 	"maps"
 	"net/http"
@@ -138,6 +139,39 @@ func TestCNI(t *testing.T) {
 	}
 	if got := fsys.Changes()[len(want):]; len(got) != 0 {
 		t.Errorf("the second cni changed %q, want nothing", got)
+	}
+}
+
+// swapRead is a filesystem whose ReadFile of path returns data, as a file that changes between its check and its read.
+type swapRead struct {
+	nodeup.FS
+	path string
+	data []byte
+}
+
+func (s swapRead) ReadFile(p string) ([]byte, error) {
+	if p == s.path {
+		return bytes.Clone(s.data), nil
+	}
+	return s.FS.ReadFile(p)
+}
+
+// TestCNIChecksTheBytesItUnpacks checks that the cni phase unpacks only the archive that the asset's sha256 names,
+// even when the cached file changes after the fetch checked it.
+func TestCNIChecksTheBytesItUnpacks(t *testing.T) {
+	h, fsys, _, e := ubuntu(t)
+	nc := combined(t)
+	archive := cniArchive(t)
+	serveCNI(t, h, nc, archive)
+	other := nodeuptest.Tgz(t, topDir, pluginFile("other", 0o755))
+	h.FS = swapRead{fsys, cachePath, other}
+	_, err := runPhase(t, "cni", h, nc, e)
+	want := "read cni-plugins 1.9.1 from the cache: the sha256 is " + sum(other) + ", not " + sum(archive)
+	if errText(err) != want {
+		t.Errorf("cni = %q, want %q", errText(err), want)
+	}
+	if got := under(fsys, cniDir); len(got) != 0 {
+		t.Errorf("cni wrote %q from an archive that it did not check", slices.Collect(maps.Keys(got)))
 	}
 }
 

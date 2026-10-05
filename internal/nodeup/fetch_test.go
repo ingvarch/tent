@@ -117,11 +117,14 @@ func TestFetch(t *testing.T) {
 		t.Errorf("Fetch did not log the download:\n%s", logs)
 	}
 
-	// The second fetch takes the cached file.
-	changes := len(fsys.Changes())
+	// The second fetch takes the cached file, which it checks as a stream: it reads no whole file into memory.
+	changes, reads := len(fsys.Changes()), len(fsys.Reads())
 	data, changed, err = nodeup.Fetch(t.Context(), h, a)
 	if err != nil || changed || !bytes.Equal(data, payload) {
 		t.Fatalf("the second Fetch: %q, %t, %v; want the payload and no change", data, changed, err)
+	}
+	if got := fsys.Reads()[reads:]; len(got) != 0 {
+		t.Errorf("the second Fetch read %q whole, want nothing", got)
 	}
 	if got := srv.Requests(); len(got) != 1 {
 		t.Errorf("the second Fetch asked for %q, want nothing", got[1:])
@@ -196,6 +199,10 @@ func TestFetchMakesTheCachedFileRootOnly(t *testing.T) {
 	}
 	if diff := cmp.Diff(cached(payload), entries(fsys, tentDir, assetDir, cachePath)); diff != "" {
 		t.Errorf("the cache (-want +got):\n%s", diff)
+	}
+	// It rewrites the file as a stream: no whole asset goes into memory.
+	if got := fsys.Reads(); len(got) != 0 {
+		t.Errorf("Fetch read %q whole, want nothing", got)
 	}
 }
 

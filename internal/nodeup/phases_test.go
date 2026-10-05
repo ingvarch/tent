@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
+	"net/http"
 	"net/netip"
 	"slices"
 	"strings"
@@ -23,7 +24,7 @@ import (
 
 // units are the units that tent-node installs, and startUnits those of them that it enables and starts.
 var (
-	units      = []string{"tent-node.service", "tent-node-join.service", "tent-node-join.timer"}
+	units      = []string{"tent-node.service", "tent-node-join.service", "tent-node-join.timer", "nomad.service"}
 	startUnits = []string{"tent-node.service", "tent-node-join.timer"}
 )
 
@@ -57,7 +58,7 @@ func ubuntuMachine(t *testing.T) (*nodeup.Host, *nodeuptest.FS, *nodeuptest.Runn
 }
 
 // combined returns the sample with a tent-node asset of the fake host's version, the cni-plugins asset of the tests'
-// archive, and the system settings of a combined node that runs Docker.
+// archive, the nomad asset, and the system settings of a combined node that runs Docker.
 func combined(t *testing.T) *nodeconfig.NodeConfig {
 	t.Helper()
 	nc := sample(t)
@@ -65,7 +66,11 @@ func combined(t *testing.T) *nodeconfig.NodeConfig {
 		Name: nodeconfig.TentNodeAsset, Version: nodeuptest.Version,
 		URLs:   []string{"https://github.com/ingvarch/tent/releases/download/v0.3.0/tent-node_linux_amd64"},
 		SHA256: "3c7d1e9a5b2f8046c1e7a3d9b5f20864e1c7a3d9b5f20864e1c7a3d9b5f20864",
-	}, cniPlugins(t)}
+	}, cniPlugins(t), {
+		Name: nodeconfig.NomadAsset, Version: "2.0.7",
+		URLs:   []string{"https://releases.hashicorp.com/nomad/2.0.7/nomad_2.0.7_linux_amd64.zip"},
+		SHA256: sum(nomadZip(t)),
+	}}
 	nc.System = nodeconfig.System{
 		Sysctls: map[string]string{
 			"net.bridge.bridge-nf-call-arptables": "1", "net.bridge.bridge-nf-call-ip6tables": "1",
@@ -74,6 +79,7 @@ func combined(t *testing.T) *nodeconfig.NodeConfig {
 		KernelModules: []string{"br_netfilter", "overlay"},
 		Docker:        true,
 	}
+	nc.Files = append(nc.Files, nodeconfig.RenderNomadService())
 	return rehash(t, nc)
 }
 
@@ -521,24 +527,10 @@ func countOf(list []string, s string) int {
 	return n
 }
 
-func TestStubs(t *testing.T) {
-	for _, name := range []string{"join", "nomad"} {
-		t.Run(name, func(t *testing.T) {
-			h, fsys, r, e := ubuntu(t)
-			res, err := runPhase(t, name, h, combined(t), e)
-			if want := (nodeup.Result{Status: nodeup.Skipped, Reason: "not built yet"}); err != nil || res != want {
-				t.Errorf("%s: %+v, %v; want %+v", name, res, err, want)
-			}
-			if len(r.Commands()) != 0 || len(fsys.Changes()) != 0 {
-				t.Errorf("%s ran %q and changed %q, want nothing", name, r.Commands(), fsys.Changes())
-			}
-		})
-	}
-}
-
 func TestVerify(t *testing.T) {
 	h, fsys, r, e := ubuntu(t)
 	enableUnits(t, fsys, r)
+	agentServer(t, h, fsys, v1alpha1.RoleCombined, 0)
 	res, err := runPhase(t, "verify", h, combined(t), e)
 	if err != nil || res != (nodeup.Result{Status: nodeup.Unchanged}) {
 		t.Errorf("verify: %+v, %v; want unchanged", res, err)
@@ -591,7 +583,37 @@ func TestUpWithThePhases(t *testing.T) {
 	}
 	enableUnits(t, fsys, r)
 	nc := combined(t)
-	srv := serveCNI(t, h, nc, cniArchive(t))
+	srv := serve(t, h, map[string]http.HandlerFunc{
+		cniPath:        file(cniArchive(t)),
+		nomadAssetPath: file(nomadZip(t)),
+	})
+	for _, a := range []struct {
+		name, path string
+		data       []byte
+	}{
+		{nodeconfig.CNIPluginsAsset, cniPath, cniArchive(t)},
+		{nodeconfig.NomadAsset, nomadAssetPath, nomadZip(t)},
+	} {
+		i := slices.IndexFunc(nc.Assets, func(x nodeconfig.Asset) bool { return x.Name == a.name })
+		nc.Assets[i].URLs, nc.Assets[i].SHA256 = []string{srv.URL + a.path}, sum(a.data)
+	}
+	// A fake agent with the node's certificate answers verify, and join as the seed server. The certificate and its key
+	// come in nc, as tent sends them; the CA bundle is on the machine already, as it is a group file, in the spec hash
+	// that the status golden pins.
+	ca := testCA(t)
+	cert, err := ca.IssueNode(nc.Role, nc.Region, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := serveNomadWith(t, ca, cert, nil)
+	h.DialContext = agent.Dial
+	fsys.AddFile(t, nodeconfig.CAFile, ca.Bundle(), 0o644, nodeconfig.Owner)
+	key := slices.IndexFunc(nc.Files, func(f nodeconfig.File) bool { return f.Path == nodeconfig.KeyFile })
+	nc.Files[key].Content = cert.Key.Bytes()
+	nc.Files = append(nc.Files, nodeconfig.File{
+		Path: nodeconfig.CertFile, Mode: 0o644, Owner: nodeconfig.Owner, Content: cert.Cert, PerNode: true,
+	})
+	rehash(t, nc)
 	first, err := nodeup.Up(t.Context(), h, nc, nodeup.Phases(e))
 	if err != nil {
 		t.Fatal(err)
@@ -619,6 +641,7 @@ func TestUpWithThePhases(t *testing.T) {
 		"timedatectl show -p CanNTP -p NTP",
 		firewalldActive, firewalldEnabled, listTables, ufwEnabled,
 		dpkgQuery, dockerEnabled, dockerActive,
+		"systemctl show -p NeedDaemonReload --value nomad.service", "systemctl is-active nomad.service",
 		"systemctl is-enabled tent-node.service", "systemctl is-enabled tent-node-join.timer",
 	}
 	if diff := cmp.Diff(want, r.Commands()[commands:]); diff != "" {
@@ -635,10 +658,8 @@ func TestUpWithThePhases(t *testing.T) {
 	for _, p := range third.Phases {
 		status := nodeup.Unchanged
 		switch p.Name {
-		case "hostfirewall":
+		case "hostfirewall", "nomad":
 			status = nodeup.Done
-		case "join", "nomad":
-			status = nodeup.Skipped
 		}
 		if p.Status != status {
 			t.Errorf("phase %s is %s after the reboot, want %s", p.Name, p.Status, status)
@@ -647,15 +668,24 @@ func TestUpWithThePhases(t *testing.T) {
 	if diff := cmp.Diff([]string{nodeup.StatusFile}, fsys.Changes()[changes:]); diff != "" {
 		t.Errorf("the run after the reboot changed files (-want +got):\n%s", diff)
 	}
-	// Docker's start job is still queued: runtime waits for it.
+	// Docker's start job is still queued: runtime waits for it. Nomad is never enabled, so up starts it again.
 	i := slices.Index(want, listTables) + 1
 	want = slices.Insert(want, i, loadTent)
 	i = slices.Index(want, dockerActive) + 1
 	want = slices.Insert(want, i, dockerJob, dockerStart)
+	i = slices.Index(want, "systemctl is-active nomad.service") + 1
+	want = slices.Insert(want, i, "systemctl start nomad.service")
 	if diff := cmp.Diff(want, r.Commands()[commands:]); diff != "" {
 		t.Errorf("the commands after the reboot (-want +got):\n%s", diff)
 	}
-	if got := srv.Requests(); len(got) != 1 {
-		t.Errorf("the runs asked for %q, want the CNI plugins once", got)
+	wantDownloads := []string{cniPath, nomadAssetPath}
+	if got := srv.Requests(); !cmp.Equal(got, wantDownloads) {
+		t.Errorf("the runs asked for %q, want %q, each once", got, wantDownloads)
+	}
+	// verify asks the agent on every run, and join once the node's certificate is on the machine.
+	checks := []string{"/v1/status/leader?stale", "/v1/agent/health?type=client"}
+	peers := []string{"/v1/status/peers?stale"}
+	if diff := cmp.Diff(slices.Concat(checks, peers, checks, peers, checks), agent.Requests()); diff != "" {
+		t.Errorf("the agent saw (-want +got):\n%s", diff)
 	}
 }

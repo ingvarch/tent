@@ -2,6 +2,7 @@ package nodeuptest
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"encoding/binary"
 	"hash/crc32"
@@ -77,4 +78,49 @@ func storedGzip(data []byte) []byte {
 	}
 	out = binary.LittleEndian.AppendUint32(out, crc32.ChecksumIEEE(data))
 	return binary.LittleEndian.AppendUint32(out, uint32(len(data)))
+}
+
+// ZipFile is an entry of an archive that Zip makes: its header and its content.
+type ZipFile struct {
+	Header  zip.FileHeader
+	Content []byte
+}
+
+// Zip returns a zip of the files, in order, each stored uncompressed with the CRC-32 and the size of its content. An
+// entry whose header declares an uncompressed size keeps it, as a zip that lies about the size does.
+func Zip(t testing.TB, files ...ZipFile) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, f := range files {
+		h := f.Header
+		h.Method = zip.Store
+		h.CRC32 = crc32.ChecksumIEEE(f.Content)
+		h.CompressedSize64 = uint64(len(f.Content))
+		if h.UncompressedSize64 == 0 {
+			h.UncompressedSize64 = h.CompressedSize64
+		}
+		w, err := zw.CreateRaw(&h)
+		if err != nil {
+			t.Fatalf("nodeuptest: zip %s: %v", h.Name, err)
+		}
+		if _, err := w.Write(f.Content); err != nil {
+			t.Fatalf("nodeuptest: zip %s: %v", h.Name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// NomadZip returns a zip as HashiCorp releases Nomad: LICENSE.txt with mode 0644 first, then nomad with mode 0755,
+// which holds binary.
+func NomadZip(t testing.TB, binary []byte) []byte {
+	t.Helper()
+	license := zip.FileHeader{Name: "LICENSE.txt"}
+	license.SetMode(0o644)
+	nomad := zip.FileHeader{Name: "nomad"}
+	nomad.SetMode(0o755)
+	return Zip(t, ZipFile{license, []byte("Business Source License 1.1\n")}, ZipFile{nomad, binary})
 }

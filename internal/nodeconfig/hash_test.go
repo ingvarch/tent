@@ -128,6 +128,8 @@ func TestSpecHashKeeps(t *testing.T) {
 		{"name", func(_ *testing.T, c *nc) { c.Name = "prod-core-4" }},
 		// A cluster never changes its provider, so the provider need not mark nodes out of date.
 		{"provider", func(_ *testing.T, c *nc) { c.Provider = v1alpha1.ProviderHetzner }},
+		// The region is in the hash through 00-tent.hcl already.
+		{"region", func(_ *testing.T, c *nc) { c.Region = "europe" }},
 		{"stored spec hash", func(_ *testing.T, c *nc) { c.SpecHash = "0123456789abcdef" }},
 		{"rule order", func(_ *testing.T, c *nc) { slices.Reverse(c.Firewall.Rules) }},
 		{"source order", func(t *testing.T, c *nc) {

@@ -90,6 +90,15 @@ func TestGet(t *testing.T) {
 		})
 	}
 
+	t.Run("own limit", func(t *testing.T) {
+		data, err := opts.getUpTo(t.Context(), srv.URL+"/ok", 5)
+		if err != nil || string(data) != "hello" {
+			t.Errorf("getUpTo /ok, 5 = %q, %v; want hello", data, err)
+		}
+		_, err = opts.getUpTo(t.Context(), srv.URL+"/ok", 4)
+		wantErr(t, err, srv.URL+"/ok", "larger than 4 bytes")
+	})
+
 	t.Run("cancelled", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()

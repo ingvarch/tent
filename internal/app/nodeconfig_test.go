@@ -155,6 +155,21 @@ const (
 	sum2        = "2222222222222222222222222222222222222222222222222222222222222222"
 )
 
+// The assets that resolveAssets finds for tent of a development build: Nomad 2.0.7 with the sha256 of its zip in
+// HashiCorp's signed SHA256SUMS, and the tent-node at a development build's URL with its sha256.
+const (
+	signedNomadSum = "4c9b8a0850d6fd9caadbbab09b3e6fdf8b77aa777729543c70c61b85acca68c1"
+	devTentVersion = "v0.3.0-4-gabc1234"
+	devTentURL     = "https://tent-dev.s3.example.com/tent-node_linux_amd64?X-Amz-Signature=0123"
+	devTentSum     = "4444444444444444444444444444444444444444444444444444444444444444"
+)
+
+var (
+	signedNomad = nodeconfig.Asset{Name: "nomad", Version: "2.0.7", URLs: []string{nomadZipURL}, SHA256: signedNomadSum}
+	devTentNode = nodeconfig.Asset{Name: "tent-node", Version: devTentVersion, URLs: []string{devTentURL},
+		SHA256: devTentSum}
+)
+
 // testCA makes the CA of the test cluster.
 func testCA(t *testing.T) *pki.CA {
 	t.Helper()
@@ -323,13 +338,15 @@ func TestGroupTemplates(t *testing.T) {
 				string(fileAt(t, tmpl.Files, tentFile).Content)); diff != "" {
 				t.Errorf("00-tent.hcl (-want +got):\n%s", diff)
 			}
-			if diff := cmp.Diff(viewOf(append(agentFiles, caFile)), viewOf(tmpl.Files)); diff != "" {
+			if diff := cmp.Diff(viewOf(append(agentFiles, caFile, nodeconfig.RenderNomadService())),
+				viewOf(tmpl.Files)); diff != "" {
 				t.Errorf("Files (-want +got):\n%s", diff)
 			}
 			tmpl.Files = nil
 			want := nodeconfig.NodeConfig{
 				APIVersion: v1alpha1.APIVersion, Kind: nodeconfig.Kind, Cluster: "prod",
-				Provider: v1alpha1.ProviderVultr, NodeGroup: tc.group, Role: tc.agent.Role, Assets: tc.assets,
+				Provider: v1alpha1.ProviderVultr, NodeGroup: tc.group, Role: tc.agent.Role, Region: "eu",
+				Assets: tc.assets,
 				Join:   nodeconfig.Join{Strategy: nodeconfig.JoinSeedAndRefresh, RefreshInterval: time.Minute},
 				System: tc.system,
 				Firewall: nodeconfig.HostFirewall{
@@ -410,7 +427,7 @@ func TestGroupTemplatesProvider(t *testing.T) {
 // TestHostFirewall checks the host firewall of each role in a cluster whose private network is 10.10.0.0/16: the
 // rules that the templates of the test cluster carry, and the metadata service blocked.
 func TestHostFirewall(t *testing.T) {
-	cidr := netip.MustParsePrefix("10.10.0.0/16")
+	intra := model.IntraRules(netip.MustParsePrefix("10.10.0.0/16"))
 	for _, tc := range []struct {
 		role  v1alpha1.Role
 		rules []nodeconfig.Rule
@@ -421,8 +438,8 @@ func TestHostFirewall(t *testing.T) {
 	} {
 		t.Run(string(tc.role), func(t *testing.T) {
 			want := nodeconfig.HostFirewall{Rules: tc.rules, BlockMetadata: netip.MustParseAddr("169.254.169.254")}
-			if diff := cmp.Diff(want, HostFirewall(cidr, tc.role), equateNetip); diff != "" {
-				t.Errorf("HostFirewall (-want +got):\n%s", diff)
+			if diff := cmp.Diff(want, hostFirewall(intra, tc.role), equateNetip); diff != "" {
+				t.Errorf("hostFirewall (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -451,8 +468,8 @@ func TestNodeSystem(t *testing.T) {
 		{"combined with every driver", v1alpha1.RoleCombined, nil, withDocker},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if diff := cmp.Diff(tc.want, NodeSystem(tc.role, tc.drivers)); diff != "" {
-				t.Errorf("NodeSystem (-want +got):\n%s", diff)
+			if diff := cmp.Diff(tc.want, nodeSystem(tc.role, tc.drivers)); diff != "" {
+				t.Errorf("nodeSystem (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -744,11 +761,8 @@ func nomadReleases(t *testing.T) sites {
 
 func TestResolveAssets(t *testing.T) {
 	const (
-		release  = "https://github.com/ingvarch/tent/releases/download/v0.3.0/"
-		nodeSum  = "3333333333333333333333333333333333333333333333333333333333333333"
-		devURL   = "https://tent-dev.s3.example.com/tent-node_linux_amd64?X-Amz-Signature=0123"
-		devSum   = "4444444444444444444444444444444444444444444444444444444444444444"
-		nomadSum = "4c9b8a0850d6fd9caadbbab09b3e6fdf8b77aa777729543c70c61b85acca68c1"
+		release = "https://github.com/ingvarch/tent/releases/download/v0.3.0/"
+		nodeSum = "3333333333333333333333333333333333333333333333333333333333333333"
 	)
 	stable, err := channels.Load("stable")
 	if err != nil {
@@ -756,7 +770,6 @@ func TestResolveAssets(t *testing.T) {
 	}
 	withRelease := nomadReleases(t)
 	withRelease[release+"checksums.txt"] = nodeSum + "  tent-node_linux_amd64\n"
-	nomad := nodeconfig.Asset{Name: "nomad", Version: "2.0.7", URLs: []string{nomadZipURL}, SHA256: nomadSum}
 	cni := nodeconfig.Asset{Name: "cni-plugins", Version: "1.9.1", URLs: []string{cniURL}, SHA256: stableCNI}
 	for _, tc := range []struct {
 		name    string
@@ -769,19 +782,19 @@ func TestResolveAssets(t *testing.T) {
 			version: "v0.3.0",
 			// A release ignores the variables of a development build.
 			opts: assets.Options{
-				Client: &http.Client{Transport: withRelease}, DevURL: devURL, DevSHA256: devSum, Now: at(testNow),
+				Client: &http.Client{Transport: withRelease}, DevURL: devTentURL, DevSHA256: devTentSum, Now: at(testNow),
 			},
-			want: []nodeconfig.Asset{nomad, cni, {Name: "tent-node", Version: "v0.3.0",
+			want: []nodeconfig.Asset{signedNomad, cni, {Name: "tent-node", Version: "v0.3.0",
 				URLs: []string{release + "tent-node_linux_amd64"}, SHA256: nodeSum}},
 		},
 		{
 			name:    "a development build of tent",
-			version: "v0.3.0-4-gabc1234",
+			version: devTentVersion,
 			opts: assets.Options{
-				Client: &http.Client{Transport: nomadReleases(t)}, DevURL: devURL, DevSHA256: devSum, Now: at(testNow),
+				Client: &http.Client{Transport: nomadReleases(t)}, DevURL: devTentURL, DevSHA256: devTentSum,
+				Now: at(testNow),
 			},
-			want: []nodeconfig.Asset{nomad, cni, {Name: "tent-node", Version: "v0.3.0-4-gabc1234",
-				URLs: []string{devURL}, SHA256: devSum}},
+			want: []nodeconfig.Asset{signedNomad, cni, devTentNode},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -973,9 +986,7 @@ func TestNodeConfigUserDataFits(t *testing.T) {
 	intro := introToken(2048)
 	wantIncompressible(t, "the intro token", intro)
 	wantIncompressible(t, "the presigned URL", []byte(presigned))
-	nomad := assets.Asset{Name: "nomad", Version: "2.0.7", URLs: []string{nomadZipURL},
-		SHA256: "4c9b8a0850d6fd9caadbbab09b3e6fdf8b77aa777729543c70c61b85acca68c1"}
-	all := nodeAssets{nomad: nodeconfig.Asset(nomad), cni: nodeconfig.Asset(cni), tentNode: nodeconfig.Asset(tentNode)}
+	all := nodeAssets{nomad: signedNomad, cni: nodeconfig.Asset(cni), tentNode: nodeconfig.Asset(tentNode)}
 
 	m, c, groups := nodeSpecs(t, nodeClusterYAML, nodeCombinedYAML)
 	c.Spec.Nomad.ExtraConfig = v1alpha1.ExtraConfig{Server: statedExtraServer, Client: statedExtraClient}
@@ -1059,4 +1070,149 @@ func payloadOf(t *testing.T, userData []byte) []byte {
 		t.Fatalf("read the payload: %v", err)
 	}
 	return node
+}
+
+// logged answers from its sites and records the URLs that it is asked for.
+type logged struct {
+	sites sites
+	urls  []string
+}
+
+func (l *logged) RoundTrip(r *http.Request) (*http.Response, error) {
+	l.urls = append(l.urls, r.URL.String())
+	return l.sites.RoundTrip(r)
+}
+
+// newNode returns the new node called name of the group of the specs in docs, with the test CA's certificate for its
+// role, three seeds and intro, and the assets of the stable channel, HashiCorp's signed release files and a
+// development build's tent-node, which l serves.
+func newNode(t *testing.T, l *logged, ca *pki.CA, gossip pki.Secret, group, name string, intro pki.Secret,
+	docs ...string,
+) NewNode {
+	t.Helper()
+	_, c, groups := nodeSpecs(t, docs...)
+	stable, err := channels.Load("stable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	role := v1alpha1.RoleClient
+	for _, g := range groups {
+		if g.Metadata.Name == group {
+			role = g.Spec.Role
+		}
+	}
+	cert, err := ca.IssueNode(role, "eu", testNow)
+	if err != nil {
+		t.Fatalf("IssueNode: %v", err)
+	}
+	return NewNode{
+		Specs:   spec.Objects{Cluster: c, NodeGroups: groups},
+		Channel: stable,
+		Assets: assets.Options{Client: &http.Client{Transport: l}, DevURL: devTentURL, DevSHA256: devTentSum,
+			Now: at(testNow)},
+		TentVersion: devTentVersion, Arch: "amd64",
+		Gossip: gossip, CABundle: ca.Bundle(),
+		Group: group, Name: name, Zone: "ams", BootstrapExpect: 3, Cert: cert, Seed: seeds(3), Intro: intro,
+	}
+}
+
+// TestNodeConfigOf checks the config of a new node of each role: what tent's own steps make of the node's specs,
+// secrets and parts, with the assets that the channel and the signed release files give.
+func TestNodeConfigOf(t *testing.T) {
+	ca, gossip, intro := testCA(t), pki.NewGossipKey(), introToken(512)
+	all := []string{nodeClusterYAML, nodeServersYAML, nodeWorkersYAML}
+	for _, tc := range []struct {
+		name, group, node string
+		docs              []string
+		intro             pki.Secret
+	}{
+		{"server", "servers", "prod-servers-0", all, nil},
+		{"client", "workers", "prod-workers-1", all, intro},
+		{"combined", "dev", "prod-dev-2", []string{nodeClusterYAML, nodeCombinedYAML}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := newNode(t, &logged{sites: nomadReleases(t)}, ca, gossip, tc.group, tc.node, tc.intro, tc.docs...)
+			got, err := NodeConfigOf(t.Context(), n)
+			if err != nil {
+				t.Fatalf("NodeConfigOf: %v", err)
+			}
+			m, c, groups := nodeSpecs(t, tc.docs...)
+			downloads, err := resolveAssets(t.Context(), n.Assets, n.Channel, "2.0.7", devTentVersion, "amd64")
+			if err != nil {
+				t.Fatalf("resolveAssets: %v", err)
+			}
+			tmpls, err := groupTemplates(m, c, groups, downloads, gossip, ca.Bundle())
+			if err != nil {
+				t.Fatalf("groupTemplates: %v", err)
+			}
+			want, err := nodeConfig(tmpls[tc.group], tc.node, "ams", 3, n.Cert, seeds(3), tc.intro)
+			if err != nil {
+				t.Fatalf("nodeConfig: %v", err)
+			}
+			if diff := cmp.Diff(viewOf(want.Files), viewOf(got.Files)); diff != "" {
+				t.Errorf("Files (-want +got):\n%s", diff)
+			}
+			// The signed SHA256SUMS of Nomad 2.0.7 give its sha256; the stable channel the CNI plugins'.
+			wantAssets := []nodeconfig.Asset{signedNomad, devTentNode}
+			if tc.group != "servers" {
+				wantAssets = []nodeconfig.Asset{signedNomad, testCNI, devTentNode}
+			}
+			// Asset prints its URLs without their query: compare the URLs themselves.
+			asset := cmp.Transformer("asset", func(a nodeconfig.Asset) []string {
+				return append([]string{a.Name, a.Version, a.SHA256}, a.URLs...)
+			})
+			if diff := cmp.Diff(wantAssets, got.Assets, asset); diff != "" {
+				t.Errorf("Assets (-want +got):\n%s", diff)
+			}
+			want.Files, got.Files = nil, nil
+			if diff := cmp.Diff(want, got, equateNetip, asset); diff != "" {
+				t.Errorf("node config (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestNodeConfigOfErrors(t *testing.T) {
+	ca, gossip := testCA(t), pki.NewGossipKey()
+	const sums = "https://releases.hashicorp.com/nomad/2.0.6/nomad_2.0.6_SHA256SUMS"
+	for _, tc := range []struct {
+		name    string
+		edit    func(n *NewNode)
+		want    string // the start of the error
+		fetches bool   // whether the error comes after a request
+	}{
+		{"no cluster", func(n *NewNode) { n.Specs.Cluster = nil }, "no cluster to model", false},
+		{
+			"no Nomad version", func(n *NewNode) { n.Specs.Cluster.Spec.Nomad.Version = "" },
+			"cluster prod: spec.nomad.version is not set", false,
+		},
+		{"a group that the specs lack", func(n *NewNode) { n.Group = "nope" }, "node group nope: not in the specs", false},
+		// The version comes from the specs.
+		{
+			"a Nomad version without a release", func(n *NewNode) { n.Specs.Cluster.Spec.Nomad.Version = "2.0.6" },
+			"find Nomad 2.0.6: get " + sums + ": 404 Not Found", true,
+		},
+		{"no gossip key", func(n *NewNode) { n.Gossip = nil }, "node group servers: nomad agent: no gossip key", true},
+		{
+			"no certificate", func(n *NewNode) { n.Cert = pki.Certificate{} },
+			"node prod-servers-0: no certificate or key", true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := &logged{sites: nomadReleases(t)}
+			n := newNode(t, l, ca, gossip, "servers", "prod-servers-0", nil, nodeClusterYAML, nodeServersYAML,
+				nodeWorkersYAML)
+			tc.edit(&n)
+			nc, err := NodeConfigOf(t.Context(), n)
+			if err == nil || !strings.HasPrefix(err.Error(), tc.want) {
+				t.Errorf("NodeConfigOf() error = %v, want one that starts with %s", err, tc.want)
+			}
+			if nc != nil {
+				t.Error("NodeConfigOf() returned a config with the error")
+			}
+			if fetched := len(l.urls) > 0; fetched != tc.fetches {
+				t.Errorf("NodeConfigOf() asked for %q; want requests: %t", l.urls, tc.fetches)
+			}
+		})
+	}
 }

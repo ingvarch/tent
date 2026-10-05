@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -79,6 +80,61 @@ func TestFSRecordsChanges(t *testing.T) {
 	}
 	if a, _ := f.Entry("/etc/tent/a"); a.Owner != "nomad:nomad" {
 		t.Errorf("the owner of /etc/tent/a is %s, want nomad:nomad", a.Owner)
+	}
+}
+
+// TestFSRemovesStaleTemporaryFiles checks that a write removes the regular files that a killed write of the same
+// file left beside it, as nodeup.OSFS does, and records each removal.
+func TestFSRemovesStaleTemporaryFiles(t *testing.T) {
+	for name, writeA := range map[string]func(f *nodeuptest.FS) (bool, error){
+		"WriteFile": func(f *nodeuptest.FS) (bool, error) {
+			return f.WriteFile("/d/a.bin", []byte("a\n"), 0o644, "root:root")
+		},
+		"WriteStream": func(f *nodeuptest.FS) (bool, error) {
+			return f.WriteStream("/d/a.bin", strings.NewReader("a\n"), 0o644, "root:root")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := nodeuptest.NewFS()
+			for _, p := range []string{"/d/.a.bin.tmp7", "/d/.a.bin.tmp123456", "/d/.b.bin.tmp1", "/d/a.bin.tmp1"} {
+				f.AddFile(t, p, []byte("half a binary"), 0o600, "root:root")
+			}
+			f.AddDir(t, "/d/.a.bin.tmpdir", 0o755, "root:root")
+			if changed, err := writeA(f); err != nil || !changed {
+				t.Fatalf("%s: %v, %v; want a change", name, changed, err)
+			}
+			want := []string{"/d/.a.bin.tmp123456", "/d/.a.bin.tmp7", "/d/a.bin"}
+			if diff := cmp.Diff(want, f.Changes()); diff != "" {
+				t.Errorf("Changes() (-want +got):\n%s", diff)
+			}
+			want = []string{"/", "/d", "/d/.a.bin.tmpdir", "/d/.b.bin.tmp1", "/d/a.bin", "/d/a.bin.tmp1"}
+			if diff := cmp.Diff(want, f.Paths()); diff != "" {
+				t.Errorf("Paths() (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestFSReads checks that the fake records the files that ReadFile reads whole, and not those that Open opens.
+func TestFSReads(t *testing.T) {
+	f := nodeuptest.NewFS()
+	f.AddFile(t, "/a", []byte("a"), 0o644, "root:root")
+	f.AddFile(t, "/b", []byte("b"), 0o644, "root:root")
+	if _, err := f.ReadFile("/a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.ReadFile("/missing"); err == nil {
+		t.Fatal("ReadFile of a missing file: no error")
+	}
+	file, err := f.Open("/b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff([]string{"/a"}, f.Reads()); diff != "" {
+		t.Errorf("Reads() (-want +got):\n%s", diff)
 	}
 }
 

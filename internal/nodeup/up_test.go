@@ -79,6 +79,7 @@ func sample(t *testing.T) *nodeconfig.NodeConfig {
 		NodeGroup:  "core",
 		Name:       "prod-core-0",
 		Role:       v1alpha1.RoleCombined,
+		Region:     "global",
 		Files: []nodeconfig.File{
 			{Path: keyPath, Mode: 0o600, Owner: nodeconfig.Owner, Content: nodeKey, PerNode: true, Secret: true},
 			{Path: tentPath, Mode: 0o644, Owner: nodeconfig.Owner, Content: []byte("region = \"global\"\n")},
@@ -177,7 +178,7 @@ func TestUpRunsThePhasesInOrder(t *testing.T) {
 	report, err := nodeup.Up(t.Context(), h, nc, []nodeup.Phase{
 		phase("preflight", &ran, nodeup.Result{Status: nodeup.Done}, nil),
 		phase("system", &ran, nodeup.Result{Status: nodeup.Unchanged}, nil),
-		phase("cni", &ran, nodeup.Result{Status: nodeup.Skipped, Reason: "not built yet"}, nil),
+		phase("cni", &ran, nodeup.Result{Status: nodeup.Skipped, Reason: "servers run no workloads"}, nil),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -190,7 +191,7 @@ func TestUpRunsThePhasesInOrder(t *testing.T) {
 		Phases: []nodeup.PhaseResult{
 			{Name: "preflight", Result: nodeup.Result{Status: nodeup.Done}},
 			{Name: "system", Result: nodeup.Result{Status: nodeup.Unchanged}},
-			{Name: "cni", Result: nodeup.Result{Status: nodeup.Skipped, Reason: "not built yet"}},
+			{Name: "cni", Result: nodeup.Result{Status: nodeup.Skipped, Reason: "servers run no workloads"}},
 		},
 	}
 	if diff := cmp.Diff(want, report, equateAddrs); diff != "" {

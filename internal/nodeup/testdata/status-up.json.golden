@@ -1,6 +1,6 @@
 {
   "version": "v0.3.0",
-  "specHash": "ace7c719de320307",
+  "specHash": "9c7cfc92b64625d6",
   "started": "2026-09-29T12:00:01Z",
   "finished": "2026-09-29T12:00:02Z",
   "instance": {
@@ -31,13 +31,11 @@
     },
     {
       "name": "join",
-      "status": "skipped",
-      "reason": "not built yet"
+      "status": "done"
     },
     {
       "name": "nomad",
-      "status": "skipped",
-      "reason": "not built yet"
+      "status": "done"
     },
     {
       "name": "verify",

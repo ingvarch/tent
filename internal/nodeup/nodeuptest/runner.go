@@ -11,12 +11,14 @@ import (
 )
 
 // Runner is a nodeup.Runner that records the commands it runs and answers them from a script: a command runs the
-// Answer that On gave it, and one without an answer succeeds with no output. Like nodeup.ExecRunner, it names the
-// command in its errors, does not run a command whose context has ended, and returns the context's error when the
-// context ends while the command runs. The zero Runner has no answers. It is safe for concurrent use.
+// Answer that Next queued for it, or else the one that On gave it, and one without an answer succeeds with no output.
+// Like nodeup.ExecRunner, it names the command in its errors, does not run a command whose context has ended, and
+// returns the context's error when the context ends while the command runs. The zero Runner has no answers. It is
+// safe for concurrent use.
 type Runner struct {
 	mu       sync.Mutex
-	answers  map[string]Answer // by command
+	answers  map[string]Answer   // by command
+	next     map[string][]Answer // queued for the next runs, by command
 	commands []string
 }
 
@@ -50,6 +52,16 @@ func (r *Runner) On(command string, a Answer) {
 	r.answers[command] = a
 }
 
+// Next makes the next run of the command run a, once, before the answer that On gave it. Answers queue in order.
+func (r *Runner) Next(command string, a Answer) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.next == nil {
+		r.next = map[string][]Answer{}
+	}
+	r.next[command] = append(r.next[command], a)
+}
+
 // Commands returns the commands that ran, in order, as nodeup.CommandLine writes them.
 func (r *Runner) Commands() []string {
 	r.mu.Lock()
@@ -66,6 +78,9 @@ func (r *Runner) Run(ctx context.Context, name string, args ...string) ([]byte, 
 	r.mu.Lock()
 	r.commands = append(r.commands, line)
 	answer := r.answers[line]
+	if queued := r.next[line]; len(queued) > 0 {
+		answer, r.next[line] = queued[0], queued[1:]
+	}
 	r.mu.Unlock()
 	if answer == nil {
 		return nil, nil

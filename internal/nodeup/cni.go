@@ -45,9 +45,21 @@ func cni(ctx context.Context, h *Host, nc *nodeconfig.NodeConfig) (Result, error
 	}
 	asset := nc.Assets[i]
 	var archive []byte
-	fetchArchive := func(ctx context.Context, h *Host, _ *nodeconfig.NodeConfig) (changed bool, err error) {
-		archive, changed, err = fetch(ctx, h, asset)
-		return changed, err
+	// The archive is read whole: each of its plugins is checked against the file on disk. The bytes read are checked
+	// again, as the file may have changed since fetch checked it.
+	fetchArchive := func(ctx context.Context, h *Host, _ *nodeconfig.NodeConfig) (bool, error) {
+		file, changed, err := fetch(ctx, h, asset)
+		if err != nil {
+			return false, err
+		}
+		if archive, err = h.FS.ReadFile(file); err != nil {
+			return false, err
+		}
+		if got := sha256Hex(archive); got != asset.SHA256 {
+			return false, fmt.Errorf("read %s %s from the cache: the sha256 is %s, not %s", asset.Name, asset.Version,
+				got, asset.SHA256)
+		}
+		return changed, nil
 	}
 	unpack := func(_ context.Context, h *Host, _ *nodeconfig.NodeConfig) (bool, error) {
 		changed, err := unpackPlugins(h.FS, archive)

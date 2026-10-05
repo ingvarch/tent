@@ -466,7 +466,8 @@ func TestPrintedValuesAreWhatTentAndNodesAccept(t *testing.T) {
 	// NodeConfig and the user data take the asset.
 	nc := &nodeconfig.NodeConfig{
 		APIVersion: v1alpha1.APIVersion, Kind: nodeconfig.Kind, Cluster: "dev", Provider: v1alpha1.ProviderVultr,
-		NodeGroup: "clients", Name: "dev-clients-1", Role: v1alpha1.RoleClient, Assets: []nodeconfig.Asset{nodeconfig.Asset(a)},
+		NodeGroup: "clients", Name: "dev-clients-1", Role: v1alpha1.RoleClient, Region: "global",
+		Assets:   []nodeconfig.Asset{nodeconfig.Asset(a)},
 		Join:     nodeconfig.Join{Strategy: nodeconfig.JoinSeedAndRefresh, RefreshInterval: time.Minute},
 		Firewall: nodeconfig.HostFirewall{BlockMetadata: netip.MustParseAddr("169.254.169.254")},
 	}

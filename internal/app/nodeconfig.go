@@ -16,6 +16,7 @@ import (
 	"github.com/ingvarch/tent/internal/model"
 	"github.com/ingvarch/tent/internal/nodeconfig"
 	"github.com/ingvarch/tent/internal/pki"
+	"github.com/ingvarch/tent/internal/spec"
 )
 
 // joinRefresh is how often tent-node asks the servers for their peers.
@@ -163,6 +164,8 @@ func groupTemplates(m *model.Cluster, c *v1alpha1.Cluster, groups []*v1alpha1.No
 		// The CA bundle holds no secret; it is in the spec hash, so a new CA marks every node out of date.
 		files = append(files,
 			nodeconfig.File{Path: nodeconfig.CAFile, Mode: 0o644, Owner: nodeconfig.Owner, Content: caBundle})
+		// The unit is group-level too: a change of it marks every node of the group out of date.
+		files = append(files, nodeconfig.RenderNomadService())
 		tmpl := nodeconfig.NodeConfig{
 			APIVersion: v1alpha1.APIVersion,
 			Kind:       nodeconfig.Kind,
@@ -170,10 +173,11 @@ func groupTemplates(m *model.Cluster, c *v1alpha1.Cluster, groups []*v1alpha1.No
 			Provider:   m.Provider,
 			NodeGroup:  g.Name,
 			Role:       g.Role,
+			Region:     n.Region,
 			Assets:     downloads.forRole(g.Role),
 			Files:      files,
 			Join:       nodeconfig.Join{Strategy: strategy, RefreshInterval: joinRefresh},
-			System:     NodeSystem(g.Role, gn.Drivers),
+			System:     nodeSystem(g.Role, gn.Drivers),
 			Firewall:   hostFirewall(m.Intra, g.Role),
 		}
 		tmpl.SpecHash = nodeconfig.SpecHash(&tmpl)
@@ -190,12 +194,12 @@ func joinStrategy(j model.JoinStrategy) (string, error) {
 	return nodeconfig.JoinSeedAndRefresh, nil
 }
 
-// NodeSystem returns how a node of the role sets up its operating system. A node that runs a client loads the kernel
+// nodeSystem returns how a node of the role sets up its operating system. A node that runs a client loads the kernel
 // module of bridge networking and passes bridged traffic through the firewall, as Nomad's bridge networking needs. It
 // installs Docker, and loads the overlay module of Docker's storage, unless the group's drivers leave the docker
 // driver out; an empty list keeps all of Nomad's built-in drivers, Docker among them. A server runs no workloads and
 // needs none of it.
-func NodeSystem(role v1alpha1.Role, drivers []string) nodeconfig.System {
+func nodeSystem(role v1alpha1.Role, drivers []string) nodeconfig.System {
 	if !role.RunsClient() {
 		return nodeconfig.System{}
 	}
@@ -212,12 +216,6 @@ func NodeSystem(role v1alpha1.Role, drivers []string) nodeconfig.System {
 		s.KernelModules = append(s.KernelModules, "overlay")
 	}
 	return s
-}
-
-// HostFirewall returns the host firewall that tent gives a node of the role in a cluster whose private network is
-// cidr, as the node's group template holds it.
-func HostFirewall(cidr netip.Prefix, role v1alpha1.Role) nodeconfig.HostFirewall {
-	return hostFirewall(model.IntraRules(cidr), role)
 }
 
 // hostFirewall returns the host firewall of a node of the role: the public rules, then the rules between nodes, each
@@ -251,6 +249,63 @@ func hostFirewall(intra []model.IntraRule, role v1alpha1.Role) nodeconfig.HostFi
 		}
 	}
 	return nodeconfig.HostFirewall{Rules: rules, BlockMetadata: metadataAddr}
+}
+
+// NewNode is a node that tent is about to create, with everything that its NodeConfig is made from.
+type NewNode struct {
+	// Specs are the cluster's specs with their defaults and the Nomad version pinned, as the completed spec holds them.
+	Specs spec.Objects
+	// Channel is the cluster's release channel, which pins the CNI plugins.
+	Channel *channels.Channel
+	// Assets say where Nomad and tent-node are found. The node downloads the tent-node of tent of TentVersion, and
+	// everything for linux on Arch.
+	Assets      assets.Options
+	TentVersion string
+	Arch        string
+	// The cluster's gossip key, a secret, and its CA bundle, which holds certificates alone.
+	Gossip   pki.Secret
+	CABundle []byte
+	// The node: its group's name; its name, which is also its host name; its zone; the number of servers, which a
+	// client ignores; its certificate and key; the servers it joins first; and an intro token, which only a node that
+	// runs a client takes.
+	Group           string
+	Name            string
+	Zone            string
+	BootstrapExpect int
+	Cert            pki.Certificate
+	Seed            []netip.Addr
+	Intro           pki.Secret
+}
+
+// NodeConfigOf returns the NodeConfig of the new node n: the template of its group, with the assets that the
+// channel, the pinned Nomad version and the tent version give, and the node's own parts. It sends no request when the
+// specs lack the version or the group. Its errors are those of its steps: the specs' and the template's name the
+// cluster, when there is one, or the group; the node's parts' name the node; the assets' name the asset and the URL
+// they read.
+// update must build a node's config with the same steps, or through this function, so that what the tools that check
+// tent-node give a machine is what tent gives a node.
+func NodeConfigOf(ctx context.Context, n NewNode) (*nodeconfig.NodeConfig, error) {
+	c, groups := n.Specs.Cluster, n.Specs.NodeGroups
+	m, err := model.New(c, groups)
+	if err != nil {
+		return nil, err
+	}
+	version := c.Spec.Nomad.Version
+	if version == "" {
+		return nil, fmt.Errorf("%s: spec.nomad.version is not set", clusterLabel(m.Name))
+	}
+	if !slices.ContainsFunc(m.Groups, func(g model.NodeGroup) bool { return g.Name == n.Group }) {
+		return nil, fmt.Errorf("node group %s: not in the specs", n.Group)
+	}
+	downloads, err := resolveAssets(ctx, n.Assets, n.Channel, version, n.TentVersion, n.Arch)
+	if err != nil {
+		return nil, err
+	}
+	tmpls, err := groupTemplates(m, c, groups, downloads, n.Gossip, n.CABundle)
+	if err != nil {
+		return nil, err
+	}
+	return nodeConfig(tmpls[n.Group], n.Name, n.Zone, n.BootstrapExpect, n.Cert, n.Seed, n.Intro)
 }
 
 // nodeConfig returns the NodeConfig of the node called name in zone, from the template of its group: the template with

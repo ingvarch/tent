@@ -1,7 +1,8 @@
 # Rendered by tent. Do not edit: changes are overwritten on the next boot.
-region             = "global"
-data_dir           = "/var/lib/nomad"
-leave_on_terminate = true # leave the cluster gracefully when Nomad stops
+region               = "global"
+data_dir             = "/var/lib/nomad"
+leave_on_terminate   = true # leave the cluster gracefully when Nomad stops
+disable_update_check = true
 
 addresses {
   http = "127.0.0.1 {{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"address\" }}"
@@ -20,11 +21,6 @@ client {
   network_interface = "{{ GetPrivateInterfaces | include \"network\" \"10.64.0.0/16\" | attr \"name\" }}"
   min_dynamic_port  = 20000
   max_dynamic_port  = 32000
-
-  drain_on_shutdown {
-    deadline           = "10m"
-    ignore_system_jobs = true
-  }
 
   options {
     "driver.allowlist"     = "docker,exec"
@@ -63,6 +59,12 @@ tls {
 
   verify_server_hostname = true
   verify_https_client    = true
+}
+
+# There is no Consul: do not look for Nomad servers in it.
+consul {
+  server_auto_join = false
+  client_auto_join = false
 }
 
 telemetry {

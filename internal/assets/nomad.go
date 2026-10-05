@@ -32,6 +32,11 @@ var signatureHashes = []crypto.Hash{crypto.SHA256, crypto.SHA384, crypto.SHA512}
 // Nomad returns the Nomad release for linux on arch (amd64 or arm64) with the sha256 that nomad_<version>_SHA256SUMS
 // lists for it. The file must verify with its detached signature and HashiCorp's release key, which tent embeds.
 func Nomad(ctx context.Context, opts Options, version, arch string) (Asset, error) {
+	return nomadFor(ctx, opts, version, "linux", arch)
+}
+
+// nomadFor is Nomad for the operating system goos: nodes run linux, tests the system they run on.
+func nomadFor(ctx context.Context, opts Options, version, goos, arch string) (Asset, error) {
 	dir := releaseDir(opts.nomadURL, nomadReleases, version)
 	sumsURL := dir + "nomad_" + version + "_SHA256SUMS"
 	sigURL := sumsURL + ".sig"
@@ -51,7 +56,7 @@ func Nomad(ctx context.Context, opts Options, version, arch string) (Asset, erro
 	if err != nil {
 		return Asset{}, fmt.Errorf("verify %s with %s: %w", sumsURL, sigURL, err)
 	}
-	file := "nomad_" + version + "_linux_" + arch + ".zip"
+	file := "nomad_" + version + "_" + goos + "_" + arch + ".zip"
 	sum, err := sumOf(sumsURL, sums, file)
 	if err != nil {
 		return Asset{}, err

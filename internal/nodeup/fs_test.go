@@ -1,13 +1,17 @@
 package nodeup_test
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"os/user"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ingvarch/tent/internal/nodeup"
@@ -120,6 +124,139 @@ func TestFSWriteFile(t *testing.T) {
 	}
 }
 
+// writeStream calls WriteStream and fails t on an error or when changed is not want.
+func writeStream(t *testing.T, fsys nodeup.FS, path, data string, mode fs.FileMode, owner string, want bool) {
+	t.Helper()
+	changed, err := fsys.WriteStream(path, strings.NewReader(data), mode, owner)
+	if err != nil || changed != want {
+		t.Fatalf("WriteStream(%s, %q, %#o): changed %v, err %v; want changed %v", path, data, mode, changed, err, want)
+	}
+}
+
+func TestFSWriteStream(t *testing.T) {
+	for _, c := range filesystems(t) {
+		t.Run(c.name, func(t *testing.T) {
+			writeStream(t, c.fs, "/a.bin", "one\n", 0o755, c.owner, true)
+			wantFile(t, c, "/a.bin", "one\n", 0o755)
+			writeStream(t, c.fs, "/a.bin", "one\n", 0o755, c.owner, false)
+			writeStream(t, c.fs, "/a.bin", "two\n", 0o755, c.owner, true)
+			wantFile(t, c, "/a.bin", "two\n", 0o755)
+			if c.meta {
+				writeStream(t, c.fs, "/a.bin", "two\n", 0o700, c.owner, true)
+				wantFile(t, c, "/a.bin", "two\n", 0o700)
+				writeStream(t, c.fs, "/a.bin", "two\n", 0o700, c.owner, false)
+			}
+			// A failed read leaves the file as it was.
+			write, err := c.fs.WriteStream("/a.bin", failReader{}, 0o755, c.owner)
+			if err == nil || write {
+				t.Errorf("WriteStream with a failing reader: changed %v, err %v; want false and an error", write, err)
+			}
+			wantFile(t, c, "/a.bin", "two\n", 0o700)
+		})
+	}
+}
+
+// sha returns the sha256 of data.
+func sha(data string) []byte {
+	sum := sha256.Sum256([]byte(data))
+	return sum[:]
+}
+
+// hasContent calls HasContent for data and fails t on an error.
+func hasContent(t *testing.T, fsys nodeup.FS, path, data string, mode fs.FileMode, owner string) bool {
+	t.Helper()
+	has, err := fsys.HasContent(path, int64(len(data)), sha(data), mode, owner)
+	if err != nil {
+		t.Fatalf("HasContent(%s, %q, %#o): %v", path, data, mode, err)
+	}
+	return has
+}
+
+func TestFSHasContent(t *testing.T) {
+	for _, c := range filesystems(t) {
+		t.Run(c.name, func(t *testing.T) {
+			if hasContent(t, c.fs, "/a.bin", "one\n", 0o755, c.owner) {
+				t.Error("a missing file has the content")
+			}
+			writeStream(t, c.fs, "/a.bin", "one\n", 0o755, c.owner, true)
+			if !hasContent(t, c.fs, "/a.bin", "one\n", 0o755, c.owner) {
+				t.Error("the written file does not have its content")
+			}
+			for _, other := range []string{"two\n", "one", ""} {
+				if hasContent(t, c.fs, "/a.bin", other, 0o755, c.owner) {
+					t.Errorf("the file has the content %q", other)
+				}
+			}
+			if c.meta && hasContent(t, c.fs, "/a.bin", "one\n", 0o700, c.owner) {
+				t.Error("the file has another mode")
+			}
+			ensureDir(t, c.fs, "/d", 0o755, c.owner, true)
+			if _, err := c.fs.HasContent("/d", 0, sha(""), 0o755, c.owner); err == nil {
+				t.Error("HasContent of a directory: no error")
+			}
+		})
+	}
+}
+
+// TestFSWriteStreamFromItself checks that a file can be written again from its own content, which Open reads as a
+// stream, to give it another mode.
+func TestFSWriteStreamFromItself(t *testing.T) {
+	for _, c := range filesystems(t) {
+		t.Run(c.name, func(t *testing.T) {
+			write(t, c.fs, "/a.zip", "0123456789", 0o644, c.owner, true)
+			f, err := c.fs.Open("/a.zip")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = f.Close() }()
+			fi, err := f.Stat()
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed, err := c.fs.WriteStream("/a.zip", io.NewSectionReader(f, 0, fi.Size()), 0o600, c.owner)
+			if err != nil || changed != c.meta {
+				t.Fatalf("WriteStream from itself: changed %v, %v; want changed %v", changed, err, c.meta)
+			}
+			wantFile(t, c, "/a.zip", "0123456789", 0o600)
+		})
+	}
+}
+
+func TestFSOpen(t *testing.T) {
+	for _, c := range filesystems(t) {
+		t.Run(c.name, func(t *testing.T) {
+			write(t, c.fs, "/a.zip", "0123456789", 0o600, c.owner, true)
+			f, err := c.fs.Open("/a.zip")
+			if err != nil {
+				t.Fatal(err)
+			}
+			buf := make([]byte, 4)
+			n, err := f.ReadAt(buf, 3)
+			fi, statErr := f.Stat()
+			if err != nil || string(buf[:n]) != "3456" || statErr != nil || fi.Size() != 10 {
+				t.Errorf("ReadAt(3) = %q, %v; Stat = %v, %v; want 3456 of a file of 10 bytes", buf[:n], err, fi,
+					statErr)
+			}
+			if err := f.Close(); err != nil {
+				t.Errorf("Close: %v", err)
+			}
+			if _, err := c.fs.Open("/missing"); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("Open of a missing file: %v, want an error that matches fs.ErrNotExist", err)
+			}
+			ensureDir(t, c.fs, "/d", 0o755, c.owner, true)
+			if f, err := c.fs.Open("/d"); err == nil {
+				_ = f.Close()
+				t.Error("Open of a directory: no error")
+			}
+		})
+	}
+}
+
+// failReader is a reader that fails.
+type failReader struct{}
+
+func (failReader) Read([]byte) (int, error) { return 0, errors.New("the source failed") }
+
 func TestFSEnsureDir(t *testing.T) {
 	for _, c := range filesystems(t) {
 		t.Run(c.name, func(t *testing.T) {
@@ -197,6 +334,9 @@ func TestFSRefuses(t *testing.T) {
 					return c.fs.WriteFile("/d/../a.conf", data, 0o600, c.owner)
 				}},
 				{"a file onto a directory", func() (bool, error) { return c.fs.WriteFile("/d", data, 0o600, c.owner) }},
+				{"a stream onto a directory", func() (bool, error) {
+					return c.fs.WriteStream("/d", bytes.NewReader(data), 0o600, c.owner)
+				}},
 				{"a file in a file", func() (bool, error) { return c.fs.WriteFile("/f/a.conf", data, 0o600, c.owner) }},
 				{"a mode beyond 0777", func() (bool, error) { return c.fs.WriteFile("/a", data, 0o4755, c.owner) }},
 				{"an owner without a group", func() (bool, error) { return c.fs.WriteFile("/a", data, 0o600, "root") }},
@@ -249,7 +389,17 @@ func TestOSFSReplaceLeavesNoTemporaryFile(t *testing.T) {
 	if got, err := os.ReadFile(filepath.Join(root, "a.conf")); err != nil || string(got) != "two\n" {
 		t.Errorf("the replaced file holds %q, %v; want %q", got, err, "two\n")
 	}
-	wantOnly(t, root, "a.conf")
+	// WriteStream does the same, and leaves no temporary file on the unchanged path either.
+	writeStream(t, fsys, "/b.bin", "one\n", 0o755, owner, true)
+	writeStream(t, fsys, "/b.bin", "one\n", 0o755, owner, false)
+	writeStream(t, fsys, "/b.bin", "two\n", 0o755, owner, true)
+	if got, err := os.ReadFile(filepath.Join(root, "b.bin")); err != nil || string(got) != "two\n" {
+		t.Errorf("the streamed file holds %q, %v; want %q", got, err, "two\n")
+	}
+	if _, err := fsys.WriteStream("/b.bin", failReader{}, 0o755, owner); err == nil {
+		t.Error("WriteStream with a failing reader: no error")
+	}
+	wantOnly(t, root, "a.conf", "b.bin")
 }
 
 // wantOnly fails t unless dir holds exactly the named entries: no temporary files are left.

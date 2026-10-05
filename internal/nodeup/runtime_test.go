@@ -54,10 +54,13 @@ func captureLog(h *nodeup.Host) *bytes.Buffer {
 }
 
 // warnings returns the lines of logs at the level WARN.
-func warnings(logs *bytes.Buffer) []string {
+func warnings(logs *bytes.Buffer) []string { return logLines(logs, "WARN") }
+
+// logLines returns the lines of logs at the level.
+func logLines(logs *bytes.Buffer, level string) []string {
 	var lines []string
 	for line := range strings.Lines(logs.String()) {
-		if strings.Contains(line, " level=WARN ") {
+		if strings.Contains(line, " level="+level+" ") {
 			lines = append(lines, line)
 		}
 	}
