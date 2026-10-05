@@ -246,6 +246,32 @@ func TestDeleteClusterSecrets(t *testing.T) {
 	wantPaths(t, svc.Store)
 }
 
+// nomadMarkPath is the store path of the mark that the cluster's ACL system is bootstrapped.
+const nomadMarkPath = "prod/nomad/bootstrapped"
+
+// TestDeleteClusterNomadMark deletes the bootstrap mark without force, after the node groups and before the
+// secrets, and still refuses an unknown object beside it.
+func TestDeleteClusterNomadMark(t *testing.T) {
+	svc, _ := newCluster(t)
+	put(t, svc.Store, nomadMarkPath, []byte("?"))
+	for _, p := range secretPaths {
+		put(t, svc.Store, p, []byte("?"))
+	}
+	want := slices.Concat([]string{completedPath, serversPath, workersPath, nomadMarkPath}, secretDeletes,
+		[]string{clusterPath, versionPath})
+	for _, apply := range []bool{false, true} {
+		plan, err := svc.DeleteCluster(t.Context(), "prod", apply, false)
+		wantDeletePlan(t, plan, err, nil, nil, want)
+	}
+	wantPaths(t, svc.Store)
+
+	const unknown = "prod/nomad/old"
+	put(t, svc.Store, nomadMarkPath, []byte("?"))
+	put(t, svc.Store, unknown, []byte("?"))
+	_, err := svc.DeleteCluster(t.Context(), "prod", true, false)
+	wantError(t, err, "cluster prod holds objects tent does not know: "+unknown+"; delete them yourself or use --force")
+}
+
 // TestDeleteClusterUnknownObjectNextToTheSecrets refuses an object under pki/ that is not one of the secrets.
 func TestDeleteClusterUnknownObjectNextToTheSecrets(t *testing.T) {
 	const unknown = "prod/pki/private/old.key"
