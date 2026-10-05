@@ -39,8 +39,9 @@ func (a NodeAction) String() string {
 // MarshalText returns the action's name, as String does.
 func (a NodeAction) MarshalText() ([]byte, error) { return []byte(a.String()), nil }
 
-// NodeChange is one change to the nodes of a cluster. A create and a wait hold what a create request needs; a wait and
-// a delete hold the ID of the machine, a wait its operation id and a delete the reason.
+// NodeChange is one change to the nodes of a cluster. A create and a wait hold what a create request needs, with the
+// hash of the group's node configuration; a wait and a delete hold the ID of the machine, a wait its operation id and a
+// delete the reason.
 type NodeChange struct {
 	Action      NodeAction    `json:"action"`
 	Name        string        `json:"name"`
@@ -49,6 +50,7 @@ type NodeChange struct {
 	Zone        string        `json:"zone,omitempty"`
 	MachineType string        `json:"machineType,omitempty"`
 	Image       string        `json:"image,omitempty"`
+	SpecHash    string        `json:"specHash,omitempty"`
 	ID          string        `json:"id,omitempty"`
 	Op          string        `json:"op,omitempty"`
 	Reason      string        `json:"reason,omitempty"`

@@ -133,11 +133,11 @@ func exampleNodes() []app.NodeChange {
 	return []app.NodeChange{
 		{
 			Action: app.NodeWait, Name: "prod-servers-1", Group: "servers", Role: v1alpha1.RoleServer, Zone: "ams",
-			MachineType: "vc2-2c-4gb", Image: "ubuntu-24.04", ID: "instance-2", Op: waitOp,
+			MachineType: "vc2-2c-4gb", Image: "ubuntu-24.04", SpecHash: "3f9a1c0b7d2e4f68", ID: "instance-2", Op: waitOp,
 		},
 		{
 			Action: app.NodeCreate, Name: "prod-servers-2", Group: "servers", Role: v1alpha1.RoleServer, Zone: "ams",
-			MachineType: "vc2-2c-4gb", Image: "ubuntu-24.04",
+			MachineType: "vc2-2c-4gb", Image: "ubuntu-24.04", SpecHash: "3f9a1c0b7d2e4f68",
 		},
 		{
 			Action: app.NodeCreate, Name: "prod-workers-1", Group: "workers", Role: v1alpha1.RoleClient, Zone: "ams",
@@ -164,7 +164,10 @@ func someNodes() []app.NodeChange {
 // exampleUpdate is an update plan with every part.
 func exampleUpdate(t *testing.T) app.UpdatePlan {
 	t.Helper()
-	return app.UpdatePlan{Infra: exampleInfra(t), Nodes: exampleNodes(), Secrets: secretNames, Completed: true}
+	return app.UpdatePlan{
+		Infra: exampleInfra(t), Nodes: exampleNodes(), Nomad: &app.NomadStep{Bootstrap: true, Servers: 3},
+		Secrets: secretNames, Completed: true,
+	}
 }
 
 func TestUpdatePlanWriteTextGolden(t *testing.T) {
@@ -229,6 +232,40 @@ Nodes: 1 to create, 0 to wait for, 1 to delete.
 		},
 		{"nothing", app.UpdatePlan{}, "No changes.\n"},
 		{
+			"the Nomad step with the bootstrap alone",
+			app.UpdatePlan{Nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, Completed: true},
+			"Nomad: bootstrap the ACL system and wait for 3 healthy servers.\n" +
+				"State: cluster.completed.yaml and nomad/bootstrapped will be written.\n",
+		},
+		{
+			"the Nomad step with the bootstrap, the secrets and the completed spec",
+			app.UpdatePlan{Nomad: &app.NomadStep{Bootstrap: true, Servers: 1}, Secrets: secretNames, Completed: true},
+			"Nomad: bootstrap the ACL system and wait for 1 healthy server.\n" +
+				"State: pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token, " +
+				"cluster.completed.yaml and nomad/bootstrapped will be written.\n",
+		},
+		{
+			"the Nomad step with the bootstrap and no completed spec",
+			app.UpdatePlan{Nomad: &app.NomadStep{Bootstrap: true, Servers: 3}},
+			"Nomad: bootstrap the ACL system and wait for 3 healthy servers.\n" +
+				"State: nomad/bootstrapped will be written.\n",
+		},
+		{
+			"the Nomad step without the bootstrap alone",
+			app.UpdatePlan{Nomad: &app.NomadStep{Servers: 3}},
+			"Nomad: wait for 3 healthy servers.\n",
+		},
+		{
+			"the Nomad step for one server",
+			app.UpdatePlan{Nomad: &app.NomadStep{Servers: 1}},
+			"Nomad: wait for 1 healthy server.\n",
+		},
+		{
+			"the nodes and the Nomad step",
+			app.UpdatePlan{Nodes: someNodes(), Nomad: &app.NomadStep{Servers: 3}},
+			nodesOnly + "Nomad: wait for 3 healthy servers.\n",
+		},
+		{
 			"a delete without a reason",
 			app.UpdatePlan{Nodes: []app.NodeChange{{Action: app.NodeDelete, Name: "prod-x-0", ID: "i-1"}}},
 			"- node prod-x-0 (ID i-1)\n\nNodes: 0 to create, 0 to wait for, 1 to delete.\n",
@@ -260,6 +297,8 @@ func TestUpdatePlanHasChanges(t *testing.T) {
 		{"both", app.UpdatePlan{Infra: exampleInfra(t), Nodes: someNodes()}, true},
 		{"the completed spec", app.UpdatePlan{Infra: infraPlan(t, nil), Completed: true}, true},
 		{"a secret", app.UpdatePlan{Infra: infraPlan(t, nil), Secrets: secretNames[3:]}, true},
+		{"the Nomad step", app.UpdatePlan{Infra: infraPlan(t, nil), Nomad: &app.NomadStep{Servers: 3}}, true},
+		{"the Nomad bootstrap", app.UpdatePlan{Nomad: &app.NomadStep{Bootstrap: true, Servers: 3}}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.plan.HasChanges(); got != tc.want {
@@ -277,6 +316,14 @@ func TestUpdatePlanJSONWithoutInfrastructure(t *testing.T) {
 		{app.UpdatePlan{}, `{"infrastructure":null,"nodes":[]}` + "\n"},
 		{app.UpdatePlan{Completed: true}, `{"infrastructure":null,"nodes":[],"completedSpec":true}` + "\n"},
 		{app.UpdatePlan{Applied: true}, `{"applied":true,"infrastructure":null,"nodes":[]}` + "\n"},
+		{
+			app.UpdatePlan{Nomad: &app.NomadStep{Bootstrap: true, Servers: 3}},
+			`{"infrastructure":null,"nodes":[],"nomad":{"bootstrap":true,"servers":3}}` + "\n",
+		},
+		{
+			app.UpdatePlan{Nomad: &app.NomadStep{Servers: 1}, Completed: true},
+			`{"infrastructure":null,"nodes":[],"nomad":{"bootstrap":false,"servers":1},"completedSpec":true}` + "\n",
+		},
 		{
 			app.UpdatePlan{Secrets: secretNames[2:], Completed: true},
 			`{"infrastructure":null,"nodes":[],"secrets":["secrets/gossip.key","secrets/acl-bootstrap-token"],` +
@@ -371,8 +418,9 @@ func TestUpdatePlanWriteApplied(t *testing.T) {
 			"every part",
 			exampleUpdate(t),
 			"Applied: 2 created, 1 updated, 0 replaced, 1 deleted. Nodes: 2 created, 1 waited for, 3 deleted. " +
-				"Wrote pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token and " +
-				"cluster.completed.yaml.\n",
+				"Nomad: bootstrapped the ACL system; 3 servers are healthy. " +
+				"Wrote pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token, " +
+				"cluster.completed.yaml and nomad/bootstrapped.\n",
 		},
 		{"the infrastructure only", app.UpdatePlan{Infra: exampleInfra(t)},
 			"Applied: 2 created, 1 updated, 0 replaced, 1 deleted.\n"},
@@ -385,6 +433,21 @@ func TestUpdatePlanWriteApplied(t *testing.T) {
 			app.UpdatePlan{Nodes: someNodes(), Secrets: secretNames[2:]},
 			"Nodes: 1 created, 0 waited for, 1 deleted. Wrote secrets/gossip.key and secrets/acl-bootstrap-token.\n",
 		},
+		{
+			"the Nomad step with the bootstrap",
+			app.UpdatePlan{Nomad: &app.NomadStep{Bootstrap: true, Servers: 3}},
+			"Nomad: bootstrapped the ACL system; 3 servers are healthy. Wrote nomad/bootstrapped.\n",
+		},
+		{
+			"the Nomad step without the bootstrap",
+			app.UpdatePlan{Nodes: someNodes(), Nomad: &app.NomadStep{Servers: 3}},
+			"Nodes: 1 created, 0 waited for, 1 deleted. Nomad: 3 servers are healthy.\n",
+		},
+		{
+			"the Nomad step for one server",
+			app.UpdatePlan{Nomad: &app.NomadStep{Servers: 1}},
+			"Nomad: 1 server is healthy.\n",
+		},
 		{"nothing", app.UpdatePlan{Infra: infraPlan(t, nil)}, "No changes.\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -396,5 +459,20 @@ func TestUpdatePlanWriteApplied(t *testing.T) {
 	err := app.UpdatePlan{Completed: true}.WriteApplied(&failWriter{err: errors.New("broken pipe")})
 	if want := "writing the plan: broken pipe"; err == nil || err.Error() != want {
 		t.Errorf("WriteApplied error = %v, want %q", err, want)
+	}
+}
+
+func TestNomadActionString(t *testing.T) {
+	for a, want := range map[app.NomadAction]string{
+		app.NomadLeader: "leader", app.NomadBootstrap: "bootstrap", app.NomadHealthy: "healthy",
+		app.NomadRegister: "register", app.NomadAction(0): "NomadAction(0)", app.NomadRegister + 1: "NomadAction(5)",
+	} {
+		if got := a.String(); got != want {
+			t.Errorf("NomadAction(%d).String() = %q, want %q", int(a), got, want)
+		}
+		text, err := a.MarshalText()
+		if err != nil || string(text) != want {
+			t.Errorf("NomadAction(%d).MarshalText() = %q, %v, want %q", int(a), text, err, want)
+		}
 	}
 }

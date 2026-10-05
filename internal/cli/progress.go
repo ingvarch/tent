@@ -49,6 +49,8 @@ func progressText(p app.Progress) string {
 	switch {
 	case p.Infra != nil:
 		return infraText(*p.Infra)
+	case p.Nomad != nil:
+		return nomadText(p)
 	case p.Going == 1:
 		return "waiting for 1 node to go"
 	case p.Going > 1:
@@ -71,6 +73,55 @@ func progressText(p app.Progress) string {
 		return fmt.Sprintf(lines[1], node)
 	}
 	return fmt.Sprintf(lines[2]+": %v", node, p.Err)
+}
+
+// nomadText returns the line of text of the Nomad step p, such as "waiting for 3 healthy Nomad servers".
+func nomadText(p app.Progress) string {
+	e := p.Nomad
+	var lines [3]string
+	switch e.Action {
+	case app.NomadLeader:
+		lines = [3]string{
+			"waiting for a Nomad leader", "Nomad has a leader (" + e.Leader + ")", "failed to wait for a Nomad leader",
+		}
+	case app.NomadBootstrap:
+		lines = [3]string{
+			"bootstrapping the ACL system", "bootstrapped the ACL system", "failed to bootstrap the ACL system",
+		}
+	case app.NomadHealthy:
+		servers, verb := "servers", "are"
+		if e.Voters == 1 {
+			servers, verb = "server", "is"
+		}
+		lines = [3]string{
+			fmt.Sprintf("waiting for %d healthy Nomad %s", e.Voters, servers),
+			fmt.Sprintf("%d Nomad %s %s healthy", e.Voters, servers, verb),
+			fmt.Sprintf("failed to wait for %d healthy Nomad %s", e.Voters, servers),
+		}
+	case app.NomadRegister:
+		lines = [3]string{
+			"waiting for node " + e.Node + " to register", "node " + e.Node + " registered",
+			"failed to wait for node " + e.Node + " to register",
+		}
+	default:
+		return fmt.Sprintf("%s %s Nomad", e.Action, p.Step)
+	}
+	line := lines[stepIndex(p.Step)]
+	if p.Step == app.NodeFailed {
+		return fmt.Sprintf("%s: %v", line, p.Err)
+	}
+	return line
+}
+
+// stepIndex returns the index of the step in the three lines of an action: started, done, failed.
+func stepIndex(s app.NodeStep) int {
+	switch s {
+	case app.NodeStarted:
+		return 0
+	case app.NodeDone:
+		return 1
+	}
+	return 2
 }
 
 // infraText returns the line of text of the infrastructure event e.
@@ -124,6 +175,18 @@ type nodeEvent struct {
 	Error   string         `json:"error,omitempty"`
 }
 
+// nomadEvent is a step of the Nomad step of an update as -o json prints it. Name is the node of a register, Leader the
+// leader of a done leader wait, and Voters the number of servers of a healthy wait.
+type nomadEvent struct {
+	Type   string          `json:"type"` // nomad
+	Step   string          `json:"step"`
+	Action app.NomadAction `json:"action"`
+	Name   string          `json:"name,omitempty"`
+	Leader string          `json:"leader,omitempty"`
+	Voters int             `json:"voters,omitempty"`
+	Error  string          `json:"error,omitempty"`
+}
+
 // waitEvent is the start of the wait for deleted nodes to go as -o json prints it.
 type waitEvent struct {
 	Type  string `json:"type"`  // wait
@@ -142,6 +205,10 @@ func jsonEvent(p app.Progress) any {
 			ev.Wait = roundWait(e.Wait).String()
 		}
 		return ev
+	}
+	if e := p.Nomad; e != nil {
+		return nomadEvent{Type: "nomad", Step: p.Step.String(), Action: e.Action, Name: e.Node, Leader: e.Leader,
+			Voters: e.Voters, Error: errorText(p.Err)}
 	}
 	ev := nodeEvent{Type: "node", Step: p.Step.String(), Action: p.Node.Action, Name: p.Node.Name,
 		ID: cmp.Or(p.Instance.ID, p.Node.ID), Error: errorText(p.Err)}
