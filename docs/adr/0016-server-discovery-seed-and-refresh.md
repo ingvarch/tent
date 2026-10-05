@@ -2,7 +2,11 @@
 
 - **Status:** Accepted; amended by [ADR-0027](0027-nodeconfig-contract-rendering-and-spec-hash.md)
   (tent sends the seed in NodeConfig, and tent-node renders `05-join.hcl`, the seed included; a combined node joins as
-  a server does)
+  a server does) and by [ADR-0030](0030-nomad-on-nodes.md) (the `join` phase of `up` refreshes at boot, before Nomad
+  starts; a refresh asks the servers of the last answer (`/var/lib/tent/peers.json`), then the seed, for
+  `/v1/status/peers?stale` with the TLS name `server.<region>.nomad`; on server and combined nodes `refresh-join` asks
+  the node's own agent first; `05-join.hcl` is rewritten only when the rendering changes, and an empty answer changes
+  nothing)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** complements [ADR-0009](0009-server-discovery-fixed-ip-slots.md) (Hetzner slots become a provider

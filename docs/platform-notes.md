@@ -3,8 +3,10 @@
 Facts about Nomad, Hetzner Cloud, Vultr, S3-compatible object stores, prior art and Ubuntu on nodes that tent's
 design relies on.
 
-> **Verified on 2026-09-25**, [section 5](#5-s3-compatible-object-stores) on 2026-09-26 and
-> [section 6](#6-ubuntu-on-nodes) on 2026-09-29. Sources: official documentation, the Hetzner Cloud OpenAPI spec
+> **Verified on 2026-09-25**, [section 5](#5-s3-compatible-object-stores) on 2026-09-26,
+> [section 6](#6-ubuntu-on-nodes) on 2026-09-29 ([6.4](#64-restarts-of-docker-containerd-and-nomad) on 2026-10-05) and
+> [1.6](#16-the-agent-on-a-node) from 2026-09-29 to 2026-10-05.
+> Sources: official documentation, the Hetzner Cloud OpenAPI spec
 > (`https://docs.hetzner.cloud/cloud.spec.json`), the Vultr API reference (OpenAPI spec from a Wayback copy of
 > `https://www.vultr.com/api/`, 2026-09-12) plus live calls to public Vultr endpoints, release APIs and upstream
 > source code (Nomad `main`, kops `master`, hcloud-go, govultr, cloud-init). The confidence is high unless marked
@@ -135,13 +137,15 @@ the version tent runs.
   - in a quoted string, `${` opens a span that runs to its matching `}`. Quotes inside it do not end the string, and
     backslash escapes inside it are kept as written. HCL1 has no escape for `${`.
 
-  The fork was not checked. ⏳ `nomad config validate` of tent's golden files settles it (M2.6b; M2.5 did not run
-  it).
+  The fork itself was not read. Nomad 2.0.0 and 2.0.7, which parse with it, accept tent's golden files:
+  `nomad config validate` passed each role's goldens on 2026-10-02 ([1.6](#16-the-agent-on-a-node)).
 - **Graceful shutdown settings.**
   - `leave_on_interrupt` and `leave_on_terminate` default to false.
   - With them enabled, a server leaves the peer set gracefully. SIGTERM leaves only with `leave_on_terminate`, and
     SIGINT only with `leave_on_interrupt` (`handleSignals` in `command/agent/command.go`).
-  - Clients with `drain_on_shutdown { deadline, force, ignore_system_jobs }` drain themselves on shutdown.
+  - Clients with `drain_on_shutdown { deadline, force, ignore_system_jobs }` drain themselves on shutdown, and stay
+    ineligible after their next start ([1.6](#16-the-agent-on-a-node)).
+  - How long the agent waits, and what a server's leave does to Raft: [1.6](#16-the-agent-on-a-node).
 - **Jobs default to `datacenters = ["*"]`** (since 1.5).
 
 **Client settings tent writes** (v1.11.3 source, 2026-09-29, as above):
@@ -223,7 +227,8 @@ the version tent runs.
 
 **Status and agent endpoints** (used by seed-and-refresh discovery and API-driven server removal):
 - **`GET /v1/status/leader` and `GET /v1/status/peers`** require **no ACL token**; mTLS still applies. `peers` returns
-  the Raft peers' RPC addresses (`["10.0.0.5:4647", …]`).
+  the Raft peers' RPC addresses (`["10.0.0.5:4647", …]`). Their answers with `?stale` and on clients:
+  [1.6](#16-the-agent-on-a-node).
 - **`GET /v1/agent/servers`** (`agent:read`) lists the servers a client knows.
 - **`PUT /v1/agent/servers?address=…`** (`agent:write`) replaces that list. Whether this survives a restart is not
   documented.
@@ -285,7 +290,9 @@ the version tent runs.
 ### 1.4 Downloads and verification
 
 - **Binaries:** `https://releases.hashicorp.com/nomad/{V}/nomad_{V}_linux_{amd64|arm64}.zip`. The zip contains
-  `nomad` and `LICENSE.txt`.
+  `LICENSE.txt` (mode 0644) and then `nomad` (0755), both regular files at the top, deflated, and nothing else. The
+  linux zips of 2.0.0 and 2.0.7 take 53 to 59 MB and their binaries 137 to 147 MB: 2.0.7's `nomad` is 147,230,688
+  bytes on amd64 and 137,387,200 on arm64 (their central directories, read on 2026-10-02).
 - **Checksums and signatures:** `nomad_{V}_SHA256SUMS`, plus detached signatures `nomad_{V}_SHA256SUMS.sig` and
   `….72D7468F.sig`.
 - **JSON index:** `https://api.releases.hashicorp.com/v1/releases/nomad/{V|latest}`.
@@ -330,6 +337,150 @@ the version tent runs.
   legal advice.
 - **Forks.** No maintained, foundation-backed fork exists. OpenNood/nood (based on 1.6.5) has had no commits since
   December 2023. (Medium confidence.)
+
+### 1.6 The agent on a node
+
+What tent-node's `join`, `nomad`, `verify` and `refresh-join` rely on, and the shutdown facts behind tent's agent
+configuration ([ADR-0030](adr/0030-nomad-on-nodes.md)). Read in the v2.0.7 tag (commit `9dcbdc5`, 2026-09-17) and
+in the docs of 2.0.x on 2026-09-29, and seen in live runs of the official `nomad_2.0.7_darwin_arm64` binary, with ACLs
+on and without TLS, on 2026-09-29, unless an item says otherwise. The M2.6b VM checks of 2026-10-05 (runs `bxkllh`
+on Ubuntu 24.04 and `g2rl9d` on 26.04, [3.16](#316-spike-runs)) settled the items that name them; those still
+marked 🔬 are open.
+
+**Health and status** (live runs, and the source where an item says so):
+- **`GET /v1/agent/health`** needs no ACL token. It answers 200 with `application/json` when the agent is healthy,
+  and 500 with the same JSON as `text/plain` when not. `?type=client` or `?type=server` checks one part; a part that
+  the agent does not run fails (`client not enabled`).
+  - A server runs the `Status.Leader` RPC, which the leader answers. Without a leader it answers 500
+    `{"server":{"ok":false,"message":"No cluster leader"}}` after the RPC hold of 5 s. With `?stale` it answers 500 at
+    once, with the message `no leader`.
+  - A client is healthy when its list of servers is not empty. The list starts empty, and retry_join adds a server
+    only after a `Status.Ping` to it succeeds. Unhealthy is `{"client":{"ok":false,"message":"no known servers"}}`. In
+    a live run the client turned healthy right after the join although `Node.Register` failed with
+    `Permission denied`.
+  - On a combined agent the client part is healthy at once, since the local server's RPC address is in its list
+    ([1.2](#12-features-tent-relies-on)). The server part needs a leader.
+- **`GET /v1/status/peers` and `/v1/status/leader`** need no token: the agent drops their auth errors on purpose.
+  - A server without a leader answers 500 `No cluster leader` after 5 s. With `?stale` it answers from its local Raft
+    configuration: `[]` before the bootstrap, and `""` for the leader. So `GET /v1/status/leader?stale` answers 200
+    on a server without a leader.
+  - Peers are RPC addresses, `"10.0.0.5:4647"`, and in IPv6 `"[fd00::1]:4647"` (source only).
+  - A client forwards both to a server, but blocks until the node has registered: in a live run a request to a
+    client that had not registered hung for 12 s.
+- **Server certificates name no node address**: tent's carry `127.0.0.1` alone
+  ([architecture §9.1](architecture.md#91-pki)). A caller that dials a server's private IP sets
+  `tls.Config.ServerName` to `server.<region>.nomad`. The M2.6b VM checks made one such call on a real node:
+  `refresh-join` asked the node's own agent at `127.0.0.1` with `server.global.nomad`, and got the node's address.
+  🔬 A call between two VMs waits for clusters of several nodes (M2.7, E2E).
+
+**The stock unit** (`.release/linux/package/usr/lib/systemd/system/nomad.service`): `Wants=` and
+`After=network-online.target`; `User=` and `Group=root`; `Type=notify`; `EnvironmentFile=-/etc/nomad.d/nomad.env`;
+`ExecReload=/bin/kill -HUP $MAINPID`; `ExecStart=/usr/bin/nomad agent -config /etc/nomad.d`; `KillMode=process`;
+`KillSignal=SIGINT`; `LimitNOFILE=65536`; `LimitNPROC=infinity`; `Restart=on-failure`; `RestartSec=2`;
+`TasksMax=infinity`; `OOMScoreAdjust=-1000`; `WantedBy=multi-user.target`. HashiCorp's e2e units add
+`StartLimitIntervalSec=0` and `StartLimitBurst=3`.
+- **sd_notify** (since 1.8.0): the agent sends `READY=1` once it is set up and its signal handlers are in place,
+  without waiting for a join or a leader, and again after a SIGHUP reload (`handleSignals` after `setupAgent` in
+  `command/agent/command.go`, v1.11.3, read 2026-10-02). On the M2.6b VM checks `systemctl start` of a combined node's
+  `Type=notify` unit returned 1.0 to 1.4 s after tent-node asked for it (by the timing of the log lines), far within
+  systemd's default start timeout of 90 s.
+- **`KillMode=process`:** the executor and logmon processes of tasks stay in the unit's cgroup and must outlive a
+  restart of the agent. They do: on the M2.6b VM checks `systemctl restart nomad.service` with a docker job running
+  left its container with the same id and start time and the task unrestarted. At a shutdown systemd logs
+  `Unit process … (nomad) remains running after unit stopped` for two such processes.
+- **`Delegate=yes` is not needed:** Nomad writes the root `cgroup.subtree_control` and makes `nomad.slice` itself
+  (GH-18211).
+- **cgroups v2:** the client needs root and `cpuset cpu io memory pids` in `/sys/fs/cgroup/cgroup.controllers`, and
+  nothing from the unit. On the M2.6b VM checks the client reported the docker and exec drivers healthy on 24.04
+  and 26.04 (`Driver Status = docker,exec`), so its cgroup checks passed (inferred). 🔬 `nomad.slice` itself was not
+  listed.
+
+**Stopping** (`command/agent/command.go`):
+- Without `leave_on_terminate`, SIGTERM makes the agent exit with 1 at once ([1.2](#12-features-tent-relies-on)).
+- The graceful wait is `gracefulTimeout`, 5 s, plus the client's `drain_on_shutdown` deadline (`terminateGracefully`,
+  v2.0.7). systemd's default stop timeout of 90 s would cut a long drain short; without a drain it covers the 5 s.
+
+**A client's drain at shutdown and its eligibility** (verified on 2026-10-03 in the v2.0.7 tag, commit `9dcbdc5`, and
+on a local 2.0.7 cluster on macOS: the official `darwin_arm64` binary, one server and one client, ACLs on; `-dev`
+skips the self-drain):
+- On SIGTERM with `leave_on_terminate` the client calls `DrainSelf` (`client/drain.go:16-86`). Without a
+  `drain_on_shutdown` block it returns at once, since the drain configuration is nil (`DrainConfigFromAgent` in
+  `client/config/drain.go`; read in v1.11.3 on 2026-10-03 too), and the agent exits with 0 as soon as the leave
+  returns, within the 5-second graceful wait (`command/agent/command.go:1058-1064` and `1083-1089`; `Client.Leave`
+  returns at once, `client/drain.go:17-20`). With one it sends
+  `Node.UpdateDrain` with `MarkEligible=false` (`drain.go:34`) and the meta message `shutting down`.
+- When the drain completes, `NodesDrainComplete` clears the drain strategy and leaves the eligibility as it is
+  (`nomad/drainer_shims.go:26`, `nomad/state/state_store.go:1231-1236`). At the client's next registration the
+  server keeps the stored eligibility (`state_store.go:1016-1018`), and the client takes it
+  (`client/client.go:2299-2303`).
+- Live: an eligible client, stopped with SIGTERM, was ineligible, with its last drain's AccessorID `client:<id>` and
+  the message `shutting down`; after a start it was `ready` and `ineligible`. A crash, SIGKILL or a power loss leaves
+  it eligible (by the source: only `DrainSelf` marks it).
+- Nomad has no setting that makes the client eligible again: hashicorp/nomad#17093, open since 2023-05-05 and
+  accepted, where a maintainer writes "Currently there's no built-in way to do that". The docs of 2.0.x
+  (`configuration/client.mdx`) say nothing about eligibility after `drain_on_shutdown`.
+- The node's secret ID can clear it through `PUT /v1/node/<id>/drain` (verified live). Nomad's code says the secret
+  ID "is no longer used as the primary authentication method" and still uses it while the servers are not upgraded
+  (`client/client.go:935-942`). `node:write` has no per-node scope (`acl/policy.go:239-241`): it covers the drain,
+  eligibility, purge and meta of every node, the garbage collection of allocations and intro tokens.
+
+**A server's `leave_on_terminate`** (verified on 2026-10-03 in the v2.0.7 source and live runs of three local
+servers with ACLs, retry_join and `bootstrap_expect = 3`):
+- With it, SIGTERM makes a leader remove itself from Raft, and a follower waits up to 5 s for the leader to remove it
+  (`nomad/server.go:817-908`). That wait (`raftRemoveGracePeriod`, after the Serf leave, `server.go:861-906`) can
+  outlast the agent's graceful wait of 5 s: the agent then exits with 1, and systemd would show the unit failed
+  after the stop, though the stop, and a restart, complete (inferred; the runs had no systemd). A combined agent in a
+  cluster of several servers runs the same server code, so it does the same (by the source, not run).
+- At the next start Serf has forgotten its peers (`rejoin_after_leave` is false), retry_join brings the server back,
+  the leader adds it as a nonvoter, and autopilot promotes it (`server_stabilization_time`, 10 s). In the runs it was
+  a voter again 7 to 20 s after its start; the 7 s case, the former leader, is not explained.
+- A whole cluster whose servers left one by one comes back only through the last server to leave: until it starts,
+  the others answer `No cluster leader`.
+- Without it, a short restart keeps the voter set. A stopped server stays a voter until autopilot removes it (about
+  40 s in the run) or `DELETE /v1/operator/raft/peer` does.
+- A single server (`bootstrap_expect = 1`, as a combined node of one) skips the removal and comes back as it was.
+- A hard power-off never leaves.
+- The docs of 2.0.x (`configuration/index.mdx`) say to set it on servers only "if the terminated server will never
+  join the cluster again"; hashicorp/nomad#7943 gives the reasons (extra Raft log entries, Raft v2 ids).
+
+**What the agent reads once:**
+- **retry_join** is read only at start; SIGHUP does not reload it (live run). SIGHUP reloads the log level, the TLS
+  certificates, the scheduler workers, some Raft settings and the client's fingerprinters.
+- **`retry_interval`** defaults to 30 s and **`retry_max`** to 0, which sets no limit (`DefaultConfig` in
+  `command/agent/config.go`, `retryJoiner` in `command/agent/retry_join.go`, v1.11.3, read 2026-10-02).
+
+**The data directory:**
+- The agent makes missing directories and never changes the mode of one that exists: a server's `data_dir` and
+  `server/` 0755 and its keystore 0700; a client's `client/` 0700, `alloc/` 0711, and
+  `<parent of data_dir>/alloc_mounts` 0711 (`/var/lib/alloc_mounts`).
+- A `client/` made beforehand with mode 0700 and holding `intro_token.jwt` was left as it was. The agent reads the
+  token once at start, and never removes or rewrites it.
+
+**Settings tent turns off:**
+- `disable_update_check = true`, a top-level setting, stops the agent's update check with HashiCorp (docs).
+- **Consul auto-join.** `consul { server_auto_join, client_auto_join }` default to true (`DefaultConsulConfig` in
+  `nomad/structs/config/consul.go`, v2.0.7, read 2026-09-30). With these defaults and no Consul, the agent logs
+  Consul discovery errors every few seconds (live run). With both false, a server sets up no Consul bootstrap handler
+  (`setupConsulSyncer` in `nomad/server.go`) and a client runs no Consul discovery (`consulDiscovery` in
+  `client/client.go`). The agent still asks Consul otherwise: a client's Consul fingerprinter runs every 15 s
+  (`client/fingerprint/consul.go`; these three in v1.11.3, read 2026-10-02).
+
+**`nomad config validate <dir>`:**
+- It merges a directory as the agent does (`*.hcl` and `*.json`, sorted, subdirectories skipped, a later non-empty
+  retry_join replacing an earlier one), refuses unknown keys and runs `IsValidConfig`; it exits with 1 on errors. It
+  does not resolve go-sockaddr templates, and missing TLS files only warn, with exit 0. A top-level `server_join {}`
+  passes and is ignored (source and live runs, 2026-09-29).
+- Zips exist for darwin on amd64 and arm64, linux on amd64 and arm64, and windows on amd64.
+- tent's online test ran it on darwin/arm64 on 2026-10-02 with Nomad 2.0.0 and 2.0.7, on each role's directory of
+  tent's goldens: each printed `WARNING: Error when parsing TLS configuration: open /etc/nomad.d/tls/ca.pem: no such
+  file or directory` and `Configuration is valid!`, and exited with 0. A file with `tent_unknown_key = true` exited
+  with 1: `Error loading <dir>/50-unknown.hcl: unexpected keys tent_unknown_key`. With several bad files only the
+  first in name order is named (2.0.7, 2026-10-02).
+
+**Seen on Ubuntu** (the M2.6b VM checks, 2026-10-05): Nomad bound to the node's private address at its start, so
+the VPC interface was up by `network-online.target` and the go-sockaddr templates resolved; at a shutdown with a job
+running Nomad stopped in 1.1 s, before Docker, without a drain; the client was ready and eligible after the reboot.
+Nomad did not reattach to its container after `systemctl restart docker` ([6.2](#62-firewalls-on-the-host)).
 
 ---
 
@@ -1077,10 +1228,11 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
 
 ### 3.16 Spike runs
 
-All runs: region `ams`, plan `vc2-1c-1gb`, Ubuntu 24.04 (`os_id` 2284), except one of the M2.5 VM checks and one M2.6a
-VM check and its rerun, which ran Ubuntu 26.04 (`os_id` 2760). Runs 1 to 3 ran on 2026-09-25, run 4 on 2026-09-27,
-run 5 on 2026-09-28, the M2.5 VM checks on 2026-09-29, and the M2.6a VM checks and their reruns on 2026-09-30.
-Reports are in `hack/vultr-spike/results/` (git-ignored). The M1 exit run below was not a spike run.
+All runs: region `ams`, plan `vc2-1c-1gb`, Ubuntu 24.04 (`os_id` 2284), except one of the M2.5 VM checks, one M2.6a
+VM check and its rerun, and one M2.6b VM check and its rerun, which ran Ubuntu 26.04 (`os_id` 2760). Runs 1 to 3 ran
+on 2026-09-25, run 4 on 2026-09-27, run 5 on 2026-09-28, the M2.5 VM checks on 2026-09-29, the M2.6a VM checks and
+their reruns on 2026-09-30, and the M2.6b VM checks and their reruns on 2026-10-05. Reports are in
+`hack/vultr-spike/results/` (git-ignored). The M1 exit run below was not a spike run.
 
 **Run 1 (`tt3s1g`, spike v1)** verified:
 - the tag syntax, limits and filter semantics;
@@ -1196,10 +1348,82 @@ passed, with no failed, unexpected, missing or unknown row. They verified:
 - everything else as in the first runs: the metadata probes blocked with their counters, `up` by hand unchanged,
   tent's table back after the reboot with the same comment, and only `status.json` changed.
 
+**M2.6b VM checks (`bxkllh` and `g2rl9d`, spike v7, `--only tentnode`, 2026-10-05)** each booted the combined node
+of a cluster of one node from the user data of `hack/tent-node-userdata` ([ADR-0030](adr/0030-nomad-on-nodes.md)):
+`bxkllh` on Ubuntu 24.04.5 (`os_id` 2284, systemd 255.4, docker.io 29.1.3-0ubuntu3~24.04.2), `g2rl9d` on Ubuntu
+26.04.1 (`os_id` 2760, systemd 259.5, docker.io 29.1.3-0ubuntu4.1). Both ran one development build of tent-node,
+`v0.1.0-rc.2-30-g3b219a6-dirty`, with Nomad 2.0.7; the user data took 6111 and 5959 bytes. Every row was as expected
+on both images but one, the restart of Docker (below). They verified:
+- **Boot.** cloud-init finished 248 s and 137 s after the create call. `tent-node.service` was active 92.0 s and
+  83.9 s after boot, and `nomad.service` 91.9 s and 83.8 s. `systemctl start nomad.service` returned 1.0 to 1.4 s
+  after tent-node logged `start Nomad`, on the first boot and after the reboot (by the timing of the log lines), well
+  within systemd's start timeout of 90 s. After the reboot `nomad.service` was active 38.2 s and 35.4 s after boot,
+  and started after `hostfirewall` had logged its result (27.5 s, then 37.2 s; 23.5 s, then 34.2 s, monotonic).
+- **Cost on the node.** Over the first boot the cgroup of `tent-node.service` peaked at 519.4 MB and 436.7 MB, apt's
+  install and the page cache of what `up` wrote included (systemd's memory peak). With the zip in the cache, the
+  `nomad` phase took about 3 to 4 s before `start Nomad` (by the timing).
+- **Registration.** The first `Node.Register` failed with `failed to sign node identity claims: keyring has not been
+  initialized yet` and succeeded 24 s and 21 s later. After `systemctl restart nomad.service`, `Node.Register` and
+  `Node.GetClientAllocs` failed with `Permission denied` and succeeded 23 s and 20 s later; on 24.04 the keyring
+  replicator first logged `failed to fetch key from any peer`. After the reboot the client registered at once.
+  `verify` passed every time: a combined node's client knows its own server before it has registered.
+- **Nomad.** `nomad acl bootstrap` exited with 0, and the token stayed in a root-only file. The node led its cluster
+  of one in the region `global` with the datacenter `ams`, and `nomad node status` showed it ready and eligible in the
+  pool `default`, with the meta `tent_instance_id`, `tent_cluster` and `tent_nodegroup`. With `enforcement = warn` the
+  server logged `node registration without introduction token`.
+- **A job** (`busybox:1.38`'s httpd in bridge mode with a dynamic port): its port answered on the private address,
+  and from its container the metadata service timed out while the drop counter of tent's forward chain grew.
+- **A restart of Nomad with the job running** returned after 1.5 s and 1.7 s. The container kept its id and start
+  time, the task was not restarted, the node stayed ready and eligible, no line named a drain, and the port answered.
+  Nomad logged nothing at INFO about restoring or reattaching.
+- **`refresh-join`.** Its first run, right after `tent-node.service` finished, asked the node's own agent over mTLS
+  (`server.global.nomad`) and rewrote `05-join.hcl` to `10.64.0.3:4648` (`known=0 servers=1`); later runs changed
+  nothing, and `peers.json` held `["10.64.0.3"]`.
+- **The reboot.** `hostfirewall` and `nomad` were done, every other phase unchanged, and only `status.json` changed
+  among tent-node's files. `join` logged `a server did not answer` for the node's own address (connection refused),
+  since Nomad was not running yet. The node came back ready and eligible. The first boot's allocation ran again: the
+  client restarted its task after `Exit Code: 255`, with the restart policy's delay of 17.3 s and 15.6 s. When SSH
+  answered, `up` had finished on 24.04 and Nomad listened; on 26.04 `up` still ran, and only sshd,
+  systemd-resolved, the DHCP client and containerd listened.
+- **The shutdown** with the job running: Nomad's stop took 1.1 s on both and ended before Docker's stop began, and no
+  line named a drain. systemd logged `Unit process … (nomad) remains running after unit stopped` for two processes,
+  which `KillMode=process` leaves to the tasks. Docker's stop took about 5 s.
+- **docker.io** came from `noble-updates/universe` and `noble-security/universe` on 24.04, and from
+  `resolute-updates/universe` and `resolute-security/universe` on 26.04 (`apt-cache policy`).
+- Preflight's metadata read took 256 ms and 148 ms on the first boot, 255 ms and 379 ms after the reboot. The VPC
+  delete succeeded 12 s and 3 requests after the instance was gone, on both.
+
+The finding: **a restart of Docker restarted the job's task** on both images. `tent-node up` with a changed
+`daemon.json` restarted `docker.service` (`runtime` done, every other phase unchanged, Nomad not restarted). Nomad's
+docker driver logged `failed to wait for container; already terminated` and `log streaming ended with error:
+unexpected EOF`; the task ended `Terminated` with `Exit Code: 0, Exit Message: "unexpected EOF"`, and the client
+started it again in a new container after the restart policy's delay of 17.3 s and 18.7 s. So Nomad 2.0.7 did not
+reattach to its container after a restart of docker.io 29.1.3 with live-restore. What tent does about it: see
+[ADR-0030](adr/0030-nomad-on-nodes.md)'s follow-ups.
+
+**M2.6b VM reruns (`bqpw7p` and `xskxx4`, spike v8, `--only tentnode`, 2026-10-05)** ran spike v8 on Ubuntu 24.04
+(`bqpw7p`) and 26.04 (`xskxx4`) with a rebuild of the same version label (sha256
+`ed76e2b8c84d74ffce336a6df185c3d1a27fb8858d3a1b222b97c5e7fb35910e`; the v7 runs had
+`eed8a97a23d5f7f4801fab7b347e4dc4f6f61c2614fbe8569dd72d3bca101a40`), and passed every row on both. Besides what the
+v7 runs showed, they verified:
+- **A restart of containerd with the job running** (`systemctl restart containerd.service`) kept the task: the same
+  container id and start time, no task restart, watched 62 s and 63 s after containerd was active again. Neither
+  `docker.service` nor `nomad.service` became active again. So an upgrade of containerd does not touch Nomad's
+  docker tasks ([6.4](#64-restarts-of-docker-containerd-and-nomad)).
+- **A restart of Docker** replaced the task again, as accepted: it ran again 17 s and 20 s after `docker.service` was
+  active again.
+- **Records.** needrestart is installed on Vultr's images (3.6-7ubuntu4.5 on 24.04, 3.11-1ubuntu2 on 26.04), with no
+  `$nrconf{restart}` line, the package's default. `/etc/apt/apt.conf.d/20auto-upgrades` sets
+  `APT::Periodic::Update-Package-Lists "1"` and `APT::Periodic::Unattended-Upgrade "1"` on both. `debconf-show
+  docker.io` gives `docker.io/restart: false` on both. `docker.service` has `Wants=` and `After=` on
+  `containerd.service`, `Requires=docker.socket`, no `BindsTo=` or `PartOf=`, and `Restart=always`.
+- Everything else as on the v7 runs: a restart of Nomad kept the task, the node was eligible after the reboot, and
+  Nomad stopped in 1.1 s, before Docker.
+
 **Still open:**
 - Object Storage conditional writes ([3.12](#312-object-storage-)).
-- Images other than Ubuntu 24.04 were not checked, except Ubuntu 26.04 by one M2.5 VM check and one M2.6a VM check
-  and its rerun, for tent-node only.
+- Images other than Ubuntu 24.04 were not checked, except Ubuntu 26.04 by one M2.5 VM check, one M2.6a VM check and
+  its rerun, and one M2.6b VM check and its rerun, for tent-node only.
 - Account limits beyond 3 concurrent instances were not tested.
 - What `/vpcs` answers in the first 30 s after a create ([3.5](#35-vpc)).
 
@@ -1415,8 +1639,9 @@ is in [3.6](#36-firewall-groups).
   - `log-driver` and `log-opts` are not among the settings that Docker reloads on SIGHUP, so a change needs a restart.
     `live-restore` keeps the containers of a daemon that started with it running while it restarts (dockerd
     reference). Neither Docker's nor Nomad's docs mention a conflict between live-restore and Nomad (read
-    2026-09-29). 🔬 Whether Nomad reattaches to its containers after `systemctl restart docker` (the M2.6b VM
-    check).
+    2026-09-29). Nomad 2.0.7 did not reattach after a restart of docker.io 29.1.3 with live-restore on the M2.6b VM
+    checks (2026-10-05, runs `bxkllh` and `g2rl9d`): the task ended with `unexpected EOF` and the client started it
+    again in a new container ([3.16](#316-spike-runs)); why: [6.4](#64-restarts-of-docker-containerd-and-nomad).
 - **nftables** (nftables wiki, "Configuring chains"):
   - A drop in any base chain is final; an accept is not.
   - `nft -f` applies a file as one transaction. `table inet tent`, `delete table inet tent`, `table inet tent { … }`
@@ -1471,6 +1696,42 @@ Read in the source of apt 2.8.3 and 3.2.0 and of dpkg 1.22, on 2026-09-29.
   otherwise keeps the installed file, when both the admin and the package changed it. Without them it asks, and
   without a terminal the question fails (dpkg(1)).
 
+### 6.4 Restarts of Docker, containerd and Nomad
+
+Read on 2026-10-05 in the Nomad v2.0.7 source and in Ubuntu's packages, whose postinst scripts ran in throwaway
+containers, unless an item says otherwise.
+
+- **A restart of Docker stops Nomad's containers.** Nomad's docker driver waits on each container with
+  `ContainerWait` (`run()` in `drivers/docker/handle.go`, lines 281-353). dockerd cuts that stream when it stops; the
+  driver logs `failed to wait for container; already terminated` and calls `ContainerStop` with a timeout of 0, and
+  the task runner's `DestroyTask` removes the container (`ContainerRemove`). So Nomad itself stops the container that
+  live-restore kept.
+  - The stop is a guard against a wait that "returned incorrectly" (`handle.go:330-341`, present in v1.8.0), and no
+    option of the driver changes it. hashicorp/nomad#24081 (merged 2024-09-30) made the wait's context endless.
+    hashicorp/nomad#24105 asked for live-restore support and was closed in 2024-10 with a maintainer's note that
+    Nomad picks the containers up again; 2.0.7 did not on the VM checks. #19962 (bridge-mode containers brought back
+    with broken networks) and moby/moby#27987 (`docker wait` across a live-restore restart) are related.
+  - The task restarts under the job's `restart` block, by default after 15 s plus up to 25% of jitter (17.3 s and
+    18.7 s on the M2.6b VM checks, [3.16](#316-spike-runs)). Each such restart counts toward the block's attempts.
+- **An upgrade of docker.io does not restart Docker.** The debconf question `docker.io/restart` defaults to false, and
+  the postinst of 29.1.3-0ubuntu3~24.04.2 and 29.1.3-0ubuntu4.1 restarts Docker on an upgrade only when it is true
+  (run with `DEBIAN_FRONTEND=noninteractive` on both releases; `debconf-show docker.io` gave `false` on Vultr's
+  images, on the M2.6b VM reruns). unattended-upgrades installs docker.io from
+  `<codename>-security/universe` (`Allowed-Origins` of `50unattended-upgrades`, with an empty `Package-Blacklist`), so
+  it upgrades the package without restarting Docker, and a security fix of Docker takes effect only at the next
+  reboot or restart of Docker.
+- **An upgrade of containerd restarts it.** containerd 2.2.1-0ubuntu1~24.04.3 and 2.2.2-0ubuntu1.1 restart
+  `containerd.service` on every upgrade without asking, and unattended-upgrades installs them from `-security`.
+  `apt-daily-upgrade.timer` runs at 06:00 with `RandomizedDelaySec=60m`, so a fleet takes such an upgrade within an
+  hour. It does not touch Nomad's docker tasks: on the M2.6b VM reruns a restart of containerd kept the task, and
+  neither Docker nor Nomad restarted ([3.16](#316-spike-runs)). `docker.service` has `Wants=` and `After=` on
+  `containerd.service`, and no `Requires=`, `BindsTo=` or `PartOf=` on it.
+- **needrestart**, which `ubuntu-server` recommends, restarts services after library upgrades under APT. It skips
+  `docker.service` (`qr(^docker) => 0`) but not `nomad.service`, since the Nomad binary is dynamically linked: a
+  `libc6` security upgrade restarts Nomad. The tasks survive a restart of Nomad ([3.16](#316-spike-runs)). Vultr's
+  images have needrestart (3.6-7ubuntu4.5 on 24.04, 3.11-1ubuntu2 on 26.04), with no `$nrconf{restart}` line, the
+  package's default, and unattended-upgrades on (`20auto-upgrades`), on the M2.6b VM reruns of 2026-10-05.
+
 ---
 
 ## 7. Sources
@@ -1495,6 +1756,12 @@ Nomad:
 - CNI and bridge networking: <https://developer.hashicorp.com/nomad/docs/networking/cni>
 - Source of v1.11.3: <https://github.com/hashicorp/nomad/tree/v1.11.3>
 - Source of v2.0.7: <https://github.com/hashicorp/nomad/tree/v2.0.7>
+- `consul` block: <https://developer.hashicorp.com/nomad/docs/configuration/consul>
+- Eligibility after `drain_on_shutdown` (issue #17093): <https://github.com/hashicorp/nomad/issues/17093>
+- Whether a stopped server should leave (issue #7943): <https://github.com/hashicorp/nomad/issues/7943>
+- `nomad config validate`: <https://developer.hashicorp.com/nomad/commands/config/validate>
+- The stock unit of v2.0.7:
+  <https://github.com/hashicorp/nomad/blob/v2.0.7/.release/linux/package/usr/lib/systemd/system/nomad.service>
 - HCL1 v1.0.0, which Nomad forks as `v1.0.1-nomad-1`: <https://github.com/hashicorp/hcl/tree/v1.0.0>
 
 Hetzner:
@@ -1540,6 +1807,12 @@ Ubuntu on nodes:
 - Docker packet filtering and firewalls: <https://docs.docker.com/engine/network/packet-filtering-firewalls/>
 - Docker Engine 29 release notes: <https://docs.docker.com/engine/release-notes/29/>
 - dockerd reference (configuration reload): <https://docs.docker.com/reference/cli/dockerd/>
+- Nomad's docker driver waits on a container with a context that never ends (PR #24081):
+  <https://github.com/hashicorp/nomad/pull/24081>
+- Live-restore support in Nomad's docker driver (issue #24105): <https://github.com/hashicorp/nomad/issues/24105>
+- Bridge-mode containers brought back with broken networks (issue #19962):
+  <https://github.com/hashicorp/nomad/issues/19962>
+- `docker wait`, live-restore and restarting dockerd (moby issue #27987): <https://github.com/moby/moby/issues/27987>
 - CNI plugins: <https://github.com/containernetworking/plugins>
 - nftables wiki, configuring chains: <https://wiki.nftables.org/wiki-nftables/index.php/Configuring_chains>
 - nftables source: <https://git.netfilter.org/nftables/>

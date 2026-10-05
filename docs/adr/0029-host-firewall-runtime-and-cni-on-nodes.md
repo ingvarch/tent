@@ -1,6 +1,15 @@
 # ADR-0029: Host firewall, container runtime and CNI plugins on nodes
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by [ADR-0030](0030-nomad-on-nodes.md) (after a reboot `nomad` reports `done` too,
+  since only `up` starts Nomad; decision 23: `hack/tent-node-userdata` builds a node's config through
+  `app.NodeConfigOf`, `app.HostFirewall` is gone and `app.NodeSystem` is unexported, and the `tentnode` check is
+  spike v8; decision 17: the cache checks a cached file as a stream (`FS.HasContent`), rewrites one with a wrong
+  mode or owner from itself as a stream, hashes an old one as a stream before it removes it, and gives the phases the
+  file's path; decision 19: `cni` reads its archive once with `ReadFile` and checks the sha256 of the bytes it
+  unpacks, so a cache file changed after the check fails the phase; decision 13: on the M2.6b VM checks a restart of
+  Docker with live-restore restarted Nomad's docker tasks in new containers
+  ([platform notes §6.4](../platform-notes.md#64-restarts-of-docker-containerd-and-nomad), ADR-0030's trade-offs);
+  the M2.6b follow-ups are built, and their VM check ran on 2026-10-05)
 - **Date:** 2026-09-29
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0007](0007-security-baseline.md) and [ADR-0008](0008-node-credential-delivery.md) (how

@@ -1,6 +1,8 @@
 # ADR-0017: Remove Nomad servers through the Nomad API; ACPI shutdown is an optimization
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by [ADR-0030](0030-nomad-on-nodes.md) (clients have no `drain_on_shutdown`, so the
+  drain through the Nomad API is the only drain of a client before its removal; whether servers keep
+  `leave_on_terminate` is decided in M2.7)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md); [ADR-0016](0016-server-discovery-seed-and-refresh.md),
