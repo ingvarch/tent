@@ -54,12 +54,12 @@ func New() *Fake { return &Fake{} }
 func (f *Fake) Format(s fmt.State, _ rune) { _, _ = io.WriteString(s, "nomadfake.Fake") }
 
 // Client returns a new client of the cluster, where nomadops.New returns one of a real cluster. It records a copy of
-// cfg's token for Tokens, and ignores the rest of cfg.
+// cfg's token for Tokens, and the address as the Server of the client's calls. It ignores the rest of cfg.
 func (f *Fake) Client(cfg nomadops.Config) nomadops.API {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.tokens = append(f.tokens, slices.Clone(cfg.Token))
-	return client{f: f}
+	return client{f: f, server: cfg.Address}
 }
 
 // SetLeader makes addr the RPC address of the cluster's leader, such as 10.0.0.5:4647. An empty addr leaves the
@@ -103,6 +103,8 @@ func (f *Fake) Tokens() []secret.Secret {
 // Call is a call that reached the cluster.
 type Call struct {
 	Name string // the nomadops.API method, such as Bootstrap
+	// Server is the Address of the Config of the client that made the call.
+	Server string
 	// Arg is the call's argument without a secret: the size of the secret for Bootstrap, such as [secret, 36 bytes];
 	// the node's name, the pool and the TTL for IntroToken, such as "prod-workers-1 default 30m0s"; empty for the
 	// others.
@@ -139,17 +141,17 @@ func (e *callError) Is(target error) bool { return e.notReady && target == nomad
 // Unwrap returns the cause, such as nomadops.ErrBootstrapMismatch or the error of the caller's context.
 func (e *callError) Unwrap() error { return e.cause }
 
-// call carries out the call of the API method name, which Calls logs with arg, as the client would send it. When ctx
-// has ended it does nothing. Otherwise it logs the call and takes the first fault for name. A failure fault returns
-// its error without doing anything. Without a leader the call fails with ErrNotReady; with one, do runs under the lock
-// and its error becomes the call's. A lost answer replaces the outcome with ErrNotReady.
-func (f *Fake) call(ctx context.Context, name, arg string, do func() error) error {
+// call carries out the call of the API method name, which Calls logs with server and arg, as the client would send
+// it. When ctx has ended it does nothing. Otherwise it logs the call and takes the first fault for name. A failure
+// fault returns its error without doing anything. Without a leader the call fails with ErrNotReady; with one, do runs
+// under the lock and its error becomes the call's. A lost answer replaces the outcome with ErrNotReady.
+func (f *Fake) call(ctx context.Context, server, name, arg string, do func() error) error {
 	if err := ctx.Err(); err != nil {
 		return &callError{name: name, cause: err}
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, Call{Name: name, Arg: arg})
+	f.calls = append(f.calls, Call{Name: name, Server: server, Arg: arg})
 	ft, faulted := f.takeFault(name)
 	if faulted && ft.err != nil {
 		return ft.err
@@ -167,7 +169,10 @@ func (f *Fake) call(ctx context.Context, name, arg string, do func() error) erro
 }
 
 // client is the nomadops.API of a client of the cluster.
-type client struct{ f *Fake }
+type client struct {
+	f      *Fake
+	server string // the Address of the Config that made the client
+}
 
 // Format prints the client as nomadfake.Client, whatever the verb: fmt would print the secrets of the fake for %s and
 // %q.
@@ -175,7 +180,7 @@ func (c client) Format(s fmt.State, _ rune) { _, _ = io.WriteString(s, "nomadfak
 
 func (c client) Leader(ctx context.Context) (string, error) {
 	var leader string
-	err := c.f.call(ctx, "Leader", "", func() error {
+	err := c.f.call(ctx, c.server, "Leader", "", func() error {
 		leader = c.f.leader
 		return nil
 	})
@@ -189,7 +194,7 @@ func (c client) Bootstrap(ctx context.Context, bootstrapSecret secret.Secret) er
 	if err := pki.CheckBootstrapSecret(bootstrapSecret); err != nil {
 		return &callError{name: "Bootstrap", cause: err}
 	}
-	return c.f.call(ctx, "Bootstrap", bootstrapSecret.String(), func() error {
+	return c.f.call(ctx, c.server, "Bootstrap", bootstrapSecret.String(), func() error {
 		switch {
 		case c.f.bootstrapped == nil:
 			c.f.bootstrapped = slices.Clone(bootstrapSecret)
@@ -207,7 +212,7 @@ func (c client) IntroToken(ctx context.Context, req nomadops.IntroRequest) (secr
 		return nil, &callError{name: "IntroToken", cause: err}
 	}
 	var jwt secret.Secret
-	err := c.f.call(ctx, "IntroToken", req.NodeName+" "+req.NodePool+" "+req.TTL.String(), func() error {
+	err := c.f.call(ctx, c.server, "IntroToken", req.NodeName+" "+req.NodePool+" "+req.TTL.String(), func() error {
 		claims, err := json.Marshal(map[string]string{"nomad_node_name": req.NodeName, "nomad_node_pool": req.NodePool})
 		if err != nil {
 			return err
@@ -222,7 +227,7 @@ func (c client) IntroToken(ctx context.Context, req nomadops.IntroRequest) (secr
 
 func (c client) Nodes(ctx context.Context) ([]nomadops.Node, error) {
 	var nodes []nomadops.Node
-	err := c.f.call(ctx, "Nodes", "", func() error {
+	err := c.f.call(ctx, c.server, "Nodes", "", func() error {
 		nodes = append(make([]nomadops.Node, 0, len(c.f.nodes)), c.f.nodes...)
 		return nil
 	})
@@ -231,7 +236,7 @@ func (c client) Nodes(ctx context.Context) ([]nomadops.Node, error) {
 
 func (c client) Health(ctx context.Context) (nomadops.Health, error) {
 	var h nomadops.Health
-	err := c.f.call(ctx, "Health", "", func() error {
+	err := c.f.call(ctx, c.server, "Health", "", func() error {
 		h = c.f.health
 		return nil
 	})
