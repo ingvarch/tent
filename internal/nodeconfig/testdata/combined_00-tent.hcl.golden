@@ -1,7 +1,7 @@
 # Rendered by tent. Do not edit: changes are overwritten on the next boot.
 region               = "global"
 data_dir             = "/var/lib/nomad"
-leave_on_terminate   = true # leave the cluster gracefully when Nomad stops
+leave_on_terminate   = false # a stopped server stays a Raft peer; tent removes servers through the Nomad API
 disable_update_check = true
 
 addresses {

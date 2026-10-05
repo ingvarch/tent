@@ -133,7 +133,7 @@ func TestRenderAgentWithoutExtras(t *testing.T) {
 // nomadConfig is the part of Nomad's agent configuration that the tests read back with HCL1, as Nomad reads it.
 type nomadConfig struct {
 	Region             string `hcl:"region"`
-	LeaveOnTerminate   bool   `hcl:"leave_on_terminate"`
+	LeaveOnTerminate   *bool  `hcl:"leave_on_terminate"`
 	DisableUpdateCheck bool   `hcl:"disable_update_check"`
 	Server             *struct {
 		Enabled            bool   `hcl:"enabled"`
@@ -185,8 +185,15 @@ func TestRenderAgentReadsBack(t *testing.T) {
 			if got.Region != a.Region {
 				t.Errorf("region = %q, want %q", got.Region, a.Region)
 			}
-			if !got.LeaveOnTerminate {
-				t.Error("leave_on_terminate is not set")
+			// A server stays a Raft peer when Nomad stops; a client leaves.
+			want := !role.RunsServer()
+			switch got.LeaveOnTerminate {
+			case nil:
+				t.Errorf("leave_on_terminate is not set, want %t", want)
+			default:
+				if *got.LeaveOnTerminate != want {
+					t.Errorf("leave_on_terminate = %t, want %t", *got.LeaveOnTerminate, want)
+				}
 			}
 			if !got.DisableUpdateCheck {
 				t.Error("the update check is not disabled")
@@ -211,8 +218,8 @@ func merge(got *nomadConfig, one nomadConfig) {
 	if one.Region != "" {
 		got.Region = one.Region
 	}
-	if one.LeaveOnTerminate {
-		got.LeaveOnTerminate = true
+	if one.LeaveOnTerminate != nil {
+		got.LeaveOnTerminate = one.LeaveOnTerminate
 	}
 	if one.DisableUpdateCheck {
 		got.DisableUpdateCheck = true

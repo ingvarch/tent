@@ -257,7 +257,11 @@ func (p *problems) quoteSet(what, s string) string {
 // agentTemplate renders 00-tent.hcl from an agentView.
 var agentTemplate = template.Must(template.New("00-tent.hcl").Parse(header + `region               = {{.Region}}
 data_dir             = "` + dataDir + `"
+{{- if .Server}}
+leave_on_terminate   = false # a stopped server stays a Raft peer; tent removes servers through the Nomad API
+{{- else}}
 leave_on_terminate   = true # leave the cluster gracefully when Nomad stops
+{{- end}}
 disable_update_check = true
 
 addresses {

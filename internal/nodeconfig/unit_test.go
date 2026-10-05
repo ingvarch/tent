@@ -21,9 +21,9 @@ func TestRenderNomadService(t *testing.T) {
 	checkGolden(t, "nomad.service.golden", string(f.Content))
 }
 
-// TestNomadServiceStopsGracefully checks the settings that a graceful stop needs: SIGTERM, which leave_on_terminate
-// answers, systemd's default stop timeout of 90 seconds, which covers Nomad's 5-second graceful wait, and a KillMode
-// that lets executors and logmon survive a restart.
+// TestNomadServiceStopsGracefully checks the settings that a graceful stop needs: SIGTERM, which a client answers
+// by leaving the cluster and a server by exiting at once, systemd's default stop timeout of 90 seconds, which covers
+// Nomad's 5-second graceful wait, and a KillMode that lets executors and logmon survive a restart.
 func TestNomadServiceStopsGracefully(t *testing.T) {
 	content := string(nodeconfig.RenderNomadService().Content)
 	for _, line := range []string{"KillMode=process", "KillSignal=SIGTERM"} {
