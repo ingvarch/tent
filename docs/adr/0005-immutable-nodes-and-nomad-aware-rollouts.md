@@ -2,7 +2,9 @@
 
 - **Status:** Accepted; server removal amended by [ADR-0017](0017-api-driven-server-removal.md); amended by
   [ADR-0030](0030-nomad-on-nodes.md) (tent sets no `drain_on_shutdown`: a client that drains itself at shutdown
-  comes back ineligible; tent drains a client through the Nomad API before it removes it, ADR-0017)
+  comes back ineligible; tent drains a client through the Nomad API before it removes it, ADR-0017) and by
+  [ADR-0031](0031-bootstrap-in-update.md) (servers and combined nodes have `leave_on_terminate = false`, so a server
+  does not leave Raft when it stops; tent removes it through the API, ADR-0017)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0004](0004-layered-architecture.md), [ADR-0009](0009-server-discovery-fixed-ip-slots.md),

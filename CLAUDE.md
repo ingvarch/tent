@@ -27,21 +27,21 @@ Providers, in order:
 - M1 added the reconciliation engine (`internal/engine`, M1.1), the Vultr API client, the label codec and the fake
   `vultrfake` (M1.2), the model, the provider interface and the Vultr infrastructure tasks (M1.3), the Vultr node
   primitives (M1.4), and `tent update cluster`, `tent delete cluster` and `create --yes` (M1.5,
-  `docs/architecture.md` §13). The nodes are empty machines without Nomad. The exit criteria were met in the
-  integration tests (`internal/app/integration_test.go`, `interrupt_test.go`) and on a real Vultr account.
+  `docs/architecture.md` §13). Until M2.7a the nodes were empty machines without Nomad. The
+  exit criteria were met in the integration tests (`internal/app/integration_test.go`, `interrupt_test.go`) and on a
+  real Vultr account.
 - M2 Nomad bootstrap is in progress, in parts M2.1 to M2.9 (`docs/roadmap.md`).
   - M2.1 added the cluster PKI and secrets (`internal/pki`, ADR-0024): `update` makes the CA, the gossip key and the
     ACL bootstrap secret once and keeps them in the state store; `delete` removes them.
   - M2.2 added the release channels and assets (`internal/channels`, `internal/assets`, ADR-0026): the embedded
     `stable` channel, the Nomad version pin in `cluster.completed.yaml`, and Nomad, CNI and tent-node downloads
-    verified by signature or sha256. Nothing downloads on nodes yet.
+    verified by signature or sha256.
   - M2.3 added NodeConfig (`internal/nodeconfig`, `internal/app/nodeconfig.go`, ADR-0027): the model's join strategy
     and rules between nodes, the NodeConfig types and strict codec, the Nomad agent configuration with golden files,
-    the spec hash and the cloud-config within 24 KiB. `update` does not use it until M2.7; nodes still boot the
-    placeholder.
+    the spec hash and the cloud-config within 24 KiB.
   - M2.4 added nomadops (`internal/nomadops`, `nomadfake`): the mTLS client of a server's HTTP API, the ACL
     bootstrap that is safe to repeat, intro tokens, the leader, the nodes, autopilot health and waits over them.
-    `nomad/api` is pinned at the commit of Nomad v2.0.7 and moved by hand. Nothing calls nomadops until M2.7.
+    `nomad/api` is pinned at the commit of Nomad v2.0.7 and moved by hand.
   - M2.5 added tent-node (`cmd/tent-node`, `internal/nodeup`, ADR-0028): `install`, `up`, `version` and a stub
     `refresh-join`; the phase runner over a filesystem and exec, with fakes in `nodeuptest`; the Vultr metadata
     client; the systemd units; `status.json`; and the phases `preflight`, `system` and `verify`, the others being
@@ -61,9 +61,17 @@ Providers, in order:
     agent first), with a lock between `up` and `refresh-join`. The weekly online job runs `nomad config validate` on
     the goldens (`internal/assets`, maintainer decision 23). `hack/tent-node-userdata` builds its node through
     `app.NodeConfigOf`, and the spike's `tentnode` check (v8) boots Nomad. The VM check ran on 2026-10-05 with one
-    finding, accepted as a trade-off: a restart of Docker restarts Nomad's docker tasks. Pending: the online job's
-    first run on Linux.
-  - Next: M2.7 Bootstrap in `update`.
+    finding, accepted as a trade-off: a restart of Docker restarts Nomad's docker tasks. Pending: the
+    online job's first run on Linux.
+  - M2.7a added the bootstrap in `update` (`internal/app`, `internal/nomadops`, ADR-0031): `tent update cluster --yes`
+    builds a Nomad cluster: servers, then the Nomad step (leader, ACL bootstrap with the stored secret, healthy
+    servers, the mark `nomad/bootstrapped`), then clients with intro tokens until Nomad lists them. `cmd/tent` reads
+    `TENT_NODE_URL` and `TENT_NODE_SHA256`. Maintainer decision 26: `leave_on_terminate` is false on server and
+    combined agents, so `nomad.service` ends as failed after a stop of a server (seen on a real server on 2026-10-05).
+    The real-cloud check of the whole flow passed on Vultr (spike v9, run `qypvsk`). Nodes keep their user data until
+    M2.7b.
+  - Next: M2.7b: the scrub of user data, nodes that never registered, and the guard against deleting a node that
+    registered or a Raft peer (decision 27).
 
 ## Read before changing anything
 
@@ -100,12 +108,13 @@ Providers, in order:
     included, imports no Nomad module.
   - Never import the root module `github.com/hashicorp/nomad`; it is BUSL-licensed.
   - `internal/pki` imports only the standard library, `internal/uuid`, `internal/secret` and `api/v1alpha1`;
-    `internal/uuid`, `internal/secret`, `internal/english` and `internal/secrettest` import only the standard library.
-    Their tests are exempt (ADR-0025, ADR-0027).
+    `internal/uuid`, `internal/secret`, `internal/english`, `internal/secrettest` and `internal/assets/assetstest`
+    import only the standard library. Their tests are exempt (ADR-0025, ADR-0027, ADR-0031).
   - `internal/nodeconfig` imports only the standard library, `internal/secret` and `api/v1alpha1`; its tests are
     exempt (ADR-0027).
   - Only tests import `internal/secrettest`, `internal/nomadops/nomadfake`, `internal/nodeup/nodeuptest`,
-    `internal/s3url/s3urltest` and `github.com/hashicorp/hcl`.
+    `internal/s3url/s3urltest`, `internal/assets/assetstest`, `hack/internal/shellenv/shellenvtest` and
+    `github.com/hashicorp/hcl`.
   - Only `internal/assets` imports `github.com/ProtonMail/go-crypto`, tests included (ADR-0026).
   - `internal/nodeup`, `internal/nodeconfig` and `cmd/tent-node`, tests included, import neither `internal/assets`
     nor `internal/channels`; tent-node gets its assets in NodeConfig (ADR-0026).

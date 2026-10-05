@@ -1,6 +1,13 @@
 # ADR-0030: Nomad on nodes
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by [ADR-0031](0031-bootstrap-in-update.md) (item 2: `00-tent.hcl` has
+  `leave_on_terminate = false` on server and combined agents and `true` on clients, which settles the
+  follow-up on servers, and the hash of server and combined groups moved; item 4: SIGTERM makes a server exit
+  at once with status 1 and stay a Raft peer, so `nomad.service` on server and combined nodes should end as
+  failed after a stop (inferred: the runs had no systemd), and the unit's text is unchanged; item 17: `update`
+  builds a node's config through the same node builder as `NodeConfigOf`; the M2.7 follow-ups on `update`, the
+  clients after healthy servers and the wait for registration are built; the check of the peers call between
+  two VMs is part of the real-cloud check)
 - **Date:** 2026-10-02
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md) and

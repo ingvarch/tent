@@ -125,7 +125,9 @@ the version tent runs.
 - **go-sockaddr templates** work in `bind_addr`, `addresses.*`, `advertise.*` and `client.network_interface`.
   `addresses.http` accepts several space-separated addresses.
 - **File merging.** `LoadConfigDir` (`command/agent/config.go`) reads the `.hcl` and `.json` files of a directory,
-  skips temporary files, sorts the paths and merges the files in that order. A later file's single values win.
+  skips temporary files, sorts the paths and merges the files in that order. A later file's single values
+  win, except plain booleans such as `leave_on_terminate` and `leave_on_interrupt`: they merge with OR, so a
+  later `false` does not undo an earlier `true` (`Config.Merge`, v2.0.7).
   `client.meta` and `client.options` merge key by key. A later, non-empty `server_join.retry_join` replaces the
   earlier list (`ServerJoin.Merge`).
 - **Unknown keys are errors.** Each file is checked for keys that no field takes (`extraKeys` in
@@ -331,7 +333,7 @@ the version tent runs.
   Apache-2.0, and tent uses it under Apache-2.0. The licence check reads only files named like `LICENSE`, `COPYING`
   or `NOTICE`.
 - **Size.** Linking `internal/nomadops` adds about 150 KB to the `tent` binary in a release build (`-s -w`), about
-  210 KB unstripped. That happens when `update` calls it (M2.7).
+  210 KB unstripped. Since M2.7a `update` calls it.
 - **Competitive use.** BUSL "competitive offering" covers products provided on a paid basis. A free tool that
   downloads official binaries is fine; a paid managed-Nomad offering would need a commercial licence. This is not
   legal advice.
@@ -371,7 +373,11 @@ marked 🔬 are open.
   ([architecture §9.1](architecture.md#91-pki)). A caller that dials a server's private IP sets
   `tls.Config.ServerName` to `server.<region>.nomad`. The M2.6b VM checks made one such call on a real node:
   `refresh-join` asked the node's own agent at `127.0.0.1` with `server.global.nomad`, and got the node's address.
-  🔬 A call between two VMs waits for clusters of several nodes (M2.7, E2E).
+  The M2.7a cluster check (run `qypvsk`, 2026-10-05, [3.16](#316-spike-runs)) made the first call between two machines:
+  a client's `05-join.hcl` lists the three servers' RPC addresses, and its `tent-node-join.service` ran 3 times with
+  0 failed runs. The answer matched the seed, so the file was not rewritten; that the mTLS call with the TLS name
+  `server.<region>.nomad` worked is inferred from the runs that did not fail. 🔬 E2E still has to show a call after
+  servers have been replaced.
 
 **The stock unit** (`.release/linux/package/usr/lib/systemd/system/nomad.service`): `Wants=` and
 `After=network-online.target`; `User=` and `Group=root`; `Type=notify`; `EnvironmentFile=-/etc/nomad.d/nomad.env`;
@@ -442,6 +448,46 @@ servers with ACLs, retry_join and `bootstrap_expect = 3`):
 - A hard power-off never leaves.
 - The docs of 2.0.x (`configuration/index.mdx`) say to set it on servers only "if the terminated server will never
   join the cluster again"; hashicorp/nomad#7943 gives the reasons (extra Raft log entries, Raft v2 ids).
+- **Run on 2026-10-05** (three local servers with `leave_on_terminate = false`, Nomad 2.0.7 `darwin_arm64`, TLS and
+  ACLs on): SIGTERM to a follower made it exit with status 1 within 0.28 s, and 0.44 s in a second run, and the log
+  said `nomad: serf: Shutdown without a Leave`. In 25 polls of `GET /v1/operator/raft/configuration`, one a second
+  from 2 s before the stop to 12 s after the restart, it stayed `Voter=true` while it was down (8 s) and after it
+  restarted with the same `data_dir`. Autopilot was healthy with three voters again. On a real server the unit showed
+  failed after that exit status ([3.16](#316-spike-runs), run `qypvsk`, 2026-10-05).
+
+**A new cluster's bootstrap and first clients** (what `update` of M2.7a relies on). Run on 2026-10-05 against local
+Nomad 2.0.7 agents: the binary from the official `nomad_2.0.7_darwin_arm64.zip`, whose sha256 matches HashiCorp's signed
+`nomad_2.0.7_SHA256SUMS`, ports 14700 to 14732 on 127.0.0.1, region `global`, TLS on HTTP and RPC with
+`verify_server_hostname` and `verify_https_client`, ACLs on, certificates made with openssl. Requests came from curl
+and python over mTLS; the source is the v2.0.7 tag:
+- **`PUT /v1/acl/bootstrap` with an unknown secret in `X-Nomad-Token` is accepted.** With the header set to the
+  bootstrap secret S and the body `{"BootstrapSecret": "S"}`, before any bootstrap: HTTP 200 and a management token
+  whose `SecretID` was S. A second identical call answered 400 `ACL bootstrap already done (reset index: 8)`, and
+  `GET /v1/acl/token/self` with S returned the same token. `GET /v1/status/leader` with an unknown token answered
+  200 before the bootstrap.
+  - The source agrees. `ACL.Bootstrap` (`nomad/acl_endpoint.go:450-452`) throws away any auth error "so that we can
+    measure rate metrics" and only authenticates. A non-empty `BootstrapSecret` must be a UUID, else 400
+    `invalid acl token`, and becomes the `SecretID` (lines 497-504). The HTTP handler (`ACLTokenBootstrap`,
+    `command/agent/acl_endpoint.go:145-162`) takes PUT or POST, reads the header into the request and checks nothing.
+  - `nomadops.Client.Bootstrap` itself was not run: the check used curl and python, not the Go client.
+- **A new cluster is healthy at once.** `GET /v1/operator/autopilot/health` with the bootstrap token, for one server
+  (`bootstrap_expect = 1`): HTTP 200, `Healthy`, one voter. For three servers (`bootstrap_expect = 3`), started one
+  after another within about 1 s: the first leader showed 1.5 s after the poller started, the bootstrap answered 200
+  at once, and the first health call after it, 0.02 s after the leader showed, was healthy with three voters, all
+  `Voter=true`. The log said `found expected number of peers, attempting to bootstrap cluster`. All three servers are
+  in the first Raft configuration, so no promotion is awaited. Localhost timing only: VMs are slower.
+- **Intro tokens.** `PUT /v1/acl/identity/client-introduction-token` with `{"NodeName": "n1", "NodePool": "default",
+  "TTL": "30m"}` and the management token answered 200 with `{"JWT": …}`. The string `30m` is accepted (`exp - iat =
+  1800`); `ACLIdentityClientIntroductionTokenRequest` in `api/acl.go` has `TTL time.Duration`, `NodeName`, `NodePool`.
+  - **Size.** 739 bytes for the node name `n1`. The JWT is RS256 with the claims `aud`, `exp`, `iat`, `jti`, `nbf`,
+    `nomad_node_name`, `nomad_node_pool` and `sub` (`node-introduction:global:default:n1:default`), so each character
+    of a longer name adds about 4/3 bytes twice, in the name claim and in `sub`.
+  - **`strict`.** A client with the token in `<data_dir>/client/intro_token.jwt` (0600) registered
+    (`client: node registration complete`, `GET /v1/nodes` showed it `ready`). The file stayed after registration. A
+    client without a token did not register: the client logged `Permission denied` for `Node.Register`, the server
+    `node registration without introduction token: enforcement_level=strict`, and `GET /v1/nodes` was empty.
+  - **`warn`.** After the servers restarted with `enforcement = "warn"`, a client without a token registered, and the
+    server logged a warning with `enforcement_level=warn`.
 
 **What the agent reads once:**
 - **retry_join** is read only at start; SIGHUP does not reload it (live run). SIGHUP reloads the log level, the TLS
@@ -1105,7 +1151,16 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
     `voc-c` or `voc-m`. Any other value answers 400 `Please provide a valid type: …` with that list.
 - **Images.** Referenced by numeric `os_id` from `GET /v2/os`: Ubuntu 24.04 LTS = **2284**, Ubuntu 26.04 LTS = 2760,
   Debian 12 = 2136, Debian 13 = 2625 (checked live).
-- **No arm64** Cloud Compute plans.
+- **No arm64** Cloud Compute plans. Checked live on 2026-10-05: `GET /v2/plans?type=all&per_page=500`, which answered
+  without a key at about 12:30 UTC, returned 151 plans. `type` is `voc` (51), `vx1` (36), `vhp` (16), `vcg` (15), `vc2`
+  (12), `vdm` (11) or `vhf` (10); `cpu_vendor` is AMD (97), Intel (53) or empty (1, a `vdm` GPU plan); `vcpu_type` is
+  `thread`; `gpu_brand` is `none`, NVIDIA or AMD. No field says arm, a plan has no architecture field, and a
+  case-insensitive search of the whole answer for `arm`, `ampere` and `aarch` found nothing.
+- **An unauthenticated `GET /v2/plans` failed on 2026-10-05.** From about 18:11 UTC Vultr answered it without a key with
+  HTTP 500 `Call to a member function request() on null`, while the same call answered 200 at about 12:30 UTC that
+  day. The failure was without a key: the preflight of the M2.7a cluster check read the plan and its price with the
+  key at about 21:37 UTC. The spike's preflight sends the key when it has one, and goes on without the plan's price when
+  the call fails without a key. 🔬 Check again whether the call works without a key.
 - **Smallest plans** (checked live for `ams` on 2026-09-25):
 
   | Plan | vCPU / RAM / disk | $/month | Real $/hour (÷ 672) |
@@ -1231,8 +1286,8 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
 All runs: region `ams`, plan `vc2-1c-1gb`, Ubuntu 24.04 (`os_id` 2284), except one of the M2.5 VM checks, one M2.6a
 VM check and its rerun, and one M2.6b VM check and its rerun, which ran Ubuntu 26.04 (`os_id` 2760). Runs 1 to 3 ran
 on 2026-09-25, run 4 on 2026-09-27, run 5 on 2026-09-28, the M2.5 VM checks on 2026-09-29, the M2.6a VM checks and
-their reruns on 2026-09-30, and the M2.6b VM checks and their reruns on 2026-10-05. Reports are in
-`hack/vultr-spike/results/` (git-ignored). The M1 exit run below was not a spike run.
+their reruns on 2026-09-30, and the M2.6b VM checks, their reruns and the M2.7a cluster check on 2026-10-05.
+Reports are in `hack/vultr-spike/results/` (git-ignored). The M1 exit run below was not a spike run.
 
 **Run 1 (`tt3s1g`, spike v1)** verified:
 - the tag syntax, limits and filter semantics;
@@ -1420,11 +1475,36 @@ v7 runs showed, they verified:
 - Everything else as on the v7 runs: a restart of Nomad kept the task, the node was eligible after the reboot, and
   Nomad stopped in 1.1 s, before Docker.
 
+**M2.7a cluster check (`qypvsk`, spike v9, `--only cluster`, 2026-10-05)** ran tent itself on Ubuntu 24.04, `ams`,
+`vc2-1c-1gb`, with tent `v0.1.0-rc.2-43-g58a50ff-dirty` and a development tent-node, and passed every row. It built a
+cluster of 3 servers and 2 clients, five instances at once, from an empty account, with `tent create cluster --yes`:
+- **The build.** The command exited 0 after 453 s. The progress lines showed a Nomad leader, the bootstrap and healthy
+  servers all at 190 s, and the clients registered 126 s and 263 s after the leader line (each client's create
+  included). The bootstrap and the health wait with three voters answered at once, as on the local run
+  ([1.6](#16-the-agent-on-a-node)). The longest wait of the Nomad step stayed far under its 10 minutes.
+- **The Nomad API,** through `hack/tent-operator`'s certificate (TLS name `server.global.nomad`) and token: 3 alive
+  servers, autopilot healthy with 3 voters, 2 ready and eligible clients under their instance labels. A docker job in
+  bridge mode ran on a client after 5 s and was purged.
+- **A second run.** `update cluster --exit-code` exited 0 and `update cluster --yes` printed `cluster … is up to
+  date`, each in 4 s. All 5 instances carry a `tent/spec-hash` tag, 2 distinct values (servers and clients).
+- **User data.** All 5 instances still held `/etc/tent/node.json`: nothing scrubs it before M2.7b.
+- **A client.** `status.json` had `preflight` and `verify` unchanged and every other phase done; `05-join.hcl` listed
+  the 3 servers on port 4647. The intro token file was 787 bytes, mode 0600, `root:root`, for the node name
+  `spk-qypvsk-workers-0` (the plan's size check assumes up to 2048). The size matches the estimate of 4/3 bytes per name
+  character, twice, from the 739 bytes for a two-character name ([1.6](#16-the-agent-on-a-node)).
+- **Decision 26 on a real server.** `systemctl restart nomad` exited 0 and the unit was active again at once (`Result`
+  `success`, `NRestarts` 0). Its journal had one `Failed with result 'exit-code'` line, the stop ending with status 1.
+  Autopilot was healthy with 3 voters 7 s after the restart.
+- **The delete.** `tent delete cluster --yes` exited 0 after 23 s; the VPC delete was retried four times, about 10 s,
+  while Vultr still listed the instances as attached. Afterwards no instance, VPC, firewall group or SSH key of the
+  cluster was left, and the state store was empty. None of the CA key, gossip key, ACL bootstrap token and operator
+  key appeared in tent's output or the report.
+
 **Still open:**
 - Object Storage conditional writes ([3.12](#312-object-storage-)).
 - Images other than Ubuntu 24.04 were not checked, except Ubuntu 26.04 by one M2.5 VM check, one M2.6a VM check and
   its rerun, and one M2.6b VM check and its rerun, for tent-node only.
-- Account limits beyond 3 concurrent instances were not tested.
+- Account limits beyond 5 concurrent instances were not tested (the M2.7a cluster check ran 5).
 - What `/vpcs` answers in the first 30 s after a create ([3.5](#35-vpc)).
 
 ---

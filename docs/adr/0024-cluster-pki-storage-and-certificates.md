@@ -1,6 +1,9 @@
 # ADR-0024: Cluster PKI storage and certificate details
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by [ADR-0031](0031-bootstrap-in-update.md) (a run holds the CA, the gossip key and the
+  bootstrap secret in memory and issues each node's certificate from the CA, storing none; the operator certificate
+  of a run lasts 24 hours, longer than any run, and is never stored; the bootstrap secret reaches the first
+  `Bootstrap` call as the client's token)
 - **Date:** 2026-09-28
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0007](0007-security-baseline.md); [ADR-0010](0010-state-store-and-locking.md),

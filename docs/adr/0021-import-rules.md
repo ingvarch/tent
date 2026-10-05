@@ -8,7 +8,9 @@
   `nodeup-no-cloud` covers `internal/nodeconfig`) and [ADR-0028](0028-tent-node-agent-units-and-delivery.md)
   (`tent-node-allowed` lists what `internal/nodeup` and `cmd/tent-node` may import; `nodeup-no-cloud` covers
   `cmd/tent-node`; `nodeuptest` and `s3urltest` only in tests; the follow-up `go list -deps ./cmd/tent-node` test is
-  built; `internal/s3url` imports only the standard library and the AWS SDK's S3 client)
+  built; `internal/s3url` imports only the standard library and the AWS SDK's S3 client) and by
+  [ADR-0031](0031-bootstrap-in-update.md) (`internal/assets/assetstest` imports only the standard library; only
+  tests import it and `hack/internal/shellenv/shellenvtest`)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0004](0004-layered-architecture.md), [ADR-0006](0006-two-binaries-and-nodeconfig.md),

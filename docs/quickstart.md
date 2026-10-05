@@ -1,17 +1,31 @@
 # Quick start
 
-This guide builds a small cluster on Vultr and deletes it again. It takes about ten minutes and costs a few cents.
+This guide builds a small Nomad cluster on Vultr and deletes it again. It takes about fifteen minutes and costs a
+few cents.
 
-> tent is at milestone M1. It builds a cluster's network, firewalls, SSH keys and machines on Vultr, but the
-> machines are empty: Nomad comes with M2 ([roadmap](roadmap.md)). So the guide shows how tent plans, builds, checks
-> and deletes a cluster; there is nothing to run on it yet.
+> tent is at milestone M2 ([roadmap](roadmap.md)). `update cluster --yes` builds the network, the firewalls, the
+> machines and a running, secured Nomad cluster: a leader, ACLs bootstrapped with the secret in the state store, and
+> registered nodes. Not done yet:
+> - The node keys, the gossip key and the clients' intro tokens stay in the machines' user data until M2.7b builds the
+>   scrub. Do not use the cluster for production.
+> - tent cannot scale a running cluster down safely before M3: `update` deletes surplus machines without draining
+>   them or checking the Raft quorum.
+> - `tent export nomad`, which gives you the Nomad API's certificate and token, comes with M2.8, so this guide does
+>   not run a job.
 
 ## What you need
 
 - A Vultr account and an API key (Account → API). Vultr accepts the key only from the addresses in the access
   control list next to it, so add the address you run tent from.
-- Go 1.26 or newer, to build tent. The only release so far, the pre-release `v0.1.0-rc.1`, predates the commands
-  that reach the cloud.
+- Go 1.26 or newer, to build tent. The releases so far predate the Nomad bootstrap, so the guide builds tent from
+  `main`.
+- The tent-node of that build. A development build needs `TENT_NODE_URL` and `TENT_NODE_SHA256`, which
+  `make dev-upload` prints the lines that set, in a clone of the repository, which `go install` does not give you
+  (it needs an R2 bucket and token; [details](../hack/tent-node-upload/README.md)). Without them
+  `tent update cluster` fails with `find tent-node: tent dev is a development build, so no release holds its
+  tent-node: set TENT_NODE_URL and TENT_NODE_SHA256 to a tent-node built from the same commit`. A release build finds
+  its tent-node in its own release and ignores the variables. The tent-node is for linux/amd64, which is all that
+  Vultr offers.
 - An SSH key pair, if you want to log in to the machines.
 
 ## 1. Install tent
@@ -87,7 +101,8 @@ tent update cluster demo
 
 Plan: 3 to create, 0 to update, 0 to replace, 0 to delete.
 Nodes: 3 to create, 0 to wait for, 0 to delete.
-State: pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token and cluster.completed.yaml will be written.
+Nomad: bootstrap the ACL system and wait for 3 healthy servers.
+State: pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token, cluster.completed.yaml and nomad/bootstrapped will be written.
 run with --yes to apply the changes
 ```
 
@@ -102,7 +117,7 @@ tent update cluster demo --yes
 ```
 
 tent prints the plan again, then each step as it happens, then what it did. It creates the SSH key, the VPC and the
-firewall group at the same time, so their lines may come in another order:
+firewall group at the same time, so their lines may come in another order. After the machines it waits for Nomad:
 
 ```
 creating vultr.FirewallGroup/demo-servers
@@ -117,17 +132,37 @@ creating node demo-nodes-1
 created node demo-nodes-1 (10.64.0.4)
 creating node demo-nodes-2
 created node demo-nodes-2 (10.64.0.5)
+waiting for a Nomad leader
+Nomad has a leader (10.64.0.3:4647)
+bootstrapping the ACL system
+bootstrapped the ACL system
+waiting for 3 healthy Nomad servers
+3 Nomad servers are healthy
+waiting for node demo-nodes-0 to register
+node demo-nodes-0 registered
+waiting for node demo-nodes-1 to register
+node demo-nodes-1 registered
+waiting for node demo-nodes-2 to register
+node demo-nodes-2 registered
 
-Applied: 3 created, 0 updated, 0 replaced, 0 deleted. Nodes: 3 created, 0 waited for, 0 deleted. Wrote pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token and cluster.completed.yaml.
+Applied: 3 created, 0 updated, 0 replaced, 0 deleted. Nodes: 3 created, 0 waited for, 0 deleted. Nomad: bootstrapped the ACL system; 3 servers are healthy. Wrote pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token, cluster.completed.yaml and nomad/bootstrapped.
 ```
 
 - tent creates the machines one at a time and waits until Vultr reports each one running with its address in the
-  VPC. That takes about two minutes per machine.
-- `cluster.completed.yaml` in the state store holds the specs with every default that tent applied. The first build
-  also writes the cluster's CA, gossip key and ACL bootstrap secret there.
+  VPC. That takes about two minutes per machine. Each machine boots with its own configuration, which tent-node turns
+  into a running Nomad agent. The first server has no peers to join; every later server and every client is given the
+  servers that exist.
+- Once the servers have a leader, tent bootstraps the ACL system with the secret in the state store, then waits until
+  the servers are healthy and every combined node has registered. With separate clients it creates them after that,
+  each with an intro token, and waits for each to register. Each of these waits takes at most 10 minutes.
+- `cluster.completed.yaml` in the state store holds the specs with every default that tent applied, among them the
+  Nomad version. The first build also writes the cluster's CA, gossip key and ACL bootstrap secret there, and
+  `nomad/bootstrapped`, the mark that the ACL system is bootstrapped.
 - If the run stops halfway, because of Ctrl-C or a lost connection, run the same command again. tent finds what the
-  earlier run created by the markers it put on each object, and each machine by the operation id of its create call.
-  It never creates a second machine for one node.
+  earlier run created by the markers it put on each object, and each machine by the operation id of its create call. It
+  never creates a second machine for one node, and it repeats the leader wait, the bootstrap and the health wait until
+  the mark is written, but not a registration wait (M2.7b). The release files of Nomad (releases.hashicorp.com) are read
+  only by a run that creates machines or waits for them.
 
 ## 6. Check it
 
@@ -145,9 +180,10 @@ tent does not list the machines yet; `tent get nodes` comes later. The Vultr con
 `demo-nodes-2`, with their public addresses. From an address in `--ssh-access` you can log in as `root` with your
 SSH key.
 
-To change the number of machines, edit the group's `size` with `tent edit nodegroup nodes --name demo` and run
-`tent update cluster demo --yes` again. tent creates the missing machines, or deletes the surplus ones, newest first.
-A combined group, like a server group, has 1, 3 or 5 machines, and 1 needs `--allow-single-server` on each command.
+To add machines, edit the group's `size` with `tent edit nodegroup nodes --name demo` and run
+`tent update cluster demo --yes` again. tent creates the missing machines and they join the cluster. Do not make a
+running group smaller: before M3 tent would delete machines without draining them or checking the Raft quorum. A
+combined group, like a server group, has 1, 3 or 5 machines, and 1 needs `--allow-single-server` on each command.
 
 ## 7. Delete the cluster
 
@@ -164,6 +200,7 @@ tent delete cluster demo
 - vultr.SSHKey/demo-7855a371 (ID <id>)
 - state demo/cluster.completed.yaml
 - state demo/nodegroups/nodes.yaml
+- state demo/nomad/bootstrapped
 - state demo/secrets/acl-bootstrap-token
 - state demo/secrets/gossip.key
 - state demo/pki/ca-bundle.pem
@@ -172,9 +209,12 @@ tent delete cluster demo
 
 Nodes: 3 to delete.
 Plan: 0 to create, 0 to update, 0 to replace, 3 to delete.
-State: 7 objects to delete.
+State: 8 objects to delete.
 run with --yes to delete them
 ```
+
+A release build, and the `bin/tent` that `make build` makes, also lists `- state demo/tent-version`, so the count is
+9.
 
 Without `--yes` this is only the plan. To delete:
 
@@ -198,7 +238,7 @@ deleted vultr.VPC/demo (ID <id>)
 deleting vultr.SSHKey/demo-7855a371 (ID <id>)
 deleted vultr.SSHKey/demo-7855a371 (ID <id>)
 
-Deleted: 3 nodes, 3 infrastructure objects, 7 state objects.
+Deleted: 3 nodes, 3 infrastructure objects, 8 state objects.
 ```
 
 tent deletes the machines first and waits until Vultr no longer lists them. Then it deletes the firewall group, the

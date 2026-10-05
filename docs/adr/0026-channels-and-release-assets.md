@@ -4,7 +4,14 @@
   [ADR-0027](0027-nodeconfig-contract-rendering-and-spec-hash.md); amended by
   [ADR-0028](0028-tent-node-agent-units-and-delivery.md) (the M2.5 follow-up is built: the release lists the
   tent-node binaries in `checksums.txt`, and development builds upload to the CI R2 bucket; the one URL of a
-  development build serves an amd64 binary, so its clusters need amd64 plans)
+  development build serves an amd64 binary, so its clusters need amd64 plans) and by
+  [ADR-0031](0031-bootstrap-in-update.md) (the follow-ups moved to M2.7 are built:
+  `update` reads the assets only in a plan that creates or waits for a node, once per architecture and once per run,
+  with its own clock for the signature; the Nomad pin is written with the completed spec before the first node,
+  so a first `update` that is cut and run again by a newer tent keeps the first run's pin; the architecture comes
+  from `cloud.Provider.Arch`; a development build needs
+  `TENT_NODE_URL` and `TENT_NODE_SHA256` for such a plan, which `cmd/tent` reads; the warning for a release build
+  shows before the first change)
 - **Date:** 2026-09-28
 - **Deciders:** ingvarch
 - **Related:** extends [ADR-0006](0006-two-binaries-and-nodeconfig.md),
@@ -125,8 +132,8 @@ each must have. Nothing downloads on nodes yet: NodeConfig takes the files in M2
 ### Negative / trade-offs
 
 - A cluster may run a Nomad version that tent has not tested. The warning says so on every change.
-- The pin is written with the completed spec, only after the first `update` has succeeded. A first `update` that is
-  cut and then run again by a newer tent pins that tent's recommendation.
+- The pin is written with the completed spec. Before M2.7a that came only after the first `update` had succeeded, so a
+  first `update` that was cut and then run again by a newer tent pinned that tent's recommendation.
 - A version in the spec below the pin is accepted: nothing refuses a downgrade yet.
 - Once M2.3 uses the assets, a plan needs releases.hashicorp.com, and for a release build github.com.
 - From 2030-03-01, every tent that embeds the current key fails to verify Nomad, and operators must upgrade tent. A

@@ -6,7 +6,9 @@
   starts; a refresh asks the servers of the last answer (`/var/lib/tent/peers.json`), then the seed, for
   `/v1/status/peers?stale` with the TLS name `server.<region>.nomad`; on server and combined nodes `refresh-join` asks
   the node's own agent first; `05-join.hcl` is rewritten only when the rendering changes, and an empty answer changes
-  nothing)
+  nothing) and by [ADR-0031](0031-bootstrap-in-update.md) (the seed as built: the private addresses of every other
+  server that the run knows, by name; the first server has none; a server that is not ready has no address, so a
+  wait runs before the creates of its role; a client gets every known server)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** complements [ADR-0009](0009-server-discovery-fixed-ip-slots.md) (Hetzner slots become a provider
