@@ -15,10 +15,8 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,6 +28,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
+	"github.com/ingvarch/tent/hack/internal/shellenv/shellenvtest"
 	"github.com/ingvarch/tent/internal/assets"
 	"github.com/ingvarch/tent/internal/nodeconfig"
 	"github.com/ingvarch/tent/internal/s3url"
@@ -479,60 +478,20 @@ func TestPrintedValuesAreWhatTentAndNodesAccept(t *testing.T) {
 	}
 }
 
-// shells are the shells that the tool prints for, with how each prints two variables after running the lines.
-var shells = map[string]string{
-	"sh":   `printf '%s\n' "$TENT_NODE_URL" "$TENT_NODE_SHA256"`,
-	"fish": `printf '%s\n' $TENT_NODE_URL $TENT_NODE_SHA256`,
-}
-
-// inShell runs script in the shell and returns its output. It skips the test when the shell is not installed.
-func inShell(t *testing.T, shell, script string) string {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("the lines are for POSIX shells and fish")
-	}
-	path, err := exec.LookPath(shell)
-	if err != nil {
-		t.Skipf("%s is not installed", shell)
-	}
-	cmd := exec.Command(path, "-c", script)
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir()}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s: %v, output:\n%s", shell, err, out)
-	}
-	return string(out)
-}
-
 func TestLinesSetTheVariablesInEachShell(t *testing.T) {
 	f := newFakeS3(t)
 	useFake(t, f)
 	bin, _, sum := writeBinary(t, elf.EM_X86_64)
-	for shell, show := range shells {
+	for _, shell := range shellenvtest.Shells {
 		t.Run(shell, func(t *testing.T) {
 			out := mustRun(t, "-binary", bin, "-shell", shell)
-			got := strings.Split(strings.TrimSuffix(inShell(t, shell, out+show), "\n"), "\n")
+			show := shellenvtest.Print(shell, "TENT_NODE_URL", "TENT_NODE_SHA256")
+			got := strings.Split(strings.TrimSuffix(shellenvtest.Run(t, shell, out+show), "\n"), "\n")
 			if len(got) != 2 || got[1] != sum {
 				t.Fatalf("%s sets %d values, TENT_NODE_SHA256 %q; want the URL and %q", shell, len(got), got, sum)
 			}
 			if parsedURL(t, got[0]).Query().Get("X-Amz-Signature") == "" {
 				t.Error("TENT_NODE_URL is not a presigned URL")
-			}
-		})
-	}
-}
-
-func TestExportLineQuotes(t *testing.T) {
-	values := []string{"plain", "it's", `back\slash`, `trailing\`, `$HOME and $(id) and ` + "`id`", "a b\tc", `"double"`,
-		`\'`, "semi;colon&amp"}
-	for shell, show := range shells {
-		t.Run(shell, func(t *testing.T) {
-			for _, v := range values {
-				script := exportLine(shell, "TENT_NODE_URL", v) + "\n" + exportLine(shell, "TENT_NODE_SHA256", "x") +
-					"\n" + show
-				if got := inShell(t, shell, script); got != v+"\nx\n" {
-					t.Errorf("%s reads %q back as %q", shell, v, strings.TrimSuffix(got, "\nx\n"))
-				}
 			}
 		})
 	}

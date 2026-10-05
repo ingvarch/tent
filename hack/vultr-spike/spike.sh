@@ -4,21 +4,23 @@
 #
 # It creates REAL, BILLED resources in your Vultr account (at most 3 instances at a time, 4 in total,
 # one VPC, up to three firewall groups, up to two SSH keys) and deletes them on exit unless --keep is given.
-# The tentnode check runs alone: one instance, one VPC and one SSH key.
+# The tentnode check runs alone: one instance, one VPC and one SSH key. The cluster check runs alone too: it builds a
+# cluster of five instances with tent itself (see the cluster section).
 # Usage and details: hack/vultr-spike/README.md
 #
-# Portable bash (3.2+, macOS default), requires: curl, jq 1.6+, ssh, ssh-keygen, awk, od; tentnode also go and gzip.
+# Portable bash (3.2+, macOS default), requires: curl, jq 1.6+, ssh, ssh-keygen, awk, od; tentnode also go and gzip;
+# cluster also go, mkfifo and find.
 set -euo pipefail
 
-readonly SPIKE_VERSION="8"
+readonly SPIKE_VERSION="9"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 readonly SCRIPT_DIR
 REPO_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 readonly REPO_DIR
 readonly API_BASE="${VULTR_API_BASE:-https://api.vultr.com/v2}"
-# The checks of a run without --only. tentnode runs only when --only names it alone.
+# The checks of a run without --only. tentnode and cluster run only when --only names one of them alone.
 readonly DEFAULT_CHECKS="boot,inside,metadata,network,firewall,alias,tags,markers,userdata,scrub,halt,sshdup,lengths,rules,fwinuse,patchtags,vpcpending,halttwice,objstore"
-readonly ALL_CHECKS="$DEFAULT_CHECKS,tentnode"
+readonly ALL_CHECKS="$DEFAULT_CHECKS,tentnode,cluster"
 # The checks that log in to an instance over SSH. Without them, instance A gets a firewall group with no rules.
 readonly SSH_CHECKS="boot inside metadata network firewall alias scrub halt tentnode"
 
@@ -41,6 +43,8 @@ S3_REGION="${S3_REGION:-us-east-1}"
 # tentnode: the tent-node under test, as hack/tent-node-upload prints it. TENT_NODE_URL carries a signature: the script
 # never logs it. TENT_NODE_VERSION defaults to the version of bin/tent from the same make build.
 TENT_NODE_VERSION="${TENT_NODE_VERSION:-}"
+# cluster: the address that tent opens SSH to (default: what api.ipify.org says this machine's address is).
+RUNNER_ADDR="${RUNNER_ADDR:-}"
 
 # SSH pacing: v1 lost SSH after a burst of ~7 connections. At most one new connection to port 22 per host per
 # POLL_INTERVAL keeps the spike under ufw's `limit` (6 per 30 s); SSH_MAX_FAILS failures in a row stop further
@@ -105,6 +109,31 @@ TN_REBOOT_S=""  # tentnode: seconds from the reboot to SSH on the new boot
 TN_COMMENT=""   # tentnode: the comment of tent's nftables table on the first boot
 TN_ALLOC=""     # tentnode: the allocation of the job that ran on the first boot
 VPC_MARKER="" SSH_MARKER="" FG_MARKER=""
+CL_NAME=""      # cluster: the name of the cluster that tent builds
+CL_STATE=""     # cluster: the directory of its file:// state store
+CL_URL=""       # cluster: the URL of that store
+CL_TENT=""      # cluster: the tent under test (bin/tent)
+CL_OPERATOR=""  # cluster: hack/tent-operator, built for this run
+CL_OPDIR=""     # cluster: the directory tent-operator makes
+CL_VERSION=""   # cluster: the version of bin/tent
+CL_RUNNER=""    # cluster: the address that tent opens SSH to
+CL_NOMAD_NAME="server.global.nomad" # cluster: the TLS server name of the Nomad API, as tent-operator prints it
+CL_CONF=""      # cluster: the curl config file that holds the ACL token
+CL_NM_STATUS="" # cluster: the HTTP status of the last Nomad API call
+CL_RC=0         # cluster: the exit code of the last tent run
+CL_SECS=0       # cluster: its duration in seconds
+CL_T0=0         # cluster: the epoch second it started
+CL_OUT=""       # cluster: the files of its stdout and stderr
+CL_ERR=""
+CL_PUBS=""      # cluster: the public addresses that SSH connected to, for the exit trap
+CL_IP=""
+CL_STARTED=0    # cluster: tent create has started
+CL_DELETED=0    # cluster: tent delete cluster has exited 0
+CL_SECRETS=0    # cluster: the secret files the end of the run looks for in its records
+CL_SECRET_NAMES="" # cluster: what those files hold, as a list
+CL_SEARCHED=0   # cluster: the run's own secret search has written its row
+KEEP_WORK=0     # the exit trap leaves the temporary directory in place
+CL_LEFT_INST="" CL_LEFT_VPC="" CL_LEFT_FW="" CL_LEFT_KEY=""
 SSH_NAME_USED=""
 
 usage() {
@@ -114,11 +143,11 @@ Usage: hack/vultr-spike/spike.sh [options]
 Checks undocumented Vultr behaviour for tent's provider design and writes a Markdown report.
 
 Options:
-  --preflight        Only query public endpoints (no API key, no resources): region, plan, image.
+  --preflight        Only query region, plan and image (no resources; the API key is used for /plans if set).
   --dry-run          Print what would be created and exit (needs no API key).
   --yes              Do not ask for confirmation before creating billed resources.
   --keep             Do not delete resources on exit (you must delete them yourself).
-  --only LIST        Comma-separated subset of checks (default: all but tentnode):
+  --only LIST        Comma-separated subset of checks (default: all but tentnode and cluster):
                      boot,inside,metadata,network,firewall,alias,tags,markers,userdata,scrub,halt,
                      sshdup,lengths,rules,fwinuse,patchtags,vpcpending,halttwice,objstore
                      ("--only objstore" needs no Vultr API key and creates no instances;
@@ -128,6 +157,9 @@ Options:
                      with no rules at creation and the checks start once the API reports A ready)
                      tentnode is not in the default list and runs alone ("--only tentnode"): it boots
                      instance T with a development build of tent-node and checks it over SSH
+                     cluster is not in the default list either and runs alone ("--only cluster"): it builds a
+                     cluster of 3 servers and 2 clients with bin/tent (5 instances at once, which the account's
+                     limit must allow) and checks it through the Vultr API, the Nomad API and SSH
   --region ID        Vultr region (default: ams; env REGION).
   --plan ID          Instance plan (default: vc2-1c-1gb; env PLAN).
   --out DIR          Report directory (default: hack/vultr-spike/results, git-ignored; env OUT_DIR).
@@ -148,6 +180,9 @@ Environment:
                      (hack/tent-node-upload/README.md). The URL is never printed.
   TENT_NODE_VERSION  tentnode: the version of that tent-node (default: bin/tent version, after a check that
                      bin/tent-node_linux_amd64 has the sha256 TENT_NODE_SHA256).
+  RUNNER_ADDR        cluster: the public IPv4 address of this machine, which tent lets reach SSH (default: what
+                     api.ipify.org answers). The cluster check needs TENT_NODE_URL and TENT_NODE_SHA256 too, and
+                     bin/tent and bin/tent-node_linux_amd64 of the same make build.
 EOF
 }
 
@@ -334,10 +369,26 @@ wait_ssh() { # wait_ssh IP TIMEOUT ; one attempt per POLL_INTERVAL
 }
 
 # ---------------------------------------------------------------------------------------------------------------
-# Preflight (public endpoints, no API key).
+# Preflight (public endpoints; the key is sent with /plans only, which Vultr answers with HTTP 500 without one).
+
+# write_auth_conf: puts VULTR_API_KEY into a mode-0600 curl config and points AUTH_CONF at it; the key never goes on a
+# command line.
+write_auth_conf() {
+  AUTH_CONF="$WORK/auth.conf"
+  (
+    umask 077
+    printf 'header = "Authorization: Bearer %s"\n' "$VULTR_API_KEY" >"$AUTH_CONF"
+  )
+}
+
+# cost_text COUNT: the cost of COUNT instances for the minimum hour, for what the run says before it creates them.
+cost_text() {
+  if [ -z "$HOURLY" ]; then printf 'price unknown (/plans needs a key)'; return 0; fi
+  awk -v h="$HOURLY" -v n="$1" 'BEGIN { printf "about $%.3f", h * n }'
+}
 
 preflight() {
-  local plan_type="${PLAN%%-*}" monthly city
+  local plan_type="${PLAN%%-*}" monthly="" city price conf="$AUTH_CONF"
   api GET "/regions?per_page=500"
   api_ok || die "GET /regions failed: $API_STATUS $(api_err)"
   city=$(jq -r --arg r "$REGION" '.regions[] | select(.id==$r) | .city' "$API_BODY")
@@ -348,11 +399,19 @@ preflight() {
     row "Plan availability" "$PLAN NOT deployable in $REGION right now" "choose another plan/region"
     die "plan $PLAN is not currently available in $REGION"
   fi
+  if [ -n "${VULTR_API_KEY:-}" ]; then write_auth_conf; fi
   api GET "/plans?per_page=500"
-  api_ok || die "GET /plans failed: $API_STATUS $(api_err)"
-  monthly=$(jq -r --arg p "$PLAN" '.plans[] | select(.id==$p) | .monthly_cost' "$API_BODY")
-  [ -n "$monthly" ] || die "unknown plan: $PLAN"
-  HOURLY=$(awk -v m="$monthly" 'BEGIN { printf "%.4f", m / 672 }')
+  AUTH_CONF="$conf"
+  if api_ok; then
+    monthly=$(jq -r --arg p "$PLAN" '.plans[] | select(.id==$p) | .monthly_cost' "$API_BODY")
+    [ -n "$monthly" ] || die "unknown plan: $PLAN"
+    HOURLY=$(awk -v m="$monthly" 'BEGIN { printf "%.4f", m / 672 }')
+    price="\$$monthly/month = \$$HOURLY/hour (÷672)"
+  elif [ -n "${VULTR_API_KEY:-}" ]; then
+    die "GET /plans failed: $(answer)"
+  else
+    price="plan and price not read: GET /plans without a key answered $(answer)"
+  fi
   api GET "/os?per_page=500"
   api_ok || die "GET /os failed: $API_STATUS $(api_err)"
   if [ -z "$OS_ID" ]; then
@@ -363,8 +422,8 @@ preflight() {
     OS_NAME=$(jq -r --arg id "$OS_ID" '.os[] | select((.id | tostring) == $id) | .name' "$API_BODY" | head -1)
     [ -n "$OS_NAME" ] || die "unknown os_id: $OS_ID"
   fi
-  row "Preflight" "region $REGION ($city); $PLAN deployable; \$$monthly/month = \$$HOURLY/hour (÷672); os_id $OS_ID ($OS_NAME)" \
-    "availability endpoint + /plans work without a key"
+  row "Preflight" "region $REGION ($city); $PLAN deployable; $price; os_id $OS_ID ($OS_NAME)" \
+    "the availability endpoint works without a key; /plans needs one"
 }
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -2958,15 +3017,814 @@ check_tentnode() {
 }
 
 # ---------------------------------------------------------------------------------------------------------------
+# cluster: a cluster of three servers and two clients that tent builds itself with `tent create cluster --yes`, checked
+# from outside (the Vultr API, the Nomad API with an operator certificate from hack/tent-operator) and over SSH. tent
+# makes the VPC, the firewall groups, the SSH key and the instances; the script makes only a key pair and a state store
+# in a temporary directory. The ACL bootstrap token reaches curl only through a mode-0600 config file, and no secret
+# goes to the terminal or the report: the end of the run looks for the cluster's secrets in everything it recorded.
+
+readonly CL_SERVERS=3
+readonly CL_WORKERS=2
+# Where a client keeps its intro token (internal/nodeconfig).
+readonly CL_INTRO_TOKEN="/var/lib/nomad/client/intro_token.jwt"
+# A line of a secret file is looked for in the report only from this length: shorter lines would match ordinary text.
+readonly CL_SECRET_MIN=16
+
+# cl_runner_addr: the address tent opens SSH to: RUNNER_ADDR, or what api.ipify.org answers.
+cl_runner_addr() {
+  local re='^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
+  CL_RUNNER="${RUNNER_ADDR:-}"
+  if [ -z "$CL_RUNNER" ]; then CL_RUNNER=$(curl -sS -m 10 https://api.ipify.org 2>/dev/null || true); fi
+  [[ $CL_RUNNER =~ $re ]] || die "cannot find the address of this machine: set RUNNER_ADDR to its public IPv4 address"
+}
+
+# prepare_cluster: checks the tent under test, builds the operator tool into WORK, finds the address of this machine
+# and writes the first row.
+prepare_cluster() {
+  local bin="$REPO_DIR/bin/tent-node_linux_amd64" sum
+  [ -n "${TENT_NODE_URL:-}" ] && [ -n "${TENT_NODE_SHA256:-}" ] ||
+    die "cluster needs TENT_NODE_URL and TENT_NODE_SHA256: run make dev-upload (hack/tent-node-upload/README.md)"
+  CL_TENT="$REPO_DIR/bin/tent"
+  [ -x "$CL_TENT" ] && [ -f "$bin" ] || die "run make dev-upload first: cluster needs bin/tent and bin/tent-node_linux_amd64 of one build"
+  sum=$(sha256 <"$bin")
+  [ "$sum" = "$TENT_NODE_SHA256" ] ||
+    die "bin/tent-node_linux_amd64 is not the tent-node with TENT_NODE_SHA256: run make dev-upload again"
+  CL_VERSION=$("$CL_TENT" version -o json | jq -r .version) || die "bin/tent version failed"
+  CL_OPERATOR="$WORK/tent-operator"
+  (cd "$REPO_DIR" && go build -o "$CL_OPERATOR" ./hack/tent-operator) || die "go build ./hack/tent-operator failed"
+  cl_runner_addr
+  row "tent under test" "version $CL_VERSION, tent-node sha256 $TENT_NODE_SHA256; cluster $CL_NAME: $CL_SERVERS servers and $CL_WORKERS clients of $PLAN in $REGION; SSH from $CL_RUNNER/32" \
+    "bin/tent builds the cluster with the development tent-node; the Nomad API takes the default access (mTLS and an ACL token from anywhere)"
+}
+
+# cl_stamp FIFO: each line that comes through FIFO with the epoch second in front, URL signatures hidden; the line
+# also goes to the terminal.
+cl_stamp() {
+  local line
+  while IFS= read -r line; do
+    line=$(printf '%s' "$line" | hide_url)
+    printf '%s %s\n' "$(now)" "$line"
+    log "tent: $line"
+  done <"$1"
+}
+
+# cl_run LABEL TENT_ARGS...: runs tent on the run's state store. Sets CL_RC, CL_SECS and CL_T0 (the epoch second of the
+# start); stdout goes to cl-LABEL.out and stderr to cl-LABEL.err with the second of each line in front.
+cl_run() {
+  local label="$1" fifo reader
+  shift
+  fifo="$WORK/cl-$label.fifo"
+  CL_OUT="$WORK/cl-$label.out"
+  CL_ERR="$WORK/cl-$label.err"
+  mkfifo "$fifo"
+  cl_stamp "$fifo" >"$CL_ERR" &
+  reader=$!
+  CL_T0=$(now)
+  CL_RC=0
+  "$CL_TENT" "$@" --state "$CL_URL" >"$CL_OUT.raw" 2>"$fifo" </dev/null || CL_RC=$?
+  CL_SECS=$(($(now) - CL_T0))
+  wait "$reader" || true
+  rm -f "$fifo"
+  hide_url <"$CL_OUT.raw" >"$CL_OUT"
+  rm -f "$CL_OUT.raw"
+}
+
+# cl_last_line: the last line of tent's stderr in CL_ERR, without the second in front.
+cl_last_line() { tail -n 1 "$CL_ERR" 2>/dev/null | cut -d' ' -f2- | oneline 200 || true; }
+
+# cl_out_detail TITLE: tent's stdout and stderr of the last cl_run as details.
+cl_out_detail() {
+  { printf 'stdout:\n'; cat "$CL_OUT"; printf '\nstderr:\n'; cut -d' ' -f2- "$CL_ERR"; } | detail "$1"
+}
+
+# cl_collect_secrets FILE...: adds the long lines of the secret files that exist to the patterns that cl_secrets_row
+# looks for, and counts the files.
+cl_collect_secrets() {
+  local f
+  for f in "$@"; do
+    [ -s "$f" ] || continue
+    { grep -v '^-----' "$f" || true; } | awk -v n="$CL_SECRET_MIN" 'length($0) >= n' >>"$WORK/secret-patterns.txt"
+    CL_SECRETS=$((CL_SECRETS + 1))
+    case "$f" in
+      */ca.key) f="CA key" ;;
+      */gossip.key) f="gossip key" ;;
+      */acl-bootstrap-token) f="ACL bootstrap token" ;;
+      *) f="operator key" ;;
+    esac
+    CL_SECRET_NAMES="$CL_SECRET_NAMES${CL_SECRET_NAMES:+, }$f"
+  done
+}
+
+cl_create() {
+  local res
+  CL_STARTED=1
+  (umask 077; : >>"$WORK/secret-patterns.txt")
+  cl_run create create cluster "$CL_NAME" --provider vultr --region "$REGION" --machine-type "$PLAN" \
+    --servers "$CL_SERVERS" --workers "$CL_WORKERS" --ssh-key "$SSH_KEY.pub" --ssh-access "$CL_RUNNER/32" --yes
+  if [ "$CL_RC" = 0 ]; then res="as expected: exit 0 in ${CL_SECS}s"; else res="FAILED: exit $CL_RC in ${CL_SECS}s: $(cl_last_line)"; fi
+  row "tent create cluster --yes" "$res" \
+    "update builds a fresh cluster: infrastructure, three servers, the ACL bootstrap, two clients, with no run between"
+  cl_out_detail "tent create cluster --yes (the output of tent)"
+  cl_collect_store_secrets
+}
+
+# cl_collect_store_secrets: cl_collect_secrets for the files of the state store that hold the cluster's secrets.
+cl_collect_store_secrets() {
+  cl_collect_secrets "$CL_STATE/$CL_NAME/pki/private/ca.key" "$CL_STATE/$CL_NAME/secrets/gossip.key" \
+    "$CL_STATE/$CL_NAME/secrets/acl-bootstrap-token"
+}
+
+# cl_line_time TEXT: the epoch second of the first line of the last cl_run's stderr that holds TEXT, or nothing.
+cl_line_time() { awk -v p="$1" 'index($0, p) { print $1; exit }' "$CL_ERR" 2>/dev/null || true; }
+
+# cl_progress_row: the lines of create's progress, and the seconds from the start of create to the leader, the bootstrap
+# and the healthy servers, and from the leader line to each registration line.
+cl_progress_row() {
+  local leader boot healthy regs missing="" res n=0 node t list="" text
+  leader=$(cl_line_time "Nomad has a leader")
+  boot=$(cl_line_time "bootstrapped the ACL system")
+  healthy=$(cl_line_time "Nomad servers are healthy")
+  regs=$(awk '$2 == "node" && $NF == "registered" { print $3, $1 }' "$CL_ERR" 2>/dev/null || true)
+  [ -n "$leader" ] || missing="leader"
+  [ -n "$boot" ] || missing="$missing${missing:+, }bootstrap"
+  [ -n "$healthy" ] || missing="$missing${missing:+, }healthy"
+  if [ -n "$regs" ]; then n=$(printf '%s\n' "$regs" | wc -l | tr -d ' '); fi
+  [ "$n" = "$CL_WORKERS" ] || missing="$missing${missing:+, }$n of $CL_WORKERS registrations"
+  while read -r node t; do
+    [ -n "$node" ] || continue
+    list="$list${list:+, }$node +$((t - ${leader:-$t}))s"
+  done <<<"$regs"
+  text="Nomad had a leader at +$((${leader:-$CL_T0} - CL_T0))s of create, the ACL system was bootstrapped at +$((${boot:-$CL_T0} - CL_T0))s, the servers were healthy at +$((${healthy:-$CL_T0} - CL_T0))s; registered, after the leader line: ${list:-none}"
+  if [ -n "$missing" ]; then
+    res="UNEXPECTED: missing lines: $missing"
+  elif [ "$boot" -lt "$leader" ] || [ "$healthy" -lt "$boot" ]; then
+    res="UNEXPECTED: the lines are out of order: $text"
+  else
+    res="as expected: $text"
+  fi
+  row "Progress of create" "$res" \
+    "the deadlines of the waits (10 minutes) against real times; a client registers right after its create"
+}
+
+# cl_instances: lists the cluster's instances by tag into cl-instances.json; fails when the API does.
+cl_instances() {
+  api GET "/instances?per_page=500&tag=$(urlencode "tent/cluster=$CL_NAME")"
+  api_ok || return 1
+  cp "$API_BODY" "$WORK/cl-instances.json"
+}
+
+# cl_ip LABEL: the public address of the instance with that label in cl-instances.json.
+cl_ip() { { jq -r --arg l "$1" '.instances[]? | select(.label == $l) | .main_ip' "$WORK/cl-instances.json" 2>/dev/null | head -n 1; } || true; }
+
+# cl_group_names GROUP COUNT: the names of the nodes of a node group, one per line.
+cl_group_names() {
+  local i=0
+  while [ "$i" -lt "$2" ]; do
+    printf '%s-%s-%s\n' "$CL_NAME" "$1" "$i"
+    i=$((i + 1))
+  done
+}
+
+cl_instances_row() {
+  local want got n active res
+  want=$({ cl_group_names servers "$CL_SERVERS"; cl_group_names workers "$CL_WORKERS"; } | sort | paste -sd , -)
+  if ! cl_instances; then
+    row "Cluster's instances in the Vultr API" "UNEXPECTED: $(answer)" "tent's labels and tags find its machines"
+    return 0
+  fi
+  got=$(jq -r '[.instances[].label] | sort | join(",")' "$WORK/cl-instances.json")
+  n=$(jq -r '.instances | length' "$WORK/cl-instances.json")
+  active=$(jq -r '[.instances[] | select(.status == "active" and .power_status == "running")] | length' "$WORK/cl-instances.json")
+  if [ "$n" != "$((CL_SERVERS + CL_WORKERS))" ]; then
+    res="UNEXPECTED: $n instances, want $((CL_SERVERS + CL_WORKERS)): $got"
+  elif [ "$active" != "$n" ]; then
+    res="UNEXPECTED: $n instances, not all active and running: $active are"
+  elif [ "$got" != "$want" ]; then
+    res="UNEXPECTED: labels $got, want $want"
+  else
+    res="as expected: $n instances, all active and running: $got"
+  fi
+  row "Cluster's instances in the Vultr API" "$res" "tent's labels and tags find its machines; the public address of a server is the operator's way in"
+  jq -r '.instances[] | [.id, .label, .main_ip, .status, .power_status, (.tags | join(","))] | @tsv' "$WORK/cl-instances.json" |
+    detail "the cluster's instances (id, label, public address, status, power, tags)"
+}
+
+# cl_file_mode PATH: the octal mode of a file (GNU stat, then BSD stat).
+cl_file_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || echo '?'; }
+
+# cl_operator IP: hack/tent-operator makes the operator's files and the Nomad variables; sets CL_NOMAD_NAME and, when it
+# worked, CL_CONF (the curl config that holds the token).
+cl_operator() {
+  local out rc=0 f bad="" res
+  out=$("$CL_OPERATOR" -state "$CL_URL" -name "$CL_NAME" -dir "$CL_OPDIR" -addr "https://$1:4646" -shell sh 2>"$WORK/cl-operator.err" </dev/null) || rc=$?
+  if [ "$rc" != 0 ]; then
+    res="FAILED: exit $rc: $(oneline 200 <"$WORK/cl-operator.err")"
+  else
+    CL_NOMAD_NAME=$(printf '%s\n' "$out" | sed -n "s/^export NOMAD_TLS_SERVER_NAME='\\(.*\\)'\$/\\1/p")
+    for f in ca.pem cli.pem cli-key.pem token; do
+      [ "$(cl_file_mode "$CL_OPDIR/$f")" = 600 ] || bad="$bad${bad:+, }$f has mode $(cl_file_mode "$CL_OPDIR/$f")"
+    done
+    [ "$(cl_file_mode "$CL_OPDIR")" = 700 ] || bad="$bad${bad:+, }the directory has mode $(cl_file_mode "$CL_OPDIR")"
+    [ -n "$CL_NOMAD_NAME" ] || bad="$bad${bad:+, }no NOMAD_TLS_SERVER_NAME line"
+    if [ -n "$bad" ]; then res="UNEXPECTED: $bad"; else res="as expected: exit 0; ca.pem, cli.pem, cli-key.pem and token with mode 600 in a directory with mode 700; TLS server name $CL_NOMAD_NAME"; fi
+    # The token goes into a config file that only this user reads: curl never gets it on a command line.
+    (umask 077; printf 'header = "X-Nomad-Token: %s"\n' "$(cat "$CL_OPDIR/token")" >"$WORK/nomad-curl.conf")
+    CL_CONF="$WORK/nomad-curl.conf"
+    cl_collect_secrets "$CL_OPDIR/cli-key.pem"
+  fi
+  row "tent-operator" "$res" "the operator's access to the Nomad API until tent export nomad: a certificate for cli.<region>.nomad and the bootstrap token"
+}
+
+# cl_need_api TITLE: true when the operator's files exist; else writes the row of TITLE as unknown and fails.
+cl_need_api() {
+  [ -n "$CL_CONF" ] && return 0
+  row "$1" "unknown: no operator files" "tent-operator failed"
+  return 1
+}
+
+# cl_nm IP METHOD PATH [BODY_FILE]: one call of the Nomad API of the server at IP with the operator's certificate and
+# token; sets CL_NM_STATUS and leaves the body in nm-body.json.
+cl_nm() {
+  local ip="$1" method="$2" path="$3" body="${4:-}"
+  local args=(-sS -X "$method" -o "$WORK/nm-body.json" -w '%{http_code}' --max-time 20 --cacert "$CL_OPDIR/ca.pem"
+    --cert "$CL_OPDIR/cli.pem" --key "$CL_OPDIR/cli-key.pem" --resolve "$CL_NOMAD_NAME:4646:$ip" -K "$CL_CONF"
+    -H 'Content-Type: application/json')
+  if [ -n "$body" ]; then args+=(--data-binary "@$body"); fi
+  CL_NM_STATUS=$(curl "${args[@]}" "https://$CL_NOMAD_NAME:4646$path" 2>>"$WORK/curl-errors.log" || true)
+  [ -n "$CL_NM_STATUS" ] || CL_NM_STATUS=000
+}
+
+# cl_nm_get IP PATH: a GET that tries again twice, 5 s apart, when nothing answered.
+cl_nm_get() {
+  local i
+  for i in 1 2 3; do
+    cl_nm "$1" GET "$2"
+    [ "$CL_NM_STATUS" = 000 ] || return 0
+    [ "$i" = 3 ] || sleep 5
+  done
+}
+
+# cl_health_answered: true when the last call got a health report: Nomad answers 200 for healthy servers and 429 with the
+# same report for unhealthy ones.
+cl_health_answered() { [ "$CL_NM_STATUS" = 200 ] || [ "$CL_NM_STATUS" = 429 ]; }
+
+# cl_nm_error PATH: why the last call failed, on one line.
+cl_nm_error() { printf '%s answered HTTP %s: %s' "$1" "$CL_NM_STATUS" "$(oneline 150 <"$WORK/nm-body.json" 2>/dev/null)"; }
+
+cl_members_row() {
+  local title="Nomad servers (agent/members)" alive total names res
+  cl_need_api "$title" || return 0
+  cl_nm_get "$1" /v1/agent/members
+  if [ "$CL_NM_STATUS" != 200 ]; then
+    res="UNEXPECTED: $(cl_nm_error /v1/agent/members)"
+  else
+    alive=$(jq -r '[.Members[] | select(.Status == "alive")] | length' "$WORK/nm-body.json")
+    total=$(jq -r '.Members | length' "$WORK/nm-body.json")
+    names=$(jq -r '[.Members[] | select(.Status == "alive") | .Name] | sort | join(",")' "$WORK/nm-body.json")
+    if [ "$alive" = "$CL_SERVERS" ] && [ "$total" = "$CL_SERVERS" ]; then res="as expected: $alive alive: $names"; else res="UNEXPECTED: $alive alive of $total: $names"; fi
+  fi
+  row "$title" "$res" "GET /v1/agent/members over mTLS with the operator's certificate and the token"
+}
+
+# cl_health_text: "healthy, N voters" or "not healthy, N voters" from the last autopilot answer; empty when the body is
+# not a health report (Nomad's connection limit answers 429 with plain text).
+cl_health_text() {
+  jq -r '(if .Healthy then "healthy" else "not healthy" end) + ", "
+    + ([.Servers[]? | select(.Voter)] | length | tostring) + " voters"' "$WORK/nm-body.json" 2>/dev/null || true
+}
+
+cl_health_row() {
+  local title="Autopilot health" res
+  cl_need_api "$title" || return 0
+  cl_nm_get "$1" /v1/operator/autopilot/health
+  if cl_health_answered; then res=$(cl_health_text); else res=""; fi
+  if [ -z "$res" ]; then
+    res="UNEXPECTED: $(cl_nm_error /v1/operator/autopilot/health)"
+  elif [ "$res" = "healthy, $CL_SERVERS voters" ]; then
+    res="as expected: $res"
+  else
+    res="UNEXPECTED: $res"
+  fi
+  row "$title" "$res" "all servers vote at the first call after the bootstrap"
+}
+
+cl_nodes_row() {
+  local title="Nomad clients (nodes)" n re names want res
+  cl_need_api "$title" || return 0
+  cl_nm_get "$1" /v1/nodes
+  if [ "$CL_NM_STATUS" != 200 ]; then
+    row "$title" "UNEXPECTED: $(cl_nm_error /v1/nodes)" "the clients registered with their intro tokens"
+    return 0
+  fi
+  n=$(jq -r 'length' "$WORK/nm-body.json")
+  re=$(jq -r '[.[] | select(.Status == "ready" and .SchedulingEligibility == "eligible")] | length' "$WORK/nm-body.json")
+  names=$(jq -r '[.[] | .Name] | sort | join(",")' "$WORK/nm-body.json")
+  want=$(cl_group_names workers "$CL_WORKERS" | sort | paste -sd , -)
+  if [ "$n" != "$CL_WORKERS" ] || [ "$re" != "$CL_WORKERS" ]; then
+    res="UNEXPECTED: $n node(s), $re ready and eligible: $names"
+  elif [ "$names" != "$want" ]; then
+    res="UNEXPECTED: names $names, want $want"
+  else
+    res="as expected: $n ready and eligible: $names"
+  fi
+  row "$title" "$res" "GET /v1/nodes: the clients registered with their intro tokens, under their instance labels"
+}
+
+# cl_job_json: the job of the check as the HTTP API takes it: what the nomad CLI sends for tn_job_spec's HCL, without the
+# fields it leaves null.
+cl_job_json() {
+  jq -n --arg id "$TN_JOB" --arg image "$TN_IMAGE" --arg body "$TN_JOB_BODY" '{Job: {
+    ID: $id, Name: $id, Datacenters: ["*"],
+    TaskGroups: [{Name: "web",
+      Networks: [{Mode: "bridge", DynamicPorts: [{Label: "http", To: 8080}]}],
+      Tasks: [{Name: "web", Driver: "docker",
+        Config: {image: $image, command: "sh",
+          args: ["-c", ("mkdir -p /www && echo " + $body + " >/www/index.html && exec httpd -f -p 8080 -h /www")]},
+        Resources: {CPU: 50, MemoryMB: 32}}]}]}}'
+}
+
+# cl_job IP: registers the job with PUT /v1/jobs, waits up to 3 minutes for an allocation that runs on a client, then
+# purges the job and waits up to a minute for it to stop.
+cl_job() {
+  local title="The job $TN_JOB" ip="$1" t0 i alloc node res="" code running
+  cl_need_api "$title" || { cl_need_api "Stop of the job $TN_JOB" || true; return 0; }
+  cl_job_json >"$WORK/cl-job.json"
+  cl_nm "$ip" PUT /v1/jobs "$WORK/cl-job.json"
+  if [ "$CL_NM_STATUS" != 200 ]; then
+    row "$title" "FAILED: PUT /v1/jobs answered HTTP $CL_NM_STATUS: $(oneline 150 <"$WORK/nm-body.json")" "a docker job in bridge mode runs on a client"
+    return 0
+  fi
+  t0=$(now)
+  running=""
+  for i in $(seq 1 36); do
+    cl_nm_get "$ip" "/v1/job/$TN_JOB/allocations"
+    running=$(jq -r '[.[]? | select(.ClientStatus == "running" and .DesiredStatus == "run")][0] | "\(.ID) \(.NodeName)"' "$WORK/nm-body.json" 2>/dev/null || true)
+    case "$running" in "" | "null null") running="" ;; *) break ;; esac
+    sleep 5
+  done
+  if [ -n "$running" ]; then
+    read -r alloc node <<<"$running"
+    case "$node" in
+      "$CL_NAME-workers-"*) res="as expected: allocation $alloc runs on $node after $(($(now) - t0))s" ;;
+      *) res="UNEXPECTED: allocation $alloc runs on $node, which is not a client" ;;
+    esac
+  else
+    res="FAILED: no allocation ran within 180s: $(jq -c '[.[]? | {ClientStatus, DesiredStatus, NodeName}]' "$WORK/nm-body.json" 2>/dev/null | oneline 200)"
+  fi
+  row "$title" "$res" "a docker job in bridge mode runs on a client: the CNI plugins, Docker and the registration work together"
+  cl_nm "$ip" DELETE "/v1/job/$TN_JOB?purge=true"
+  code=$CL_NM_STATUS
+  t0=$(now)
+  running="?"
+  for i in $(seq 1 12); do
+    cl_nm_get "$ip" "/v1/job/$TN_JOB/allocations"
+    running=$(jq -r '[.[]? | select(.ClientStatus == "running")] | length' "$WORK/nm-body.json" 2>/dev/null || echo '?')
+    [ "$running" = 0 ] && break
+    sleep 5
+  done
+  if [ "$code" != 200 ]; then
+    res="UNEXPECTED: DELETE answered HTTP $code"
+  elif [ "$running" = 0 ]; then
+    res="as expected: purged; no allocation runs after $(($(now) - t0))s"
+  else
+    res="UNEXPECTED: an allocation still runs $(($(now) - t0))s after the purge"
+  fi
+  row "Stop of the job $TN_JOB" "$res" "DELETE /v1/job/<id>?purge=true stops the allocation"
+}
+
+# cl_update_rows: a second run on the built cluster: the plan with --exit-code is empty, and update --yes says so.
+cl_update_rows() {
+  local res first
+  cl_run update-plan update cluster "$CL_NAME" --exit-code
+  case "$CL_RC" in
+    0) res="as expected: exit 0 in ${CL_SECS}s" ;;
+    2) res="UNEXPECTED: exit 2 (the plan has changes): $(oneline 200 <"$CL_OUT")" ;;
+    *) res="FAILED: exit $CL_RC: $(cl_last_line)" ;;
+  esac
+  row "tent update cluster --exit-code" "$res" "a built cluster has no drift: the second run plans nothing"
+  cl_out_detail "tent update cluster --exit-code"
+  cl_run update-yes update cluster "$CL_NAME" --yes
+  first=$(head -n 1 "$CL_OUT")
+  if [ "$CL_RC" = 0 ] && [ "$first" = "cluster $CL_NAME is up to date" ]; then
+    res="as expected: $first (${CL_SECS}s)"
+  elif [ "$CL_RC" = 0 ]; then
+    res="UNEXPECTED: ${first:-no output}"
+  else
+    res="FAILED: exit $CL_RC: $(cl_last_line)"
+  fi
+  row "tent update cluster --yes" "$res" "a built cluster is up to date, and the run only reads"
+  cl_out_detail "tent update cluster --yes (second run)"
+}
+
+# cl_listed: true when cl_instances got the instance list.
+cl_listed() { [ -s "$WORK/cl-instances.json" ]; }
+
+cl_tags_row() {
+  local n have distinct res
+  if ! cl_listed; then
+    row "Instance tags tent/spec-hash" "unknown: no instance list" "the hash says which spec built a node"
+    return 0
+  fi
+  n=$(jq -r '.instances | length' "$WORK/cl-instances.json" 2>/dev/null || echo 0)
+  have=$(jq -r '[.instances[] | select(any(.tags[]?; startswith("tent/spec-hash=")))] | length' "$WORK/cl-instances.json" 2>/dev/null || echo 0)
+  distinct=$(jq -r '[.instances[] | .tags[]? | select(startswith("tent/spec-hash="))] | unique | length' "$WORK/cl-instances.json" 2>/dev/null || echo 0)
+  if [ "$n" -gt 0 ] && [ "$have" = "$n" ]; then
+    res="as expected: $have of $n carry a tent/spec-hash tag; $distinct distinct value(s)"
+  else
+    res="UNEXPECTED: $have of $n carry a tent/spec-hash tag"
+  fi
+  row "Instance tags tent/spec-hash" "$res" "the hash says which spec built a node: a later rollout compares it"
+}
+
+# cl_userdata_row: the user data of each instance, which holds the node's config until the scrub of a later part.
+cl_userdata_row() {
+  local ids id have=0 n=0 res
+  if ! cl_listed; then
+    row "User data after the build" "unknown: no instance list" "recorded: nothing scrubs the user data yet"
+    return 0
+  fi
+  ids=$(jq -r '.instances[]?.id' "$WORK/cl-instances.json" 2>/dev/null || true)
+  for id in $ids; do
+    n=$((n + 1))
+    api GET "/instances/$id/user-data"
+    api_ok || continue
+    if [ "$(jq -r '.user_data.data // empty' "$API_BODY" | b64dec | grep -Fc '/etc/tent/node.json' || true)" -gt 0 ]; then have=$((have + 1)); fi
+  done
+  rm -f "$API_BODY" # a node's user data holds its secrets: it stays on disk no longer than this row needs
+  if [ "$n" -gt 0 ] && [ "$have" = "$n" ]; then
+    res="as expected: $have of $n still hold /etc/tent/node.json (the node's secrets stay in user data before the scrub)"
+  else
+    res="UNEXPECTED: $have of $n hold /etc/tent/node.json"
+  fi
+  row "User data after the build" "$res" "recorded: nothing scrubs the user data yet"
+}
+
+# cl_ssh_reachable NAME: sets CL_IP to the public address of NAME, notes it for the exit trap, and waits up to 2 minutes
+# for SSH; fails, and writes no row, when it does not answer.
+cl_ssh_reachable() {
+  CL_IP=$(cl_ip "$1")
+  [ -n "$CL_IP" ] || return 1
+  CL_PUBS="$CL_PUBS $CL_IP"
+  wait_ssh "$CL_IP" 120
+}
+
+# cl_ssh_unknown_text NAME: why a check on NAME did not run: no instance list, no public address, or SSH.
+cl_ssh_unknown_text() {
+  if [ -n "$CL_IP" ]; then ssh_unknown "$CL_IP"; return 0; fi
+  if cl_listed; then printf 'unknown: the Vultr API has no public address for %s' "$1"; else printf 'unknown: no instance list'; fi
+}
+
+# cl_ssh_unknown_rows NAME TITLE...: the rows of TITLE on NAME as unknown, when SSH did not answer.
+cl_ssh_unknown_rows() {
+  local name="$1" t res
+  shift
+  res=$(cl_ssh_unknown_text "$name")
+  for t in "$@"; do row "$t on $name" "$res" "no check ran"; done
+}
+
+# cl_client_rows: what a client holds after the build: status.json, the join file with the three servers, the unit of
+# the join that ran, and the intro token's size.
+cl_client_rows() {
+  local name="$CL_NAME-workers-0" ip out res phases runs failed rewrites n size mode owner
+  if ! cl_ssh_reachable "$name"; then
+    cl_ssh_unknown_rows "$name" "status.json" "05-join.hcl" "tent-node-join.service" "Intro token file"
+    return 0
+  fi
+  ip="$CL_IP"
+  ssh_x "$ip" 'cat /var/lib/tent/status.json 2>/dev/null; true' >"$WORK/cl-status.json" 2>/dev/null || : >"$WORK/cl-status.json"
+  phases=$(jq -r '[.phases[]? | "\(.name) \(.status)"] | join(", ")' "$WORK/cl-status.json" 2>/dev/null || true)
+  if [ -n "$phases" ] && [ "$(jq -r '[.phases[].name] | join(" ")' "$WORK/cl-status.json")" = "$TN_PHASES" ] &&
+    [ "$(jq -r '[.phases[].status] | all(. == "done" or . == "unchanged")' "$WORK/cl-status.json")" = true ]; then
+    res="as expected: $phases"
+  else
+    res="UNEXPECTED: ${phases:-no status.json}"
+  fi
+  row "status.json on $name" "$res" "tent-node ran every phase on a client"
+  ssh_x "$ip" 'cat /etc/nomad.d/05-join.hcl 2>/dev/null; true' >"$WORK/cl-join.hcl" 2>/dev/null || : >"$WORK/cl-join.hcl"
+  detail "/etc/nomad.d/05-join.hcl on $name" <"$WORK/cl-join.hcl"
+  out=$(grep -o '"[^"]*:[0-9]*"' "$WORK/cl-join.hcl" | tr -d '"' | paste -sd ' ' - || true)
+  n=$(printf '%s\n' "$out" | wc -w | tr -d ' ')
+  if [ "$n" = "$CL_SERVERS" ]; then res="as expected: lists $n servers ($out)"; else res="UNEXPECTED: lists $n servers (${out:-none})"; fi
+  row "05-join.hcl on $name" "$res" "a client joins the RPC port of every server, from the seed in NodeConfig"
+  ssh_x "$ip" 'journalctl -b -u tent-node-join.service --no-pager -o short-monotonic | tail -n 60' 2>/dev/null | hide_url |
+    detail "journalctl -u tent-node-join.service ($name)" || true
+  out=$(ssh_x "$ip" 'journalctl -b -u tent-node-join.service --no-pager -o cat' 2>/dev/null || true)
+  runs=$(printf '%s\n' "$out" | grep -c '^Finished' || true)
+  failed=$(printf '%s\n' "$out" | grep -c 'Failed with result' || true)
+  rewrites=$(printf '%s\n' "$out" | grep -Fc '05-join.hcl joins the servers that answered' || true)
+  if [ "$runs" -ge 1 ] && [ "$failed" = 0 ]; then res="as expected"; else res="UNEXPECTED"; fi
+  row "tent-node-join.service on $name" "$res: $runs run(s), $failed failed; $rewrites line(s) say that the join file was rewritten" \
+    "the first peers call between two machines: a client asks a server's agent for the peers"
+  out=$(ssh_x "$ip" "stat -c '%s %a %U:%G' $CL_INTRO_TOKEN 2>/dev/null; true" 2>/dev/null || true)
+  read -r size mode owner <<<"$out"
+  if [ -z "$size" ]; then
+    res="UNEXPECTED: no file $CL_INTRO_TOKEN"
+  elif [ "$size" -gt 2048 ]; then
+    res="UNEXPECTED: $size bytes, more than the 2048-byte stand-in of the plan's size check"
+  else
+    res="as expected: $size bytes, mode $mode $owner (the plan's size check assumes up to 2048)"
+  fi
+  row "Intro token file on $name" "$res" "a record: the real size of an intro token for this node name"
+}
+
+# cl_restart_script: the script on a server that restarts nomad.service, waits up to a minute for it to be active again,
+# and prints how it went.
+cl_restart_script() {
+  cat <<'EOF'
+systemctl restart nomad.service
+rc=$?
+i=0
+while [ "$i" -lt 12 ] && [ "$(systemctl is-active nomad.service)" != active ]; do sleep 5; i=$((i + 1)); done
+echo "rc|$rc"
+echo "active|$(systemctl is-active nomad.service)"
+echo "result|$(systemctl show -p Result --value nomad.service)"
+echo "nrestarts|$(systemctl show -p NRestarts --value nomad.service)"
+echo "waited|$((i * 5))"
+journalctl -b _PID=1 UNIT=nomad.service -o cat --no-pager | grep 'Failed with result' | sed 's/^/journal|/'
+true
+EOF
+}
+
+# cl_server_rows: nomad.service on the first server after systemctl restart (the unit's result: a server's agent exits
+# with 1 on SIGTERM), then that the servers vote again, asked from the second server.
+cl_server_rows() {
+  local name="$CL_NAME-servers-0" ip other out rc active result nrestarts waited journal res i t0 text=""
+  local title="nomad.service after systemctl restart on $name"
+  if ! cl_ssh_reachable "$name"; then
+    row "$title" "$(cl_ssh_unknown_text "$name")" "no check ran"
+    return 0
+  fi
+  ip="$CL_IP"
+  other=$(cl_ip "$CL_NAME-servers-1")
+  cl_restart_script >"$WORK/cl-restart.sh"
+  out=$(ssh_x "$ip" 'sh -s' <"$WORK/cl-restart.sh" 2>/dev/null | hide_url || true)
+  rc=$(tn_key rc "$out")
+  active=$(tn_key active "$out")
+  result=$(tn_key result "$out")
+  nrestarts=$(tn_key nrestarts "$out")
+  waited=$(tn_key waited "$out")
+  journal=$(printf '%s\n' "$out" | grep -c '^journal|' || true)
+  if [ -z "$out" ]; then
+    res=$(ssh_unknown "$ip")
+  elif [ "$rc" = 0 ] && [ "$active" = active ]; then
+    res="as expected: restart exit 0, unit active after ${waited}s (Result $result, NRestarts $nrestarts); the journal has $journal 'Failed with result' line(s)"
+  else
+    res="UNEXPECTED: restart exit ${rc:-?}, unit ${active:-?} after ${waited:-?}s (Result ${result:-?}); the journal has $journal 'Failed with result' line(s)"
+  fi
+  row "$title" "$res" \
+    "a server's agent exits with 1 on SIGTERM (leave_on_terminate is off): a restart works, and the journal says how the stop ended"
+  printf '%s\n' "$out" | detail "nomad.service restart on $name (rc, state, journal)" || true
+  [ -n "$out" ] || return 0
+  cl_need_api "Server voters after the restart" || return 0
+  t0=$(now)
+  for i in $(seq 1 36); do
+    cl_nm "${other:-$ip}" GET /v1/operator/autopilot/health
+    text=""
+    if cl_health_answered; then
+      text=$(cl_health_text)
+      [ "$text" != "healthy, $CL_SERVERS voters" ] || break
+    fi
+    sleep 5
+  done
+  if [ "$text" = "healthy, $CL_SERVERS voters" ]; then
+    res="as expected: $text after $(($(now) - t0))s"
+  else
+    res="UNEXPECTED: not healthy with $CL_SERVERS voters within 180s (last answer: HTTP $CL_NM_STATUS${text:+, $text})"
+  fi
+  row "Server voters after the restart" "$res" "a stopped server stays a Raft peer, and the restarted one votes again"
+}
+
+# cl_redact FILE: replaces every secret line that cl_collect_secrets noted, wherever it stands in FILE, with [hidden].
+cl_redact() {
+  awk 'NR == FNR { pat[NR] = $0; n = NR; next }
+    {
+      for (i = 1; i <= n; i++) {
+        while ((k = index($0, pat[i])) > 0) $0 = substr($0, 1, k - 1) "[hidden]" substr($0, k + length(pat[i]))
+      }
+      print
+    }' "$WORK/secret-patterns.txt" "$1" >"$1.redacted" && mv "$1.redacted" "$1"
+}
+
+# cl_secrets_row [WHEN]: looks in everything the run recorded for the long lines of the cluster's secrets, and says only
+# which files hold one. A secret that is found is hidden in the report at once. WHEN is added to the row's title.
+cl_secrets_row() {
+  local title="Secrets in the output${1:+ ($1)}" files="$SUMMARY $DETAILS $WORK/curl-errors.log" f found res
+  CL_SEARCHED=1
+  for f in "$WORK"/cl-*.out "$WORK"/cl-*.err; do
+    if [ -e "$f" ]; then files="$files $f"; fi
+  done
+  if [ "$CL_SECRETS" = 0 ] || [ ! -s "$WORK/secret-patterns.txt" ]; then
+    row "$title" "unknown: no secret file was read" "tent and the script keep secrets out of what a person reads"
+    return 0
+  fi
+  # shellcheck disable=SC2086 # the names have no spaces
+  found=$({ grep -Fl -f "$WORK/secret-patterns.txt" $files 2>/dev/null || true; } | while IFS= read -r f; do basename "$f"; done | paste -sd , -)
+  if [ -z "$found" ]; then
+    res="as expected: none of the $CL_SECRETS secrets read ($CL_SECRET_NAMES) appears in tent's output, the details or this table"
+  else
+    cl_redact "$SUMMARY"
+    cl_redact "$DETAILS"
+    res="FAILED: a secret appears in $found (hidden in this report)"
+  fi
+  row "$title" "$res" "tent and the script keep secrets out of what a person reads"
+}
+
+# cl_found: sets CL_LEFT_INST, CL_LEFT_VPC, CL_LEFT_FW and CL_LEFT_KEY to the ids of what the Vultr API still lists for
+# the cluster: instances by tag, the others by the marker in their description or name. Fails when a list fails.
+cl_found() {
+  local m="cluster=$CL_NAME;"
+  api GET "/instances?per_page=500&tag=$(urlencode "tent/cluster=$CL_NAME")"
+  api_ok || return 1
+  CL_LEFT_INST=$(jq -r '.instances[]?.id' "$API_BODY" | paste -sd ' ' -)
+  api GET "/vpcs?per_page=500"
+  api_ok || return 1
+  CL_LEFT_VPC=$(jq -r --arg m "$m" '.vpcs[]? | select((.description // "") | contains($m)) | .id' "$API_BODY" | paste -sd ' ' -)
+  api GET "/firewalls?per_page=500"
+  api_ok || return 1
+  CL_LEFT_FW=$(jq -r --arg m "$m" '.firewall_groups[]? | select((.description // "") | contains($m)) | .id' "$API_BODY" | paste -sd ' ' -)
+  api GET "/ssh-keys?per_page=500"
+  api_ok || return 1
+  CL_LEFT_KEY=$(jq -r --arg m "$m" '.ssh_keys[]? | select((.name // "") | contains($m)) | .id' "$API_BODY" | paste -sd ' ' -)
+}
+
+cl_count() { printf '%s\n' "$1" | wc -w | tr -d ' '; } # cl_count IDS: how many ids
+
+cl_left_text() {
+  printf '%s instance(s), %s VPC(s), %s firewall group(s), %s SSH key(s)' "$(cl_count "$CL_LEFT_INST")" \
+    "$(cl_count "$CL_LEFT_VPC")" "$(cl_count "$CL_LEFT_FW")" "$(cl_count "$CL_LEFT_KEY")"
+}
+
+# cl_delete [WHO]: tent delete cluster --yes; writes its row, and notes that the cluster is gone when it exits 0.
+cl_delete() {
+  local res
+  cl_run delete delete cluster "$CL_NAME" --yes
+  if [ "$CL_RC" = 0 ]; then
+    CL_DELETED=1
+    res="as expected: exit 0 in ${CL_SECS}s${1:+ ($1)}"
+  else
+    res="FAILED: exit $CL_RC in ${CL_SECS}s${1:+ ($1)}: $(cl_last_line)"
+  fi
+  row "tent delete cluster --yes" "$res" "delete finds the cluster's objects by their markers, deletes the nodes first and the state last"
+  cl_out_detail "tent delete cluster --yes${1:+ ($1)}"
+}
+
+cl_after_delete_rows() {
+  local res files n
+  if cl_found; then
+    if [ -z "$CL_LEFT_INST$CL_LEFT_VPC$CL_LEFT_FW$CL_LEFT_KEY" ]; then
+      res="as expected: no instance, VPC, firewall group or SSH key is left"
+    else
+      res="FAILED: $(cl_left_text) are left; the exit trap removes them by tag"
+    fi
+  else
+    res="UNEXPECTED: $(answer)"
+  fi
+  row "Cluster's objects in the Vultr API after the delete" "$res" "delete leaves nothing that carries the cluster's tag or marker"
+  # Names that start with .tent- belong to the store's backend: its lock files stay after a delete.
+  files=$(cd "$CL_STATE" && find . -type f ! -path './.tent-*' | sed 's|^\./||' | sort)
+  n=$(printf '%s' "$files" | grep -c . || true)
+  if [ "$n" = 0 ]; then res="as expected: empty"; else res="UNEXPECTED: $n file(s): $(printf '%s\n' "$files" | paste -sd , - | cut -c1-200)"; fi
+  row "State store after the delete" "$res" "delete removes the cluster's specs, secrets, lock and marks"
+}
+
+check_cluster() {
+  local ip t res
+  cl_create
+  cl_progress_row
+  if [ "$CL_RC" != 0 ]; then
+    log "create failed: the exit trap deletes the cluster"
+    cl_secrets_row
+    return 0
+  fi
+  cl_instances_row
+  ip=$(cl_ip "$CL_NAME-servers-0")
+  if [ -z "$ip" ]; then
+    res="unknown: no instance list"
+    if cl_listed; then res="unknown: the Vultr API has no public address for $CL_NAME-servers-0"; fi
+    for t in "tent-operator" "Nomad servers (agent/members)" "Autopilot health" "Nomad clients (nodes)" "The job $TN_JOB" \
+      "Stop of the job $TN_JOB"; do
+      row "$t" "$res" "no Nomad check ran"
+    done
+  else
+    cl_operator "$ip"
+    cl_members_row "$ip"
+    cl_health_row "$ip"
+    cl_nodes_row "$ip"
+    cl_job "$ip"
+  fi
+  cl_update_rows
+  cl_tags_row
+  cl_userdata_row
+  cl_client_rows
+  cl_server_rows
+  if [ "$KEEP" = 1 ]; then
+    for t in "tent delete cluster --yes" "Cluster's objects in the Vultr API after the delete" "State store after the delete"; do
+      row "$t" "skipped: --keep" "--keep leaves the cluster in place"
+    done
+  else
+    cl_delete
+    cl_after_delete_rows
+  fi
+  cl_secrets_row
+}
+
+# cl_remove_leftovers: removes by tag and marker what the Vultr API still lists for the cluster after tent delete.
+cl_remove_leftovers() {
+  local id left t
+  [ -n "$AUTH_CONF" ] || return 0
+  cl_found || return 0
+  [ -n "$CL_LEFT_INST$CL_LEFT_VPC$CL_LEFT_FW$CL_LEFT_KEY" ] || return 0
+  left=$(cl_left_text)
+  for id in $CL_LEFT_INST; do api DELETE "/instances/$id"; done
+  t=$(($(now) + 300))
+  while [ "$(now)" -lt "$t" ]; do
+    cl_found || break
+    [ -n "$CL_LEFT_INST" ] || break
+    sleep 5
+  done
+  cl_found || true
+  for id in $CL_LEFT_FW; do delete_retrying firewall "$id"; done
+  for id in $CL_LEFT_VPC; do delete_retrying vpc "$id"; done
+  for id in $CL_LEFT_KEY; do delete_retrying ssh-key "$id"; done
+  row "Leftovers removed by tag" "removed: $left" "tent delete did not remove them: the exit trap did, by tag and marker"
+}
+
+# cl_cleanup: the cluster's part of the exit trap. With --keep the run never deleted the cluster and still does not: the
+# secret search runs if the run did not reach its own, and the state store moves out of the temporary directory (when
+# the move fails, the store stays there and so does the directory). Otherwise tent delete runs when the run did not
+# delete the cluster, the secret search runs over what that delete printed, and then whatever the Vultr API still lists
+# for the cluster goes by tag and marker.
+cl_cleanup() {
+  local kept="$OUT_DIR/cluster-$RUN-state"
+  [ "$CL_STARTED" = 1 ] || return 0
+  # A run stopped during create has read none: read what the store holds before anything deletes it.
+  [ "$CL_SECRETS" != 0 ] || cl_collect_store_secrets
+  if [ "$KEEP" = 1 ]; then
+    [ "$CL_SEARCHED" = 1 ] || cl_secrets_row "at exit"
+    if mv "$CL_STATE" "$kept"; then
+      log "--keep: cluster $CL_NAME stays; its state store, with the cluster's secrets, is $kept"
+    else
+      kept="$CL_STATE"
+      KEEP_WORK=1
+      rm -rf "$AUTH_CONF" "$WORK/nomad-curl.conf" "$CL_OPDIR" "$WORK/secret-patterns.txt" "$SSH_KEY" "$SSH_KEY.pub"
+      log "--keep: could not move the state store: it stays in $kept, and so does the directory $WORK"
+      log "the directory holds no API key, token or private key any more: only the store has the cluster's secrets"
+    fi
+    log "finish an interrupted build with: $CL_TENT update cluster $CL_NAME --yes --state file://$kept"
+    log "delete the cluster with: $CL_TENT delete cluster $CL_NAME --yes --state file://$kept"
+    return 0
+  fi
+  if [ "$CL_DELETED" != 1 ]; then
+    cl_delete "run by the exit trap"
+    cl_secrets_row "after the exit trap's delete"
+  fi
+  cl_remove_leftovers
+}
+
+# ---------------------------------------------------------------------------------------------------------------
 # Cleanup (EXIT trap): write the report, then delete everything this run created unless --keep.
 # Records how long the API refuses to delete the firewall group and the VPC after the instances are gone
 # (the retry loop `tent delete cluster` needs).
 
+# delete_retrying TYPE ID: deletes a firewall group, VPC or SSH key, which the API refuses while an instance that is
+# going away still uses it, and tries again every 5 s for up to 5 minutes. The row records how long that took.
+delete_retrying() {
+  local type="$1" id="$2" deadline t0 tries=0 first_err=""
+  deadline=$(($(now) + 300))
+  t0=$(now)
+  while :; do
+    tries=$((tries + 1))
+    case "$type" in
+      firewall) api DELETE "/firewalls/$id" ;;
+      vpc) api DELETE "/vpcs/$id" ;;
+      ssh-key) api DELETE "/ssh-keys/$id" ;;
+    esac
+    if api_ok; then
+      row "Delete $type after instances are gone" "ok after $(($(now) - t0))s, $tries request(s)${first_err:+; refused before with: $first_err}" \
+        "retry loop in delete cluster"
+      break
+    fi
+    [ "$API_STATUS" = "404" ] && break
+    [ -n "$first_err" ] || first_err="$API_STATUS $(api_err)"
+    if [ "$(now)" -gt "$deadline" ]; then
+      log "could not delete $type $id: $API_STATUS $(api_err)"
+      row "Delete $type after instances are gone" "FAILED after $tries requests: $API_STATUS $(api_err)" "delete it by hand: $id"
+      break
+    fi
+    sleep 5
+  done
+}
+
 cleanup() {
-  local rc=$? type id deadline left t0 tries first_err ip
+  local rc=$? type t id deadline left ip
   set +e
   write_report
-  for ip in "$A_PUB" "$B_PUB" "$V_PUB" "$T_PUB"; do [ -n "$ip" ] && [ -n "$SOCK_DIR" ] && ssh_close "$ip"; done
+  # CL_PUBS is a list of addresses without spaces.
+  for ip in "$A_PUB" "$B_PUB" "$V_PUB" "$T_PUB" $CL_PUBS; do [ -n "$ip" ] && [ -n "$SOCK_DIR" ] && ssh_close "$ip"; done
+  if [ "$MODE" = "run" ] && want cluster; then
+    cl_cleanup
+    write_report
+  fi
   if [ "$MODE" = "run" ] && [ -n "$STATE" ] && [ -s "$STATE" ]; then
     if [ "$KEEP" = 1 ]; then
       log "--keep: resources left in place (delete them yourself):"
@@ -2987,31 +3845,7 @@ cleanup() {
       for type in firewall vpc ssh-key; do
         while read -r t id; do
           [ "$t" = "$type" ] || continue
-          deadline=$(($(now) + 300))
-          t0=$(now)
-          tries=0
-          first_err=""
-          while :; do
-            tries=$((tries + 1))
-            case "$type" in
-              firewall) api DELETE "/firewalls/$id" ;;
-              vpc) api DELETE "/vpcs/$id" ;;
-              ssh-key) api DELETE "/ssh-keys/$id" ;;
-            esac
-            if api_ok; then
-              row "Delete $type after instances are gone" "ok after $(($(now) - t0))s, $tries request(s)${first_err:+; refused before with: $first_err}" \
-                "retry loop in delete cluster"
-              break
-            fi
-            [ "$API_STATUS" = "404" ] && break
-            [ -n "$first_err" ] || first_err="$API_STATUS $(api_err)"
-            if [ "$(now)" -gt "$deadline" ]; then
-              log "could not delete $type $id: $API_STATUS $(api_err)"
-              row "Delete $type after instances are gone" "FAILED after $tries requests: $API_STATUS $(api_err)" "delete it by hand: $id"
-              break
-            fi
-            sleep 5
-          done
+          delete_retrying "$type" "$id"
         done <"$STATE"
       done
       # Fallback: SSH keys whose name carries the run tag but whose id was not recorded (sshdup's second key when
@@ -3027,11 +3861,58 @@ cleanup() {
   fi
   [ -n "$REPORT" ] && [ -f "$REPORT" ] && log "report: $REPORT"
   [ -n "$SOCK_DIR" ] && rm -rf "$SOCK_DIR"
-  [ -n "$WORK" ] && rm -rf "$WORK"
+  if [ -n "$WORK" ] && [ "$KEEP_WORK" != 1 ]; then rm -rf "$WORK"; fi
   exit "$rc"
 }
 
 # ---------------------------------------------------------------------------------------------------------------
+
+# authenticate_and_confirm: reads VULTR_API_KEY into a mode-0600 config file for curl, asks for the go-ahead unless
+# --yes is given, and checks the key against the API.
+authenticate_and_confirm() {
+  local ans
+  [ -n "${VULTR_API_KEY:-}" ] || die "VULTR_API_KEY is not set"
+  write_auth_conf
+  if [ "$ASSUME_YES" != 1 ]; then
+    [ -t 0 ] || die "not a terminal: pass --yes to confirm"
+    read -r -p "Proceed? [y/N] " ans
+    case "$ans" in y | Y | yes) ;; *) die "aborted" ;; esac
+  fi
+  api GET /account
+  api_ok || die "authentication failed: $API_STATUS $(api_err) (check the key and its IP allow-list)"
+}
+
+# main_cluster: the cluster check: says what it creates, and on a real run builds the cluster with tent and checks it.
+# tent makes everything in the cloud itself; the run only makes a key pair and a state store in WORK.
+main_cluster() {
+  local instances=$((CL_SERVERS + CL_WORKERS)) cost end_note
+  CL_NAME="spk-$RUN"
+  CL_STATE="$WORK/state"
+  CL_URL="file://$CL_STATE"
+  CL_OPDIR="$WORK/operator"
+  cost=$(cost_text "$instances")
+  end_note="the run deletes the cluster with tent delete cluster, and then removes by tag what is left"
+  if [ "$KEEP" = 1 ]; then end_note="the cluster is NOT deleted: --keep given, so it stays and bills until you delete it"; fi
+  cat >&2 <<EOF
+
+This run builds a cluster named $CL_NAME with tent in your Vultr account ($REGION):
+  - $instances instances of $PLAN, all created at once ($CL_SERVERS servers and $CL_WORKERS clients; the account's
+    instance limit must allow $instances), 1 hour minimum each: $cost
+  - 1 VPC, 2 firewall groups and 1 SSH key, made by tent and removed by tent delete cluster
+  - $end_note
+Expected duration: 20-30 minutes. Report: $REPORT
+
+EOF
+  [ "$MODE" = "dry-run" ] && { log "dry run: nothing created"; return 0; }
+  prepare_cluster
+  authenticate_and_confirm
+  mkdir -m 700 "$CL_STATE"
+  ssh-keygen -t ed25519 -N '' -q -f "$WORK/id_ed25519" -C "$RUN_TAG"
+  SSH_KEY="$WORK/id_ed25519"
+  ssh_init
+  check_cluster
+  log "all checks finished"
+}
 
 main() {
   local c
@@ -3054,11 +3935,15 @@ main() {
     case ",$ALL_CHECKS," in *",$c,"*) ;; *) die "unknown check: $c" ;; esac
   done
   if want tentnode && [ "$CHECKS" != tentnode ]; then die "tentnode runs alone: --only tentnode"; fi
+  if want cluster && [ "$CHECKS" != cluster ]; then die "cluster runs alone: --only cluster"; fi
   # tentnode needs one VPC: it tries the first mask alone and makes no test VPCs.
   if want tentnode; then VPC_MASKS="${VPC_MASKS%% *}"; fi
 
   for c in curl jq awk base64 tr od; do need_cmd "$c"; done
   if [ "$MODE" = "run" ] && want tentnode; then need_cmd go; need_cmd gzip; fi
+  if [ "$MODE" = "run" ] && want cluster; then
+    for c in go ssh ssh-keygen mkfifo find; do need_cmd "$c"; done
+  fi
   # needs_api: the run creates resources (SSH key, VPC); needs_instances: it also creates instance A.
   local needs_api=0 needs_instances=0
   for c in tags markers userdata fwinuse patchtags vpcpending halttwice $SSH_CHECKS; do
@@ -3080,6 +3965,7 @@ main() {
   FG_MARKER="tent:cluster=$RUN_TAG;kind=firewall;role=server;op=$(uuid4)"
   WORK=$(mktemp -d "${TMPDIR:-/tmp}/tent-spike.XXXXXX")
   mkdir -p "$OUT_DIR"
+  OUT_DIR=$(cd "$OUT_DIR" && pwd)
   REPORT="$OUT_DIR/vultr-spike-$(date -u +%Y%m%d-%H%M%S)-$REGION-$RUN.md"
   SUMMARY="$WORK/summary.md"
   DETAILS="$WORK/details.md"
@@ -3093,6 +3979,10 @@ main() {
   log "tent Vultr spike v$SPIKE_VERSION, run $RUN, region $REGION, plan $PLAN"
   preflight
   [ "$MODE" = "preflight" ] && { log "preflight only: done"; return 0; }
+  if want cluster; then
+    main_cluster
+    return 0
+  fi
   if [ "$needs_api" = 0 ]; then
     if [ "$MODE" = "run" ] && want objstore; then check_objstore; fi
     log "no Vultr resource checks selected: done"
@@ -3117,11 +4007,11 @@ main() {
     lock_note="
   - no selected check needs SSH: the instances get a firewall group with no rules (no inbound traffic)"
   fi
-  cost=$(awk -v h="$HOURLY" -v n="$instances" 'BEGIN { printf "%.3f", h * n }')
+  cost=$(cost_text "$instances")
   case "$instances" in
     0) billed="no instances (nothing billed)" duration="1-3 minutes" ;;
-    1) billed="1 instance of $PLAN, 1 hour minimum: about \$$cost" duration="5-15 minutes" ;;
-    *) billed="$instances instances of $PLAN (at most 3 at a time), 1 hour minimum each: about \$$cost" duration="20-45 minutes" ;;
+    1) billed="1 instance of $PLAN, 1 hour minimum: $cost" duration="5-15 minutes" ;;
+    *) billed="$instances instances of $PLAN (at most 3 at a time), 1 hour minimum each: $cost" duration="20-45 minutes" ;;
   esac
   # Without SSH the checks start once the API reports A ready, about a minute after the create.
   if [ "$instances" -gt 0 ] && [ "$NEED_SSH" = 0 ]; then duration="5-10 minutes"; fi
@@ -3140,21 +4030,7 @@ EOF
   [ "$MODE" = "dry-run" ] && { log "dry run: nothing created"; return 0; }
   # Before anything is created: the user data needs the tent-node under test.
   if want tentnode; then prepare_tentnode; fi
-  [ -n "${VULTR_API_KEY:-}" ] || die "VULTR_API_KEY is not set"
-  AUTH_CONF="$WORK/auth.conf"
-  (
-    umask 077
-    printf 'header = "Authorization: Bearer %s"\n' "$VULTR_API_KEY" >"$AUTH_CONF"
-  )
-  if [ "$ASSUME_YES" != 1 ]; then
-    [ -t 0 ] || die "not a terminal: pass --yes to confirm"
-    local ans
-    read -r -p "Proceed? [y/N] " ans
-    case "$ans" in y | Y | yes) ;; *) die "aborted" ;; esac
-  fi
-
-  api GET /account
-  api_ok || die "authentication failed: $API_STATUS $(api_err) (check the key and its IP allow-list)"
+  authenticate_and_confirm
 
   if want objstore; then check_objstore; fi
   create_ssh_key

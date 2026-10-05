@@ -14,12 +14,11 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"path"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
+	"github.com/ingvarch/tent/hack/internal/shellenv"
 	"github.com/ingvarch/tent/internal/assets"
 )
 
@@ -36,12 +35,6 @@ const maxExpires = 7 * 24 * time.Hour
 // The tool uploads an object again when the rule would delete it before the URL expires.
 const lifecycle = 8 * 24 * time.Hour
 
-// The shells that the tool prints for.
-const (
-	shellSh   = "sh"
-	shellFish = "fish"
-)
-
 // machines are the architectures of tent-node, with the ELF machine of each.
 var machines = map[string]elf.Machine{"amd64": elf.EM_X86_64, "arm64": elf.EM_AARCH64}
 
@@ -50,7 +43,7 @@ type options struct {
 	binary  string        // the tent-node to upload
 	arch    string        // amd64 or arm64
 	expires time.Duration // how long the presigned URL works
-	shell   string        // shellSh or shellFish
+	shell   string        // shellenv.Sh or shellenv.Fish
 }
 
 // usageError is a wrong command line: the tool exits with exitUsage.
@@ -117,9 +110,9 @@ func parseArgs(args []string, stderr io.Writer) (options, error) {
 			o.expires, maxExpires))
 	}
 	if o.shell == "" {
-		o.shell = loginShell()
+		o.shell = shellenv.Login(os.Getenv("SHELL"))
 	}
-	if o.shell != shellSh && o.shell != shellFish {
+	if !shellenv.Valid(o.shell) {
 		return options{}, usageError(fmt.Sprintf("-shell %q: want fish or sh", o.shell))
 	}
 	if o.binary == "" {
@@ -139,14 +132,6 @@ TENT_NODE_URL to a presigned URL of it and TENT_NODE_SHA256 to its sha256, for f
 Flags:
 `, urlEnv, urlForm)
 	fs.PrintDefaults()
-}
-
-// loginShell returns fish when the user's shell, as $SHELL names it, is fish, and sh otherwise.
-func loginShell() string {
-	if path.Base(os.Getenv("SHELL")) == shellFish {
-		return shellFish
-	}
-	return shellSh
 }
 
 // upload uploads the binary to the bucket in urlEnv, unless the bucket holds it and keeps it until the URL expires,
@@ -208,8 +193,8 @@ func upload(ctx context.Context, o options, stdout, stderr io.Writer) error {
 		return fmt.Errorf("presign a download of %s: %w", where, err)
 	}
 	_, _ = fmt.Fprintf(stderr, "the URL works until %s\n", until.UTC().Format(time.RFC3339))
-	_, err = fmt.Fprintf(stdout, "%s\n%s\n", exportLine(o.shell, "TENT_NODE_URL", nodeURL),
-		exportLine(o.shell, "TENT_NODE_SHA256", sum))
+	_, err = fmt.Fprintf(stdout, "%s\n%s\n", shellenv.ExportLine(o.shell, "TENT_NODE_URL", nodeURL),
+		shellenv.ExportLine(o.shell, "TENT_NODE_SHA256", sum))
 	return err
 }
 
@@ -258,22 +243,4 @@ func hashFile(f io.ReadSeeker) (sum string, size int64, err error) {
 		return "", 0, err
 	}
 	return hex.EncodeToString(h.Sum(nil)), size, nil
-}
-
-// exportLine returns the line that sets the environment variable name to value in the shell, quoted so that the
-// shell reads the value as it is.
-func exportLine(shell, name, value string) string {
-	if shell == shellFish {
-		return "set -gx " + name + " " + fishQuote(value)
-	}
-	return "export " + name + "=" + shQuote(value)
-}
-
-// shQuote puts s in single quotes for sh, where a single quote of s ends the quoted part, follows escaped by a
-// backslash and starts the next quoted part.
-func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
-
-// fishQuote puts s in single quotes for fish, where a backslash escapes a backslash and a single quote.
-func fishQuote(s string) string {
-	return "'" + strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(s) + "'"
 }
