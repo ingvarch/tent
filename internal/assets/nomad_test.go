@@ -17,6 +17,7 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
 	"github.com/google/go-cmp/cmp"
 
+	"github.com/ingvarch/tent/internal/assets/assetstest"
 	"github.com/ingvarch/tent/internal/channels"
 )
 
@@ -261,7 +262,7 @@ func TestNomadChecksTheKeyAtTheClock(t *testing.T) {
 // published them, from the default URL with the embedded key.
 func TestNomadDefaults(t *testing.T) {
 	const sumsURL = "https://releases.hashicorp.com/nomad/2.0.7/nomad_2.0.7_SHA256SUMS"
-	sums, sig := readFile(t, "testdata/nomad_2.0.7_SHA256SUMS"), readFile(t, "testdata/nomad_2.0.7_SHA256SUMS.sig")
+	sums, sig := assetstest.NomadSums()
 	for _, tc := range []struct {
 		name, sums, sig, date string
 		want                  []string // the error, or nothing

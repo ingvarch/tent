@@ -54,6 +54,12 @@ linters:
           files: ["${base-path}/internal/secrettest/**", "!$test"]
           allow:
             - $gostd
+        # internal/assets/assetstest serves release files to the tests of every layer, so it imports only the standard
+        # library.
+        assetstest-stdlib-only:
+          files: ["${base-path}/internal/assets/assetstest/**", "!$test"]
+          allow:
+            - $gostd
         # internal/channels reads the embedded channel files with the decoder of the specs, compares versions with
         # x/mod/semver and imports nothing else.
         channels-stdlib-and-yaml:
@@ -81,7 +87,7 @@ linters:
             - $gostd
             - github.com/ingvarch/tent/internal/secret$
             - github.com/ingvarch/tent/api/v1alpha1$
-        # internal/secrettest, nomadfake, nodeuptest and s3urltest, which import testing, are for tests: no code that
+        # internal/secrettest, nomadfake, nodeuptest, s3urltest and assetstest are for tests: no code that
         # tent, tent-node or a development tool runs imports them.
         secrettest-only-in-tests:
           files: ["$all", "!$test"]
@@ -94,6 +100,8 @@ linters:
               desc: nodeuptest is for tests only
             - pkg: github.com/ingvarch/tent/internal/s3url/s3urltest
               desc: s3urltest is for tests only
+            - pkg: github.com/ingvarch/tent/internal/assets/assetstest
+              desc: assetstest is for tests only
         # Tests read the rendered Nomad configuration back with HCL1; no code that tent runs parses HCL.
         hcl-only-in-tests:
           files: ["$all", "!$test"]
