@@ -1,6 +1,6 @@
 // Package nomadfake is an in-memory Nomad cluster for tests. Its clients implement nomadops.API with the types and
 // error classes of nomadops, so code that drives Nomad runs on it as on the real client. A test sets the cluster's
-// leader, nodes and health, and makes chosen calls fail or lose their answer after the fake carried them out.
+// leader, nodes, peers and health, and makes chosen calls fail or lose their answer after the fake carried them out.
 package nomadfake
 
 import (
@@ -30,9 +30,9 @@ import (
 //
 // The fake is simpler than Nomad in these ways:
 //   - It checks no ACL token: each call succeeds whatever token its client holds. Tokens tells which tokens the
-//     clients got. Only before the bootstrap does a call fail: Nodes, Health and IntroToken fail for good, as
-//     Nomad's 403, until a Bootstrap succeeds; Leader and Bootstrap work.
-//   - It lists one node per name, where Nomad also lists a node that went down until it collects it.
+//     clients got. Only before the bootstrap does a call fail: Nodes, Health, Peers and IntroToken fail for good, as
+//     Nomad's 403, until a Bootstrap succeeds; Leader and Bootstrap work. Peers fails so, since Nomad answers the
+//     Raft configuration to a management token alone.
 //
 // Faults change the outcome of the next call of a nomadops.API method, named as in the interface, such as Bootstrap:
 // see Fail and LoseResponse. A call takes the first fault set for its method, and each fault applies to one call.
@@ -42,13 +42,14 @@ type Fake struct {
 	bootstrapped secret.Secret // the secret of the management token, once the ACL system is bootstrapped
 	nodes        []nomadops.Node
 	health       nomadops.Health
+	peers        []nomadops.Peer
 	tokens       []secret.Secret // the tokens of the clients, in the order Client made them
 	faults       []fault         // in the order they were set
 	calls        []Call
 }
 
-// New returns a cluster without a leader, without nodes, with the zero Health, and with an ACL system that nobody has
-// bootstrapped.
+// New returns a cluster without a leader, nodes or peers, with the zero Health, and with an ACL system that nobody
+// has bootstrapped.
 func New() *Fake { return &Fake{} }
 
 // Format prints the fake as nomadfake.Fake, whatever the verb: fmt would print the secrets that its fields hold.
@@ -71,12 +72,12 @@ func (f *Fake) SetLeader(addr string) {
 	f.leader = addr
 }
 
-// NewCluster makes the cluster a new one, as New returns it: without a leader, nodes or bootstrap, and with the zero
-// Health. The log of calls, the clients' tokens and the faults stay.
+// NewCluster makes the cluster a new one, as New returns it: without a leader, nodes, peers or bootstrap, and with the
+// zero Health. The log of calls, the clients' tokens and the faults stay.
 func (f *Fake) NewCluster() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.leader, f.bootstrapped, f.nodes, f.health = "", nil, nil, nomadops.Health{}
+	f.leader, f.bootstrapped, f.nodes, f.peers, f.health = "", nil, nil, nil, nomadops.Health{}
 }
 
 // SetBootstrapped makes the cluster one whose ACL system was bootstrapped with a copy of bootstrapSecret, without a
@@ -87,12 +88,16 @@ func (f *Fake) SetBootstrapped(bootstrapSecret secret.Secret) {
 	f.bootstrapped = slices.Clone(bootstrapSecret)
 }
 
-// Register lists the node, in the place of the node of the same name when there is one, and after the others when
-// there is none.
+// Register lists the node, in the place of the node of the same name and address when there is one, and after the
+// others when there is none. So one name can be listed at two addresses, as Nomad lists a node that went down beside
+// its replacement.
 func (f *Fake) Register(n nomadops.Node) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if i := slices.IndexFunc(f.nodes, func(o nomadops.Node) bool { return o.Name == n.Name }); i >= 0 {
+	i := slices.IndexFunc(f.nodes, func(o nomadops.Node) bool {
+		return o.Name == n.Name && o.Address == n.Address
+	})
+	if i >= 0 {
 		f.nodes[i] = n
 		return
 	}
@@ -104,6 +109,13 @@ func (f *Fake) SetHealth(h nomadops.Health) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.health = h
+}
+
+// SetPeers makes a copy of peers the servers of the Raft configuration. It does not change the Health.
+func (f *Fake) SetPeers(peers []nomadops.Peer) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.peers = slices.Clone(peers)
 }
 
 // Tokens returns copies of the tokens that Client got, in order.
@@ -269,6 +281,18 @@ func (c client) Health(ctx context.Context) (nomadops.Health, error) {
 		return nil
 	})
 	return result(h, err)
+}
+
+func (c client) Peers(ctx context.Context) ([]nomadops.Peer, error) {
+	var peers []nomadops.Peer
+	err := c.f.call(ctx, c.server, "Peers", "", func() error {
+		if c.f.bootstrapped == nil {
+			return errDenied
+		}
+		peers = append(make([]nomadops.Peer, 0, len(c.f.peers)), c.f.peers...)
+		return nil
+	})
+	return result(peers, err)
 }
 
 // result returns v, or the zero value and err when err is not nil.

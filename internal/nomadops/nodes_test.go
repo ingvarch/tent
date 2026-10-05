@@ -2,6 +2,7 @@ package nomadops_test
 
 import (
 	"net/http"
+	"net/netip"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -17,16 +18,16 @@ var nodesRequest = gotRequest{Method: http.MethodGet, Path: "/v1/nodes", Query: 
 	Token: clientToken, Peer: "cli." + region + ".nomad"}
 
 // nodesJSON is how Nomad lists four client nodes: one that registers, one that is drained, one that is ready, and one
-// of the same name that went down before it.
+// of the same name that went down before it, at another address.
 const nodesJSON = `[
-{"ID":"4b1e","Name":"prod-workers-2","NodePool":"default","Status":"initializing","SchedulingEligibility":"eligible",
- "Drain":false,"Version":"2.0.7","CreateIndex":40},
-{"ID":"3c2d","Name":"prod-workers-1","NodePool":"default","Status":"ready","SchedulingEligibility":"ineligible",
- "Drain":true,"Version":"2.0.7","CreateIndex":30},
-{"ID":"2d3c","Name":"prod-workers-0","NodePool":"default","Status":"ready","SchedulingEligibility":"eligible",
- "Drain":false,"Version":"2.0.7","CreateIndex":20},
-{"ID":"1e4b","Name":"prod-workers-0","NodePool":"default","Status":"down","SchedulingEligibility":"eligible",
- "Drain":false,"Version":"2.0.7","CreateIndex":10}
+{"ID":"4b1e","Name":"prod-workers-2","Address":"10.64.0.8","NodePool":"default","Status":"initializing",
+ "SchedulingEligibility":"eligible","Drain":false,"Version":"2.0.7","CreateIndex":40},
+{"ID":"3c2d","Name":"prod-workers-1","Address":"10.64.0.7","NodePool":"default","Status":"ready",
+ "SchedulingEligibility":"ineligible","Drain":true,"Version":"2.0.7","CreateIndex":30},
+{"ID":"2d3c","Name":"prod-workers-0","Address":"10.64.0.6","NodePool":"default","Status":"ready",
+ "SchedulingEligibility":"eligible","Drain":false,"Version":"2.0.7","CreateIndex":20},
+{"ID":"1e4b","Name":"prod-workers-0","Address":"fd00::6","NodePool":"default","Status":"down",
+ "SchedulingEligibility":"eligible","Drain":false,"Version":"2.0.7","CreateIndex":10}
 ]`
 
 func TestNodes(t *testing.T) {
@@ -38,15 +39,61 @@ func TestNodes(t *testing.T) {
 		t.Fatalf("Nodes: %s", show(t, err, clientTokens(token)))
 	}
 	want := []nomadops.Node{
-		{Name: "prod-workers-2", Status: "initializing", Eligible: true},
-		{Name: "prod-workers-1", Status: "ready", Eligible: false},
-		{Name: "prod-workers-0", Status: "ready", Eligible: true},
-		{Name: "prod-workers-0", Status: "down", Eligible: true},
+		{Name: "prod-workers-2", Status: "initializing", Eligible: true, Address: netip.MustParseAddr("10.64.0.8")},
+		{Name: "prod-workers-1", Status: "ready", Eligible: false, Address: netip.MustParseAddr("10.64.0.7")},
+		{Name: "prod-workers-0", Status: "ready", Eligible: true, Address: netip.MustParseAddr("10.64.0.6")},
+		{Name: "prod-workers-0", Status: "down", Eligible: true, Address: netip.MustParseAddr("fd00::6")},
 	}
-	if diff := cmp.Diff(want, got); diff != "" {
+	if diff := cmp.Diff(want, got, cmpopts.EquateComparable(netip.Addr{})); diff != "" {
 		t.Errorf("Nodes() (-want +got):\n%s", diff)
 	}
 	checkRequests(t, srv, clientTokens(token), nodesRequest)
+}
+
+// TestNodesAddress checks that a node whose address is missing or does not parse lists the invalid address.
+func TestNodesAddress(t *testing.T) {
+	p := newPKI(t, v1alpha1.RoleServer, region)
+	token := pki.NewBootstrapSecret()
+	srv := newNomadServer(t, p.server, p.ca.Bundle(), answer(http.StatusOK, `[
+{"Name":"a","Status":"ready","SchedulingEligibility":"eligible"},
+{"Name":"b","Address":"not-an-address","Status":"ready","SchedulingEligibility":"eligible"},
+{"Name":"c","Address":"","Status":"ready","SchedulingEligibility":"eligible"}]`))
+	got, err := newClient(t, srv, p, token).Nodes(t.Context())
+	if err != nil {
+		t.Fatalf("Nodes: %s", show(t, err, clientTokens(token)))
+	}
+	if len(got) != 3 {
+		t.Fatalf("Nodes() = %v, want 3 nodes", got)
+	}
+	for _, n := range got {
+		if n.Address.IsValid() {
+			t.Errorf("node %s has the address %s, want the invalid one", n.Name, n.Address)
+		}
+	}
+}
+
+func TestNodeIs(t *testing.T) {
+	addr := netip.MustParseAddr("10.64.0.6")
+	node := nomadops.Node{Name: "prod-workers-0", Address: addr}
+	for _, tc := range []struct {
+		name string
+		node nomadops.Node
+		arg  string
+		addr netip.Addr
+		want bool
+	}{
+		{"same name and address", node, "prod-workers-0", addr, true},
+		{"another address", node, "prod-workers-0", netip.MustParseAddr("10.64.0.7"), false},
+		{"another name", node, "prod-workers-1", addr, false},
+		{"an invalid address never matches", nomadops.Node{Name: "prod-workers-0"}, "prod-workers-0", netip.Addr{}, false},
+		{"a node without an address", nomadops.Node{Name: "prod-workers-0"}, "prod-workers-0", addr, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.node.Is(tc.arg, tc.addr); got != tc.want {
+				t.Errorf("%+v.Is(%q, %v) = %v, want %v", tc.node, tc.arg, tc.addr, got, tc.want)
+			}
+		})
+	}
 }
 
 // TestNodesSkipsNull checks that a list with null in it gives the nodes that it holds.
@@ -72,7 +119,7 @@ func TestNodesSkipsNull(t *testing.T) {
 					{Name: "prod-workers-1", Status: "initializing", Eligible: true},
 				}
 			}
-			if diff := cmp.Diff(want, got, cmpopts.EquateEmpty()); diff != "" {
+			if diff := cmp.Diff(want, got, cmpopts.EquateEmpty(), cmpopts.EquateComparable(netip.Addr{})); diff != "" {
 				t.Errorf("Nodes() (-want +got):\n%s", diff)
 			}
 		})

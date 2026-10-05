@@ -71,6 +71,13 @@ func (s *stub) Nodes(context.Context) ([]nomadops.Node, error) {
 	return []nomadops.Node{{Name: "n"}}, nil
 }
 
+func (s *stub) Peers(context.Context) ([]nomadops.Peer, error) {
+	if err := s.record("Peers"); err != nil {
+		return nil, err
+	}
+	return []nomadops.Peer{{Name: "s0", Voter: true}}, nil
+}
+
 func (s *stub) Health(context.Context) (nomadops.Health, error) {
 	if err := s.record("Health"); err != nil {
 		return nomadops.Health{}, err
@@ -185,6 +192,7 @@ func TestServersEveryMethodMovesOn(t *testing.T) {
 		},
 		"Nodes":  func(ctx context.Context, a nomadops.API) error { _, err := a.Nodes(ctx); return err },
 		"Health": func(ctx context.Context, a nomadops.API) error { _, err := a.Health(ctx); return err },
+		"Peers":  func(ctx context.Context, a nomadops.API) error { _, err := a.Peers(ctx); return err },
 	}
 	for name, call := range calls {
 		t.Run(name, func(t *testing.T) {
@@ -263,6 +271,11 @@ func (r ctxRecorder) Nodes(ctx context.Context) ([]nomadops.Node, error) {
 	return r.API.Nodes(ctx)
 }
 
+func (r ctxRecorder) Peers(ctx context.Context) ([]nomadops.Peer, error) {
+	r.record(ctx)
+	return r.API.Peers(ctx)
+}
+
 func (r ctxRecorder) Health(ctx context.Context) (nomadops.Health, error) {
 	r.record(ctx)
 	return r.API.Health(ctx)
@@ -274,6 +287,7 @@ func TestServersPassArgumentsContextAndValues(t *testing.T) {
 	f.SetLeader(leaderAddr)
 	f.Register(nomadops.Node{Name: "prod-workers-1", Status: "ready", Eligible: true})
 	f.SetHealth(nomadops.Health{Healthy: true, Voters: 3})
+	f.SetPeers([]nomadops.Peer{{Name: "prod-servers-0.eu", Voter: true}})
 	var seen []context.Context
 	s := fakeServers(t, f, pki.NewBootstrapSecret(), func(a nomadops.API) nomadops.API {
 		return ctxRecorder{API: a, seen: &seen}
@@ -314,6 +328,9 @@ func TestServersPassArgumentsContextAndValues(t *testing.T) {
 	if h, err := s.Health(ctx); err != nil || h != (nomadops.Health{Healthy: true, Voters: 3}) {
 		t.Errorf("Health() = %+v, %v; want the set one", h, err)
 	}
+	if got, err := s.Peers(ctx); err != nil || len(got) != 1 || got[0].Name != "prod-servers-0.eu" {
+		t.Errorf("Peers() = %+v, %v; want the set one", got, err)
+	}
 
 	const bootstrapArg = "[secret, 36 bytes]"
 	const introArg = "prod-workers-1 default 30m0s"
@@ -327,12 +344,13 @@ func TestServersPassArgumentsContextAndValues(t *testing.T) {
 		{Name: "Leader", Server: addr1},
 		{Name: "Nodes", Server: addr1},
 		{Name: "Health", Server: addr1},
+		{Name: "Peers", Server: addr1},
 	}
 	if diff := cmp.Diff(want, f.Calls()); diff != "" {
 		t.Errorf("calls (-want +got):\n%s", diff)
 	}
-	if len(seen) != 7 { // the calls of Servers: the ones of single have no recorder
-		t.Fatalf("%d calls seen, want 7", len(seen))
+	if len(seen) != 8 { // the calls of Servers: the ones of single have no recorder
+		t.Fatalf("%d calls seen, want 8", len(seen))
 	}
 	for i, c := range seen {
 		if c != ctx {

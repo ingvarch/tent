@@ -1,5 +1,5 @@
 // Package nomadops calls the HTTP API of a Nomad cluster's servers over mutual TLS: the leader, the ACL bootstrap,
-// client introduction tokens, the client nodes and the autopilot health.
+// client introduction tokens, the client nodes, the autopilot health and the Raft peers.
 package nomadops
 
 import (
@@ -54,6 +54,8 @@ type API interface {
 	Nodes(ctx context.Context) ([]Node, error)
 	// Health returns autopilot's view of the servers.
 	Health(ctx context.Context) (Health, error)
+	// Peers returns the servers of the Raft configuration.
+	Peers(ctx context.Context) ([]Peer, error)
 }
 
 // Client is the API over the HTTP API of one Nomad server. Each call has at most 30 seconds, and none is retried.
