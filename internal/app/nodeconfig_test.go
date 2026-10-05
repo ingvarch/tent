@@ -144,6 +144,15 @@ func testAssets() nodeAssets {
 	return nodeAssets{nomad: testNomad, cni: testCNI, tentNode: testTentNode}
 }
 
+// forGroups returns the assets a for every group of m.
+func forGroups(m *model.Cluster, a nodeAssets) map[string]nodeAssets {
+	by := make(map[string]nodeAssets, len(m.Groups))
+	for _, g := range m.Groups {
+		by[g.Name] = a
+	}
+	return by
+}
+
 // Where the test assets come from, and the sha256 of the CNI plugins that stable pins for amd64.
 const (
 	nomadZipURL = "https://releases.hashicorp.com/nomad/2.0.7/nomad_2.0.7_linux_amd64.zip"
@@ -184,7 +193,7 @@ func testCA(t *testing.T) *pki.CA {
 func templates(t *testing.T, gossip pki.Secret, caBundle []byte, docs ...string) map[string]nodeconfig.NodeConfig {
 	t.Helper()
 	m, c, groups := nodeSpecs(t, docs...)
-	tmpls, err := groupTemplates(m, c, groups, testAssets(), gossip, caBundle)
+	tmpls, err := groupTemplates(m, c, groups, forGroups(m, testAssets()), gossip, caBundle)
 	if err != nil {
 		t.Fatalf("groupTemplates: %v", err)
 	}
@@ -389,7 +398,7 @@ func TestGroupTemplatesSpecHash(t *testing.T) {
 	m, c, groups := nodeSpecs(t, nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
 	newCNI := testAssets()
 	newCNI.cni.Version, newCNI.cni.SHA256 = "1.9.2", strings.Repeat("3", 64)
-	withCNI, err := groupTemplates(m, c, groups, newCNI, gossip, bundle)
+	withCNI, err := groupTemplates(m, c, groups, forGroups(m, newCNI), gossip, bundle)
 	if err != nil {
 		t.Fatalf("groupTemplates: %v", err)
 	}
@@ -413,7 +422,7 @@ func TestGroupTemplatesSpecHash(t *testing.T) {
 func TestGroupTemplatesProvider(t *testing.T) {
 	m, c, groups := nodeSpecs(t, nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
 	m.Provider = v1alpha1.ProviderHetzner
-	tmpls, err := groupTemplates(m, c, groups, testAssets(), pki.NewGossipKey(), testCA(t).Bundle())
+	tmpls, err := groupTemplates(m, c, groups, forGroups(m, testAssets()), pki.NewGossipKey(), testCA(t).Bundle())
 	if err != nil {
 		t.Fatalf("groupTemplates: %v", err)
 	}
@@ -483,7 +492,17 @@ func TestGroupTemplatesErrors(t *testing.T) {
 		gossip pki.Secret
 		bundle []byte
 		want   string
+		// noAssets is a group that downloads lacks.
+		noAssets string
 	}{
+		{
+			name: "a group without assets",
+			edit: func(_ *model.Cluster, _ *v1alpha1.Cluster, groups []*v1alpha1.NodeGroup) []*v1alpha1.NodeGroup {
+				return groups
+			},
+			gossip: gossip, bundle: bundle, noAssets: "workers",
+			want: "node group workers: no assets",
+		},
 		{
 			name: "a group without its spec",
 			edit: func(_ *model.Cluster, _ *v1alpha1.Cluster, groups []*v1alpha1.NodeGroup) []*v1alpha1.NodeGroup {
@@ -530,7 +549,9 @@ func TestGroupTemplatesErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m, c, groups := nodeSpecs(t, nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
 			groups = tc.edit(m, c, groups)
-			tmpls, err := groupTemplates(m, c, groups, testAssets(), tc.gossip, tc.bundle)
+			downloads := forGroups(m, testAssets())
+			delete(downloads, tc.noAssets)
+			tmpls, err := groupTemplates(m, c, groups, downloads, tc.gossip, tc.bundle)
 			if err == nil || err.Error() != tc.want {
 				t.Errorf("groupTemplates() error = %v, want %s", err, tc.want)
 			}
@@ -706,7 +727,7 @@ func TestNodeConfigHidesSecrets(t *testing.T) {
 	const signature = "9f2c6e1ab47d03e58c1f6a2b7d4e90c3a5f81b6d2e7c409a3f5b8d1e6c2a7f40"
 	withURL := testAssets()
 	withURL.tentNode.URLs = []string{"https://tent-dev.s3.example.com/tent-node?X-Amz-Signature=" + signature}
-	tmpls, err := groupTemplates(m, c, groups, withURL, gossip, ca.Bundle())
+	tmpls, err := groupTemplates(m, c, groups, forGroups(m, withURL), gossip, ca.Bundle())
 	if err != nil {
 		t.Fatalf("groupTemplates: %v", err)
 	}
@@ -964,7 +985,7 @@ func TestNodeConfigUserDataFits(t *testing.T) {
 	for i := range 8 {
 		groups[0].Spec.Nomad.Meta[fmt.Sprintf("team-%d.owner", i)] = fmt.Sprintf("platform-team-%d@example.com", i)
 	}
-	tmpls, err := groupTemplates(m, c, groups, all, pki.NewGossipKey(), ca.Bundle())
+	tmpls, err := groupTemplates(m, c, groups, forGroups(m, all), pki.NewGossipKey(), ca.Bundle())
 	if err != nil {
 		t.Fatalf("groupTemplates: %v", err)
 	}
@@ -1070,7 +1091,7 @@ func newNode(t *testing.T, l *assetstest.Sites, ca *pki.CA, gossip pki.Secret, g
 			Now: at(testNow)},
 		TentVersion: devTentVersion, Arch: "amd64",
 		Gossip: gossip, CABundle: ca.Bundle(),
-		Group: group, Name: name, Zone: "ams", BootstrapExpect: 3, Cert: cert, Seed: seeds(3), Intro: intro,
+		Group: group, Name: name, Zone: "ams", Cert: cert, Seed: seeds(3), Intro: intro,
 	}
 }
 
@@ -1099,7 +1120,7 @@ func TestNodeConfigOf(t *testing.T) {
 			if err != nil {
 				t.Fatalf("resolveAssets: %v", err)
 			}
-			tmpls, err := groupTemplates(m, c, groups, downloads, gossip, ca.Bundle())
+			tmpls, err := groupTemplates(m, c, groups, forGroups(m, downloads), gossip, ca.Bundle())
 			if err != nil {
 				t.Fatalf("groupTemplates: %v", err)
 			}
@@ -1172,5 +1193,255 @@ func TestNodeConfigOfErrors(t *testing.T) {
 				t.Errorf("NodeConfigOf() asked for %q; want requests: %t", l.URLs(), tc.fetches)
 			}
 		})
+	}
+}
+
+// testBuilderInput returns the input of a node builder for the specs in docs: the stable channel, a development build's
+// tent-node, l's release files, and every group on archs. A group missing from archs has no architecture.
+func testBuilderInput(t *testing.T, l *assetstest.Sites, archs map[string]string, docs ...string) builderInput {
+	t.Helper()
+	n := newNode(t, l, testCA(t), pki.NewGossipKey(), "", "", nil, docs...)
+	return builderInput{
+		Specs: n.Specs, Channel: n.Channel, Assets: n.Assets, TentVersion: n.TentVersion, Archs: archs,
+		Gossip: n.Gossip, CABundle: n.CABundle,
+	}
+}
+
+// onArch puts every group of the test cluster on one architecture.
+func onArch(arch string, groups ...string) map[string]string {
+	archs := make(map[string]string, len(groups))
+	for _, g := range groups {
+		archs[g] = arch
+	}
+	return archs
+}
+
+func TestNodeBuilderReadsEachArchitectureOnce(t *testing.T) {
+	l := assetstest.New()
+	in := testBuilderInput(t, l, onArch("amd64", "servers", "workers"), nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
+	if _, err := newNodeBuilder(t.Context(), in, assetCache{}); err != nil {
+		t.Fatalf("newNodeBuilder: %v", err)
+	}
+	// Nomad's SHA256SUMS and its signature; the development build's tent-node needs no request.
+	if got := l.URLs(); len(got) != 2 {
+		t.Errorf("two groups of one architecture asked for %q, want two requests", got)
+	}
+}
+
+func TestNodeBuilderAssetsNameTheirArchitecture(t *testing.T) {
+	l := assetstest.New()
+	archs := map[string]string{"servers": "amd64", "workers": "arm64"}
+	in := testBuilderInput(t, l, archs, nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
+	b, err := newNodeBuilder(t.Context(), in, assetCache{})
+	if err != nil {
+		t.Fatalf("newNodeBuilder: %v", err)
+	}
+	// Two requests for each architecture's Nomad: the sums are the same file, read once per architecture.
+	if got := l.URLs(); len(got) != 4 {
+		t.Errorf("two architectures asked for %q, want four requests", got)
+	}
+	for group, arch := range archs {
+		for _, a := range b.templates[group].Assets {
+			if a.Name == "tent-node" {
+				continue // the development build's URL has no architecture
+			}
+			if !slices.ContainsFunc(a.URLs, func(u string) bool {
+				return strings.Contains(u, "linux_"+arch) ||
+					strings.Contains(u, "linux-"+arch)
+			}) {
+				t.Errorf("group %s: asset %s has URLs %q, want one for %s", group, a.Name, a.URLs, arch)
+			}
+		}
+	}
+}
+
+func TestNodeBuilderCacheSavesRequests(t *testing.T) {
+	l := assetstest.New()
+	in := testBuilderInput(t, l, onArch("amd64", "servers", "workers"), nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
+	cache := assetCache{}
+	for range 2 {
+		if _, err := newNodeBuilder(t.Context(), in, cache); err != nil {
+			t.Fatalf("newNodeBuilder: %v", err)
+		}
+	}
+	if got := l.URLs(); len(got) != 2 {
+		t.Errorf("two builders with one cache asked for %q, want the two requests of the first", got)
+	}
+}
+
+// TestNodeBuilderCacheKeepsVersionsApart checks that a cache filled for one tent and one Nomad gives a builder of
+// another tent that tent's tent-node, and that a builder of another Nomad asks for that Nomad's release files.
+func TestNodeBuilderCacheKeepsVersionsApart(t *testing.T) {
+	in := testBuilderInput(t, assetstest.New(), onArch("amd64", "servers", "workers"), nodeClusterYAML,
+		nodeServersYAML, nodeWorkersYAML)
+	cache := assetCache{}
+	if _, err := newNodeBuilder(t.Context(), in, cache); err != nil {
+		t.Fatalf("newNodeBuilder: %v", err)
+	}
+
+	otherTent := in
+	otherTent.TentVersion = "v0.3.0-5-gdef5678"
+	b, err := newNodeBuilder(t.Context(), otherTent, cache)
+	if err != nil {
+		t.Fatalf("newNodeBuilder for tent %s: %v", otherTent.TentVersion, err)
+	}
+	downloads := b.templates["servers"].Assets
+	i := slices.IndexFunc(downloads, func(a nodeconfig.Asset) bool { return a.Name == "tent-node" })
+	if i < 0 {
+		t.Fatal("the servers download no tent-node")
+	}
+	if got := downloads[i].Version; got != otherTent.TentVersion {
+		t.Errorf("a builder for tent %s gives the tent-node of %s", otherTent.TentVersion, got)
+	}
+
+	// assetstest serves no Nomad 2.0.6, so the error shows a request where the cache has only 2.0.7.
+	const want = "find Nomad 2.0.6: get https://releases.hashicorp.com/nomad/2.0.6/nomad_2.0.6_SHA256SUMS: 404 Not Found"
+	in.Specs.Cluster.Spec.Nomad.Version = "2.0.6"
+	b, err = newNodeBuilder(t.Context(), in, cache)
+	if err == nil || !strings.HasPrefix(err.Error(), want) {
+		t.Errorf("newNodeBuilder() for Nomad 2.0.6 error = %v, want one that starts with %s", err, want)
+	}
+	if b != nil {
+		t.Error("newNodeBuilder() returned a builder with the error")
+	}
+}
+
+func TestNodeBuilderBootstrapExpect(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		group string
+		docs  []string
+		want  int
+	}{
+		{"servers", "servers", []string{nodeClusterYAML, nodeServersYAML, nodeWorkersYAML}, 3},
+		{"a combined group of one", "dev", []string{nodeClusterYAML, nodeCombinedYAML}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := testBuilderInput(t, assetstest.New(), onArch("amd64", "servers", "workers", "dev"), tc.docs...)
+			if tc.want == 1 {
+				in.Specs.NodeGroups[0].Spec.Size = 1
+			}
+			b, err := newNodeBuilder(t.Context(), in, assetCache{})
+			if err != nil {
+				t.Fatalf("newNodeBuilder: %v", err)
+			}
+			ca := testCA(t)
+			cert, err := ca.IssueNode(in.Specs.NodeGroups[0].Spec.Role, "eu", testNow)
+			if err != nil {
+				t.Fatalf("IssueNode: %v", err)
+			}
+			nc, err := b.node(tc.group, "prod-"+tc.group+"-0", "ams", cert, seeds(1), nil)
+			if err != nil {
+				t.Fatalf("node: %v", err)
+			}
+			want := fmt.Sprintf("bootstrap_expect = %d", tc.want)
+			if got := string(fileAt(t, nc.Files, "/etc/nomad.d/10-node.hcl").Content); !strings.Contains(got, want) {
+				t.Errorf("10-node.hcl = %q, want it to hold %q", got, want)
+			}
+		})
+	}
+}
+
+func TestNodeBuilderReadsGroups(t *testing.T) {
+	in := testBuilderInput(t, assetstest.New(), onArch("amd64", "servers", "workers"), nodeClusterYAML, nodeServersYAML,
+		nodeWorkersYAML)
+	b, err := newNodeBuilder(t.Context(), in, assetCache{})
+	if err != nil {
+		t.Fatalf("newNodeBuilder: %v", err)
+	}
+	if got, want := b.nodePool("workers"), "batch"; got != want {
+		t.Errorf("nodePool(workers) = %q, want %q", got, want)
+	}
+	if got, want := b.specHash("workers"), b.templates["workers"].SpecHash; got == "" || got != want {
+		t.Errorf("specHash(workers) = %q, want the template's %q", got, want)
+	}
+}
+
+func TestNodeBuilderNoArchitecture(t *testing.T) {
+	l := assetstest.New()
+	in := testBuilderInput(t, l, onArch("amd64", "servers"), nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
+	b, err := newNodeBuilder(t.Context(), in, assetCache{})
+	if err == nil || err.Error() != "node group workers: no architecture" {
+		t.Errorf("newNodeBuilder() error = %v, want node group workers: no architecture", err)
+	}
+	if b != nil {
+		t.Error("newNodeBuilder() returned a builder with the error")
+	}
+	if got := l.URLs(); len(got) != 0 {
+		t.Errorf("newNodeBuilder() asked for %q before the check", got)
+	}
+}
+
+func TestNodeBuilderNoNomadVersion(t *testing.T) {
+	l := assetstest.New()
+	in := testBuilderInput(t, l, onArch("amd64", "servers", "workers"), nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
+	in.Specs.Cluster.Spec.Nomad.Version = ""
+	b, err := newNodeBuilder(t.Context(), in, assetCache{})
+	if err == nil || err.Error() != "cluster prod: spec.nomad.version is not set" {
+		t.Errorf("newNodeBuilder() error = %v, want cluster prod: spec.nomad.version is not set", err)
+	}
+	if b != nil {
+		t.Error("newNodeBuilder() returned a builder with the error")
+	}
+	if got := l.URLs(); len(got) != 0 {
+		t.Errorf("newNodeBuilder() asked for %q before the check", got)
+	}
+}
+
+func TestNodeBuilderSkipsNilGroups(t *testing.T) {
+	in := testBuilderInput(t, assetstest.New(), onArch("amd64", "servers", "workers"), nodeClusterYAML, nodeServersYAML,
+		nodeWorkersYAML)
+	in.Specs.NodeGroups = append(in.Specs.NodeGroups, nil)
+	b, err := newNodeBuilder(t.Context(), in, assetCache{})
+	if err != nil {
+		t.Fatalf("newNodeBuilder with a nil group: %v", err)
+	}
+	if got, want := b.nodePool("workers"), "batch"; got != want {
+		t.Errorf("nodePool(workers) = %q, want %q", got, want)
+	}
+}
+
+func TestNodeConfigOfSkipsNilGroups(t *testing.T) {
+	ca, gossip := testCA(t), pki.NewGossipKey()
+	build := func(withNil bool) *nodeconfig.NodeConfig {
+		n := newNode(t, assetstest.New(), ca, gossip, "servers", "prod-servers-0", nil, nodeClusterYAML,
+			nodeServersYAML, nodeWorkersYAML)
+		if withNil {
+			n.Specs.NodeGroups = append(n.Specs.NodeGroups, nil)
+		}
+		nc, err := NodeConfigOf(t.Context(), n)
+		if err != nil {
+			t.Fatalf("NodeConfigOf(nil group: %t): %v", withNil, err)
+		}
+		return nc
+	}
+	if got, want := build(true).SpecHash, build(false).SpecHash; got != want {
+		t.Errorf("spec hash with a nil group = %s, want %s", got, want)
+	}
+}
+
+func TestNodeBuilderUnknownGroup(t *testing.T) {
+	in := testBuilderInput(t, assetstest.New(), onArch("amd64", "servers", "workers"), nodeClusterYAML, nodeServersYAML,
+		nodeWorkersYAML)
+	b, err := newNodeBuilder(t.Context(), in, assetCache{})
+	if err != nil {
+		t.Fatalf("newNodeBuilder: %v", err)
+	}
+	cert, err := testCA(t).IssueNode(v1alpha1.RoleServer, "eu", testNow)
+	if err != nil {
+		t.Fatalf("IssueNode: %v", err)
+	}
+	nc, err := b.node("nope", "prod-nope-0", "ams", cert, seeds(1), nil)
+	if err == nil || err.Error() != "node group nope: not in the specs" {
+		t.Errorf("node() error = %v, want node group nope: not in the specs", err)
+	}
+	if nc != nil {
+		t.Error("node() returned a config with the error")
+	}
+	if got := b.specHash("nope"); got != "" {
+		t.Errorf("specHash(nope) = %q, want empty", got)
+	}
+	if got := b.nodePool("nope"); got != "" {
+		t.Errorf("nodePool(nope) = %q, want empty", got)
 	}
 }

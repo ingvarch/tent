@@ -118,14 +118,25 @@ func devVariablesWarning(version string, opts assets.Options) string {
 		"of release %s", english.And(set), verb, version, pronoun, version)
 }
 
+// groupSpecs indexes the specs in groups by the group's name and skips nil ones, as model.New does.
+func groupSpecs(groups []*v1alpha1.NodeGroup) map[string]*v1alpha1.NodeGroup {
+	specs := make(map[string]*v1alpha1.NodeGroup, len(groups))
+	for _, g := range groups {
+		if g != nil {
+			specs[g.Metadata.Name] = g
+		}
+	}
+	return specs
+}
+
 // groupTemplates returns the NodeConfig of each node group of the model m, by the group's name: what every node of the
 // group has, with the group's spec hash. c and groups are the specs of m with their defaults, as the completed spec
 // holds them. A template has the cluster's provider, the Nomad agent configuration that the specs describe, the CA
-// bundle, the assets that its role downloads, the join strategy, the system settings and the host firewall; nodeConfig
-// adds what one node has.
+// bundle, the assets that its role downloads, which downloads holds for each group by its name, the join strategy,
+// the system settings and the host firewall; nodeConfig adds what one node has.
 // An empty CA bundle is an error, as is an empty gossip key for a group that runs servers.
-func groupTemplates(m *model.Cluster, c *v1alpha1.Cluster, groups []*v1alpha1.NodeGroup, downloads nodeAssets,
-	gossip pki.Secret, caBundle []byte,
+func groupTemplates(m *model.Cluster, c *v1alpha1.Cluster, groups []*v1alpha1.NodeGroup,
+	downloads map[string]nodeAssets, gossip pki.Secret, caBundle []byte,
 ) (map[string]nodeconfig.NodeConfig, error) {
 	n := c.Spec.Nomad
 	if len(caBundle) == 0 {
@@ -138,12 +149,7 @@ func groupTemplates(m *model.Cluster, c *v1alpha1.Cluster, groups []*v1alpha1.No
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", clusterLabel(m.Name), err)
 	}
-	specs := make(map[string]*v1alpha1.NodeGroup, len(groups))
-	for _, g := range groups {
-		if g != nil {
-			specs[g.Metadata.Name] = g
-		}
-	}
+	specs := groupSpecs(groups)
 	tmpls := make(map[string]nodeconfig.NodeConfig, len(m.Groups))
 	for _, g := range m.Groups {
 		gs, ok := specs[g.Name]
@@ -151,6 +157,10 @@ func groupTemplates(m *model.Cluster, c *v1alpha1.Cluster, groups []*v1alpha1.No
 			return nil, fmt.Errorf("node group %s: no spec", g.Name)
 		}
 		gn := gs.Spec.Nomad
+		groupAssets, ok := downloads[g.Name]
+		if !ok {
+			return nil, fmt.Errorf("node group %s: no assets", g.Name)
+		}
 		files, err := nodeconfig.RenderAgent(nodeconfig.Agent{
 			Role: g.Role, Cluster: m.Name, Group: g.Name, Region: n.Region, CIDR: m.CIDR,
 			ClientIntroduction: n.ClientIntroduction, Gossip: gossip, VerifyHTTPSClient: *n.TLS.VerifyHTTPSClient,
@@ -174,7 +184,7 @@ func groupTemplates(m *model.Cluster, c *v1alpha1.Cluster, groups []*v1alpha1.No
 			NodeGroup:  g.Name,
 			Role:       g.Role,
 			Region:     n.Region,
-			Assets:     downloads.forRole(g.Role),
+			Assets:     groupAssets.forRole(g.Role),
 			Files:      files,
 			Join:       nodeconfig.Join{Strategy: strategy, RefreshInterval: joinRefresh},
 			System:     nodeSystem(g.Role, gn.Drivers),
@@ -265,23 +275,21 @@ type NewNode struct {
 	// The cluster's gossip key, a secret, and its CA bundle, which holds certificates alone.
 	Gossip   pki.Secret
 	CABundle []byte
-	// The node: its group's name; its name, which is also its host name; its zone; the number of servers, which a
-	// client ignores; its certificate and key; the servers it joins first; and an intro token, which only a node that
-	// runs a client takes.
-	Group           string
-	Name            string
-	Zone            string
-	BootstrapExpect int
-	Cert            pki.Certificate
-	Seed            []netip.Addr
-	Intro           pki.Secret
+	// The node: its group's name; its name, which is also its host name; its zone; its certificate and key; the
+	// servers it joins first; and an intro token, which only a node that runs a client takes.
+	Group string
+	Name  string
+	Zone  string
+	Cert  pki.Certificate
+	Seed  []netip.Addr
+	Intro pki.Secret
 }
 
 // NodeConfigOf returns the NodeConfig of the new node n: the template of its group, with the assets that the
-// channel, the pinned Nomad version and the tent version give, and the node's own parts. It sends no request when the
-// specs lack the version or the group. Its errors are those of its steps: the specs' and the template's name the
-// cluster, when there is one, or the group; the node's parts' name the node; the assets' name the asset and the URL
-// they read.
+// channel, the pinned Nomad version and the tent version give, and the node's own parts. The specs give the number of
+// servers. It sends no request when the specs lack the version or the group. Its errors are those of its steps: the
+// specs' and the template's name the cluster, when there is one, or the group; the node's parts' name the node; the
+// assets' name the asset and the URL they read.
 // update must build a node's config with the same steps, or through this function, so that what the tools that check
 // tent-node give a machine is what tent gives a node.
 func NodeConfigOf(ctx context.Context, n NewNode) (*nodeconfig.NodeConfig, error) {
@@ -290,23 +298,118 @@ func NodeConfigOf(ctx context.Context, n NewNode) (*nodeconfig.NodeConfig, error
 	if err != nil {
 		return nil, err
 	}
+	if !slices.ContainsFunc(m.Groups, func(g model.NodeGroup) bool { return g.Name == n.Group }) {
+		return nil, fmt.Errorf("node group %s: not in the specs", n.Group)
+	}
+	archs := make(map[string]string, len(m.Groups))
+	for _, g := range m.Groups {
+		archs[g.Name] = n.Arch
+	}
+	b, err := newNodeBuilder(ctx, builderInput{
+		Specs: n.Specs, Channel: n.Channel, Assets: n.Assets, TentVersion: n.TentVersion, Archs: archs,
+		Gossip: n.Gossip, CABundle: n.CABundle,
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return b.node(n.Group, n.Name, n.Zone, n.Cert, n.Seed, n.Intro)
+}
+
+// assetKey names the files that one architecture's nodes download for one Nomad and one tent.
+type assetKey struct{ nomadVersion, tentVersion, arch string }
+
+// assetCache keeps the files that nodeBuilders found, so that builders of one run read each release's files once.
+type assetCache map[assetKey]nodeAssets
+
+// builderInput is what a nodeBuilder is made from.
+type builderInput struct {
+	// Specs are the cluster's specs with their defaults and the Nomad version pinned, as the completed spec holds them.
+	Specs spec.Objects
+	// Channel is the cluster's release channel, which pins the CNI plugins.
+	Channel *channels.Channel
+	// Assets say where Nomad and tent-node are found; the nodes download the tent-node of tent of TentVersion.
+	Assets      assets.Options
+	TentVersion string
+	// Archs gives the CPU architecture of each node group's machines, by the group's name.
+	Archs map[string]string
+	// The cluster's gossip key, a secret, and its CA bundle, which holds certificates alone.
+	Gossip   pki.Secret
+	CABundle []byte
+}
+
+// nodeBuilder makes the NodeConfig of the nodes of one cluster from the template of each group.
+type nodeBuilder struct {
+	templates map[string]nodeconfig.NodeConfig
+	pools     map[string]string
+	// servers is the number of Nomad servers that the specs give, which every server waits for before it bootstraps.
+	servers int
+}
+
+// newNodeBuilder returns a builder for the cluster of in. It reads the release files of each architecture once, or
+// takes them from cache, which may be nil. A group without an architecture is an error before any request.
+func newNodeBuilder(ctx context.Context, in builderInput, cache assetCache) (*nodeBuilder, error) {
+	c, groups := in.Specs.Cluster, in.Specs.NodeGroups
+	m, err := model.New(c, groups)
+	if err != nil {
+		return nil, err
+	}
 	version := c.Spec.Nomad.Version
 	if version == "" {
 		return nil, fmt.Errorf("%s: spec.nomad.version is not set", clusterLabel(m.Name))
 	}
-	if !slices.ContainsFunc(m.Groups, func(g model.NodeGroup) bool { return g.Name == n.Group }) {
-		return nil, fmt.Errorf("node group %s: not in the specs", n.Group)
+	for _, g := range m.Groups {
+		if in.Archs[g.Name] == "" {
+			return nil, fmt.Errorf("node group %s: no architecture", g.Name)
+		}
 	}
-	downloads, err := resolveAssets(ctx, n.Assets, n.Channel, version, n.TentVersion, n.Arch)
+	if cache == nil {
+		cache = assetCache{}
+	}
+	downloads := make(map[string]nodeAssets, len(m.Groups))
+	for _, g := range m.Groups {
+		key := assetKey{nomadVersion: version, tentVersion: in.TentVersion, arch: in.Archs[g.Name]}
+		found, ok := cache[key]
+		if !ok {
+			found, err = resolveAssets(ctx, in.Assets, in.Channel, version, in.TentVersion, key.arch)
+			if err != nil {
+				return nil, err
+			}
+			cache[key] = found
+		}
+		downloads[g.Name] = found
+	}
+	tmpls, err := groupTemplates(m, c, groups, downloads, in.Gossip, in.CABundle)
 	if err != nil {
 		return nil, err
 	}
-	tmpls, err := groupTemplates(m, c, groups, downloads, n.Gossip, n.CABundle)
-	if err != nil {
-		return nil, err
+	b := &nodeBuilder{templates: tmpls, pools: make(map[string]string, len(groups))}
+	for name, g := range groupSpecs(groups) {
+		b.pools[name] = g.Spec.Nomad.NodePool
 	}
-	return nodeConfig(tmpls[n.Group], n.Name, n.Zone, n.BootstrapExpect, n.Cert, n.Seed, n.Intro)
+	for _, g := range m.Groups {
+		if g.Role.RunsServer() {
+			b.servers += g.Size
+		}
+	}
+	return b, nil
 }
+
+// node returns the NodeConfig of the node called name in zone of group, as nodeConfig makes it, with the number of
+// servers of the builder. A group that the builder lacks is an error.
+func (b *nodeBuilder) node(group, name, zone string, cert pki.Certificate, seed []netip.Addr, intro pki.Secret,
+) (*nodeconfig.NodeConfig, error) {
+	tmpl, ok := b.templates[group]
+	if !ok {
+		return nil, fmt.Errorf("node group %s: not in the specs", group)
+	}
+	return nodeConfig(tmpl, name, zone, b.servers, cert, seed, intro)
+}
+
+// specHash returns the spec hash of the nodes of group, "" for a group that the builder lacks.
+func (b *nodeBuilder) specHash(group string) string { return b.templates[group].SpecHash }
+
+// nodePool returns the Nomad node pool of the nodes of group, "" for a group that the builder lacks.
+func (b *nodeBuilder) nodePool(group string) string { return b.pools[group] }
 
 // nodeConfig returns the NodeConfig of the node called name in zone, from the template of its group: the template with
 // the node's name, its 10-node.hcl, its certificate and key, and the seed of servers to join. A node that runs a
