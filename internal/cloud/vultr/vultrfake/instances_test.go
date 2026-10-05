@@ -291,6 +291,30 @@ func TestSetBootReadsMisuse(t *testing.T) {
 	}
 }
 
+func TestInstanceVPCs(t *testing.T) {
+	f := newInfra(t)
+	// Slow to boot: ListInstanceVPCs shows nothing yet, InstanceVPCs shows the addresses.
+	f.SetBootReads(t, 5, 5)
+	mustCreateInstance(t, f, nodeReq("first"))
+	before := len(f.Calls())
+
+	want := []govultr.VPCInfo{{ID: "vpc-1", IPAddress: "10.64.0.3", MacAddress: "5a:00:04:00:00:01"}}
+	if diff := cmp.Diff(want, f.InstanceVPCs("instance-1")); diff != "" {
+		t.Errorf("InstanceVPCs instance-1 (-want +got):\n%s", diff)
+	}
+	if got := f.InstanceVPCs("nope"); got != nil {
+		t.Errorf("InstanceVPCs of an unknown id = %v, want nil", got)
+	}
+	if got := len(f.Calls()); got != before {
+		t.Errorf("InstanceVPCs made %d calls, want none", got-before)
+	}
+	// The caller gets a copy.
+	f.InstanceVPCs("instance-1")[0].IPAddress = "changed"
+	if diff := cmp.Diff(want, f.InstanceVPCs("instance-1")); diff != "" {
+		t.Errorf("InstanceVPCs after a change of the copy (-want +got):\n%s", diff)
+	}
+}
+
 func TestInstanceVPCAddresses(t *testing.T) {
 	f := newInfra(t)
 	f.SetBootReads(t, 0, 0)
@@ -450,6 +474,10 @@ func TestUpdateInstance(t *testing.T) {
 			[]string{"c"}, "m", "c3R1Ygo=", "firewall-2",
 		},
 		{"no tags", &govultr.InstanceUpdateReq{Tags: []string{}}, []string{}, "m", "c3R1Ygo=", "firewall-2"},
+		{
+			"tags and user data in one request", &govultr.InstanceUpdateReq{Tags: []string{"e", "f"}, UserData: "bmV3Cg=="},
+			[]string{"e", "f"}, "m", "bmV3Cg==", "firewall-2",
+		},
 	} {
 		if err := f.UpdateInstance(t.Context(), "instance-1", step.req); err != nil {
 			t.Fatalf("%s: UpdateInstance: %v", step.name, err)

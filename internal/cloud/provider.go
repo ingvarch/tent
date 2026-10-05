@@ -33,7 +33,7 @@ type Provider interface {
 	// Inventory lists every object the cluster owns in the cloud. Tasks read it through the provider's own snapshot
 	// type.
 	Inventory(ctx context.Context, cluster string) (engine.Snapshot, error)
-	// Nodes returns the primitives that list, create, stop and delete machines and scrub their user data.
+	// Nodes returns the primitives that list, create, stop and delete machines and label them as joined.
 	Nodes() Nodes
 	// Arch returns the CPU architecture, ArchAMD64 or ArchARM64, of the machines of machineType. A provider that must
 	// ask its API for it uses ctx and may fail.

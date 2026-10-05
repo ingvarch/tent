@@ -20,6 +20,9 @@ import (
 
 var _ cloud.Nodes = (*Provider)(nil)
 
+// joinedTag is the tag of a machine whose node has joined the cluster.
+const joinedTag = cloud.LabelJoined + "=true"
+
 // taggedInstance is an instance with the canonical labels that its tags hold.
 type taggedInstance struct {
 	govultr.Instance
@@ -384,6 +387,7 @@ func (n taggedInstance) cloudInstance(addr netip.Addr) cloud.Instance {
 		PrivateIP: addr,
 		PublicIP:  parseAddr(n.MainIP),
 		Ready:     ready(n.Instance),
+		Joined:    n.labels[cloud.LabelJoined] == "true",
 		Created:   createdAt(n.DateCreated),
 	}
 }
@@ -410,15 +414,30 @@ func (p *Provider) Delete(ctx context.Context, node cloud.Instance) error {
 }
 
 // scrubbedUserData replaces a node's user data once the node has joined the cluster. It holds no secrets and no
-// modules: cloud-init runs the per-boot modules of the current user data on every boot.
-const scrubbedUserData = "#cloud-config\n# tent removed this node's user data after the node joined the cluster\n"
+// modules: cloud-init runs the per-boot modules of the current user data on every boot. The empty mapping is there
+// because cloud-init refuses a cloud-config that loads to nothing, such as one of comments only, and then reports a
+// degraded status (seen with cloud-init 26.1 on Ubuntu 24.04).
+const scrubbedUserData = "#cloud-config\n# tent removed this node's user data after the node joined the cluster\n{}\n"
 
-// ScrubUserData replaces the user data of the machine node, which holds its secrets, with a stub: a cloud-config with
-// a comment and no modules. The update changes nothing else; Vultr keeps the tags of an update without them. A machine
-// that is gone counts as scrubbed. The update is idempotent, so after an error that matches ErrUnavailable the caller
-// may call again.
-func (p *Provider) ScrubUserData(ctx context.Context, node cloud.Instance) error {
-	req := &govultr.InstanceUpdateReq{UserData: encodeUserData([]byte(scrubbedUserData))}
+// MarkJoined records on the machine node that its node has joined the cluster, and replaces its user data, which holds
+// its secrets, with a stub: a cloud-config with a comment, an empty mapping and no modules. It reads the instance, then
+// sends its tags in their order, with the tag tent/joined=true added at the end when it is missing, and the stub, in
+// one update. A tent/joined tag with another value is replaced, and every other tag stays. A tag that an operator
+// changes between the read and the update, about a second, is lost. It is safe to repeat. A machine that is gone
+// counts as marked. After an error that matches ErrUnavailable the caller may call again.
+func (p *Provider) MarkJoined(ctx context.Context, node cloud.Instance) error {
+	in, err := p.api.GetInstance(ctx, node.ID)
+	if err != nil {
+		return nodeResult(err, "scrub the user data of", node)
+	}
+	tags := slices.DeleteFunc(slices.Clone(in.Tags), func(tag string) bool {
+		return tag != joinedTag && strings.HasPrefix(tag, cloud.LabelJoined+"=")
+	})
+	if !slices.Contains(tags, joinedTag) {
+		// The list holds the joined tag at least, so it is never nil and Vultr replaces the tags.
+		tags = append(tags, joinedTag)
+	}
+	req := &govultr.InstanceUpdateReq{Tags: tags, UserData: encodeUserData([]byte(scrubbedUserData))}
 	return nodeResult(p.api.UpdateInstance(ctx, node.ID, req), "scrub the user data of", node)
 }
 
