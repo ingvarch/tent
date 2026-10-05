@@ -470,3 +470,29 @@ func TestConcurrentUse(t *testing.T) {
 		t.Errorf("Nodes() = %d nodes, %v; want %d", len(nodes), err, workers)
 	}
 }
+
+func TestCallsNameTheServerOfTheClient(t *testing.T) {
+	for _, c := range apiCalls {
+		t.Run(c.name, func(t *testing.T) {
+			f := nomadfake.New()
+			f.SetLeader(leader)
+			first := f.Client(nomadops.Config{Address: "198.51.100.1:4646", Token: pki.NewBootstrapSecret()})
+			second := f.Client(nomadops.Config{Address: "198.51.100.2:4646", Token: pki.NewBootstrapSecret()})
+			anonymous := f.Client(nomadops.Config{Token: pki.NewBootstrapSecret()})
+
+			for _, a := range []nomadops.API{first, second, first, anonymous} {
+				if err := c.call(t.Context(), a); err != nil {
+					t.Fatalf("%s: %v", c.name, err)
+				}
+			}
+
+			arg := argOf(c.name)
+			wantCalls(t, f,
+				nomadfake.Call{Name: c.name, Server: "198.51.100.1:4646", Arg: arg},
+				nomadfake.Call{Name: c.name, Server: "198.51.100.2:4646", Arg: arg},
+				nomadfake.Call{Name: c.name, Server: "198.51.100.1:4646", Arg: arg},
+				nomadfake.Call{Name: c.name, Arg: arg},
+			)
+		})
+	}
+}
