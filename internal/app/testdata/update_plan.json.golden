@@ -38,6 +38,17 @@
   },
   "nodes": [
     {
+      "action": "wait",
+      "name": "prod-servers-1",
+      "group": "servers",
+      "role": "server",
+      "zone": "ams",
+      "machineType": "vc2-2c-4gb",
+      "image": "ubuntu-24.04",
+      "id": "instance-2",
+      "op": "5f0c2a9e-8d1b-4c7e-9f3a-2b6d8e1c4a70"
+    },
+    {
       "action": "create",
       "name": "prod-servers-2",
       "group": "servers",
@@ -54,17 +65,6 @@
       "zone": "ams",
       "machineType": "vc2-4c-8gb",
       "image": "ubuntu-24.04"
-    },
-    {
-      "action": "wait",
-      "name": "prod-servers-1",
-      "group": "servers",
-      "role": "server",
-      "zone": "ams",
-      "machineType": "vc2-2c-4gb",
-      "image": "ubuntu-24.04",
-      "id": "instance-2",
-      "op": "5f0c2a9e-8d1b-4c7e-9f3a-2b6d8e1c4a70"
     },
     {
       "action": "delete",

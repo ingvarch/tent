@@ -779,7 +779,7 @@ func TestUpdateWaitsForNodes(t *testing.T) {
 		}
 		wait := createOf("servers", v1alpha1.RoleServer, 0)
 		wait.Action, wait.ID, wait.Op = app.NodeWait, "instance-1", opOf(f.Instances()[0].Tags)
-		wantNodeChanges(t, plan, slices.Concat(allCreates[1:], []app.NodeChange{wait})...)
+		wantNodeChanges(t, plan, slices.Concat([]app.NodeChange{wait}, allCreates[1:])...)
 
 		f.SetBootReads(t, 1, 2)
 		mustUpdate(t, svc)
