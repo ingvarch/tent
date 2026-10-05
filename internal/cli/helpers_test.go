@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -216,16 +217,26 @@ func testAssets() assets.Options {
 }
 
 // staticNomad returns the Nomad factory of a cluster that has a leader, three healthy servers that vote, and the three
-// workers of the test cluster registered. Its ACL system counts as bootstrapped with the token of the first client
-// that is made, which is the secret that tent holds, as that of a cluster that an earlier run built. It does not follow the
-// cloud, and the CLI tests check output, not the order of the calls.
+// workers of the test cluster registered at 10.64.0.6 to 10.64.0.8. Its Raft peers are the servers at 10.64.0.3 to
+// 10.64.0.5, the addresses that the test cluster's machines get on the fake. Its ACL system counts as bootstrapped
+// with the token of the first client that is made, which is the secret that tent holds, as that of a cluster that an
+// earlier run built. It does not follow the cloud, and the CLI tests check output, not the order of the calls.
 func staticNomad() func(nomadops.Config) (nomadops.API, error) {
 	f := nomadfake.New()
 	f.SetLeader("10.64.0.3:4647")
 	f.SetHealth(nomadops.Health{Healthy: true, Voters: 3})
+	var peers []nomadops.Peer
 	for i := range 3 {
-		f.Register(nomadops.Node{Name: fmt.Sprintf("prod-workers-%d", i), Status: "ready", Eligible: true})
+		f.Register(nomadops.Node{
+			Name: fmt.Sprintf("prod-workers-%d", i), Status: "ready", Eligible: true,
+			Address: netip.AddrFrom4([4]byte{10, 64, 0, byte(6 + i)}),
+		})
+		peers = append(peers, nomadops.Peer{
+			Name:    fmt.Sprintf("prod-servers-%d.global", i),
+			Address: netip.AddrPortFrom(netip.AddrFrom4([4]byte{10, 64, 0, byte(3 + i)}), 4647), Voter: true,
+		})
 	}
+	f.SetPeers(peers)
 	var once sync.Once
 	return func(cfg nomadops.Config) (nomadops.API, error) {
 		once.Do(func() { f.SetBootstrapped(cfg.Token) })

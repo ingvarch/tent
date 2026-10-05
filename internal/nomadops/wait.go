@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"time"
 
 	"github.com/ingvarch/tent/internal/english"
@@ -28,11 +29,12 @@ func WaitLeader(ctx context.Context, a API) (string, error) {
 	return leader, nil
 }
 
-// WaitNode calls Nodes until a node of the name is ready and eligible, and returns that node. It waits 2 seconds after
-// each call. When several nodes have the name, as a node that went down and its replacement do, any ready one ends the
-// wait. It fails at once with an error of Nodes that does not match ErrNotReady. When ctx ends, it fails with an error
-// that matches ctx.Err() and says what the last list showed of the name.
-func WaitNode(ctx context.Context, a API, name string) (Node, error) {
+// WaitNode calls Nodes until a node called name that advertises addr is ready and eligible, and returns that node. It
+// waits 2 seconds after each call. Nodes of the name at other addresses, such as a machine's twin or the node of an
+// earlier machine, are ignored, and an invalid addr matches no node. When several nodes have the name at addr, any
+// ready one ends the wait. It fails at once with an error of Nodes that does not match ErrNotReady. When ctx ends, it
+// fails with an error that matches ctx.Err() and says what the last list showed of the name at addr.
+func WaitNode(ctx context.Context, a API, name string, addr netip.Addr) (Node, error) {
 	var node Node
 	err := poll(ctx, "node "+name, func(ctx context.Context) error {
 		nodes, err := a.Nodes(ctx)
@@ -42,7 +44,7 @@ func WaitNode(ctx context.Context, a API, name string) (Node, error) {
 		var states []string
 		for _, n := range nodes {
 			switch {
-			case n.Name != name:
+			case !n.Is(name, addr):
 			case n.Ready():
 				node = n
 				return nil
@@ -54,11 +56,11 @@ func WaitNode(ctx context.Context, a API, name string) (Node, error) {
 		}
 		switch len(states) {
 		case 0:
-			return pending("node " + name + " is not listed")
+			return pending("node " + name + " is not listed at " + addr.String())
 		case 1:
 			return pending("node " + name + " is " + states[0])
 		}
-		return pending("the nodes named " + name + " are " + english.And(states))
+		return pending("the nodes named " + name + " at " + addr.String() + " are " + english.And(states))
 	})
 	if err != nil {
 		return Node{}, err

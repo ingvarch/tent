@@ -130,3 +130,15 @@ func TestClusterServers(t *testing.T) {
 		t.Errorf("clusterServers = %d, want 5", got)
 	}
 }
+
+// TestRegisterNeedsAPrivateAddress fails the registration wait of a machine that has no private address before any
+// call: a node cannot be told from its twin without it. The service has no Nomad client, so a Nomad call would fail
+// with another error.
+func TestRegisterNeedsAPrivateAddress(t *testing.T) {
+	err := (&applier{s: &Service{}}).register(t.Context(), cloud.Instance{Name: "prod-workers-1"})
+
+	const want = "node prod-workers-1: the cloud reports no private address for it yet; run the command again"
+	if err == nil || err.Error() != want {
+		t.Errorf("register = %v, want %q", err, want)
+	}
+}
