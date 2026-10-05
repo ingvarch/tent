@@ -14,9 +14,9 @@ const (
 // tent-node.service, which would deadlock. It is ordered after docker.service and tied to it in no other way:
 // systemd stops Nomad before Docker, so the agent stops while the Docker daemon still answers it, and a restart of
 // Docker leaves Nomad running. On a node without Docker the order does nothing. Type=notify, since Nomad answers
-// sd_notify; KillMode=process, so that executors and logmon survive a restart of the agent; SIGTERM, which the
-// agent's leave_on_terminate answers; and systemd's default stop timeout of 90 seconds, which covers Nomad's
-// 5-second graceful wait.
+// sd_notify; KillMode=process, so that executors and logmon survive a restart of the agent; SIGTERM, which a
+// client answers by leaving the cluster and a server by exiting at once, still a Raft peer; and systemd's default
+// stop timeout of 90 seconds, which covers Nomad's 5-second graceful wait.
 var nomadService = header + `[Unit]
 Description=The Nomad agent of this node
 Documentation=https://developer.hashicorp.com/nomad
