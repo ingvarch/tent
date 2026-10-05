@@ -198,8 +198,8 @@ func nodeConfig(ctx context.Context, o options, client *http.Client, now time.Ti
 		Arch:        arch,
 		Gossip:      pki.NewGossipKey(),
 		CABundle:    ca.Bundle(),
-		// The cluster's only server: it bootstraps alone and joins no seed.
-		Group: nodeGroup, Name: o.name, Zone: o.zone, BootstrapExpect: 1, Cert: cert,
+		// The cluster's only server, a group of one: it bootstraps alone and joins no seed.
+		Group: nodeGroup, Name: o.name, Zone: o.zone, Cert: cert,
 	})
 }
 
