@@ -2,7 +2,10 @@
 
 - **Status:** Accepted; amended by [ADR-0030](0030-nomad-on-nodes.md) (clients have no `drain_on_shutdown`, so the
   drain through the Nomad API is the only drain of a client before its removal; whether servers keep
-  `leave_on_terminate` is decided in M2.7)
+  `leave_on_terminate` is decided in M2.7) and by [ADR-0031](0031-bootstrap-in-update.md) (decision 26: server and
+  combined agents run with `leave_on_terminate = false`, so a stopped server stays a Raft peer on every provider,
+  an ACPI shutdown included, until step 5 removes it through the API or autopilot's `cleanup_dead_servers` does
+  first; clients keep `true`)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md); [ADR-0016](0016-server-discovery-seed-and-refresh.md),

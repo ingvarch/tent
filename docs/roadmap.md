@@ -1,6 +1,6 @@
 # Roadmap
 
-> **Current status (2026-09-28):** M0 Foundation and M1 Vultr infrastructure are complete.
+> **Current status (2026-10-05):** M0 Foundation and M1 Vultr infrastructure are complete, and M2 is in progress.
 >
 > M0 built the Go module, `tent version`, the Makefile, the import rules in golangci-lint, CI on Linux, macOS and
 > Windows, the release pipeline for `tent`, the API types with defaults and validation, the spec reader and writer,
@@ -14,11 +14,15 @@
 > client and its fake, the Vultr infrastructure tasks and node primitives
 > ([architecture §11](architecture.md#11-vultr-provider)), and `tent update cluster` and `tent delete cluster`
 > ([architecture §13.2](architecture.md#132-tent-update-cluster---yes),
-> [§13.7](architecture.md#137-tent-delete-cluster---yes)). The nodes are empty machines without Nomad.
+> [§13.7](architecture.md#137-tent-delete-cluster---yes)). Until M2.7a the nodes were empty machines without Nomad.
 >
 > - Vultr is the first provider and the E2E platform ([ADR-0014](adr/0014-vultr-first-provider-and-e2e.md)).
 > - Hetzner Cloud is second.
-> - **Next:** M2 Nomad bootstrap.
+>
+> M2 is in progress (2026-10-05). M2.1 to M2.6b built the PKI and secrets, the channels and assets, NodeConfig, the
+> Nomad client, tent-node and its phases. M2.7a made `tent update cluster --yes` build a Nomad cluster: servers,
+> the ACL bootstrap and clients with intro tokens ([ADR-0031](adr/0031-bootstrap-in-update.md)). M2.7b is next: the
+> scrub of user data, nodes that never registered and the guard against deleting nodes that registered.
 >
 > **Work items live in GitHub:** each milestone below links to its GitHub milestone, and the
 > [tent roadmap project][project] shows the open issues. This file keeps the goals and exit criteria; close issues as
@@ -31,8 +35,8 @@ and, from M2 on, in the E2E suite on Vultr.
 
 These come from [architecture §18](architecture.md#18-open-questions). The first six were decided on 2026-09-25, the
 seventh to the fifteenth on 2026-09-28, the sixteenth to the twenty-first on 2026-09-29, the twenty-second to the
-twenty-fourth on 2026-09-30, and the twenty-fifth on 2026-10-05. The maintainer extended the twenty-third on
-2026-10-02.
+twenty-fourth on 2026-09-30, and the twenty-fifth to the twenty-seventh on 2026-10-05. The maintainer extended the
+twenty-third on 2026-10-02.
 
 | # | Question | Decision |
 |---|---|---|
@@ -47,7 +51,7 @@ twenty-fourth on 2026-09-30, and the twenty-fifth on 2026-10-05. The maintainer 
 | 9 | Nomad's sha256s | checked at run time against the signed `SHA256SUMS`, with HashiCorp's key embedded in tent ([ADR-0026](adr/0026-channels-and-release-assets.md)) |
 | 10 | Nomad version of a spec without one | the channel's recommended one, pinned in `cluster.completed.yaml` by the first `update`; any release from the channel's minimum up to the next major is allowed, and untested ones get a warning |
 | 11 | What a channel holds | Nomad and the CNI plugins only; images stay in the provider's table and the API default |
-| 12 | When NodeConfig reaches `update` | in M2.7, with tent-node, intro tokens and the bootstrap; until then nodes boot a placeholder without secrets, and the asset downloads, the development-variable warning and the Nomad pin before the first node move there too ([ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)) |
+| 12 | When NodeConfig reaches `update` | in M2.7, with tent-node, intro tokens and the bootstrap; M2.7a built it, with the asset downloads, the development-variable warning and the Nomad pin before the first node; nodes keep their user data until the scrub of M2.7b ([ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md), [ADR-0031](adr/0031-bootstrap-in-update.md)) |
 | 13 | The instance id | NodeConfig carries the node's name; tent-node reads the instance id from the metadata service and writes it into `11-instance.hcl` |
 | 14 | The user data budget | 24 KiB for the whole cloud-config on every provider; a per-provider limit comes when a provider needs less |
 | 15 | The host firewall and `access` | the host does not copy `access`: SSH, ICMP and 4646 on servers are open on the host and the cloud firewall filters their sources; Nomad's and the dynamic ports only from the cluster CIDR (since M2.6a also from Nomad's and Docker's default bridges on client and combined nodes; the metadata block is decision 21); a change of `access` never changes the spec hash |
@@ -59,8 +63,10 @@ twenty-fourth on 2026-09-30, and the twenty-fifth on 2026-10-05. The maintainer 
 | 21 | The metadata service on a node | only tent-node's socket reaches it, by the socket mark `0x747`; every other packet to it is dropped, from the host and from containers; root `curl` on a node gets no answer, and a workload with CAP_NET_ADMIN or CAP_NET_RAW can still set the mark ([ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md)) |
 | 22 | The Nomad region on the node | a `region` field in NodeConfig, validated as `spec.nomad.region` is and outside the spec hash; tent-node calls servers as `server.<region>.nomad` ([ADR-0030](adr/0030-nomad-on-nodes.md)) |
 | 23 | `nomad config validate` of the golden files | an online test in the weekly CI job, not on every pull request; since 2026-10-02 with both the channel's minimum and its recommended Nomad |
-| 24 | The secrets of the tent-node VM check | `hack/tent-node-userdata` makes a throwaway CA, node certificate and gossip key per run; they sit in the user data of a VM that is deleted after the check, with no scrub before M2.7 |
+| 24 | The secrets of the tent-node VM check | `hack/tent-node-userdata` makes a throwaway CA, node certificate and gossip key per run; they sit in the user data of a VM that is deleted after the check, with no scrub before M2.7b |
 | 25 | Draining at shutdown | clients do not drain themselves when Nomad stops, since Nomad's self-drain leaves them ineligible after their next start; tent's own removals drain a client through the Nomad API ([ADR-0030](adr/0030-nomad-on-nodes.md)) |
+| 26 | `leave_on_terminate` by role | server and combined agents set it to `false`, so a stopped server stays a Raft peer, and clients keep `true`; tent removes servers through the Nomad API on every provider ([ADR-0031](adr/0031-bootstrap-in-update.md)) |
+| 27 | Deleting nodes that joined | until M3, `update` refuses to delete a node that registered in Nomad or a server of the Raft peer set; `delete cluster` works as before; M2.7b builds it |
 
 New questions for the maintainer are issues with the `decision` label.
 

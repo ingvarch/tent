@@ -1,6 +1,9 @@
 # ADR-0019: A combined server+client role for dev and small clusters
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by [ADR-0031](0031-bootstrap-in-update.md) (item 4: tent gives combined nodes no
+  intro token, also those made once the cluster runs, since their clusters never run `strict`, so a token adds
+  nothing; after the health wait `update` waits until each combined node it created or waited for has
+  registered; M3 can revisit this with server scaling)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0007](0007-security-baseline.md), [ADR-0008](0008-node-credential-delivery.md),

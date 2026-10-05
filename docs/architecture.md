@@ -455,12 +455,15 @@ github.com/ingvarch/tent
 │   ├── s3url/           # s3:// URLs of a bucket and prefix, and their S3 clients: the state store, dev uploads
 │   │   └── s3urltest/   # tests only: keeps the developer's AWS configuration out of a test
 │   ├── assets/          # Nomad, CNI and tent-node: URLs and sha256s; checks Nomad's signature; the online test of
-│   │                    # nomad config validate on the goldens of nodeconfig
+│   │   │                # nomad config validate on the goldens of nodeconfig
+│   │   └── assetstest/  # tests only: Nomad's signed SHA256SUMS and tent's checksums, no network
 │   ├── channels/        # embedded channel files: the Nomad versions allowed and tested, the CNI plugins
 │   ├── buildinfo/       # version, commit, date (ldflags); which release a version counts as
 │   └── buildconfig/     # tests only: CI, Makefile and release config agree; what tent-node links
 ├── test/e2e/            # //go:build e2e: black-box tests against real clouds (Vultr first)
-├── hack/                # tent-node-upload/ (dev builds), tent-node-userdata/ (VM check), vultr-spike/, janitor
+├── hack/                # tent-node-upload/ (dev builds), tent-node-userdata/ (VM check), tent-operator/
+│   │                    # (operator access before export nomad), vultr-spike/, janitor
+│   └── internal/shellenv/ # env lines for fish and sh; shellenvtest/ is tests only
 └── docs/                # this document, ADRs, platform notes, roadmap
 ```
 
@@ -491,14 +494,21 @@ to `internal/rollout` with the drain and the quorum checks
   only the API module is allowed (`nomadops-api-only`). Throw-away files proved both rules on 2026-09-29 (#92): an
   import of the API module in `internal/app` code, in an `internal/app` test and in `cmd/tent`, and an import of the
   root module in `internal/nomadops`, gave four findings; the API module in `internal/nomadops` gave none.
+- Since M2.7a `internal/app`, `internal/cli` and `cmd/tent` import `internal/nomadops` in non-test code, so the `tent`
+  binary links `nomad/api`. `internal/cli` also imports `internal/assets` and `internal/channels` for its options;
+  `internal/cli` has the options `WithAssets` and `WithNomad`; the channel list has no option: the tests of
+  `internal/cli` set the unexported `channels` field of its options, which goes to `Service.Channels`.
 - `internal/nomadops/nomadfake`, tests included, imports no Nomad module: it stands in for Nomad with the types of
   `internal/nomadops` alone (`nomadfake-no-nomad`). It imports `testing`, so only tests import it.
 - `internal/pki` imports only the standard library, `internal/uuid`, `internal/secret` and `api/v1alpha1`, so the
   code that makes the CA and the secrets never reaches a cloud or the state store. `internal/uuid`, `internal/secret`,
-  `internal/english` and `internal/secrettest` import only the standard library. The tests of these five packages are
+  `internal/english`, `internal/secrettest` and `internal/assets/assetstest` import only the standard library
+  (`assetstest-stdlib-only`, so that the tests of `internal/assets` can import it). The tests of these six packages are
   exempt ([ADR-0025](adr/0025-stdlib-only-helper-packages.md),
-  [ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)). Only tests import `internal/secrettest`,
-  `internal/nomadops/nomadfake`, `internal/nodeup/nodeuptest` and `internal/s3url/s3urltest`.
+  [ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md),
+  [ADR-0031](adr/0031-bootstrap-in-update.md)). Only tests import `internal/secrettest`,
+  `internal/nomadops/nomadfake`, `internal/nodeup/nodeuptest`, `internal/s3url/s3urltest`,
+  `internal/assets/assetstest` and `hack/internal/shellenv/shellenvtest`.
 - `internal/nodeconfig`, the contract that tent-node decodes, imports only the standard library, `internal/secret`
   and `api/v1alpha1`. Its tests are exempt ([ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)).
 - Only tests import `github.com/hashicorp/hcl`: they parse the rendered Nomad configuration back with HCL1. No code
@@ -721,6 +731,8 @@ type Provider interface {
 	Inventory(ctx context.Context, cluster string) (engine.Snapshot, error)
 	// Nodes returns the machine primitives.
 	Nodes() Nodes
+	// Arch returns the CPU architecture of the machines of a machine type, cloud.ArchAMD64 or cloud.ArchARM64.
+	Arch(ctx context.Context, machineType string) (string, error)
 }
 
 // Nodes are the machine primitives of a provider. Drain, quorum and the order of replacements live in the core.
@@ -793,7 +805,7 @@ The sketch of the target:
 
 ```go
 type Provider interface {
-	// Name, Validate, BuildInfra, InfraKinds, Inventory and Nodes as above, and:
+	// Name, Validate, BuildInfra, InfraKinds, Inventory, Nodes and Arch as above, and:
 	Capabilities() Capabilities
 	Default(c *v1alpha1.Cluster, groups []*v1alpha1.NodeGroup) error // provider defaults, at spec time
 	Join(m *model.Cluster) model.JoinStrategy                       // how agents find servers
@@ -934,7 +946,7 @@ cloud-init (user_data: minimal cloud-config; vendor package upgrades disabled)
 - **No vendor package upgrades.** The cloud-config disables package update and upgrade. Vultr's vendor data has set the
   same since at least 2026-09, but it may change, so tent sets it anyway. OS patching happens by replacing nodes.
 - **The user data** is built in M2.3 (`nodeconfig.UserData`, [Appendix B](#appendix-b-cloud-init-user-data-sketch)).
-  `update` uses it from M2.7 and gives nodes a placeholder until then ([13.2](#132-tent-update-cluster---yes)).
+  `update` gives it to every node since M2.7a ([13.2](#132-tent-update-cluster---yes)).
 - **The handover** (decision 19 of [18](#18-open-questions),
   [ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md)).
   - **First boot.** cloud-final runs `tent-node install` through `exec`. `install` starts `tent-node.service` and
@@ -1019,7 +1031,7 @@ and after `tent-node.service` ([ADR-0030](adr/0030-nomad-on-nodes.md)):
 ### 8.3 NodeConfig contract
 
 Built in M2.3 in `internal/nodeconfig` ([ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)).
-`update` uses it from M2.7 ([13.2](#132-tent-update-cluster---yes)).
+`update` uses it since M2.7a ([13.2](#132-tent-update-cluster---yes)).
 
 ```go
 // NodeConfig is the contract between tent (producer) and tent-node (consumer).
@@ -1059,10 +1071,14 @@ type NodeConfig struct {
 - **Built by `internal/app`.** `groupTemplates` makes a template per node group: the model's provider, the Nomad
   region from `spec.nomad.region`, the agent configuration from the completed specs, the CA bundle, `nomad.service`,
   the assets, the join strategy, the system settings, the host firewall and the spec hash. `nodeConfig` adds what one
-  node has: its name, `10-node.hcl`, its certificate and key, the seed of servers, and on client and combined nodes
-  the intro token. `NodeConfigOf` (with `NewNode`) runs these steps for one new node, after `model.New` and the
-  assets, and refuses a missing Nomad version or group before any request. `hack/tent-node-userdata` uses it, and
-  `update` must build a node's config the same way (M2.7).
+  node has: its name, `10-node.hcl` with `bootstrap_expect`, its certificate and key, the seed of servers, and an
+  intro token when it is given one: `update` gives one to clients only ([9.3](#93-client-introduction)).
+  - One node builder runs these steps. It reads the assets once per architecture, makes a template per group, and
+    returns a node's config from its group, name, zone, certificate, seed and intro token. `bootstrap_expect` is the
+    size of the server group, or of the combined group, in the specs.
+  - `update` uses the builder, and so does `NodeConfigOf` (with `NewNode`), which builds one new node with every group
+    on one architecture. `NodeConfigOf` refuses a missing Nomad version, a missing group and an empty architecture
+    before any request. `hack/tent-node-userdata` uses it.
 - **Join:** `seed-and-refresh`, the private addresses of the servers that exist when the node is created, and a
   refresh every minute ([11.2](#112-server-discovery-seed-and-refresh)).
 - **System**, per role. Servers get none.
@@ -1117,6 +1133,14 @@ type NodeConfig struct {
 
   tent-node renders two small per-node files itself, with the same package: `05-join.hcl`, which the refresh
   rewrites, and `11-instance.hcl`, since only the node knows its instance id.
+- **`leave_on_terminate` by role** (decision 26 of [18](#18-open-questions), M2.7a,
+  [ADR-0031](adr/0031-bootstrap-in-update.md)). `00-tent.hcl` sets it to `false` on server and combined agents, so a
+  stopped server stays a Raft peer, and to `true` on clients. The line is in every role's file, with a comment. Nomad
+  merges the key across the files of `/etc/nomad.d` with OR (v2.0.7, `command/agent/config.go`): `extraConfig.server`
+  can turn it on again, from false to true only, and `extraConfig.client` cannot turn a client's `true` off. A server
+  that stops stays a voter until autopilot's `cleanup_dead_servers` removes it, about 40 s on 2026-10-03
+  ([platform notes §1.6](platform-notes.md#16-the-agent-on-a-node)), or until tent removes it through the API
+  ([13.3](#133-tent-rolling-update-cluster---yes)).
 - **Files in `/etc/nomad.d/`**, merged by Nomad in the order of their names. Root owns every file
   (`nodeconfig.Owner`, `root:root`).
 
@@ -1134,12 +1158,15 @@ type NodeConfig struct {
   | `tls/agent-key.pem` | the node's key | node, secret | 0600 | all | tent |
 
   The user files exist only when their part of `extraConfig` is set. The intro token goes to
-  `/var/lib/nomad/client/intro_token.jwt` (0600, secret) on client and combined nodes
-  ([9.3](#93-client-introduction)).
+  `/var/lib/nomad/client/intro_token.jwt` (0600, secret) on the nodes that get one: every client,
+  and no combined node ([9.3](#93-client-introduction)).
 - **`nomad.service`** (`nodeconfig.RenderNomadService`, [ADR-0030](adr/0030-nomad-on-nodes.md)) is a NodeConfig file
   of every role too: `/etc/systemd/system/nomad.service`, 0644, group-level and in the hash, the same on every node.
   Compared with HashiCorp's stock unit it has:
-  - SIGTERM where the stock unit sends SIGINT, so `leave_on_terminate` acts;
+  - SIGTERM where the stock unit sends SIGINT. A server exits at once with status 1 and stays a Raft peer, so the unit
+    ends as failed after a stop of a server or combined node, and the restart works (seen on a real server on
+    2026-10-05: [platform notes §3.16](platform-notes.md#316-spike-runs); decision 26 of
+    [18](#18-open-questions));
   - systemd's default stop timeout of 90 s, which covers the 5-second graceful wait;
   - `After=docker.service` and no other tie to Docker, so a shutdown stops Nomad while Docker still answers;
   - no `[Install]`, so the unit is never enabled ([8.1](#81-bootstrap-chain)).
@@ -1169,8 +1196,9 @@ type NodeConfig struct {
   grants every request to its own endpoints ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)).
 - **`bootstrap_expect`** is per node, in `10-node.hcl`, so a resize of the server group does not mark every server out
   of date.
-- **The operator's files come last** and can override anything, tent's settings included, such as `data_dir`,
-  `client.state_dir`, the `tls` file paths, the dynamic ports and Nomad's bridge subnet (`bridge_network_subnet`).
+- **The operator's files come last** and can override tent's settings, such as `data_dir`, `client.state_dir`, the
+  `tls` file paths, the dynamic ports and Nomad's bridge subnet (`bridge_network_subnet`); they cannot turn off a
+  boolean that Nomad merges with OR, such as a client's `leave_on_terminate`.
   The host firewall does not follow them. After such an override Nomad looks for the TLS files or the intro token
   where tent did not write them, and under strict client introduction the client is refused
   ([9.3](#93-client-introduction)). tent does not check `extraConfig`.
@@ -1213,9 +1241,11 @@ The golden files and a sketch: [Appendix A](#appendix-a-nomad-agent-configuratio
   request, which the caller's context bounds, and errors name the URL. The CLI caches nothing. The time at which the
   signature is checked is injectable (`assets.Options.Now`).
 - **NodeConfig carries the assets** from M2.3: `internal/app` resolves them (`resolveAssets`) and converts them to
-  NodeConfig's own type ([8.3](#83-nodeconfig-contract)). `update` reads the release files from M2.7, with its own
-  clock for the signature check, so from then a plan needs releases.hashicorp.com, and for a release build github.com
-  (decision 12 of [18](#18-open-questions)).
+  NodeConfig's own type ([8.3](#83-nodeconfig-contract)). Since M2.7a `update` reads the release files with its own
+  clock for the signature check, but only in a plan that creates or waits for a node. Such a plan needs
+  releases.hashicorp.com, and for a release build github.com. A plan without node changes reads no release file and
+  needs no development variables ([13.2](#132-tent-update-cluster---yes),
+  [ADR-0031](adr/0031-bootstrap-in-update.md)).
 - **tent-node's downloads** (M2.6a, [ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md)). tent-node keeps
   one file per asset, `/var/lib/tent/assets/<name>` (0600; `/var/lib/tent` and `assets` 0700). A file with
   NodeConfig's sha256, mode 0600 and owner root is used without a download; tent-node checks it as a stream
@@ -1250,9 +1280,11 @@ The golden files and a sketch: [Appendix A](#appendix-a-nomad-agent-configuratio
   - A development build's tent-node is uploaded to object storage and served through a presigned URL:
     `TENT_NODE_URL` plus `TENT_NODE_SHA256`. One URL and one sha256 serve every architecture.
   - Without them a development build fails and names them. A release build ignores them. Its warning when they are
-    set is built (`devVariablesWarning` in `internal/app`) and shows from M2.7, when `update` fetches the assets, such
-    as `TENT_NODE_URL is set, but tent v0.3.0 is a release build and ignores it: its nodes download the tent-node of
-    release v0.3.0`.
+    set is `devVariablesWarning` in `internal/app`. `update --yes` shows it before the first change, such as
+    `TENT_NODE_URL is set, but tent v0.3.0 is a release build and ignores it: its nodes download the tent-node of
+    release v0.3.0`. A plan without `--yes` does not warn.
+  - `cmd/tent` reads `TENT_NODE_URL` and `TENT_NODE_SHA256` once at start and gives them to the service as
+    `assets.Options`. A release build ignores them.
   - **Where it lives** (decision 18 of [18](#18-open-questions),
     [ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md)). `make dev-upload` builds tent and tent-node, and
     `hack/tent-node-upload` puts tent-node into the CI R2 bucket at `dev/tent-node/<sha256>/tent-node_linux_amd64`,
@@ -1267,7 +1299,11 @@ The golden files and a sketch: [Appendix A](#appendix-a-nomad-agent-configuratio
 - **Ubuntu** (apt-based) is supported in v1. The default image is `ubuntu-24.04` (decided on 2026-09-25). E2E also
   runs on `ubuntu-26.04`.
 - **Architectures:** x86-64 everywhere, and arm64 only where the provider offers it. Hetzner has CAX; Vultr has no
-  arm64 Cloud Compute.
+  arm64 Cloud Compute (151 plans, none arm, on 2026-10-05,
+  [platform notes §3.8](platform-notes.md#38-regions-images-plans-and-billing-)).
+  - A node group's architecture comes from `cloud.Provider.Arch` for its machine type, and `update` resolves the
+    assets for it. Vultr's `Arch` answers amd64 for every plan without a call, so an arm64 plan on Vultr would get
+    amd64 files until the provider reads the plan.
 - **Other distributions** come later behind a small `osfamily` abstraction in `nodeup`.
 
 ---
@@ -1279,8 +1315,10 @@ See [ADR-0007](adr/0007-security-baseline.md) and [ADR-0008](adr/0008-node-crede
 ### 9.1 PKI
 
 `internal/pki` makes the CA, the certificates, the gossip key and the ACL bootstrap secret (M2.1). `update` keeps the
-CA and the secrets in the state store ([13.2](#132-tent-update-cluster---yes)); no node uses them yet. The storage and
-certificate details are in [ADR-0024](adr/0024-cluster-pki-storage-and-certificates.md).
+CA and the secrets in the state store ([13.2](#132-tent-update-cluster---yes)). A run holds the CA, the gossip key and
+the bootstrap secret in memory, stored or new, and issues each node's certificate and the run's operator certificate
+from the CA without storing them (M2.7a). The storage and certificate details are in
+[ADR-0024](adr/0024-cluster-pki-storage-and-certificates.md).
 
 - **One CA per cluster**, ECDSA P-256, the same as `nomad tls`. The CA private key lives only in the state store and
   never reaches a node.
@@ -1327,7 +1365,10 @@ certificate details are in [ADR-0024](adr/0024-cluster-pki-storage-and-certifica
 ### 9.2 ACL and tokens
 
 - **ACLs are always enabled.**
-- **Bootstrap.** Built in M2.4 as `nomadops.Client.Bootstrap`; `update` calls it from M2.7.
+- **Bootstrap.** Built in M2.4 as `nomadops.Client.Bootstrap`; `update` calls it since M2.7a.
+  - Every `nomadops` client carries the bootstrap secret as its token, also for the bootstrap call itself, which
+    Nomad accepts: `ACL.Bootstrap` throws away the auth error of that call (`nomad/acl_endpoint.go`, v2.0.7; run on
+    2026-10-05, [platform notes §1.6](platform-notes.md#16-the-agent-on-a-node)).
   - tent generates the bootstrap secret, a UUID, and stores it in the state store **before** it calls
     `PUT /v1/acl/bootstrap {"BootstrapSecret": ...}`.
   - Before any request, `Bootstrap` checks that the secret is a lower-case UUID of version 4, as tent makes it. It
@@ -1348,9 +1389,12 @@ Servers run with `client_introduction { enforcement = "strict" }` by default (No
 group defaults to `warn`, and `strict` is refused there: the combined node's client registers before intro tokens
 exist ([ADR-0019](adr/0019-combined-server-client-role.md)).
 
-- **Issuing.** Right before each client VM is created, tent requests an introduction token with
-  `PUT /v1/acl/identity/client-introduction-token` (`nomadops.Client.IntroToken`, built in M2.4). The token is bound
-  to the node name and node pool.
+- **Issuing.** Right before each client VM is created, `update` requests an introduction token with
+  `PUT /v1/acl/identity/client-introduction-token` (`nomadops.Client.IntroToken`, built in M2.4, used since M2.7a). The
+  token is bound to the node name and node pool. Every client gets one, whatever the enforcement.
+  - **Combined nodes get none**: `update` asks for no token for them
+    ([ADR-0019](adr/0019-combined-server-client-role.md), [ADR-0031](adr/0031-bootstrap-in-update.md)). `nodeConfig`
+    refuses a token only on the `server` role.
 - **TTL.** 30 minutes at most (`nomadops.MaxIntroTTL`), the default `max_identity_ttl` of the servers. A server cuts
   a longer TTL to its maximum without a word, so nomadops refuses one before it sends the request. It refuses an
   empty node name or pool too.
@@ -1365,7 +1409,7 @@ exist ([ADR-0019](adr/0019-combined-server-client-role.md)).
   identity.
 - **Gotchas.**
   - An expired or mismatched token is rejected even with `enforcement = "warn"`.
-  - A VM that fails to register within the TTL is simply replaced, which is idempotent.
+  - A VM that fails to register within the TTL is replaced, which is idempotent (M2.7b).
   - Client introduction does not replace mTLS.
 
 ### 9.4 Secrets on nodes: threat model
@@ -1408,8 +1452,8 @@ The spike confirmed on 2026-09-25 that this works: the metadata service serves t
 cloud-init does not re-run after a restart ([ADR-0018](adr/0018-vultr-provider-design.md)). Hetzner user data is
 immutable, so there it stays for the node's lifetime.
 
-The scrub needs a registered node, which the bootstrap of M2.7 brings. Until then `update` gives nodes a placeholder
-without secrets (decision 12 of [18](#18-open-questions)).
+The scrub needs a registered node. Since M2.7a `update` bootstraps Nomad, and nodes boot with real user data, so the
+secrets of the table stay in user data until the scrub of M2.7b (decision 12 of [18](#18-open-questions)).
 
 ### 9.5 Target architecture: bootstrap controller
 
@@ -1468,7 +1512,10 @@ User data then carries no secrets at all. Credential delivery is therefore a str
   token are short-lived.
 - **`tent ui`** is a local reverse proxy from `127.0.0.1:4646` to the cluster that injects mTLS and the token. The
   browser UI works without installing client certificates, and `verify_https_client = true` stays on.
-- **tent's own calls** go through `nomadops.Client` (built in M2.4, used from M2.7):
+- **tent's own calls** go through `nomadops.Client` (built in M2.4, used by `update` since M2.7a):
+  - `update` makes one client per server with a public address, at `<public IP>:4646`, and uses them as one API
+    (`nomadops.Servers`, [13.2](#132-tent-update-cluster---yes)). Its operator certificate lasts 24 hours, is made in
+    memory for the run and never stored.
   - mTLS with an operator certificate (`cli.<region>.nomad`) and the cluster's CA, both PEM in memory; TLS 1.2 or
     newer, over HTTP/1.1. It always uses https and expects the certificate of `server.<region>.nomad` whatever
     address it dials (`TLSServerName`).
@@ -1580,12 +1627,18 @@ type Capabilities struct {
   pki/private/ca.key                     # secret
   secrets/gossip.key                     # secret
   secrets/acl-bootstrap-token            # secret
+  nomad/bootstrapped                     # the mark that the ACL system is bootstrapped (the time)
   backups/<timestamp>.snap               # Raft snapshots (contain the keyring: secret)
   history/<timestamp>-<operation>.yaml   # audit trail of applies
 ```
 
 `statestore.Layout` names these objects, and `statestore.Clusters` lists the clusters in a store: the top-level names
 that hold a `cluster.yaml`.
+
+`nomad/bootstrapped` is written after the ACL bootstrap succeeded and the servers are healthy and all vote (M2.7a,
+[13.2](#132-tent-update-cluster---yes)). `update` deletes it and writes it again when the store holds it and no server
+or combined machine of the cluster stays. Only its existence is read; it holds the time in RFC 3339 and a newline.
+`tent delete cluster` knows it ([13.7](#137-tent-delete-cluster---yes)).
 
 Names that start with `.` belong to the backends, and `List` never returns them: `.tent-store.lock` and
 `.tent-locks/` in the root of a `file://` store, the temp files of its writes (`.tent-tmp-*`), and the objects that
@@ -1740,9 +1793,15 @@ tent therefore uses the generic seed-and-refresh strategy
 
 1. **Seed.** At creation, tent puts the private IPs of the servers that already exist into the node's NodeConfig
    (`join.servers`), and tent-node renders them into `05-join.hcl` ([8.4](#84-nomad-configuration-rendering)). tent
-   takes them from `GET /v2/instances/{id}/vpcs` (`ip_address`, `mac_address`). On first bootstrap,
-   `server-0` is created first, and the remaining servers get `[server-0]`. Serf join is transitive, so
-   `bootstrap_expect` sees every server.
+   takes them from `GET /v2/instances/{id}/vpcs` (`ip_address`, `mac_address`).
+   - `update` seeds a server or combined node with the private addresses of every other server that the run knows,
+     by name: the servers that exist, and the ones it created before. On first bootstrap `server-0` is created first
+     with an empty seed, and each later server gets the servers created so far. Serf join is transitive, so
+     `bootstrap_expect` sees every server. A client gets every known server
+     ([13.2](#132-tent-update-cluster---yes)).
+   - A server that is not ready has no private address yet. So `update` waits for the interrupted servers before it
+     creates more, and fails a server's create when servers are listed and none has an address. A client's create
+     fails the same way when no server is known.
 2. **Refresh.** At every boot, before Nomad starts, the `join` phase of `up` asks the servers that answered last and
    then the seed for `GET /v1/status/peers?stale` and renders the answer into `05-join.hcl`
    ([8.2](#82-tent-node-phases)). `refresh-join` does it every 60 seconds, and on server and combined nodes asks the
@@ -1943,8 +2002,9 @@ create that may have been carried out is never sent again.
   off (Vultr's vendor data sets the same today; tent keeps it explicit), the NodeConfig as a gz+b64 `write_files`
   entry, and the tent-node download. The M2.5 VM check found node.json intact from the gz+b64 payload on Vultr's
   Ubuntu 24.04 and 26.04 images on 2026-09-29
-  ([platform notes §3.4](platform-notes.md#34-user_data-metadata-and-identity)). Until M2.7, `update` gives nodes
-  the placeholder of [13.2](#132-tent-update-cluster---yes).
+  ([platform notes §3.4](platform-notes.md#34-user_data-metadata-and-identity)). Since M2.7a `update` gives every
+  node this user data, and its size is checked at plan time ([13.2](#132-tent-update-cluster---yes)). No scrub runs
+  before M2.7b.
 - **Scrubbing.** Once the node has joined the cluster, the core calls `Nodes.ScrubUserData`. It PATCHes the user
   data to a stub that holds no secrets and no modules:
 
@@ -2144,9 +2204,10 @@ The seed-and-refresh timer still runs. It is harmless here, and it would cover s
    to `poweroff` after a timeout.
 2. `DELETE /servers/{id}`.
 
-With `leave_on_terminate = true`, the ACPI shutdown makes a server leave the Raft peer set gracefully. That is the
-`GracefulShutdown` optimization of [ADR-0017](adr/0017-api-driven-server-removal.md). The Nomad-API checks still run
-afterwards.
+Servers run with `leave_on_terminate = false` (decision 26 of [18](#18-open-questions)), so the ACPI shutdown stops
+Nomad but the server stays a Raft peer. The `GracefulShutdown` optimization of
+[ADR-0017](adr/0017-api-driven-server-removal.md) then gives a server no graceful leave: the peer goes through the
+Nomad API, or through autopilot's cleanup when that is first. Clients still leave when they stop.
 
 ### 12.6 Zones, placement, availability, rate limits, cost
 
@@ -2175,6 +2236,7 @@ afterwards.
 - `create cluster --yes` and `create -f FILE --yes` then build the cluster in the cloud, as `update cluster --yes`
   does ([13.2](#132-tent-update-cluster---yes)). `create -f` with node groups only builds the cluster they belong
   to.
+  - Since M2.7a that build includes the Nomad cluster: the servers, the ACL bootstrap and the clients.
   - With `-o table` tent prints the lines of the create, such as `cluster prod created`, then what
     `update cluster --yes` prints.
   - With `-o json` or `-o yaml` it prints one document: `{"changes": [...], "update": <the plan it applied>}`.
@@ -2187,25 +2249,31 @@ afterwards.
 
 ### 13.2 `tent update cluster [--yes]`
 
-**Built in M1.** `update cluster` brings the cluster's infrastructure and the sizes of its node groups to the specs.
-The nodes are empty machines. They boot a placeholder cloud-config without secrets, which turns off the package
-updates and upgrades of the first boot.
+**Built in M1 and M2.7a.** `update cluster` brings the cluster's infrastructure and the sizes of its node groups to the
+specs. Since M2.7a it also builds the Nomad cluster on them: servers with real user data, a leader, the ACL system
+bootstrapped with the stored secret, healthy servers that all vote, and clients with intro tokens that register
+([ADR-0031](adr/0031-bootstrap-in-update.md)). Before M2.7a the nodes were empty machines that booted a placeholder
+cloud-config without secrets.
 
 ```
  1. load specs → defaults → validate → the channel and the Nomad version (M2.2) → provider.Validate (region, plans,
     images)
  2. plan: inventory → provider.BuildInfra → engine plan; Nodes.List → node changes (13.4); the completed spec;
-    the missing secrets (M2.1)
+    the missing secrets (M2.1); the Nomad step; for a plan that creates or waits for a node, the assets, a node
+    config per group and the size of each node's user data
  3. without --yes: print the plan and stop
  4. lock → check the tent version → steps 1 and 2 again; the plan made under the lock is the one applied
- 5. raise the tent version → write the missing secrets (M2.1)
- 6. the infrastructure's task changes (Plan.ApplyTaskChanges)
- 7. node creates, one at a time: server and combined groups first, then client groups, by group and index;
-    each with a new operation id (cloud.NewOpID)
- 8. waits for listed nodes that are not ready yet, by name: Create again with the node's operation id
- 9. node deletes, one at a time, by name: duplicates, surplus nodes, nodes of groups not in the spec
-10. the infrastructure's deletes: prune and duplicates (Plan.ApplyDeletes)
-11. write cluster.completed.yaml → unlock
+ 5. raise the tent version → write the missing secrets → write the completed spec when the plan says so
+ 6. the infrastructure's task changes (Plan.ApplyTaskChanges); then, when the plan bootstraps and the store holds a
+    stale mark, the delete of the mark
+ 7. server and combined nodes: waits for listed nodes that are not ready yet, by name; then the creates, one at a
+    time, by group and index, each seeded with the servers that exist and with a new operation id (cloud.NewOpID)
+ 8. the Nomad step: wait for a leader → bootstrap the ACL system → wait until the servers are healthy and all vote
+    → write the mark → wait until each combined node that this run created or waited for has registered
+ 9. client nodes: waits, then creates, one at a time, by group and index; each wait and create after an intro token
+    and followed by the wait until the node has registered
+10. node deletes, one at a time, by name: duplicates, surplus nodes, nodes of groups not in the spec
+11. the infrastructure's deletes: prune and duplicates (Plan.ApplyDeletes) → unlock
 ```
 
 - **Failures.** The first step that fails stops the run, and the next run finishes the job. A run cut after a
@@ -2213,48 +2281,60 @@ updates and upgrades of the first boot.
   plans `~ node prod-workers-1 (ID <id>, wait until it is ready)` and waits for it. No second instance is created.
 - **Completed spec.** `cluster.completed.yaml` holds the specs with every default filled in
   ([3.3](#33-api-rules)). It counts as a change when the stored one is missing or differs, so the first run writes
-  it, and so does a run after a spec change that changes nothing in the cloud. It is written only after every other
-  step has succeeded.
-- **Deletes come last.** An object that the plan deletes may still hold nodes that step 9 removes, such as
+  it, and so does a run after a spec change that changes nothing in the cloud. It is written before the first node,
+  with the secrets (step 5, decision 12 of [18](#18-open-questions)), so the nodes run the Nomad version that it pins.
+  After a run that failed later, it already equals the specs, and the next plan no longer lists it.
+- **Deletes come last.** An object that the plan deletes may still hold nodes that step 10 removes, such as
   `<cluster>-clients` after the last client group is gone. Vultr's firewall guard refuses to delete a group that
   nodes use and the engine does not retry that ([11.5](#115-firewall-and-host-firewall)), so a delete in step 6
-  would stop the run before step 9. The deletes therefore wait for step 10.
+  would stop the run before step 10. The deletes therefore wait for step 11.
 - **Deadlines.** `Nodes.Create` has no deadline of its own ([11.3](#113-creating-a-node)), so `update` gives each
-  create and each wait 10 minutes. The engine gives each infrastructure change 5 minutes
-  ([6](#6-reconciliation-engine)).
+  create and each wait 10 minutes. The leader wait, the health wait and each registration wait of the Nomad step
+  get 10 minutes each. The engine gives each infrastructure change 5 minutes ([6](#6-reconciliation-engine)).
 - **Single server.** `update` validates the specs, so a cluster with one server needs `--allow-single-server` on
   every run, as every command that validates specs does.
 - **Output.**
-  - The plan goes to stdout: the infrastructure's lines as the engine writes them ([6](#6-reconciliation-engine)),
-    one line per node change, a blank line, and a line of counts per part that changes. The last line names the
-    objects that the plan writes to the state store, in write order: the missing secrets, then the completed spec,
-    such as `State: secrets/gossip.key and cluster.completed.yaml will be written.` A plan that writes only state is
-    that line alone. Operation ids and the secrets' contents do not show. A plan without changes is `No changes.`,
-    and a plan with changes adds `run with --yes to apply the changes` on stderr. An example with every kind of node
-    change (`internal/app/testdata/update_plan.golden`, its infrastructure lines left out):
+  - The plan goes to stdout: the infrastructure's lines as the engine writes them ([6](#6-reconciliation-engine)), one
+    line per node change, a blank line, a line of counts per part that changes, a `Nomad:` line when the plan has a
+    Nomad step, and a last line that names the objects that the plan writes to the state store, in write order: the
+    missing secrets, the completed spec, then the bootstrap mark, such as `State: secrets/gossip.key,
+    cluster.completed.yaml and nomad/bootstrapped will be written.` The line lists the mark whenever the plan
+    bootstraps, also when the store holds a stale one that the apply deletes first; that delete shows nowhere in the
+    plan, the progress or the applied line. A plan that writes only state is that line alone. Operation ids and the
+    secrets' contents do not show. A plan without changes is `No changes.`, and a plan with changes adds `run with --yes
+    to apply the changes` on stderr. An example with every kind of node change
+    (`internal/app/testdata/update_plan.golden`, its infrastructure lines left out):
 
     ```
+    ~ node prod-servers-1 (ID instance-2, wait until it is ready)
     + node prod-servers-2 (server, vc2-2c-4gb, ams)
     + node prod-workers-1 (client, vc2-4c-8gb, ams)
-    ~ node prod-servers-1 (ID instance-2, wait until it is ready)
     - node prod-old-0 (ID instance-7, not in the spec)
     - node prod-workers-0 (ID instance-5, duplicate)
     - node prod-workers-3 (ID instance-8, surplus)
 
     Plan: 2 to create, 1 to update, 0 to replace, 1 to delete.
     Nodes: 2 to create, 1 to wait for, 3 to delete.
-    State: pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token and cluster.completed.yaml will be written.
+    Nomad: bootstrap the ACL system and wait for 3 healthy servers.
+    State: pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token, cluster.completed.yaml and nomad/bootstrapped will be written.
     ```
+
+    The `Nomad:` line reads `Nomad: wait for 3 healthy servers.` when the mark exists and a server or combined
+    machine stays, and says `1 healthy server`
+    for one. A plan with only the `Nomad:` and `State:` lines is a plan with changes.
   - With `--yes`, tent prints the plan made under the lock (step 4), applies it with each step on stderr as it
     happens ([14](#14-cli)), and then prints a blank line and one line in the past tense, each part only when it
     changed, such as `Applied: 4 created, 0 updated, 0 replaced, 0 deleted. Nodes: 5 created, 0 waited for, 0
-    deleted. Wrote pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token and
-    cluster.completed.yaml.` The writes to the state store print no progress lines. A cluster without changes prints
-    `cluster prod is up to date`.
+    deleted. Nomad: bootstrapped the ACL system; 3 servers are healthy. Wrote pki/private/ca.key,
+    pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token, cluster.completed.yaml and
+    nomad/bootstrapped.` Without a bootstrap the Nomad part is `Nomad: 3 servers are healthy.` The writes to the
+    state store print no progress lines. A cluster without changes prints `cluster prod is up to date`.
   - `-o json` and `-o yaml` print the plan as data: `{"infrastructure": <the engine's plan>, "nodes": [...],
-    "secrets": ["pki/private/ca.key", ...], "completedSpec": true}`, the node changes in the order they run and the
-    secrets in the order they are written. `secrets` is left out when the store holds them all. With `--yes` they
-    print only the plan that was applied, with `"applied": true`.
+    "nomad": {"bootstrap": true, "servers": 3}, "secrets": ["pki/private/ca.key", ...], "completedSpec": true}`,
+    the node changes in the order they run and the secrets in the order they are written. A create and a wait
+    carry `"specHash"`, the hash of the group's node configuration. `nomad` is left out when the plan has no Nomad
+    step, and `secrets` when the store holds them all. With `--yes` they print only the plan that was applied, with
+    `"applied": true`.
 - **`--exit-code`.** Without `--yes`, a plan with changes makes tent exit with 2 and print no error, for drift
   detection in CI. With `--yes` it is refused.
 
@@ -2286,10 +2366,8 @@ in the completed spec ([ADR-0026](adr/0026-channels-and-release-assets.md)).
   and `rolling-update` will (M3).
 - **When the pin is written.** The pinned version is part of the completed spec, so a change of the version alone is
   a plan that writes `cluster.completed.yaml` and nothing else. So is the first plan of a cluster whose completed spec
-  an older tent wrote without a version. The completed spec is written only after every other step has succeeded
-  (step 11), so a first `update` that is cut and then run again by a newer tent pins that tent's recommendation. From
-  M2.7 nodes run Nomad, and the pin must be written before the first node is created, with the secrets (decision 12
-  of [18](#18-open-questions)).
+  an older tent wrote without a version. Since M2.7a the first run pins the version before the first node (step 5), so
+  a first `update` that is cut and then run again by a newer tent keeps the version that the first run pinned.
 - **A pin outside the channel** fails the plan before it writes anything or reaches the cloud, such as `cluster prod
   is pinned to Nomad 2.0.7 (prod/cluster.completed.yaml), which is older than 2.1.0, the oldest Nomad that channel
   stable allows; set spec.nomad.version to a version that the channel allows`.
@@ -2300,19 +2378,16 @@ in the completed spec ([ADR-0026](adr/0026-channels-and-release-assets.md)).
 - **Untested versions.** When the version, set in the spec or pinned, is one that the channel has not tested,
   `update --yes` warns before it applies changes ([14](#14-cli)). A plan without `--yes`, or a run without changes,
   does not warn.
-- **No downloads yet.** Nodes still boot the placeholder. NodeConfig carries the assets from M2.3, and `update`
-  fetches them from M2.7 ([8.5](#85-artifacts-and-verification)).
+- **Downloads.** NodeConfig carries the assets from M2.3, and `update` reads their release files since M2.7a, in a plan
+  that creates or waits for a node ([8.5](#85-artifacts-and-verification)).
 
-**Built in M2.3, not used yet.** NodeConfig, the rendering of the Nomad configuration, the spec hash and the user data
-exist ([8.3](#83-nodeconfig-contract), [8.4](#84-nomad-configuration-rendering),
-[ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)), and `internal/app` can build the NodeConfig of a
-node. `update` does not call it: until M2.7 nodes boot the placeholder, carry no `tent/spec-hash` label and get no
-secrets (decision 12 of [18](#18-open-questions)). M2.7 adds to the flow the assets, fetched once per run; a
-NodeConfig per node; the spec hash as a label; real user data, its size checked at plan time; the Nomad pin, written
-before the first node; and the warning about development variables on a release build.
+**Built in M2.3, used since M2.7a.** NodeConfig, the rendering of the Nomad configuration, the spec hash and the user
+data exist ([8.3](#83-nodeconfig-contract), [8.4](#84-nomad-configuration-rendering),
+[ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)). Until M2.7a `update` did not call them: nodes
+booted the placeholder, carried no `tent/spec-hash` label and got no secrets. The next blocks say what M2.7a added.
 
-**Built in M2.4, not used yet.** `internal/nomadops` holds the calls that steps 5 and 7 of the target need, and
-`nomadfake` stands in for Nomad in the app's tests ([15](#15-testing)). Nothing calls them before M2.7.
+**Built in M2.4, used since M2.7a.** `internal/nomadops` holds the calls that the Nomad step and the clients need, and
+`nomadfake` stands in for Nomad in the app's tests ([15](#15-testing)).
 - **Calls.** `nomadops.API` has `Leader`, `Bootstrap` ([9.2](#92-acl-and-tokens)), `IntroToken`
   ([9.3](#93-client-introduction)), `Nodes` and `Health`. A `Client` talks to one server
   ([9.7](#97-operator-access)); the caller moves to the next server when a call fails with `ErrNotReady`. Make one
@@ -2331,12 +2406,117 @@ before the first node; and the warning about development variables on a release 
   `ErrNotReady`. When the context ends, the error says what they waited for and the last cause, and does not match
   `ErrNotReady`. `WaitNode` ends when a node of the name is ready and eligible; a `down` node of the same name does
   not end it. `WaitHealthy` needs healthy servers and at least the given number of voters.
+- **Servers** (M2.7a, `nomadops.NewServers`). It makes the servers of a cluster one `API`.
+  - A call goes to the server that answered last, the first one at the start. After an error that matches
+    `ErrNotReady` it goes to the next server, each server once per call, wrapping around the list. Any other error is
+    returned as it is: it is permanent, or the caller's context ended during the call, such as `nomad: PUT
+    /v1/acl/bootstrap: context canceled`. When the context has ended before a server is tried, the error is the
+    context's own, without a `nomad:` prefix.
+  - When no server answers, the error matches `ErrNotReady` and names each server by the address of its HTTP API with
+    its cause, in the order tried: `nomad: no server is ready: 198.51.100.1:4646: <cause>; 198.51.100.2:4646:
+    <cause>`. So the waits keep polling over `Servers`, and the timeout error of a wait shows the last causes: `nomad:
+    wait for a leader: context deadline exceeded; last: nomad: no server is ready: …`.
+  - `NewServers` fails with `nomad: no servers` or `nomad: server <address> has no API`. It is safe for concurrent
+    use, and printing it with any verb shows the addresses alone.
+- **`nomadfake`** logs the server that each call reached (`Call.Server`, the `Address` of the `Config` that made the
+  client), so a test can show that the app moved to the next server.
+
+**Built in M2.7a.** The flow of `update` with Nomad ([ADR-0031](adr/0031-bootstrap-in-update.md)). It is in
+`internal/app` and reaches Nomad only through `internal/nomadops`.
+- **The order of node changes.** The waits for server and combined nodes run first, by name; then their creates, by
+  group, then index; then the waits and creates of client nodes in the same order; the deletes come last, by name,
+  then ID. A wait is ranked by the machine's own role label: every role other than client, an empty one included,
+  counts with the servers. The reason for the order is in [11.2](#112-server-discovery-seed-and-refresh).
+- **Node configs.** A plan that creates or waits for a node asks the provider for the architecture of each distinct
+  machine type of the groups (`Provider.Arch`, [8.6](#86-operating-systems)) and makes one node builder
+  ([8.3](#83-nodeconfig-contract)) with the run's asset cache, so both plans of one `update --yes` read Nomad's
+  release files once. Each create and wait carries the spec hash of its group, which becomes the `tent/spec-hash`
+  label. A plan without a create or a wait reads no release file.
+- **The size check.** The plan builds every planned node's config with a certificate issued for the check, a seed as
+  long as the server and combined groups (the last addresses of the cluster CIDR, the longest text) and, for a client,
+  a stand-in intro token of 2048 bytes that gzip shrinks no more than a real one (base64 text of random bytes; a real
+  token is about 750 bytes, [platform notes §1.6](platform-notes.md#16-the-agent-on-a-node)).
+  - `nodeconfig.UserData` then fails as it does at the create, so a group that does not fit fails the plan, also
+    without `--yes` and before any write, such as `user data: node group workers needs 25012 bytes, more than the 24576
+    that fit`.
+  - The check's certificate differs by a few bytes from the one the apply issues, so a group within those bytes of the
+    limit can pass the plan and fail at its create.
+- **Warnings.** `devVariablesWarning` ([8.5](#85-artifacts-and-verification)) joins the other warnings, before the
+  first change of `update --yes`. A development build without `TENT_NODE_URL` and `TENT_NODE_SHA256` fails a plan that
+  creates nodes: `find tent-node: tent dev is a development build, so no release holds its tent-node: set TENT_NODE_URL
+  and TENT_NODE_SHA256 to a tent-node built from the same commit`.
+- **Secrets and certificates.** The run holds the CA, the gossip key and the bootstrap secret, stored or new. It issues
+  each node's certificate with `ca.IssueNode` and one operator certificate with `ca.IssueOperator`, ([9.1](#91-pki),
+  [9.7](#97-operator-access)). A plan made before the
+  CA is stored issues a new CA in memory each time, so its spec hashes differ from plan to plan until the first
+  `update --yes` has stored the CA.
+- **Servers.** For each server or combined change, in plan order: the seed is the private addresses of every other known
+  server, by name; the certificate; the config from the builder without an intro token; `nodeconfig.UserData`; then
+  `Nodes.Create` with the spec hash, the user data and a new operation id, or, for a wait, the machine's own. The
+  machine it returns joins the known servers. The first server of a cluster without servers gets an empty seed. A
+  create or a wait that has no user data to boot with fails with `node <name>: no user data` before any cloud call. When
+  servers are listed and none has a private address, the change fails, such as `node prod-servers-1: no server of
+  cluster prod has a private address yet (prod-servers-0); run the command again`.
+- **The Nomad step.** It runs when the plan has one.
+  - **When it is planned.** A plan has it with the bootstrap when the store has no mark, or when no server or
+    combined machine of the cluster stays (a cluster whose machines are all gone gets new servers and a new
+    bootstrap, although the mark exists). It has it also when no node change is left, so a run cut before the servers
+    were healthy is finished by the next run. With the mark and servers that stay, a plan that creates or waits for a
+    server or combined node has it without the bootstrap, and any other plan has none. Its size is that of the server
+    or combined group.
+  - **The mark** is read with `Store.Get` of `nomad/bootstrapped` ([10.2](#102-layout)); only its existence counts.
+    When the plan bootstraps and the store holds a stale mark, the apply deletes it after the infrastructure's task
+    changes and before the first node change, so a run cut anywhere in the rebuild is finished by the next run with
+    the bootstrap. Neither the delete nor the put of the mark sends a progress event.
+  - **No Nomad client.** The service's Nomad factory must be set when the plan has a Nomad step or a client create or
+    wait. Without it the apply fails at its start with `no Nomad client is set up`, before it raises the tent version
+    or writes anything. A plan without `--yes` does not fail.
+  - **The calls.** One `nomadops` client per known server with a public address, at `<public IP>:4646`, with the
+    region, the CA bundle, the operator certificate and the bootstrap secret as the token, over `nomadops.Servers`. A
+    cluster with no such server fails with `cluster prod: no server has a public address`. Then `WaitLeader`; with the
+    bootstrap, `Bootstrap`; `WaitHealthy` for the servers; with the bootstrap, the put of the mark; `WaitNode` for
+    each combined node that the plan created or waited for, one by one. Each wait and the bootstrap send progress
+    events ([14](#14-cli)); the put of the mark sends none.
+  - **Errors and cuts.** The texts are `bootstrap the ACL system: <error>`, for the put of the mark `write <path>:
+    <error>`, such as `write prod/nomad/bootstrapped: <error>`, and for the delete of a stale mark `delete <path>:
+    <error>`, which stops the run before any node is created; the next run tries again. The mark comes after the servers
+    are healthy, so a run cut before that is finished by the next run with the leader wait, the bootstrap (safe to
+    repeat) and the health wait. A lost `Bootstrap` answer ends with the cluster bootstrapped, and the next server finds
+    it done ([9.2](#92-acl-and-tokens)); with one server the call fails with `ErrNotReady` and the next run bootstraps
+    again, finds it done and writes the mark. A cut after the put goes straight to the clients.
+  - **Deadlines and tries.** `Bootstrap` and `IntroToken` are tried once on each server and not repeated in a loop.
+    When the leader wait ends at its deadline, its error adds `; tent reaches the servers on port 4646: check
+    spec.access.api`, since an operator outside `access.api` gets no answer.
+- **Clients.** For each client change, in plan order: `IntroToken` for the node's name, its group's pool and
+  `nomadops.MaxIntroTTL`, a failure being `intro token for node prod-workers-0: <error>`; the config from the builder
+  with the token and a seed of every known server; `Nodes.Create` as for a server; then `WaitNode` until Nomad lists the
+  node ready and eligible. A client registered 21 to 24 s after a fresh server's leadership on the M2.6b VM checks (an
+  inference from one combined node). A lost answer of `IntroToken` is harmless: the run finishes, and the node's user
+  data holds a token for its name.
+- **What M2.7a leaves.**
+  - **The scrub.** Nodes keep their user data, with the node key, the gossip key and an intro token, until M2.7b
+    ([9.4](#94-secrets-on-nodes-threat-model)).
+  - **A ready machine that has not registered.** The plan waits only for machines that the cloud reports as not ready.
+    After a cut between a client's create and its registration, the next run plans nothing and does not check the
+    registration. The same holds for a combined node: the mark is written before the registration waits, so after a
+    cut between the put and a combined node's registration the next run plans nothing. A client that never registers
+    fails its own wait after 10 minutes with the node named, and the next run plans nothing. M2.7b handles these.
+  - **A health wait that stops.** On a cluster with the mark and servers that stay, a run that creates or waits for a
+    server and stops in the health wait is not followed by a health wait once that server is ready: the next plan has
+    no server change, so no Nomad step. Only the bootstrap case repeats the wait, since its mark is missing.
+  - **A renamed server group.** The machines of the server or combined group that stay are counted ready or not. A
+    group renamed in the specs has none that stay, so `update` deletes the mark, builds the new group as a new Nomad
+    with its own bootstrap and deletes the old machines last.
+  - **Deleting a node that registered.** `update` still deletes surplus nodes, servers included, without a quorum
+    check. M2.7b refuses until M3 to delete a node that registered or a Raft peer.
+  - **Clusters built by an older tent** have placeholder nodes and no mark: the plan shows the Nomad step, and `--yes`
+    fails after 10 minutes without a leader. Delete such a cluster and create it again.
 
 **Target, with Nomad.** The whole flow:
 
 ```
  1. lock → load specs → defaults → validate (+ live: types, regions/locations, images, availability)
- 2. ensure secrets (idempotent): CA, gossip key, ACL bootstrap token
+ 2. ensure secrets (idempotent): CA, gossip key, ACL bootstrap token; write cluster.completed.yaml before the first node
  3. model → provider.BuildInfra → engine plan → print → apply without the deletes
     (SSH keys, network, firewalls, [placement groups], [LB]; tasks that do not depend on each other apply in parallel)
  4. servers first: create missing servers
@@ -2347,14 +2527,13 @@ before the first node; and the warning about development variables on a release 
  8. Vultr: scrub user data of nodes that registered (Nodes.ScrubUserData)
  9. scale down surplus nodes: drain → stop/delete → purge
 10. apply the plan's deletes, the prune and the duplicates (a second engine pass)
-11. validate → write cluster.completed.yaml + history → unlock
+11. validate → write the history → unlock
 12. report: "N nodes are out of date (reason: config diff) → run tent rolling-update cluster"
 ```
 
-- The secrets (step 2) are built (M2.1, above), but no node uses them yet. The NodeConfig with the seed of server
-  addresses and the intro tokens (steps 4 and 7), the ACL bootstrap (step 5), the day-1 configuration (step 6,
-  without node pools: decision 17 of [18](#18-open-questions)) and the scrub (step 8) come with Nomad in M2.7. Their
-  Nomad calls are built (M2.4, above).
+- Steps 2, 4, 5 and 7 are built (M2.1 and M2.7a, above), as the flow above runs them: the mark is written after the
+  servers are healthy. The scrub (step 8) comes in M2.7b. The day-1 configuration (step 6, without node pools: decision
+  17 of [18](#18-open-questions)) is not built.
 - The drain and the purge (step 9), `validate` and the history (step 11) and the report of outdated nodes (step 12)
   are not built yet.
 
@@ -2373,8 +2552,8 @@ create the replacement (Hetzner: free slot; Vultr: seeded with the current serve
 → wait: it is a Raft voter and autopilot reports Healthy
      (GET /v1/operator/autopilot/health answers HTTP 429 while unhealthy: treat as "not yet")
 → if the old server is the leader: PUT /v1/operator/raft/transfer-leadership to an updated server
-→ stop the old server: ACPI shutdown where GracefulShutdown (graceful leave via leave_on_terminate),
-  otherwise hard stop/DELETE (Vultr)
+→ stop the old server: ACPI shutdown where GracefulShutdown, otherwise hard stop/DELETE (Vultr); the server
+  does not leave Raft either way (leave_on_terminate is false on servers, decision 26)
 → if it is still a peer: DELETE /v1/operator/raft/peer?id=<raft id>; PUT /v1/agent/force-leave?node=<name>&prune=true
 → wait: peer count back to N, autopilot healthy
 → seed-and-refresh providers: wait at least one join refresh interval
@@ -2406,7 +2585,8 @@ planner is in `internal/app`, and it moves to `internal/rollout` with the drain 
   instance of the cluster has, whatever its group. It goes into the group's zone with the fewest nodes, the zone
   listed first on a tie.
 - **Scale down.** A group with more nodes than its size loses the newest ones, by creation time, then by id. Until
-  tent runs Nomad there is no drain: `update` deletes the machines, servers included, without a quorum check.
+  M3 there is no drain: `update` deletes the machines, servers included, without a quorum check. M2.7b makes it
+  refuse to delete a node that registered or a Raft peer until then.
 - **Zones.** A node in a zone that its group no longer lists counts toward the group's size and stays. New nodes go
   only into the listed zones.
 - **Duplicates.** Of instances with one name, the oldest stays and the others are deleted as `duplicate`.
@@ -2510,10 +2690,12 @@ cni:
   tent tags do not decode, still blocks the delete of its firewall group, and `delete cluster` stops there and names
   it. The engine deletes the firewall groups, the VPC, then the SSH keys. The VPC delete fails with
   `400 The following servers are attached…` for 14–20 s after its instances are gone, so it is retried.
-- **State.** The state is `tent-version`, the specs, the completed spec, and since M2.1 the four secrets: the CA's
-  key and bundle, the gossip key and the ACL bootstrap secret ([10.2](#102-layout)). Other objects under the cluster
-  in the store, such as another object under `pki/`, make tent refuse before it calls the cloud, unless `--force` is
-  given; then they are deleted with the rest. The lock's lease goes when the lock is released.
+- **State.** The state is `tent-version`, the specs, the completed spec, since M2.1 the four secrets: the CA's key and
+  bundle, the gossip key and the ACL bootstrap secret, and since M2.7a the bootstrap mark `nomad/bootstrapped`
+  ([10.2](#102-layout)). The mark goes with the first objects, after the node group specs and before the secrets.
+  Other objects under the cluster in the store, such as another object under `pki/`, make tent refuse before it calls
+  the cloud, unless `--force` is given; then they are deleted with the rest. The lock's lease goes when the lock is
+  released.
 - **Failures.** The first step that fails stops the delete. The state stays until the cloud's part has succeeded, so
   the next run still finds the cluster and finishes the job. `cluster.yaml` and `tent-version` go last, so a delete
   that stops while it deletes the state can run again too. The secrets go just before them, in the reverse of their
@@ -2542,6 +2724,8 @@ cni:
   State: 8 objects to delete.
   ```
 
+  - The store of a cluster that `update` has bootstrapped also holds the mark. The plan then lists
+    `- state prod/nomad/bootstrapped` after the node group specs, and the state count is one higher.
   - Without `--yes`, a hint follows on stderr: `run with --yes to delete them`, or `--yes --force` with `--force`.
   - With `--yes`, tent prints the plan made under the lock (step 3), deletes with each step on stderr as it happens
     ([14](#14-cli)), and then prints a blank line and a line such as `Deleted: 2 nodes, 3 infrastructure objects, 8
@@ -2579,7 +2763,7 @@ The last column names the milestone that built the command. The spec commands of
 | `tent edit cluster [NAME]`, `tent edit nodegroup NAME` | `edit` | an editor, with validation and a diff before saving | M0 |
 | `tent replace -f FILE` | `replace` | GitOps: replace stored specs with those of a file | M0 |
 | `tent apply -f FILE` | — | `replace` + `update` | — |
-| `tent update cluster [NAME] [--yes] [--exit-code]` | `update cluster` | infrastructure, node counts, day-1 configuration ([13.2](#132-tent-update-cluster---yes)) | M1, without Nomad |
+| `tent update cluster [NAME] [--yes] [--exit-code]` | `update cluster` | infrastructure, node counts, the Nomad cluster: servers, ACL bootstrap, clients ([13.2](#132-tent-update-cluster---yes)) | M1; Nomad in M2.7a |
 | `tent rolling-update cluster [--yes] [--nodegroups a,b] [--force]` | `rolling-update cluster` | Nomad-aware replacement | — |
 | `tent upgrade cluster [--yes]` | `upgrade cluster` | version bumps from the channel | — |
 | `tent validate cluster [--wait 10m]` | `validate cluster` | cloud and Nomad health | — |
@@ -2606,6 +2790,9 @@ The last column names the milestone that built the command. The spec commands of
 - Cloud credentials come from the environment. tent reads `VULTR_API_KEY` only when a command reaches a cluster on
   Vultr: `update cluster`, `delete cluster` and `create --yes` ([7.1](#71-interfaces)). `HCLOUD_TOKEN` comes with
   the Hetzner provider.
+- A development build of tent reads `TENT_NODE_URL` and `TENT_NODE_SHA256` once at start, for the tent-node that its
+  nodes download ([8.5](#85-artifacts-and-verification)). A release build ignores them. The long help of
+  `update cluster` names them.
 
 **Output**
 - Results go to stdout. Warnings, notices, progress and logs go to stderr.
@@ -2633,15 +2820,25 @@ The last column names the milestone that built the command. The spec commands of
     `skipped deleting vultr.VPC/prod (ID <id>): an earlier change failed`, `failed to create node prod-servers-0:
     <error>`, and `waiting for 3 nodes to go` once when a delete waits for the cloud to stop listing the nodes it
     deleted.
+  - Nomad lines (`update`), for each step started, done and failed: `waiting for a Nomad leader`, `Nomad has a leader
+    (10.64.0.3:4647)`, `failed to wait for a Nomad leader: <error>`; `bootstrapping the ACL system`, `bootstrapped the
+    ACL system`, `failed to bootstrap the ACL system: <error>`; `waiting for 3 healthy Nomad servers`, `3 Nomad
+    servers are healthy`, `failed to wait for 3 healthy Nomad servers: <error>`; and, for each node that the run waits
+    for, `waiting for node prod-workers-0 to register`, `node prod-workers-0 registered`, `failed to wait for node
+    prod-workers-0 to register: <error>`. One server reads `1 healthy Nomad server` and `1 Nomad server is healthy`.
   - JSON: `{"type":"infrastructure","event":"started","kind":"vultr.VPC","name":"prod","action":"create"}` with
     `id`, `wait`, `cause` and `error` when they apply,
     `{"type":"node","step":"done","action":"create","name":"prod-servers-0","id":"<id>","address":"10.64.0.3"}` with
-    `error` for a failed step, and `{"type":"wait","nodes":3}` for the wait of a delete.
+    `error` for a failed step, `{"type":"wait","nodes":3}` for the wait of a delete, and
+    `{"type":"nomad","step":"done","action":"leader","leader":"10.64.0.3:4647"}` for the Nomad step. Its `action` is
+    `leader`, `bootstrap`, `healthy` or `register`; `name` names the node of a `register`, `voters` the servers of a
+    `healthy` (the number waited for when it starts, the number that vote when it is done), and `error` a failed
+    step.
   - With `-o json`, stderr mixes the JSON progress lines with plain `WARNING:` lines and the logs. A program reads
     the lines that start with `{`. The logs are text unless `--log-format json` makes them JSON objects too; they
     carry `level` and `msg`, which progress lines never have.
-- Then `-o table` prints a blank line and one line in the past tense on stdout: `Applied: …`, `Nodes: …` and
-  `Wrote …` (the objects written to the state store) for `update`, and `Deleted: …` for `delete`. `-o yaml` and
+- Then `-o table` prints a blank line and one line in the past tense on stdout: `Applied: …`, `Nodes: …`, `Nomad: …`
+  and `Wrote …` (the objects written to the state store) for `update`, and `Deleted: …` for `delete`. `-o yaml` and
   `-o json` print the plan that was applied instead, with `"applied": true`.
 
 **Spec commands**
@@ -2692,6 +2889,8 @@ The last column names the milestone that built the command. The spec commands of
 - tent warns about the cluster that results from a change: after `create`, `replace` or a saved `edit`, and before
   `update cluster --yes` applies changes. A command prints each warning once, `create --yes` included. It warns:
   - while `access.api` lets the whole internet reach the Nomad API, a `/0` range such as the default `0.0.0.0/0`;
+  - when a release build has `TENT_NODE_URL` or `TENT_NODE_SHA256` set and so ignores it, only before
+    `update cluster --yes` applies changes ([8.5](#85-artifacts-and-verification));
   - when the cluster's Nomad version is one that its channel allows but has not tested
     ([13.5](#135-tent-upgrade-cluster---yes)), such as `WARNING: Nomad 2.0.8 is not tested by this tent; channel
     stable tests 2.0.7`. `create`, `replace` and `edit` check the version that the spec sets, and `update` also a
@@ -2758,11 +2957,15 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
      classes of nomadops, so the app runs on it as on the real client.
      - A test sets the leader, registers nodes and sets the health, and reads the calls that reached the fake and
        the tokens its clients got.
-     - Without a leader every call fails with `ErrNotReady`, as Nomad answers `No cluster leader`. The first
+     - Without a leader every call fails with `ErrNotReady`, as Nomad answers `No cluster leader`. With a leader,
+       `Nodes`, `Health` and `IntroToken` fail before the first bootstrap with `nomadfake: <method>: permission
+       denied`, which does not match `ErrNotReady`, as Nomad with ACLs refuses them. The first
        bootstrap stores its secret; the same secret again succeeds, and another one fails with
        `ErrBootstrapMismatch`. Intro tokens are unsigned JWTs that carry the node's name and pool.
      - Faults: a given error (`Fail`), or a lost answer after the fake carried the call out (`LoseResponse`), so a
        lost bootstrap leaves the ACL system bootstrapped.
+     - `NewCluster` makes the cluster a new one, without leader, nodes, bootstrap or health, and keeps the calls, tokens
+       and faults; `SetBootstrapped` makes it bootstrapped with a copy of a secret, without a call.
      - It is simpler than Nomad: it checks no ACL token, and it lists one node per name.
    - Golden files hold the plan and the sequence of operations.
    - Interruption tests cut a flow at every step and check that the next run converges.
@@ -2776,13 +2979,65 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
        in the order of the plan.
      - Cuts: the context of a run ends at each call of an uninterrupted build or delete, once just before the call,
        which then reaches nothing, and once just after the fake carried it out, when the call loses its answer, as a
-       request in flight does. The cut run leaves the state store as it was and the lock free. After the next run,
-       a build leaves the cloud as an uninterrupted build does, with one copy of every object, and a plan after it
-       has no changes; a delete leaves no object with the cluster's markers and no state.
+       request in flight does. A cut build changes nothing in the state store but for the missing secrets, the completed
+       spec and the bootstrap mark that it had written or deleted by then; a cut delete leaves the store as it was. The
+       lock is free. After the next run, a build leaves the cloud as an uninterrupted build does, with one copy of every
+       object, and a plan after it has no changes; a delete leaves no object with the cluster's markers and no state.
      - Lost answers: for each create call of the build, the fake carries the call out and the call gets no answer.
        The same run finds what the call made by its operation id, or lists the rules again, and ends with one copy
        of every object and one instance per node.
      - The fake's hook (`SetHook`) makes the cuts and the lost answers.
+   - **Built in M2.7a** ([ADR-0031](adr/0031-bootstrap-in-update.md)): the same kind of tests for the whole flow with
+     Nomad, on `vultrfake` and `nomadfake`.
+     - **The fakes.**
+       - `internal/assets/assetstest` serves HashiCorp's signed `SHA256SUMS` and `.sig` of Nomad 2.0.7 and the
+         `checksums.txt` of every release of tent, with a line for `tent-node_linux_amd64` and `_arm64` (made-up
+         sums), through an `http.RoundTripper` without a network. Every other URL is 404, so a test that pins another
+         Nomad version gets 404. It gives the constants and the clock (2026-09-28 12:00 UTC, when the signature
+         verifies with the embedded key) that callers need. The tests of `internal/app`,
+         `internal/cli`, `internal/assets` and `hack/tent-node-userdata` share it. It imports only the standard library.
+       - `nomadfake` logs the server that each call reached, and the tests of `nomadops.Servers` run on stub APIs
+         and on it, with the waits in `testing/synctest`.
+       - A test channel of the app copies the CNI plugins of the embedded `stable` channel, and tests run `update`
+         as a release.
+       - The Nomad of the flow tests is a wrapper of a `nomadfake` client that follows the Vultr fake: before each call
+         it sets a leader once as many servers are ready as the server group has, the health from the listed servers,
+         and each ready client or combined instance as registered. When none of the server machines it saw at the last
+         call is listed any more, it makes the fake a new, unbootstrapped cluster. A hook, as on `vultrfake`, lets a
+         test end the run's context before or after a named Nomad call.
+     - **Golden files** (`internal/app/testdata/flow_build.*.golden` and the scale goldens) hold the plans, and the
+       cloud calls with the Nomad calls in their place, as `nomad <Method> <arg> (<the server's node name>)`. The two
+       logs merge by the cloud call count at each Nomad call.
+     - **The flows.** A fresh cluster of three servers and two clients is built with the seeds, tokens, labels, spec
+       hashes and user data that the tests name; so is a combined cluster of three nodes and one of a single node. A
+       second `update --yes` plans nothing, makes no Nomad call and only reads the cloud. A call moves to the next
+       server after a not-ready error. No leader for 10 minutes fails the leader wait after 10 minutes and creates no
+       client. A client that never registers fails after its 10 minutes with the node named.
+     - **Cuts.** The context of a run ends before and after each call of the golden, cloud and Nomad calls together.
+       A second test fails each put of a secret, the completed spec and the mark, before it and after it with the
+       answer lost. The cuts run on two clusters, three servers with two clients and a combined cluster of three, and
+       a third test cuts the rebuild of each on an empty cloud from a store that holds the secrets and the mark. After
+       the next run the cluster has one instance per node, a bootstrapped ACL system (one or two `Bootstrap` calls: a
+       run stopped after the call, in the health wait, is followed by a call that finds it done) and no changes, the
+       mark is written and the lock is free. Named points have their own cases: after the first server; after all
+       servers and before the leader; in the health wait, before the mark (the next plan bootstraps and creates the
+       clients); after the mark and before the clients; and after a client's create and before its registration. A lost
+       `Bootstrap` answer ends with the cluster bootstrapped; a lost `IntroToken` answer ends with a token for the
+       node's name in its user data.
+     - **Checks of tests.** A test of the plan: an `extraConfig` of 30 KiB fails the plan with the size error without
+       `--yes`; a development build without the variables fails a plan that creates nodes and passes one that does
+       not; `update --yes` reads Nomad's release files once.
+   - `hack/tent-operator` gives the real-cloud check its access to the Nomad API until `tent export nomad` exists
+     (M2.8, [9.7](#97-operator-access)): it reads the CA and the bootstrap secret from the state store, issues an
+     operator certificate and writes `ca.pem`, `cli.pem`, `cli-key.pem` and `token` (0600) into a new directory
+     ([README](../hack/tent-operator/README.md)).
+   - `hack/vultr-spike/spike.sh --only cluster` (spike v9) checks the flow on a real Vultr account: tent builds a
+     cluster of three servers and two clients with `create cluster --yes` on a temporary `file://` state store and a
+     development tent-node, five instances at once. It records the time to the leader, the bootstrap, healthy servers
+     and each registration. Through `hack/tent-operator` and curl it checks the members, autopilot and the nodes, and it
+     runs a docker job on a client. It checks that `update` has nothing left to do, each instance's `tent/spec-hash`,
+     the first peers call between two machines, a restart of `nomad.service` on a server, and `delete cluster --yes`
+     leaving nothing in the cloud or the store ([README](../hack/vultr-spike/README.md)).
 4. **tent-node tests.** Phases run with an abstracted filesystem and exec. Occasionally they run in a
    systemd-enabled container or a VM.
    - **Built in M2.5.** `internal/nodeup/nodeuptest` holds the fakes: an in-memory filesystem that behaves as
@@ -2964,12 +3219,14 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
 | BUSL licence of Nomad | a paid managed offering would need a commercial licence | tent downloads official binaries and never redistributes them; stays free (not legal advice) |
 | Nomad reads a rendered value differently from the HCL1 that the tests use: Nomad parses with its fork `v1.0.1-nomad-1`, the tests with upstream v1.0.0 | a node does not start, or runs with another setting | strict quoting refuses what HCL1 cannot read back; tests parse every golden back; the weekly `online` job runs `nomad config validate` of the channel's minimum and recommended Nomad on the goldens ([ADR-0030](adr/0030-nomad-on-nodes.md)) |
 | A reboot of a client kills its tasks without a migration, since clients do not drain themselves at shutdown | the tasks are down until the client restarts them, if it is back first, or the scheduler replaces them after the missed heartbeats | a self-drain would leave the node ineligible after every reboot or restart (hashicorp/nomad#17093); tent drains a client through the API before it removes it ([ADR-0017](adr/0017-api-driven-server-removal.md), [ADR-0030](adr/0030-nomad-on-nodes.md)) |
-| A client's servers are not up within `verify`'s 2 minutes | `up` fails on the client, and on the first boot `install` and cloud-init, though Nomad joins later | M2.7 creates clients after the servers are healthy and judges a client by its registration in Nomad |
+| A client's servers are not up within `verify`'s 2 minutes | `up` fails on the client, and on the first boot `install` and cloud-init, though Nomad joins later | `update` creates clients after the servers are healthy and judges a client by its registration in Nomad (M2.7a) |
 | tent-node restarts Docker, after a hand edit of `daemon.json` and an `up` by hand, or dockerd crashes | the node's docker tasks restart after the restart policy's delay (17-20 s seen): Nomad's docker driver stops the containers that live-restore kept ([platform notes §6.4](platform-notes.md#64-restarts-of-docker-containerd-and-nomad)) | accepted on 2026-10-05 ([ADR-0030](adr/0030-nomad-on-nodes.md)); tent-node restarts Docker only for its own `daemon.json` |
-| nomadops relies on Nomad answers read in the v1.11.3 source, not in 2.0.7: the text `ACL bootstrap already done`, 403 from `token/self` for an unknown secret, the report in the 429 of an unhealthy cluster | a repeated bootstrap fails, or a health wait runs out | nomadops matches status codes and one message prefix; E2E runs real Nomad from M2.9 ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)) |
+| nomadops relies on two Nomad answers read in the v1.11.3 source, not in 2.0.7: 403 from `token/self` for an unknown secret, and the report in the 429 of an unhealthy cluster (the text `ACL bootstrap already done` was seen on 2.0.7 on 2026-10-05, [platform notes §1.6](platform-notes.md#16-the-agent-on-a-node)) | a repeated bootstrap fails, or a health wait runs out | nomadops matches status codes and one message prefix; E2E runs real Nomad from M2.9 ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)) |
 | `extraConfig` overrides tent's settings, such as `data_dir`, the TLS paths, the dynamic ports or Nomad's bridge subnet (`bridge_network_subnet`) | a node cannot find its files, a client is refused, or the host firewall blocks workloads | documented as unsupported ([3.3](#33-api-rules), [8.4](#84-nomad-configuration-rendering)) |
 | A unit ordering between cloud-init, tent-node and Nomad hangs the boot, or `up` hangs | the node never comes up; cloud-init never finishes | `install` waits for `up`, and no unit is ordered on cloud-init, `multi-user.target` or `nomad.service`, nor `nomad.service` on `tent-node.service` (a unit test checks); `nomad.service` is never enabled; finite start timeouts (45 minutes for `up`); `status.json` on every run; the M2.5 VM check boots and reboots a node ([8.1](#81-bootstrap-chain)) |
-| Secrets in user data | node impersonation if metadata leaks | mitigations in [9.4](#94-secrets-on-nodes-threat-model), including scrubbing on Vultr; bootstrap controller in v2 |
+| Secrets in user data | node impersonation if metadata leaks | mitigations in [9.4](#94-secrets-on-nodes-threat-model), including scrubbing on Vultr, which M2.7b builds: until then nodes keep their user data; bootstrap controller in v2 |
+| A client whose machine is ready never registers, or a run is cut between a client's create and its registration | the next run plans nothing and does not look at the registration; the client's intro token expires after 30 minutes | M2.7a fails the registration wait after 10 minutes and names the node; M2.7b handles nodes that never registered ([13.2](#132-tent-update-cluster---yes), [ADR-0031](adr/0031-bootstrap-in-update.md)) |
+| `nomad.service` should end as failed after every stop of a server or combined node, since servers run with `leave_on_terminate = false` (seen on a real server on 2026-10-05, [platform notes §3.16](platform-notes.md#316-spike-runs)) | an operator or a monitor sees a failed unit after a stop or restart that worked | accepted: `SuccessExitStatus=1` would hide real failures (decision 26 of [18](#18-open-questions), [ADR-0031](adr/0031-bootstrap-in-update.md)) |
 | Hetzner rate limit (3600/h per project) | slow or failing large rollouts | snapshots, batched waits, adaptive throttling, targeted rollouts, one project per cluster |
 
 ---
@@ -2996,8 +3253,8 @@ Decided on 2026-09-28:
 8. **CA validity:** 10 years, until CA rotation exists ([9.1](#91-pki)).
 9. **Nomad's sha256s:** checked at run time. The CLI downloads `nomad_<v>_SHA256SUMS` and its detached signature and
    verifies them with HashiCorp's release key, which tent embeds ([8.5](#85-artifacts-and-verification),
-   [ADR-0026](adr/0026-channels-and-release-assets.md)). So a plan needs releases.hashicorp.com once `update` fetches
-   the assets (M2.7).
+   [ADR-0026](adr/0026-channels-and-release-assets.md)). So a plan that creates or waits for a node needs
+   releases.hashicorp.com (M2.7a).
 10. **The Nomad version of a spec without one:** the first `update` records the channel's recommended version in
     `cluster.completed.yaml`, and later runs keep it. A newer tent does not move nodes to another version by itself;
     `upgrade cluster` does ([13.2](#132-tent-update-cluster---yes), [13.5](#135-tent-upgrade-cluster---yes)).
@@ -3006,11 +3263,12 @@ Decided on 2026-09-28:
     versions only decide whether tent warns.
 11. **What a channel holds:** Nomad and the CNI plugins only. Images stay in the provider's table
     ([ADR-0023](adr/0023-vultr-inventory-dedupe-and-images.md)) and the API default (decision 4).
-12. **When NodeConfig reaches `update`:** in M2.7, with tent-node, intro tokens and the bootstrap. Until then nodes
-    boot the placeholder, because real user data holds node keys and the gossip key, and the scrub runs only after
-    registration. The assets, the warning about development variables and the Nomad pin written before the first node
-    move to M2.7 too ([13.2](#132-tent-update-cluster---yes),
-    [ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)).
+12. **When NodeConfig reaches `update`:** in M2.7, with tent-node, intro tokens and the bootstrap. M2.7a built it,
+    with the asset downloads, the warning about development variables and the Nomad pin written before the first node
+    ([13.2](#132-tent-update-cluster---yes),
+    [ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md),
+    [ADR-0031](adr/0031-bootstrap-in-update.md)). Nodes get real user data, which holds node keys and the gossip key,
+    and the scrub runs only after registration, so nodes keep that user data until M2.7b builds the scrub.
 13. **The instance id:** NodeConfig carries the node's name, not a cloud instance id. tent-node reads the id from the
     metadata service and writes `tent_instance_id` into its own `11-instance.hcl` on client and combined nodes.
     Preflight compares the hostname with the name ([8.2](#82-tent-node-phases)).
@@ -3062,7 +3320,7 @@ Decided on 2026-09-30:
     ([16](#16-technology-stack-and-releases)).
 24. **The secrets of the tent-node VM check:** `hack/tent-node-userdata` makes a throwaway CA, the node's certificate
     and a gossip key on each run, for one combined node with `enforcement = "warn"` and no intro token. They sit in the
-    user data of a VM that is deleted after the check; there is no scrub before M2.7 ([15](#15-testing)).
+    user data of a VM that is deleted after the check; there is no scrub before M2.7b ([15](#15-testing)).
 
 Decided on 2026-10-05:
 
@@ -3070,10 +3328,17 @@ Decided on 2026-10-05:
     ineligible after their next start; `00-tent.hcl` sets no `drain_on_shutdown`. tent's own removals drain a client
     through the Nomad API first ([8.4](#84-nomad-configuration-rendering),
     [ADR-0017](adr/0017-api-driven-server-removal.md)).
+26. **`leave_on_terminate` by role:** server and combined agents set it to `false`, so a stopped server stays a Raft
+    peer, and clients keep `true`. tent removes a server from Raft through the Nomad API, on every provider
+    ([8.4](#84-nomad-configuration-rendering), [ADR-0017](adr/0017-api-driven-server-removal.md),
+    [ADR-0031](adr/0031-bootstrap-in-update.md)).
+27. **Deleting nodes that joined:** until M3, `update` refuses to delete a node that registered in Nomad or a server of
+    the Raft peer set; `delete cluster` works as before. M2.7b builds it; until then `update` deletes such
+    nodes without a check ([13.2](#132-tent-update-cluster---yes), [ADR-0031](adr/0031-bootstrap-in-update.md)).
 
 Decisions 18 to 20 are recorded in [ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md), decision 21 in
-[ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md), and decisions 22 to 25 in
-[ADR-0030](adr/0030-nomad-on-nodes.md).
+[ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md), decisions 22 to 25 in
+[ADR-0030](adr/0030-nomad-on-nodes.md), and decisions 26 and 27 in [ADR-0031](adr/0031-bootstrap-in-update.md).
 
 ---
 
@@ -3175,8 +3440,11 @@ A server's `00-tent.hcl` differs:
   `advertise` a `serf` address too;
 - it has `server { enabled = true }` with `client_introduction { enforcement = "strict" }` instead of the `client`
   block, and `autopilot { cleanup_dead_servers = true }`.
+- it has `leave_on_terminate   = false # a stopped server stays a Raft peer; tent removes servers through the Nomad API`
+  where the client has `true` (decision 26 of [18](#18-open-questions)).
 
-A combined node's has the server's addresses and both blocks, with `enforcement = "warn"` by default.
+A combined node's has the server's `leave_on_terminate` line and addresses and both blocks, with
+`enforcement = "warn"` by default.
 
 **Server and combined: `01-gossip.hcl`** (the only secret file of the group, mode 0600):
 

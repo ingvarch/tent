@@ -11,7 +11,10 @@
   update check and Consul auto-join and has no `drain_on_shutdown`, so the unit keeps systemd's stop timeout; the M2.6
   follow-ups on `/var/lib/nomad/client`, the unit's signal and `nomad config validate` of the goldens are done; the
   user data grows by about 0.5 KiB and still leaves 12.0 KiB for `extraConfig`
-  ([architecture §8.3](../architecture.md#83-nodeconfig-contract)))
+  ([architecture §8.3](../architecture.md#83-nodeconfig-contract))) and by [ADR-0031](0031-bootstrap-in-update.md)
+  (decision 12 is built: `update` gives nodes NodeConfig through one node builder, with the spec hash as the
+  `tent/spec-hash` label, and writes the completed spec before the first node; the M2.7 follow-ups are done; the
+  hash of server and combined groups moved with `leave_on_terminate = false`, and the format stays 1)
 - **Date:** 2026-09-29
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0006](0006-two-binaries-and-nodeconfig.md) (the size budget, the instance id),
