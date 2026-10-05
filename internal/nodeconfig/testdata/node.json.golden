@@ -6,6 +6,7 @@
   "nodeGroup": "core",
   "name": "prod-core-0",
   "role": "combined",
+  "region": "global",
   "join": {
     "strategy": "seed-and-refresh",
     "servers": [

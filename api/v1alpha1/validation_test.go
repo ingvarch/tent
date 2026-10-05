@@ -774,6 +774,17 @@ func TestValidateName(t *testing.T) {
 	}
 }
 
+func TestRegionOK(t *testing.T) {
+	for r, want := range map[string]bool{
+		"global": true, "eu-central": true, "ams3": true,
+		"": false, "Global": false, "-eu": false, "eu_central": false,
+	} {
+		if got := RegionOK(r); got != want {
+			t.Errorf("RegionOK(%q) = %t, want %t", r, got, want)
+		}
+	}
+}
+
 func TestValidateNames(t *testing.T) {
 	alone := func(edit func(o *objects)) func(o *objects) {
 		return func(o *objects) {

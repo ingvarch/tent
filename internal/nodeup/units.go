@@ -55,8 +55,19 @@ After=` + serviceUnit + `
 [Service]
 Type=oneshot
 ExecStart=%[1]s refresh-join --config %[2]s
-TimeoutStartSec=5min
+TimeoutStartSec=%[3]dmin
 `
+
+// joinTimeoutMinutes is the start timeout of tent-node-join.service.
+const joinTimeoutMinutes = 5
+
+// RefreshTimeout bounds a run of refresh-join, the wait for the lock included: 15 seconds less than the start timeout
+// of tent-node-join.service, so that refresh-join ends before systemd stops it.
+const RefreshTimeout = joinTimeoutMinutes*time.Minute - 15*time.Second
+
+// RefreshLockWait is how long refresh-join waits for the lock that another tent-node run holds: a minute less than the
+// start timeout of tent-node-join.service, which leaves the refresh time within RefreshTimeout.
+const RefreshLockWait = (joinTimeoutMinutes - 1) * time.Minute
 
 // joinTimerTemplate is tent-node-join.timer. Without AccuracySec, systemd could start the refresh up to a minute late.
 const joinTimerTemplate = nodeconfig.NodeHeader + `[Unit]
@@ -106,7 +117,7 @@ func renderUnits(configPath, binaryPath string, refresh time.Duration) ([]nodeco
 	}
 	return []nodeconfig.File{
 		unit(serviceUnit, fmt.Sprintf(serviceTemplate, binaryPath, configPath)),
-		unit(joinServiceUnit, fmt.Sprintf(joinServiceTemplate, binaryPath, configPath)),
+		unit(joinServiceUnit, fmt.Sprintf(joinServiceTemplate, binaryPath, configPath, joinTimeoutMinutes)),
 		unit(joinTimerUnit, fmt.Sprintf(joinTimerTemplate, timeSpan(refresh))),
 	}, nil
 }

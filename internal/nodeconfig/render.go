@@ -255,9 +255,10 @@ func (p *problems) quoteSet(what, s string) string {
 }
 
 // agentTemplate renders 00-tent.hcl from an agentView.
-var agentTemplate = template.Must(template.New("00-tent.hcl").Parse(header + `region             = {{.Region}}
-data_dir           = "` + dataDir + `"
-leave_on_terminate = true # leave the cluster gracefully when Nomad stops
+var agentTemplate = template.Must(template.New("00-tent.hcl").Parse(header + `region               = {{.Region}}
+data_dir             = "` + dataDir + `"
+leave_on_terminate   = true # leave the cluster gracefully when Nomad stops
+disable_update_check = true
 
 addresses {
 {{- if .Server}}
@@ -302,11 +303,6 @@ client {
   min_dynamic_port  = {{.DynamicPorts.First}}
   max_dynamic_port  = {{.DynamicPorts.Last}}
 
-  drain_on_shutdown {
-    deadline           = "10m"
-    ignore_system_jobs = true
-  }
-
   options {
 {{- with .Drivers}}
     "driver.allowlist"     = {{.}}
@@ -337,6 +333,12 @@ tls {
 
   verify_server_hostname = true
   verify_https_client    = {{.VerifyHTTPSClient}}
+}
+
+# There is no Consul: do not look for Nomad servers in it.
+consul {
+  server_auto_join = false
+  client_auto_join = false
 }
 {{- if .Server}}
 

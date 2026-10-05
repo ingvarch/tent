@@ -139,6 +139,10 @@ func TestDecodeStrict(t *testing.T) {
 		{"invalid", with(`"role": "combined"`, `"role": "worker"`),
 			`node config: role "worker" is not server, client or combined`},
 		{"no provider", with(`"provider": "vultr",`, ""), `node config: provider "" is not one of vultr, hetzner`},
+		{"no region", with("  \"region\": \"global\",\n", ""), `node config: no region`},
+		{"malformed region", with(`"region": "global"`, `"region": "Global"`),
+			`node config: region "Global" is not lower-case letters, digits and dashes, ` +
+				"starting with a letter or digit"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, err := nodeconfig.Decode([]byte(tc.data))

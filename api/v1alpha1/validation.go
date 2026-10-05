@@ -406,6 +406,11 @@ func ValidateName(kind, name string) error {
 	return fmt.Errorf("invalid %s name %q: %s", what, name, problem)
 }
 
+// RegionOK reports whether r is a region, the rule that Validate applies to spec.cloud.region, the zones and
+// spec.nomad.region: lower-case letters, digits and dashes, starting with a letter or digit. Callers that keep a
+// region of their own check it with the same rule.
+func RegionOK(r string) bool { return regionPattern.MatchString(r) }
+
 // nameProblem returns what is wrong with a cluster or node group name, or "" when nothing is.
 func nameProblem(name string) string {
 	switch {

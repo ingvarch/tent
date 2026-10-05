@@ -43,6 +43,11 @@ func up(ctx context.Context, args []string, _, stderr io.Writer, d deps) error {
 	if err != nil {
 		return err
 	}
+	unlock, err := d.lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	e, err := d.environment(nc.Provider)
 	if err != nil {
 		return err
@@ -51,13 +56,46 @@ func up(ctx context.Context, args []string, _, stderr io.Writer, d deps) error {
 	return err
 }
 
-// refreshJoin is not built yet: it leaves the servers that the node joins as they are.
-func refreshJoin(_ context.Context, args []string, _, stderr io.Writer, _ deps) error {
-	if _, err := configFlag("refresh-join", args, stderr); err != nil {
+// refreshJoin refreshes the servers that the node joins, under the lock that it shares with up, within
+// nodeup.RefreshTimeout, of which it waits for the lock nodeup.RefreshLockWait at most. When one of its own limits
+// ends the run, it logs that the next refresh tries again and succeeds; when ctx ends, as SIGTERM ends it, it fails.
+func refreshJoin(ctx context.Context, args []string, _, stderr io.Writer, d deps) error {
+	config, err := configFlag("refresh-join", args, stderr)
+	if err != nil {
 		return err
 	}
-	logger(stderr).Info("refresh-join is not built yet: the servers that the node joins stay as they are")
+	h, nc, err := load(d, stderr, config)
+	if err != nil {
+		return err
+	}
+	runCtx, cancelRun := context.WithTimeout(ctx, nodeup.RefreshTimeout)
+	defer cancelRun()
+	lockCtx, cancelLock := context.WithTimeout(runCtx, nodeup.RefreshLockWait)
+	defer cancelLock()
+	unlock, err := d.lock(lockCtx)
+	if err != nil {
+		if ranOut(ctx, lockCtx, err) {
+			h.Log.Info("another tent-node run holds the lock; the next refresh tries again",
+				"waited", nodeup.RefreshLockWait)
+			return nil
+		}
+		return err
+	}
+	defer unlock()
+	if err := nodeup.RefreshJoin(runCtx, h, nc); err != nil {
+		if ranOut(ctx, runCtx, err) {
+			h.Log.Info("the refresh ran out of time; the next refresh tries again", "within", nodeup.RefreshTimeout)
+			return nil
+		}
+		return err
+	}
 	return nil
+}
+
+// ranOut reports whether err is the end of limited, a context that tent-node derived from ctx with a deadline of its
+// own, while ctx goes on. Any other error, even one that comes after that deadline, is a failure.
+func ranOut(ctx, limited context.Context, err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil && limited.Err() != nil
 }
 
 // environment returns the metadata service of the cloud p.

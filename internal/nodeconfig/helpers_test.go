@@ -70,6 +70,7 @@ func sample() *nodeconfig.NodeConfig {
 		NodeGroup:  "core",
 		Name:       "prod-core-0",
 		Role:       v1alpha1.RoleCombined,
+		Region:     "global",
 		Assets: []nodeconfig.Asset{
 			{
 				Name: "nomad", Version: "2.0.7",

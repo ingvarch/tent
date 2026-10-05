@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path"
@@ -30,7 +31,10 @@ type Host struct {
 	Runner Runner
 	// Transport downloads the assets; nil uses http.DefaultTransport.
 	Transport http.RoundTripper
-	Log       *slog.Logger // nil logs nothing
+	// DialContext dials the Nomad API; nil uses the default dialer. It exists for tests, which cannot bind the
+	// servers' addresses.
+	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+	Log         *slog.Logger // nil logs nothing
 
 	Version  string // tent-node's version
 	HostName string
@@ -83,8 +87,8 @@ const (
 	Failed    Status = "failed"    // it stopped with an error
 )
 
-// Result is what a phase did: Done, Unchanged or Skipped, and why, such as "not built yet" for a phase that is
-// skipped. A phase that fails returns an error instead.
+// Result is what a phase did: Done, Unchanged or Skipped, and why, such as "servers run no workloads" for the cni
+// phase on a server. A phase that fails returns an error instead.
 type Result struct {
 	Status Status `json:"status"`
 	Reason string `json:"reason,omitempty"`

@@ -48,11 +48,14 @@ type NodeConfig struct {
 	NodeGroup string            `json:"nodeGroup"`
 	Name      string            `json:"name"` // the node's name, which is also its host name
 	Role      v1alpha1.Role     `json:"role"`
-	Assets    []Asset           `json:"assets,omitempty"` // what the node downloads
-	Files     []File            `json:"files,omitempty"`  // what the node writes; Encode writes their content
-	Join      Join              `json:"join"`
-	System    System            `json:"system,omitzero"`
-	Firewall  HostFirewall      `json:"firewall"`
+	// Region is the Nomad region, which tent-node needs for the TLS name of the servers it calls. It leaves the spec
+	// hash as it is: 00-tent.hcl carries it already.
+	Region   string       `json:"region"`
+	Assets   []Asset      `json:"assets,omitempty"` // what the node downloads
+	Files    []File       `json:"files,omitempty"`  // what the node writes; Encode writes their content
+	Join     Join         `json:"join"`
+	System   System       `json:"system,omitzero"`
+	Firewall HostFirewall `json:"firewall"`
 	// SpecHash is empty or SpecHash(nc), the hash of the node group's configuration, which tells a node that is out of
 	// date.
 	SpecHash string `json:"specHash,omitempty"`
@@ -185,8 +188,8 @@ var (
 	modulePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 )
 
-// Validate checks that tent-node can act on the NodeConfig: its header, names, provider and role, the form of every
-// asset, file, join setting, system setting and firewall rule, and that a spec hash, when there is one, is
+// Validate checks that tent-node can act on the NodeConfig: its header, names, provider, role and region, the form
+// of every asset, file, join setting, system setting and firewall rule, and that a spec hash, when there is one, is
 // SpecHash(nc). It returns the first problem it finds.
 func (nc *NodeConfig) Validate() error {
 	if nc == nil {
@@ -222,7 +225,21 @@ func (nc *NodeConfig) checkHeader() error {
 	if err := checkHostName(nc.Name); err != nil {
 		return err
 	}
-	return checkRole(nc.Role)
+	if err := checkRole(nc.Role); err != nil {
+		return err
+	}
+	return checkRegion(nc.Region)
+}
+
+// checkRegion checks that r is a Nomad region, with the rule spec.nomad.region has.
+func checkRegion(r string) error {
+	if r == "" {
+		return errors.New("no region")
+	}
+	if !v1alpha1.RegionOK(r) {
+		return fmt.Errorf("region %q is not lower-case letters, digits and dashes, starting with a letter or digit", r)
+	}
+	return nil
 }
 
 // labelForm describes labelPattern in errors.

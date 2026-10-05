@@ -37,11 +37,12 @@ type deps struct {
 	host        func(log *slog.Logger) (*nodeup.Host, error)       // the machine, which logs to log
 	environment func(p v1alpha1.Provider) (env.Environment, error) // the metadata service of the cloud p
 	executable  func() (string, error)                             // the path of the running tent-node
+	lock        func(ctx context.Context) (func(), error)          // the lock between up and refresh-join
 }
 
 // machineDeps returns the deps of the machine that tent-node runs on.
 func machineDeps() deps {
-	return deps{host: nodeup.Local, environment: environment, executable: os.Executable}
+	return deps{host: nodeup.Local, environment: environment, executable: os.Executable, lock: nodeup.Lock}
 }
 
 // command is a tent-node command.
@@ -55,7 +56,7 @@ type command struct {
 var commands = []command{
 	{"install", "Install and start the systemd units that run tent-node", install},
 	{"up", "Set the machine up as a Nomad agent of its node group", up},
-	{"refresh-join", "Refresh the Nomad servers that the node joins (not built yet)", refreshJoin},
+	{"refresh-join", "Refresh the Nomad servers that the node joins", refreshJoin},
 	{"version", "Print the version of tent-node", version},
 }
 

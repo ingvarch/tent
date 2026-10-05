@@ -3,17 +3,21 @@ package main
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/netip"
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -24,6 +28,7 @@ import (
 	"github.com/ingvarch/tent/internal/nodeup/env"
 	"github.com/ingvarch/tent/internal/nodeup/env/vultr"
 	"github.com/ingvarch/tent/internal/nodeup/nodeuptest"
+	"github.com/ingvarch/tent/internal/pki"
 	"github.com/ingvarch/tent/internal/secrettest"
 )
 
@@ -52,7 +57,7 @@ func nodeConfig(t *testing.T) *nodeconfig.NodeConfig {
 	nc := &nodeconfig.NodeConfig{
 		APIVersion: v1alpha1.APIVersion, Kind: nodeconfig.Kind,
 		Cluster: "prod", Provider: v1alpha1.ProviderVultr, NodeGroup: "core", Name: "prod-core-0",
-		Role: v1alpha1.RoleCombined,
+		Role: v1alpha1.RoleCombined, Region: "global",
 		Assets: []nodeconfig.Asset{{
 			Name: nodeconfig.TentNodeAsset, Version: nodeuptest.Version,
 			URLs: []string{"https://tent-dev.s3.example.com/tent-node_linux_amd64?X-Amz-Expires=900&X-Amz-Signature=" +
@@ -64,6 +69,7 @@ func nodeConfig(t *testing.T) *nodeconfig.NodeConfig {
 				Content: []byte("server {\n  encrypt = \"" + string(gossipKey) + "\"\n}\n")},
 			{Path: nodeconfig.KeyFile, Mode: 0o600, Owner: nodeconfig.Owner, PerNode: true, Secret: true,
 				Content: nodeKey},
+			nodeconfig.RenderNomadService(),
 		},
 		Join: nodeconfig.Join{
 			Strategy: nodeconfig.JoinSeedAndRefresh, Servers: []netip.Addr{netip.MustParseAddr("10.64.0.5")},
@@ -82,18 +88,28 @@ func nodeConfig(t *testing.T) *nodeconfig.NodeConfig {
 
 // machine is a fake Ubuntu machine named prod-core-0 on Vultr, and what the commands asked of it.
 type machine struct {
-	host   *nodeup.Host
-	fs     *nodeuptest.FS
-	runner *nodeuptest.Runner
-	env    *nodeuptest.Environment
-	asked  []v1alpha1.Provider // the providers whose metadata service the commands asked for
+	host    *nodeup.Host
+	fs      *nodeuptest.FS
+	runner  *nodeuptest.Runner
+	env     *nodeuptest.Environment
+	asked   []v1alpha1.Provider // the providers whose metadata service the commands asked for
+	held    []progress          // the progress when the commands took the lock and when they left it, in turn
+	lockErr error               // what taking the lock answers, when it fails
+	// lockAfter is how long another process holds the lock: taking it waits that long, or until its context ends.
+	lockAfter time.Duration
 }
+
+// progress is how many commands had run and how many changes the filesystem had recorded.
+type progress struct{ commands, changes int }
+
+// progress returns the machine's progress now.
+func (m *machine) progress() progress { return progress{len(m.runner.Commands()), len(m.fs.Changes())} }
 
 // newMachine returns a fake machine with nc, encoded, at configPath.
 func newMachine(t *testing.T, nc *nodeconfig.NodeConfig) *machine {
 	t.Helper()
 	fsys, r := nodeuptest.NewFS(), &nodeuptest.Runner{}
-	nodeuptest.Ubuntu(t, fsys, r, "tent-node.service", "tent-node-join.service", "tent-node-join.timer")
+	nodeuptest.Ubuntu(t, fsys, r, "tent-node.service", "tent-node-join.service", "tent-node-join.timer", "nomad.service")
 	data, err := nodeconfig.Encode(nc)
 	if err != nil {
 		t.Fatal(err)
@@ -122,14 +138,31 @@ func (m *machine) deps() deps {
 			return m.env, nil
 		},
 		executable: func() (string, error) { return binaryPath, nil },
+		lock: func(ctx context.Context) (func(), error) {
+			if m.lockErr != nil {
+				return nil, m.lockErr
+			}
+			select {
+			case <-time.After(m.lockAfter):
+			case <-ctx.Done(): // as nodeup.Lock says it
+				return nil, fmt.Errorf("lock %s: %w", nodeup.LockPath, context.Cause(ctx))
+			}
+			m.held = append(m.held, m.progress())
+			return func() { m.held = append(m.held, m.progress()) }, nil
+		},
 	}
 }
 
 // run runs tent-node with args on the machine, and returns its exit code, stdout and stderr.
 func (m *machine) run(t *testing.T, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
+	return m.runWith(t.Context(), args...)
+}
+
+// runWith runs tent-node with args on the machine under ctx, and returns its exit code, stdout and stderr.
+func (m *machine) runWith(ctx context.Context, args ...string) (code int, stdout, stderr string) {
 	var out, errOut bytes.Buffer
-	code = run(t.Context(), args, &out, &errOut, m.deps())
+	code = run(ctx, args, &out, &errOut, m.deps())
 	return code, out.String(), errOut.String()
 }
 
@@ -204,32 +237,82 @@ func TestInstallCommandTakesTheConfigsPath(t *testing.T) {
 	}
 }
 
-// cniPath is where serveCNI serves the archive of the CNI plugins.
+// cniPath is where serveAssets serves the archive of the CNI plugins.
 const cniPath = "/cni-plugins-linux-amd64-v1.9.1.tgz"
 
-// serveCNI serves an archive of the CNI plugins over HTTPS, and adds it to nc as its cni-plugins asset.
-func serveCNI(t *testing.T, nc *nodeconfig.NodeConfig) *nodeuptest.Server {
+// serveAssets serves the archive of the CNI plugins and the Nomad zip over HTTPS, and adds them to nc as its
+// assets.
+func serveAssets(t *testing.T, nc *nodeconfig.NodeConfig) *nodeuptest.Server {
 	t.Helper()
 	archive := nodeuptest.Tgz(t, nodeuptest.TarFile{
 		Header: tar.Header{Name: "./bridge", Mode: 0o755}, Content: []byte("bridge plugin\n"),
 	})
+	zip := nodeuptest.NomadZip(t, []byte("the nomad binary of the tests\n"))
 	srv := nodeuptest.Serve(t, map[string]http.HandlerFunc{
 		cniPath: func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(archive) },
+		zipPath: func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(zip) },
 	})
-	sum := sha256.Sum256(archive)
-	nc.Assets = append(nc.Assets, nodeconfig.Asset{
-		Name: nodeconfig.CNIPluginsAsset, Version: "1.9.1", URLs: []string{srv.URL + cniPath},
-		SHA256: hex.EncodeToString(sum[:]),
-	})
+	sumCNI, sumZip := sha256.Sum256(archive), sha256.Sum256(zip)
+	nc.Assets = append(nc.Assets,
+		nodeconfig.Asset{
+			Name: nodeconfig.CNIPluginsAsset, Version: "1.9.1", URLs: []string{srv.URL + cniPath},
+			SHA256: hex.EncodeToString(sumCNI[:]),
+		},
+		nodeconfig.Asset{
+			Name: nodeconfig.NomadAsset, Version: "2.0.7", URLs: []string{srv.URL + zipPath},
+			SHA256: hex.EncodeToString(sumZip[:]),
+		},
+	)
 	nc.SpecHash = nodeconfig.SpecHash(nc)
 	return srv
 }
 
+// serveAgent starts a fake Nomad agent, a nodeuptest.Agent, of a new cluster CA, and gives nc the CA bundle, the
+// node's certificate and its key of that CA, as withNodeTLS does; the agent serves with that certificate, as Nomad
+// does. Until SetPeers, it answers 500 to /v1/status/peers, so join keeps the seed.
+func serveAgent(t *testing.T, nc *nodeconfig.NodeConfig) *nodeuptest.Agent {
+	t.Helper()
+	ca, node := withNodeTLS(t, nc)
+	return nodeuptest.ServeAgent(t, ca.Bundle(), node.Cert, node.Key.Bytes())
+}
+
+// withNodeTLS gives nc the CA bundle, the node's certificate and its key of a new cluster CA, and returns the CA and
+// the certificate.
+func withNodeTLS(t *testing.T, nc *nodeconfig.NodeConfig) (*pki.CA, pki.Certificate) {
+	t.Helper()
+	ca, err := pki.NewCA(nc.Cluster, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := ca.IssueNode(nc.Role, nc.Region, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	nc.Files = slices.DeleteFunc(nc.Files, func(f nodeconfig.File) bool { return f.Path == nodeconfig.KeyFile })
+	nc.Files = append(nc.Files,
+		nodeconfig.File{Path: nodeconfig.CAFile, Mode: 0o644, Owner: nodeconfig.Owner, Content: ca.Bundle()},
+		nodeconfig.File{
+			Path: nodeconfig.CertFile, Mode: 0o644, Owner: nodeconfig.Owner, Content: node.Cert, PerNode: true,
+		},
+		nodeconfig.File{
+			Path: nodeconfig.KeyFile, Mode: 0o600, Owner: nodeconfig.Owner, Content: node.Key.Bytes(), PerNode: true,
+			Secret: true,
+		},
+	)
+	nc.SpecHash = nodeconfig.SpecHash(nc)
+	return ca, node
+}
+
+// zipPath is where serveAssets serves the Nomad zip.
+const zipPath = "/nomad_2.0.7_linux_amd64.zip"
+
 func TestUpCommand(t *testing.T) {
 	nc := nodeConfig(t)
-	srv := serveCNI(t, nc)
+	srv := serveAssets(t, nc)
+	agent := serveAgent(t, nc)
 	m := newMachine(t, nc)
 	m.host.Transport = srv.Client().Transport
+	m.host.DialContext = agent.Dial
 	// A clock that moves, as a real one does, so that the status changes on the second run.
 	now := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
 	m.host.Now = func() time.Time {
@@ -256,7 +339,7 @@ func TestUpCommand(t *testing.T) {
 	}
 	want := []string{
 		"preflight unchanged", "system done", "hostfirewall done", "runtime done", "cni done",
-		"join skipped", "nomad skipped", "verify unchanged",
+		"join done", "nomad done", "verify unchanged",
 	}
 	if diff := cmp.Diff(want, phases); diff != "" {
 		t.Errorf("phases in status.json (-want +got):\n%s", diff)
@@ -273,13 +356,20 @@ func TestUpCommand(t *testing.T) {
 		"nft -j list tables", "systemctl is-enabled ufw.service",
 		"dpkg-query -W -f=${Status} docker.io", "systemctl is-enabled docker.service",
 		"systemctl is-active docker.service",
+		"systemctl show -p NeedDaemonReload --value nomad.service", "systemctl is-active nomad.service",
 		"systemctl is-enabled tent-node.service", "systemctl is-enabled tent-node-join.timer",
 	}
 	if diff := cmp.Diff(reads, m.runner.Commands()[commands:]); diff != "" {
 		t.Errorf("the second up's commands, which must only read (-want +got):\n%s", diff)
 	}
-	if diff := cmp.Diff([]string{cniPath}, srv.Requests()); diff != "" {
+	if diff := cmp.Diff([]string{cniPath, zipPath}, srv.Requests()); diff != "" {
 		t.Errorf("the two runs' downloads (-want +got):\n%s", diff)
+	}
+	// Each up checks the agent's health; the second one's join asks it too, once the node's certificate is there.
+	checks := []string{"/v1/status/leader?stale", "/v1/agent/health?type=client"}
+	asked := slices.Concat(checks, []string{"/v1/status/peers?stale"}, checks)
+	if diff := cmp.Diff(asked, agent.Requests()); diff != "" {
+		t.Errorf("the agent saw (-want +got):\n%s", diff)
 	}
 }
 
@@ -310,6 +400,35 @@ func TestUpCommandRefusesAnUnsupportedProvider(t *testing.T) {
 	}
 }
 
+// TestUpTakesTheLock checks that up runs under the lock that serializes it with a refresh-join run by hand, and that
+// a lock that cannot be taken fails the command before anything runs.
+func TestUpTakesTheLock(t *testing.T) {
+	nc := nodeConfig(t)
+	srv := serveAssets(t, nc)
+	agent := serveAgent(t, nc)
+	m := newMachine(t, nc)
+	m.host.Transport = srv.Client().Transport
+	m.host.DialContext = agent.Dial
+	m.mustRun(t, "install")
+	before := m.progress()
+	m.mustRun(t, "up", "--config", configPath)
+	// Every command and change of up, status.json included, comes while it holds the lock.
+	if want := []progress{before, m.progress()}; !slices.Equal(m.held, want) {
+		t.Errorf("up held the lock from and to %+v, want %+v: from before its first command to after its last change",
+			m.held, want)
+	}
+
+	stuck := newMachine(t, nodeConfig(t))
+	stuck.lockErr = errors.New("the lock is stuck")
+	code, _, stderr := stuck.run(t, "up")
+	if code != 1 || !strings.Contains(stderr, "the lock is stuck") {
+		t.Errorf("tent-node up with a stuck lock: code %d, stderr %q; want 1 and the lock's error", code, stderr)
+	}
+	if len(stuck.runner.Commands()) != 0 {
+		t.Errorf("up with a stuck lock ran %q, want nothing", stuck.runner.Commands())
+	}
+}
+
 func TestEnvironmentByProvider(t *testing.T) {
 	e, err := environment(v1alpha1.ProviderVultr)
 	if _, ok := e.(*vultr.Environment); !ok || err != nil {
@@ -323,15 +442,236 @@ func TestEnvironmentByProvider(t *testing.T) {
 	}
 }
 
+// addFiles puts nc's files onto the machine, as up writes them, with no change recorded.
+func (m *machine) addFiles(t *testing.T, nc *nodeconfig.NodeConfig) {
+	t.Helper()
+	for _, f := range nc.Files {
+		m.fs.AddFile(t, f.Path, f.Content, fs.FileMode(f.Mode), f.Owner)
+	}
+}
+
+// TestRefreshJoinCommand checks that refresh-join rewrites 05-join.hcl once for a new peer set, under the lock, and
+// never touches Nomad.
 func TestRefreshJoinCommand(t *testing.T) {
-	m := newMachine(t, nodeConfig(t))
+	nc := nodeConfig(t)
+	agent := serveAgent(t, nc)
+	agent.SetPeers([]string{"10.64.0.9:4647", "10.64.0.5:4647"})
+	m := newMachine(t, nc)
+	m.host.DialContext = agent.Dial
+	m.addFiles(t, nc)
+
+	before := m.progress()
 	stderr := m.mustRun(t, "refresh-join", "--config", configPath)
-	if !strings.Contains(stderr, "not built yet") {
-		t.Errorf("refresh-join says nothing of being a stub:\n%s", stderr)
+	want := `level=INFO msg="05-join.hcl joins the servers that answered" known=1 servers=2 peers="[10.64.0.5 10.64.0.9]"`
+	if !strings.HasSuffix(stderr, want+"\n") || strings.Count(stderr, "\n") != 1 {
+		t.Errorf("refresh-join logged:\n%s\nwant one line that ends with %s", stderr, want)
 	}
-	if len(m.runner.Commands()) != 0 || len(m.fs.Changes()) != 0 {
-		t.Errorf("refresh-join ran %q and changed %q, want nothing", m.runner.Commands(), m.fs.Changes())
+	wantChanges := []string{"/etc/nomad.d/05-join.hcl", "/var/lib/tent", "/var/lib/tent/peers.json"}
+	if diff := cmp.Diff(wantChanges, m.fs.Changes()); diff != "" {
+		t.Errorf("changes (-want +got):\n%s", diff)
 	}
+	// Every change comes while it holds the lock.
+	if want := []progress{before, m.progress()}; !slices.Equal(m.held, want) {
+		t.Errorf("refresh-join held the lock from and to %+v, want %+v", m.held, want)
+	}
+
+	// The same answer changes nothing and logs nothing.
+	changes := len(m.fs.Changes())
+	if stderr := m.mustRun(t, "refresh-join"); stderr != "" {
+		t.Errorf("the second refresh-join logged:\n%s", stderr)
+	}
+	if got := m.fs.Changes()[changes:]; len(got) != 0 {
+		t.Errorf("the second refresh-join changed %q, want nothing", got)
+	}
+	// Nomad reads 05-join.hcl at its next start: refresh-join runs no command at all.
+	if got := m.runner.Commands(); len(got) != 0 {
+		t.Errorf("refresh-join ran %q, want nothing", got)
+	}
+	if got := agent.Requests(); !cmp.Equal(got, []string{"/v1/status/peers?stale", "/v1/status/peers?stale"}) {
+		t.Errorf("the agent saw %q, want the peers asked twice", got)
+	}
+}
+
+// TestRefreshJoinCommandWithoutAnAnswer checks that refresh-join exits with 0 and changes nothing when it hears from no
+// server: the timer tries again in a minute.
+func TestRefreshJoinCommandWithoutAnAnswer(t *testing.T) {
+	cases := []struct {
+		name  string
+		files bool // whether up has written the node's files, the TLS files among them
+		want  string
+	}{
+		{"no TLS files", false, `level=INFO msg="no TLS files yet; 05-join.hcl stays until the next refresh"`},
+		// A combined node asks its own agent and the seed.
+		{"no server answers", true, `level=INFO msg="no server answered; 05-join.hcl stays until the next refresh" ` +
+			"asked=2"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			nc := nodeConfig(t)
+			agent := serveAgent(t, nc)
+			m := newMachine(t, nc)
+			m.host.DialContext = agent.Dial
+			if c.files {
+				m.addFiles(t, nc)
+			}
+			stderr := m.mustRun(t, "refresh-join")
+			if !strings.Contains(stderr, c.want+"\n") {
+				t.Errorf("refresh-join logged:\n%s\nwant a line that ends with %s", stderr, c.want)
+			}
+			if len(m.runner.Commands()) != 0 || len(m.fs.Changes()) != 0 {
+				t.Errorf("refresh-join ran %q and changed %q, want nothing", m.runner.Commands(), m.fs.Changes())
+			}
+			if !c.files && len(agent.Requests()) != 0 {
+				t.Errorf("refresh-join without TLS files asked %q", agent.Requests())
+			}
+		})
+	}
+}
+
+// TestRefreshJoinWaitsForTheLock checks that refresh-join waits for the lock while another tent-node run holds it, and
+// gives up a minute before systemd would stop it, with exit status 0: the next refresh tries again.
+func TestRefreshJoinWaitsForTheLock(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m := newMachine(t, nodeConfig(t))
+		m.lockAfter = time.Hour
+		start := time.Now()
+		stderr := m.mustRun(t, "refresh-join")
+		if waited := time.Since(start); waited != 4*time.Minute {
+			t.Errorf("refresh-join gave up after %s, want 4m0s", waited)
+		}
+		want := `level=INFO msg="another tent-node run holds the lock; the next refresh tries again" waited=4m0s` + "\n"
+		if !strings.HasSuffix(stderr, want) || strings.Count(stderr, "\n") != 1 {
+			t.Errorf("refresh-join logged:\n%s\nwant one line that ends with %s", stderr, want)
+		}
+		if len(m.runner.Commands()) != 0 || len(m.fs.Changes()) != 0 || len(m.held) != 0 {
+			t.Errorf("refresh-join ran %q, changed %q and held the lock %v; want nothing", m.runner.Commands(),
+				m.fs.Changes(), m.held)
+		}
+	})
+}
+
+// TestRefreshJoinCommandFailsOnTheLock checks that a lock that fails for another reason than the end of its wait
+// fails refresh-join.
+func TestRefreshJoinCommandFailsOnTheLock(t *testing.T) {
+	m := newMachine(t, nodeConfig(t))
+	m.lockErr = errors.New("lock /run/tent-node.lock: permission denied")
+	code, stdout, stderr := m.run(t, "refresh-join")
+	if want := "Error: lock /run/tent-node.lock: permission denied\n"; code != 1 || stdout != "" || stderr != want {
+		t.Errorf("tent-node refresh-join: code %d, stdout %q, stderr %q; want 1 and %q", code, stdout, stderr, want)
+	}
+}
+
+// hangingMachine returns a machine with the node's TLS files and a peers file of n servers that answer nothing, as
+// servers behind a broken network do: each call gives up after 5 seconds.
+func hangingMachine(t *testing.T, n int) *machine {
+	t.Helper()
+	nc := nodeConfig(t)
+	withNodeTLS(t, nc)
+	m := newMachine(t, nc)
+	m.addFiles(t, nc)
+	peers := make([]string, n)
+	for i := range peers {
+		peers[i] = netip.AddrFrom4([4]byte{10, 64, 1, byte(i + 1)}).String()
+	}
+	data, err := json.Marshal(peers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.fs.AddFile(t, "/var/lib/tent/peers.json", data, 0o600, nodeconfig.Owner)
+	m.host.DialContext = nodeuptest.Hang
+	return m
+}
+
+// TestRefreshJoinCommandEnds checks how refresh-join ends when it cannot finish: with 0 and one line when its own
+// deadline ends the run, 15 seconds before systemd would stop it, as the next refresh tries again; and with 1 when
+// systemd stops it.
+func TestRefreshJoinCommandEnds(t *testing.T) {
+	cases := []struct {
+		name      string
+		lockAfter time.Duration // how long another run holds the lock
+		sigterm   time.Duration // when SIGTERM ends the command's context; 0 for never
+		code      int
+		after     time.Duration
+		warnings  int    // the servers that did not answer in time; the others are not asked
+		last      string // the end of stderr's last line
+	}{
+		{"its deadline while servers hang", 2 * time.Second, 0, 0, 4*time.Minute + 45*time.Second, 56,
+			`level=INFO msg="the refresh ran out of time; the next refresh tries again" within=4m45s`},
+		// Both paths say why, as signal.NotifyContext in main words it.
+		{"SIGTERM while servers hang", 2 * time.Second, time.Minute, 1, time.Minute, 11,
+			"Error: refresh 05-join.hcl: terminated signal received"},
+		{"SIGTERM while it waits for the lock", time.Hour, time.Minute, 1, time.Minute, 0,
+			"Error: lock /run/tent-node.lock: terminated signal received"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				// The node's own agent and 60 known servers answer nothing: 61 calls of 5 seconds.
+				m := hangingMachine(t, 60)
+				m.lockAfter = c.lockAfter
+				ctx, cancel := context.WithCancelCause(t.Context())
+				defer cancel(nil)
+				if c.sigterm > 0 {
+					time.AfterFunc(c.sigterm, func() { cancel(nodeuptest.Terminated) })
+				}
+				start := time.Now()
+				code, stdout, stderr := m.runWith(ctx, "refresh-join")
+				if waited := time.Since(start); code != c.code || stdout != "" || waited != c.after {
+					t.Errorf("refresh-join: code %d, stdout %q after %s; want %d after %s", code, stdout, waited, c.code,
+						c.after)
+				}
+				lines := strings.Split(strings.TrimSuffix(stderr, "\n"), "\n")
+				if !strings.HasSuffix(lines[len(lines)-1], c.last) {
+					t.Errorf("refresh-join's last line is %q, want one that ends with %q", lines[len(lines)-1], c.last)
+				}
+				// Only the end through the deadline logs, as the end of the lock's wait does.
+				want := 0
+				if c.code == 0 {
+					want = 1
+				}
+				if infos := strings.Count(stderr, " level=INFO "); infos != want {
+					t.Errorf("refresh-join logged %d INFO lines, want %d:\n%s", infos, want, stderr)
+				}
+				if got := strings.Count(stderr, " level=WARN "); got != c.warnings {
+					t.Errorf("refresh-join logged %d warnings, want %d", got, c.warnings)
+				}
+				if len(m.fs.Changes()) != 0 || len(m.runner.Commands()) != 0 {
+					t.Errorf("refresh-join changed %q and ran %q, want nothing", m.fs.Changes(), m.runner.Commands())
+				}
+			})
+		})
+	}
+}
+
+// slowStat is a filesystem whose Stat of path takes d, as on a disk that hangs, and then fails with err.
+type slowStat struct {
+	nodeup.FS
+	path string
+	d    time.Duration
+	err  error
+}
+
+func (s slowStat) Stat(p string) (fs.FileInfo, error) {
+	if p == s.path {
+		time.Sleep(s.d)
+		return nil, s.err
+	}
+	return s.FS.Stat(p)
+}
+
+// TestRefreshJoinCommandFailsPastItsDeadline checks that an error of the refresh fails refresh-join even when it comes
+// after the deadline: only the deadline's own end leaves the work to the next refresh.
+func TestRefreshJoinCommandFailsPastItsDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m := newMachine(t, nodeConfig(t))
+		m.host.FS = slowStat{m.fs, nodeconfig.CAFile, 5 * time.Minute, errors.New("input/output error")}
+		code, stdout, stderr := m.run(t, "refresh-join")
+		want := "Error: refresh 05-join.hcl: stat " + nodeconfig.CAFile + ": input/output error\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Errorf("tent-node refresh-join: code %d, stdout %q, stderr %q; want 1 and %q", code, stdout, stderr,
+				want)
+		}
+	})
 }
 
 func TestNodeCommandsReportABadConfig(t *testing.T) {
@@ -359,7 +699,7 @@ func TestNodeCommandsReportABadConfig(t *testing.T) {
 		}, "Error: node config: role \"worker\" is not server, client or combined\n"},
 	}
 	for _, c := range cases {
-		for _, command := range []string{"install", "up"} {
+		for _, command := range []string{"install", "up", "refresh-join"} {
 			t.Run(c.name+" "+command, func(t *testing.T) {
 				m := newMachine(t, nodeConfig(t))
 				c.edit(t, m)
@@ -369,9 +709,10 @@ func TestNodeCommandsReportABadConfig(t *testing.T) {
 					t.Errorf("tent-node %s: code %d, stdout %q, stderr %q; want 1 and %q", command, code, stdout,
 						stderr, c.want)
 				}
-				if len(m.runner.Commands()) != 0 || len(m.fs.Changes()) != changes {
-					t.Errorf("%s ran %q and changed %q, want nothing", command, m.runner.Commands(),
-						m.fs.Changes()[changes:])
+				// The config fails before the lock: nothing waits on a node whose config is broken.
+				if len(m.runner.Commands()) != 0 || len(m.fs.Changes()) != changes || len(m.held) != 0 {
+					t.Errorf("%s ran %q, changed %q and took the lock %v; want nothing", command, m.runner.Commands(),
+						m.fs.Changes()[changes:], m.held)
 				}
 			})
 		}

@@ -4,8 +4,10 @@ package nodeuptest
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"path"
@@ -20,12 +22,14 @@ import (
 )
 
 // FS is an in-memory filesystem that behaves as nodeup.OSFS does on Linux. It starts with the root directory alone,
-// with mode 0755 and owned by root:root. It records the paths that WriteFile, EnsureDir and Remove change, and Fail
-// makes those calls fail for a path. It is safe for concurrent use.
+// with mode 0755 and owned by root:root. It records the paths that WriteFile, WriteStream, EnsureDir and Remove
+// change, and those that ReadFile reads whole, and Fail makes those calls but ReadFile fail for a path. It is safe for
+// concurrent use.
 type FS struct {
 	mu      sync.Mutex
 	entries map[string]Entry // by path
 	changes []string
+	reads   []string         // the paths that ReadFile read whole
 	faults  map[string]error // by path
 }
 
@@ -117,16 +121,16 @@ func (f *FS) Paths() []string {
 	return slices.Sorted(maps.Keys(f.entries))
 }
 
-// Changes returns the paths that WriteFile, EnsureDir and Remove changed, in order, once for each call that changed
-// one.
+// Changes returns the paths that WriteFile, WriteStream, EnsureDir and Remove changed, in order, once for each
+// call that changed one.
 func (f *FS) Changes() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return slices.Clone(f.changes)
 }
 
-// Fail makes every WriteFile, EnsureDir and Remove of path fail with an error that wraps err, and change nothing. A
-// nil err ends that.
+// Fail makes every WriteFile, WriteStream, EnsureDir and Remove of path fail with an error that wraps err, and
+// change nothing. A nil err ends that.
 func (f *FS) Fail(path string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -137,7 +141,7 @@ func (f *FS) Fail(path string, err error) {
 	f.faults[path] = err
 }
 
-// ReadFile returns a copy of the content of the file at p.
+// ReadFile returns a copy of the content of the file at p, and records that p was read whole.
 func (f *FS) ReadFile(p string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -148,8 +152,40 @@ func (f *FS) ReadFile(p string) ([]byte, error) {
 	if e.Dir {
 		return nil, &fs.PathError{Op: "read", Path: p, Err: errIsDir}
 	}
+	f.reads = append(f.reads, p)
 	return bytes.Clone(e.Data), nil
 }
+
+// Reads returns the paths that ReadFile read whole, in order, once for each call.
+func (f *FS) Reads() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.reads)
+}
+
+// Open opens a copy of the file at p. It does not count as a read of the whole file: nodeup.OSFS reads it as a
+// stream.
+func (f *FS) Open(p string) (nodeup.File, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, err := f.lookup("open", p)
+	if err != nil {
+		return nil, err
+	}
+	if e.Dir {
+		return nil, &fs.PathError{Op: "open", Path: p, Err: errIsDir}
+	}
+	return openFile{Reader: bytes.NewReader(bytes.Clone(e.Data)), info: fileInfo{name: path.Base(p), entry: e}}, nil
+}
+
+// openFile is a file that FS.Open opened.
+type openFile struct {
+	*bytes.Reader
+	info fileInfo
+}
+
+func (openFile) Close() error                 { return nil }
+func (o openFile) Stat() (fs.FileInfo, error) { return o.info, nil }
 
 // Stat describes the file or the directory at p. It has no modification time.
 func (f *FS) Stat(p string) (fs.FileInfo, error) {
@@ -162,7 +198,8 @@ func (f *FS) Stat(p string) (fs.FileInfo, error) {
 	return fileInfo{name: path.Base(p), entry: e}, nil
 }
 
-// WriteFile makes p a file with data, mode and owner, unless it has them already.
+// WriteFile makes p a file with data, mode and owner, unless it has them already; before it writes, it removes the
+// temporary files of p that a killed write left.
 func (f *FS) WriteFile(p string, data []byte, mode fs.FileMode, owner string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -176,8 +213,48 @@ func (f *FS) WriteFile(p string, data []byte, mode fs.FileMode, owner string) (b
 	case ok && bytes.Equal(old.Data, data) && old.Mode == mode && old.Owner == owner:
 		return false, nil
 	}
+	f.removeTemps(p)
 	f.change(p, Entry{Data: bytes.Clone(data), Mode: mode, Owner: owner})
 	return true, nil
+}
+
+// removeTemps removes the regular files .<base>.tmp* beside p, which a killed write of p leaves, as nodeup.OSFS does
+// before it writes p, and records each.
+func (f *FS) removeTemps(p string) {
+	dir, prefix := path.Dir(p), "."+path.Base(p)+".tmp"
+	for _, name := range slices.Sorted(maps.Keys(f.entries)) {
+		if e := f.entries[name]; !e.Dir && path.Dir(name) == dir && strings.HasPrefix(path.Base(name), prefix) {
+			delete(f.entries, name)
+			f.changes = append(f.changes, name)
+		}
+	}
+}
+
+// WriteStream makes p a file with what r holds, mode and owner, unless it has them already.
+func (f *FS) WriteStream(p string, r io.Reader, mode fs.FileMode, owner string) (bool, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return false, fmt.Errorf("write %s: %w", p, err)
+	}
+	return f.WriteFile(p, data, mode, owner)
+}
+
+// HasContent reports whether p is a file of size bytes with the sha256 sum, mode and owner.
+func (f *FS) HasContent(p string, size int64, sum []byte, mode fs.FileMode, owner string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := check(p, mode, owner); err != nil {
+		return false, fmt.Errorf("read %s: %w", p, err)
+	}
+	e, ok := f.entries[p]
+	switch {
+	case !ok:
+		return false, nil
+	case e.Dir:
+		return false, fmt.Errorf("read %s: %w", p, errIsDir)
+	}
+	got := sha256.Sum256(e.Data)
+	return int64(len(e.Data)) == size && bytes.Equal(got[:], sum) && e.Mode == mode && e.Owner == owner, nil
 }
 
 // EnsureDir makes p a directory with mode and owner, unless it is one already.

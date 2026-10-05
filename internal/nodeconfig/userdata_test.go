@@ -264,9 +264,9 @@ func pem(seed uint64, kind string, n int) []byte {
 }
 
 // worstCase returns the largest config that tent makes for a node of the role, without the operator's extra
-// configuration: two CAs in the bundle during a rotation, a certificate with every name, a 2 KiB intro token,
-// tent-node from a short presigned URL, a mirror and a development build's 1.5 KiB presigned URL, a mirror for each
-// other asset, 5 seeds, 12 meta keys and the host firewall of every rule.
+// configuration: nomad.service, two CAs in the bundle during a rotation, a certificate with every name, a 2 KiB intro
+// token, tent-node from a short presigned URL, a mirror and a development build's 1.5 KiB presigned URL, a mirror for
+// each other asset, 5 seeds, 12 meta keys and the host firewall of every rule.
 func worstCase(t *testing.T, role v1alpha1.Role) *nodeconfig.NodeConfig {
 	t.Helper()
 	a := agents()[role]
@@ -288,7 +288,7 @@ func worstCase(t *testing.T, role v1alpha1.Role) *nodeconfig.NodeConfig {
 		t.Fatalf("RenderNode: %v", err)
 	}
 	c.Files = files
-	c.Files = append(c.Files, node,
+	c.Files = append(c.Files, node, nodeconfig.RenderNomadService(),
 		nodeconfig.File{Path: nodeconfig.CAFile, Mode: 0o644, Owner: "root:root",
 			Content: append(pem(1, "CERTIFICATE", 600), pem(2, "CERTIFICATE", 600)...)},
 		nodeconfig.File{Path: nodeconfig.CertFile, Mode: 0o644, Owner: "root:root", PerNode: true,

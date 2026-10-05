@@ -2,11 +2,13 @@ package nodeuptest_test
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 	"testing"
@@ -123,6 +125,51 @@ func TestTgzGivesTheSameBytes(t *testing.T) {
 			t.Error("the same files at another time gave another archive")
 		}
 	})
+}
+
+// readZip returns the name, the mode and the content of every entry of a zip, and the error that stopped the reading,
+// if any.
+func readZip(t *testing.T, data []byte) ([]string, error) {
+	t.Helper()
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, f := range zr.File {
+		rc, err := f.Open()
+		if err != nil {
+			return got, err
+		}
+		content, err := io.ReadAll(rc)
+		_ = rc.Close()
+		if err != nil {
+			return got, err
+		}
+		got = append(got, fmt.Sprintf("%s %v %q", f.Name, f.Mode(), content))
+	}
+	return got, nil
+}
+
+func TestNomadZip(t *testing.T) {
+	// As HashiCorp's zips of Nomad 2.0.7 are: the licence first, then the binary.
+	got, err := readZip(t, nodeuptest.NomadZip(t, []byte("the binary\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{`LICENSE.txt -rw-r--r-- "Business Source License 1.1\n"`, `nomad -rwxr-xr-x "the binary\n"`}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("entries (-want +got):\n%s", diff)
+	}
+}
+
+func TestZipDeclaresASize(t *testing.T) {
+	h := zip.FileHeader{Name: "nomad", UncompressedSize64: 4}
+	h.SetMode(0o755)
+	_, err := readZip(t, nodeuptest.Zip(t, nodeuptest.ZipFile{Header: h, Content: []byte("more than four bytes")}))
+	if !errors.Is(err, zip.ErrFormat) {
+		t.Errorf("reading an entry past its declared size: %v, want %v", err, zip.ErrFormat)
+	}
 }
 
 func TestTgzEndsInsideAFileLargerThanItsContent(t *testing.T) {

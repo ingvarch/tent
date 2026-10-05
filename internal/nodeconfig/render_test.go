@@ -132,8 +132,10 @@ func TestRenderAgentWithoutExtras(t *testing.T) {
 
 // nomadConfig is the part of Nomad's agent configuration that the tests read back with HCL1, as Nomad reads it.
 type nomadConfig struct {
-	Region string `hcl:"region"`
-	Server *struct {
+	Region             string `hcl:"region"`
+	LeaveOnTerminate   bool   `hcl:"leave_on_terminate"`
+	DisableUpdateCheck bool   `hcl:"disable_update_check"`
+	Server             *struct {
 		Enabled            bool   `hcl:"enabled"`
 		Encrypt            string `hcl:"encrypt"`
 		RaftMultiplier     int    `hcl:"raft_multiplier"`
@@ -142,14 +144,17 @@ type nomadConfig struct {
 		} `hcl:"client_introduction"`
 	} `hcl:"server"`
 	Client *struct {
-		Enabled        bool              `hcl:"enabled"`
-		NodePool       string            `hcl:"node_pool"`
-		NodeClass      string            `hcl:"node_class"`
-		MinDynamicPort int               `hcl:"min_dynamic_port"`
-		MaxDynamicPort int               `hcl:"max_dynamic_port"`
-		MaxKillTimeout string            `hcl:"max_kill_timeout"`
-		Options        map[string]string `hcl:"options"`
-		Meta           map[string]string `hcl:"meta"`
+		Enabled         bool              `hcl:"enabled"`
+		NodePool        string            `hcl:"node_pool"`
+		NodeClass       string            `hcl:"node_class"`
+		MinDynamicPort  int               `hcl:"min_dynamic_port"`
+		MaxDynamicPort  int               `hcl:"max_dynamic_port"`
+		MaxKillTimeout  string            `hcl:"max_kill_timeout"`
+		Options         map[string]string `hcl:"options"`
+		Meta            map[string]string `hcl:"meta"`
+		DrainOnShutdown *struct {
+			Deadline string `hcl:"deadline"`
+		} `hcl:"drain_on_shutdown"`
 	} `hcl:"client"`
 	ACL *struct {
 		Enabled bool `hcl:"enabled"`
@@ -157,6 +162,10 @@ type nomadConfig struct {
 	TLS *struct {
 		VerifyHTTPSClient bool `hcl:"verify_https_client"`
 	} `hcl:"tls"`
+	Consul *struct {
+		ServerAutoJoin bool `hcl:"server_auto_join"`
+		ClientAutoJoin bool `hcl:"client_auto_join"`
+	} `hcl:"consul"`
 }
 
 // TestRenderAgentReadsBack reads each file with HCL1, as Nomad does, and checks the values that come from the agent:
@@ -176,6 +185,15 @@ func TestRenderAgentReadsBack(t *testing.T) {
 			if got.Region != a.Region {
 				t.Errorf("region = %q, want %q", got.Region, a.Region)
 			}
+			if !got.LeaveOnTerminate {
+				t.Error("leave_on_terminate is not set")
+			}
+			if !got.DisableUpdateCheck {
+				t.Error("the update check is not disabled")
+			}
+			if got.Consul == nil || got.Consul.ServerAutoJoin || got.Consul.ClientAutoJoin {
+				t.Errorf("consul = %+v, want both auto-joins off", got.Consul)
+			}
 			if got.ACL == nil || !got.ACL.Enabled {
 				t.Error("ACLs are not enabled")
 			}
@@ -193,11 +211,20 @@ func merge(got *nomadConfig, one nomadConfig) {
 	if one.Region != "" {
 		got.Region = one.Region
 	}
+	if one.LeaveOnTerminate {
+		got.LeaveOnTerminate = true
+	}
+	if one.DisableUpdateCheck {
+		got.DisableUpdateCheck = true
+	}
 	if one.ACL != nil {
 		got.ACL = one.ACL
 	}
 	if one.TLS != nil {
 		got.TLS = one.TLS
+	}
+	if one.Consul != nil {
+		got.Consul = one.Consul
 	}
 	switch {
 	case one.Server == nil:
@@ -258,6 +285,10 @@ func checkClient(t *testing.T, a nodeconfig.Agent, got nomadConfig) {
 	}
 	if c.MaxKillTimeout != "1m" {
 		t.Errorf("client.max_kill_timeout = %q, want 1m from the extra client configuration", c.MaxKillTimeout)
+	}
+	// A drain on shutdown leaves the node ineligible after every stop of Nomad.
+	if c.DrainOnShutdown != nil {
+		t.Errorf("client.drain_on_shutdown = %+v, want none", *c.DrainOnShutdown)
 	}
 	wantMeta := maps.Clone(a.Meta)
 	wantMeta["tent_cluster"], wantMeta["tent_nodegroup"] = a.Cluster, a.Group

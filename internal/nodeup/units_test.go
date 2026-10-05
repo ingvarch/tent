@@ -78,7 +78,11 @@ func unitValues(content []byte) map[string][]string {
 func TestUnitsWaitForNoCloudInit(t *testing.T) {
 	forbidden := []string{"cloud-final.service", "cloud-init.target", "cloud-config.service",
 		"cloud-init-main.service", "multi-user.target"}
-	for _, f := range renderUnits(t) {
+	units := renderUnits(t)
+	// nomad.service comes from tent through the node config.
+	units = append(units, nodeconfig.RenderNomadService())
+	nomadSeen := false
+	for _, f := range units {
 		values := unitValues(f.Content)
 		for _, key := range []string{"After", "Requires", "Wants", "Requisite", "BindsTo"} {
 			for _, unit := range values[key] {
@@ -90,11 +94,41 @@ func TestUnitsWaitForNoCloudInit(t *testing.T) {
 		if slices.Contains(values["Before"], "nomad.service") {
 			t.Errorf("%s has Before=nomad.service", f.Path)
 		}
+		// up starts Nomad from inside tent-node.service, so an order between them would deadlock; and nomad.service
+		// is never enabled for boot: up starts it after the host firewall.
+		if f.Path == nodeconfig.NomadServiceFile {
+			nomadSeen = true
+			for _, key := range []string{"After", "Requires", "Wants", "Requisite", "BindsTo"} {
+				if slices.Contains(values[key], "tent-node.service") {
+					t.Errorf("nomad.service has %s=tent-node.service", key)
+				}
+			}
+			if strings.Contains(string(f.Content), "[Install]") {
+				t.Error("nomad.service has an [Install] section, which would let it be enabled for boot")
+			}
+		}
+	}
+	if !nomadSeen {
+		t.Error("nomad.service was not among the audited units")
 	}
 	service := unitValues(renderUnits(t)[0].Content)
 	for _, key := range []string{"After", "Wants"} {
 		if got := service[key]; !cmp.Equal(got, []string{"network-online.target"}) {
 			t.Errorf("tent-node.service has %s=%q, want network-online.target alone", key, got)
+		}
+	}
+}
+
+// TestNomadStopsBeforeDocker checks that nomad.service starts after docker.service, so systemd stops Nomad before
+// Docker. Nothing more ties them: a restart of Docker leaves Nomad running, and a server without Docker starts Nomad.
+func TestNomadStopsBeforeDocker(t *testing.T) {
+	values := unitValues(nodeconfig.RenderNomadService().Content)
+	if !slices.Contains(values["After"], "docker.service") {
+		t.Errorf("nomad.service has After=%q, want docker.service among them", values["After"])
+	}
+	for _, key := range []string{"Requires", "Wants", "Requisite", "BindsTo", "PartOf"} {
+		if slices.Contains(values[key], "docker.service") {
+			t.Errorf("nomad.service has %s=docker.service", key)
 		}
 	}
 }
@@ -110,6 +144,27 @@ func TestServicesHaveAStartTimeout(t *testing.T) {
 		if got := unitValues(f.Content)["TimeoutStartSec"]; !cmp.Equal(got, []string{want[f.Path]}) {
 			t.Errorf("%s has TimeoutStartSec=%q, want %s", f.Path, got, want[f.Path])
 		}
+	}
+}
+
+// TestRefreshLockWaitEndsBeforeTheUnit checks that refresh-join ends 15 seconds before systemd would stop
+// tent-node-join.service, and stops waiting for the lock a minute before it, which leaves the refresh time.
+func TestRefreshLockWaitEndsBeforeTheUnit(t *testing.T) {
+	timeout := unitValues(renderUnits(t)[1].Content)["TimeoutStartSec"]
+	if len(timeout) != 1 || !strings.HasSuffix(timeout[0], "min") {
+		t.Fatalf("tent-node-join.service has TimeoutStartSec=%q, want minutes", timeout)
+	}
+	d, err := time.ParseDuration(strings.TrimSuffix(timeout[0], "in"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nodeup.RefreshLockWait != d-time.Minute {
+		t.Errorf("RefreshLockWait is %s, want %s: a minute less than the unit's TimeoutStartSec=%s",
+			nodeup.RefreshLockWait, d-time.Minute, timeout[0])
+	}
+	if nodeup.RefreshTimeout != d-15*time.Second {
+		t.Errorf("RefreshTimeout is %s, want %s: 15 seconds less than the unit's TimeoutStartSec=%s",
+			nodeup.RefreshTimeout, d-15*time.Second, timeout[0])
 	}
 }
 

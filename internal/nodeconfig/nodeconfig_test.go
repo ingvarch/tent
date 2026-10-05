@@ -46,6 +46,10 @@ func TestValidate(t *testing.T) {
 		{"no name", func(c *nc) { c.Name = "" }, `node config: name "" is not a host name: ` +
 			`1 to 63 lower-case letters, digits and dashes, starting and ending with a letter or digit`},
 		{"role", func(c *nc) { c.Role = "worker" }, `node config: role "worker" is not server, client or combined`},
+		{"no region", func(c *nc) { c.Region = "" }, "node config: no region"},
+		{"region", func(c *nc) { c.Region = "Global" },
+			`node config: region "Global" is not lower-case letters, digits and dashes, ` +
+				"starting with a letter or digit"},
 
 		{"asset without a name", func(c *nc) { c.Assets[1].Name = "" }, "node config: assets[1]: no name"},
 		// The name is the name of the asset's file in tent-node's cache.

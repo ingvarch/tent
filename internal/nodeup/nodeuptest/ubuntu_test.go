@@ -441,6 +441,41 @@ func TestUbuntuDockerAfterAReboot(t *testing.T) {
 	active("after a reboot of a disabled Docker", "inactive")
 }
 
+// TestUbuntuReboot checks that a reboot starts the enabled units again, and leaves the others inactive.
+func TestUbuntuReboot(t *testing.T) {
+	fsys, r := nodeuptest.NewFS(), &nodeuptest.Runner{}
+	m := nodeuptest.Ubuntu(t, fsys, r, "tent-node.service", "nomad.service")
+	sd := nodeup.Systemd{Runner: r}
+	ctx := t.Context()
+	addUnit(t, fsys, "tent-node.service", "[Unit]\n")
+	addUnit(t, fsys, "nomad.service", "[Unit]\n")
+	if err := sd.Enable(ctx, "tent-node.service"); err != nil {
+		t.Fatal(err)
+	}
+	for _, unit := range []string{"tent-node.service", "nomad.service"} {
+		if err := sd.Start(ctx, unit); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sd.DisableNow(ctx, "ufw.service"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, r, "timedatectl set-ntp true"); err != nil {
+		t.Fatal(err)
+	}
+	m.Reboot()
+	for unit, want := range map[string]string{
+		"tent-node.service":         "active",   // enabled
+		"nomad.service":             "inactive", // never enabled: up starts it
+		"ufw.service":               "inactive", // disabled
+		"systemd-timesyncd.service": "active",   // enabled by timedatectl set-ntp true
+	} {
+		if state, _, err := sd.IsActive(ctx, unit); state != want || err != nil {
+			t.Errorf("is-active %s after a reboot: %q, %v; want %q", unit, state, err, want)
+		}
+	}
+}
+
 func TestUbuntuLocks(t *testing.T) {
 	// As apt 2.8 and dpkg 1.22 on Ubuntu 24.04 answer while another process holds the lock.
 	cases := []struct {

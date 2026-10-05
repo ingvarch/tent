@@ -40,57 +40,116 @@ var assetLimits = fetchLimits{
 	tries: 3, wait: 2 * time.Second, try: 10 * time.Minute, idle: time.Minute, size: 256 << 20,
 }
 
-// fetch returns the content of the asset a, which it checks against a's sha256, and reports whether that changed the
-// cache. The cache file of an asset holds the one version that the NodeConfig names: a file with a's sha256 serves
-// without a request, and any other one, such as an older version, is removed before a is downloaded, checked and
-// written in its place. Errors name the asset.
-func fetch(ctx context.Context, h *Host, a nodeconfig.Asset) ([]byte, bool, error) {
+// fetch puts the asset a into its cache file, which it checks against a's sha256, and returns the file's path and
+// whether that changed the cache. The cache file of an asset holds the one version that the NodeConfig names: a file
+// with a's sha256 serves without a request, and any other one, such as an older version, is removed before a is
+// downloaded, checked and written in its place. It checks a cached file as a stream, so that a hit holds no asset in
+// memory. Errors name the asset.
+func fetch(ctx context.Context, h *Host, a nodeconfig.Asset) (string, bool, error) {
 	return assetLimits.fetch(ctx, h, a)
 }
 
-func (l fetchLimits) fetch(ctx context.Context, h *Host, a nodeconfig.Asset) ([]byte, bool, error) {
+func (l fetchLimits) fetch(ctx context.Context, h *Host, a nodeconfig.Asset) (string, bool, error) {
 	if len(a.URLs) == 0 {
-		return nil, false, fmt.Errorf("fetch %s %s: the asset has no URLs", a.Name, a.Version)
+		return "", false, fmt.Errorf("fetch %s %s: the asset has no URLs", a.Name, a.Version)
 	}
-	data, changed, err := l.cache(ctx, h, a)
+	file, changed, err := l.cache(ctx, h, a)
 	if err != nil {
-		return nil, false, fmt.Errorf("fetch %s %s: %w", a.Name, a.Version, err)
+		return "", false, fmt.Errorf("fetch %s %s: %w", a.Name, a.Version, err)
 	}
-	return data, changed, nil
+	return file, changed, nil
 }
 
-// cache returns the content of a from assetDir, or downloads it there.
-func (l fetchLimits) cache(ctx context.Context, h *Host, a nodeconfig.Asset) (data []byte, changed bool, err error) {
+// cache makes the cache file of a in assetDir hold a, from the file there or a download, and returns its path.
+func (l fetchLimits) cache(ctx context.Context, h *Host, a nodeconfig.Asset) (file string, changed bool, err error) {
 	for _, dir := range []string{path.Dir(assetDir), assetDir} {
 		c, err := h.FS.EnsureDir(dir, 0o700, nodeconfig.Owner)
 		if err != nil {
-			return nil, false, err
+			return "", false, err
 		}
 		changed = changed || c
 	}
-	file := assetDir + "/" + a.Name
-	data, err = h.FS.ReadFile(file)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
+	file = assetDir + "/" + a.Name
+	hit, err := hasAsset(h.FS, file, a.SHA256)
+	if err != nil || hit {
+		return file, changed, err
+	}
+	switch sum, err := fileSum(h.FS, file); {
 	case err != nil:
-		return nil, false, err
-	case sha256Hex(data) == a.SHA256:
-		// WriteFile only gives a file that someone changed the mode or owner back.
-		c, err := h.FS.WriteFile(file, data, 0o600, nodeconfig.Owner)
-		return data, changed || c, err
-	default:
+		return "", false, err
+	case sum == a.SHA256:
+		// The content is a's, the mode or the owner is not: writing the file again from itself gives them back.
+		c, err := rewrite(h.FS, file)
+		return file, changed || c, err
+	case sum != "":
 		if _, err := h.FS.Remove(file); err != nil {
-			return nil, false, err
+			return "", false, err
 		}
 	}
 	h.logger().Info("download", "asset", a.Name, "version", a.Version)
-	if data, err = l.download(ctx, h, a); err != nil {
-		return nil, false, err
+	data, err := l.download(ctx, h, a)
+	if err != nil {
+		return "", false, err
 	}
 	if _, err := h.FS.WriteFile(file, data, 0o600, nodeconfig.Owner); err != nil {
-		return nil, false, err
+		return "", false, err
 	}
-	return data, true, nil
+	return file, true, nil
+}
+
+// hasAsset reports whether file is a regular file with the sha256 sum, in hex, mode 0600 and owned by root, as a
+// stream.
+func hasAsset(fsys FS, file, sum string) (bool, error) {
+	fi, err := fsys.Stat(file)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, err
+	case !fi.Mode().IsRegular():
+		return false, nil
+	}
+	want, err := hex.DecodeString(sum)
+	if err != nil {
+		return false, fmt.Errorf("the sha256 %q: %w", sum, err)
+	}
+	return fsys.HasContent(file, fi.Size(), want, 0o600, nodeconfig.Owner)
+}
+
+// fileSum returns the sha256, in hex, of the file at name, read as a stream, or "" when there is none.
+func fileSum(fsys FS, name string) (string, error) {
+	f, err := fsys.Open(name)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "", nil
+	case err != nil:
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	r, err := readerOf(f)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, r); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// rewrite writes the cache file at name again from itself, as a stream, with mode 0600 and owned by root, and
+// reports whether that changed it.
+func rewrite(fsys FS, name string) (bool, error) {
+	f, err := fsys.Open(name)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = f.Close() }()
+	r, err := readerOf(f)
+	if err != nil {
+		return false, err
+	}
+	return fsys.WriteStream(name, r, 0o600, nodeconfig.Owner)
 }
 
 // download gets a from each of its URLs in order until one gives a file with a's sha256. It tries a URL again, l.wait

@@ -79,6 +79,11 @@ func httpsRedirects(req *http.Request, via []*http.Request) error {
 
 // get reads the file at rawURL with one request, which ctx bounds.
 func (o Options) get(ctx context.Context, rawURL string) ([]byte, error) {
+	return o.getUpTo(ctx, rawURL, maxFileSize)
+}
+
+// getUpTo is get for a file of up to limit bytes.
+func (o Options) getUpTo(ctx context.Context, rawURL string, limit int) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("get %s: %w", rawURL, err)
@@ -94,12 +99,12 @@ func (o Options) get(ctx context.Context, rawURL string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("get %s: %s", rawURL, resp.Status)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxFileSize+1))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", rawURL, err)
 	}
-	if len(data) > maxFileSize {
-		return nil, fmt.Errorf("read %s: larger than %d bytes", rawURL, maxFileSize)
+	if len(data) > limit {
+		return nil, fmt.Errorf("read %s: larger than %d bytes", rawURL, limit)
 	}
 	return data, nil
 }

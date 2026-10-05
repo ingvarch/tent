@@ -100,18 +100,19 @@ const (
 // Ubuntu makes fsys and r an Ubuntu 24.04 machine that runs systemd, as tent-node finds one on Vultr, and returns the
 // machine's state that its files do not hold. fsys gets OSRelease at /etc/os-release; the directories
 // /run/systemd/system, /etc/systemd/system, /etc/modules-load.d, /etc/sysctl.d, /var/lib, /etc/tent, where
-// cloud-init writes the NodeConfig, and /opt, with mode 0755 and owned by root:root; and ufw's unit file and its
-// configuration, which enables it. It records none of that as changes. r answers as the machine does, from a state
-// that the commands change:
-//   - systemctl is-enabled, enable, is-active, start and show -p NeedDaemonReload --value of each of the units. The
-//     units start disabled and inactive. enable and start fail, as systemd does, when the unit has no file in
-//     /etc/systemd/system or /usr/lib/systemd/system; is-enabled then prints not-found and exits with 4, as systemd
-//     255 and 259 do.
+// cloud-init writes the NodeConfig, /opt and /usr/local/bin, with mode 0755 and owned by root:root; and ufw's unit
+// file and its configuration, which enables it. It records none of that as changes. r answers as the machine does,
+// from a state that the commands change:
+//   - systemctl is-enabled, enable, is-active, start, restart and show -p NeedDaemonReload --value of each of the
+//     units. The units start disabled and inactive. enable, start and restart fail, as systemd does, when the unit has
+//     no file in /etc/systemd/system or /usr/lib/systemd/system; is-enabled then prints not-found and exits with 4,
+//     as systemd 255 and 259 do.
 //   - systemctl daemon-reload, and enable too, read the units' files again. NeedDaemonReload is yes when a unit's file
 //     changed or went since systemd read it. systemd compares the files' modification times, and the fake compares
 //     their content. systemd reads a file when it is first asked about the unit, or when the unit starts.
-//   - timedatectl show -p CanNTP -p NTP, and timedatectl set-ntp true, which starts systemd-timesyncd.service; and
-//     systemctl is-active of it and of chrony.service. timedatectl can turn NTP on, and it starts off.
+//   - timedatectl show -p CanNTP -p NTP, and timedatectl set-ntp true, which enables and starts
+//     systemd-timesyncd.service; and systemctl is-active of it and of chrony.service. timedatectl can turn NTP on, and
+//     it starts off.
 //   - systemctl is-enabled, is-active, disable and disable --now of ufw.service and firewalld.service, whose files
 //     packages put into /usr/lib/systemd/system. ufw is enabled and active; firewalld is not installed until
 //     Machine.InstallFirewalld. ufw disable writes ENABLED=no into /etc/ufw/ufw.conf, a change that fsys records, and
@@ -133,6 +134,7 @@ func Ubuntu(t testing.TB, fsys *FS, r *Runner, units ...string) *Machine {
 	fsys.AddFile(t, "/etc/os-release", []byte(OSRelease), 0o644, nodeconfig.Owner)
 	for _, dir := range []string{
 		"/run/systemd/system", unitDir, "/etc/modules-load.d", "/etc/sysctl.d", "/var/lib", "/etc/tent", "/opt",
+		"/usr/local/bin",
 	} {
 		fsys.AddDir(t, dir, 0o755, nodeconfig.Owner)
 	}
@@ -147,6 +149,7 @@ func Ubuntu(t testing.TB, fsys *FS, r *Runner, units ...string) *Machine {
 		r.On("systemctl is-enabled "+unit, s.answer(func() ([]byte, error) { return s.isEnabled(unit) }))
 		r.On("systemctl enable "+unit, s.answer(func() ([]byte, error) { return s.enable(unit) }))
 		r.On("systemctl start "+unit, s.answer(func() ([]byte, error) { return s.start(unit) }))
+		r.On("systemctl restart "+unit, s.answer(func() ([]byte, error) { return s.restart(unit) }))
 		r.On("systemctl show -p NeedDaemonReload --value "+unit,
 			s.answer(func() ([]byte, error) { return s.needDaemonReload(unit) }))
 	}
@@ -172,7 +175,7 @@ func Ubuntu(t testing.TB, fsys *FS, r *Runner, units ...string) *Machine {
 		return []byte("CanNTP=yes\nNTP=" + yesNo(s.ntp) + "\n"), nil
 	}))
 	r.On("timedatectl set-ntp true", s.answer(func() ([]byte, error) {
-		s.ntp, s.active[timesyncd] = true, true
+		s.ntp, s.enabled[timesyncd], s.active[timesyncd] = true, true, true
 		return nil, nil
 	}))
 	r.On("ufw disable", func(context.Context) ([]byte, error) { return disableUFW(fsys) })
@@ -218,17 +221,23 @@ func (m *Machine) LockDpkg(tries int) { m.packages.hold(dpkgConfigure, tries) }
 // downloaded packages: with exit status 100.
 func (m *Machine) LockAptArchives(tries int) { m.packages.hold(aptInstall, tries) }
 
-// Reboot drops the nftables tables, which live only in the kernel, as a reboot does. It leaves docker.service
-// inactive, and an enabled one with a start job queued, as tent-node found it on Ubuntu 24.04 (VM check 2026-09-30):
-// Docker starts on the same boot as tent-node.service, which is not ordered after it. systemctl start of it runs the
-// job. The files and the rest of systemd's state stay as they are.
+// Reboot drops the nftables tables, which live only in the kernel, as a reboot does, and starts the enabled units
+// again; the others are inactive. It leaves docker.service inactive, and an enabled one with a start job queued, as
+// tent-node found it on Ubuntu 24.04 (VM check 2026-09-30): Docker starts on the same boot as tent-node.service,
+// which is not ordered after it. systemctl start of it runs the job. The files and the rest of systemd's state stay
+// as they are.
 func (m *Machine) Reboot() {
 	m.nft.mu.Lock()
 	m.nft.loaded, m.nft.comment = false, ""
 	m.nft.mu.Unlock()
 	m.systemd.mu.Lock()
 	defer m.systemd.mu.Unlock()
-	m.systemd.active[docker] = false
+	// Every service stops at a reboot, and the enabled ones start again; an enabled docker's start is still queued.
+	// Nomad is never enabled: up starts it.
+	m.systemd.active = map[string]bool{}
+	for unit, enabled := range m.systemd.enabled {
+		m.systemd.active[unit] = enabled && unit != docker
+	}
 	if m.systemd.enabled[docker] {
 		m.systemd.lastJob++
 		m.systemd.jobs[docker] = m.systemd.lastJob

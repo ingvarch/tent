@@ -53,6 +53,25 @@ func TestRunnerRecordsAndAnswers(t *testing.T) {
 	}
 }
 
+func TestRunnerNext(t *testing.T) {
+	var r nodeuptest.Runner
+	r.On("systemctl daemon-reload", nodeuptest.Output("on\n"))
+	r.Next("systemctl daemon-reload", nodeuptest.Exit(1, "Failed to reload daemon: Access denied"))
+	r.Next("systemctl daemon-reload", nodeuptest.Output("second\n"))
+	var got []string
+	for range 4 {
+		out, err := r.Run(t.Context(), "systemctl", "daemon-reload")
+		got = append(got, string(out)+errText(err))
+	}
+	// The queued answers run once each, in order; then the answer of On again.
+	want := []string{
+		"systemctl daemon-reload: exit status 1: Failed to reload daemon: Access denied", "second\n", "on\n", "on\n",
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("the runs (-want +got):\n%s", diff)
+	}
+}
+
 func TestRunnerStopsWithItsContext(t *testing.T) {
 	var r nodeuptest.Runner
 	ctx, cancel := context.WithCancel(t.Context())
@@ -102,6 +121,16 @@ func TestNewHost(t *testing.T) {
 	}
 	if want := "nodeuptest: the machine has no network: serve the files with httptest"; errText(err) != want {
 		t.Errorf("a request: %q, want %q", errText(err), want)
+	}
+}
+
+func TestTerminated(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cancel(nodeuptest.Terminated)
+	err := context.Cause(ctx)
+	if !errors.Is(err, context.Canceled) || errText(err) != "terminated signal received" {
+		t.Errorf("the cause of SIGTERM is %v, want %q, which matches context.Canceled", err,
+			"terminated signal received")
 	}
 }
 
