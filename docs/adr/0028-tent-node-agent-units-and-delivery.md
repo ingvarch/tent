@@ -3,7 +3,13 @@
 - **Status:** Accepted; amended by [ADR-0029](0029-host-firewall-runtime-and-cni-on-nodes.md) (`ExecRunner` stops a
   program's process group; the Vultr client marks its socket; no tent unit is ordered on `cloud-init-main.service`
   either; `systemctl enable` asks PID 1 to reload by itself, and item 11 is about `install`'s own reload;
-  `hostfirewall`, `runtime` and `cni` are built, and the other M2.6 follow-ups move to M2.6b)
+  `hostfirewall`, `runtime` and `cni` are built, and the other M2.6 follow-ups move to M2.6b) and by
+  [ADR-0030](0030-nomad-on-nodes.md) (items 1 and 3: `join`, `nomad`, `verify` with Nomad and `refresh-join` are
+  built, and no phase is a stub; `up` and `refresh-join` take a lock on `/run/tent-node.lock`, and `refresh-join` ends
+  within 4m45s; item 2: `FS` gains `Open`, `HasContent` and `WriteStream`, and `WriteFile` and `WriteStream` first
+  remove the temporary files that a killed write left; `Host` gains a dialer for the Nomad API (`DialContext`), and
+  `nodeuptest` zips, an mTLS server, a fake Nomad agent and a hanging dialer; `nomad.service` keeps systemd's stop
+  timeout, since clients do not drain at shutdown; the other M2.6 follow-ups are done)
 - **Date:** 2026-09-29
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0006](0006-two-binaries-and-nodeconfig.md) (the units, the provider on the node, where

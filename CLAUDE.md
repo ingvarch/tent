@@ -51,16 +51,28 @@ Providers, in order:
     ufw off, the metadata service reachable only from tent-node's marked socket, maintainer decision 21), `runtime`
     (Ubuntu's `docker.io` and `daemon.json`) and `cni` (the CNI plugins from a verified, cached download).
     `ExecRunner` stops a program's whole process group. `internal/app` gives client and combined nodes host firewall
-    rules for traffic from Nomad's and Docker's bridges. `join` and `nomad` are still stubs.
-  - Next: M2.6b Nomad phases.
+    rules for traffic from Nomad's and Docker's bridges. `join` and `nomad` were still stubs.
+  - M2.6b added the Nomad phases of tent-node (`internal/nodeup`, ADR-0030). NodeConfig gains `region` (maintainer
+    decision 22) and `nomad.service` as a NodeConfig file (`internal/nodeconfig`); `00-tent.hcl` drops
+    `drain_on_shutdown` (maintainer decision 25), so clients come back eligible after a reboot. The phases `join`
+    (`05-join.hcl` from the servers' live peers over mTLS, or else the last known peers and the seed), `nomad` (the
+    binary from the asset cache, the agent's files, a start, and a restart only after a change; never enabled for
+    boot) and `verify` (the local agent's health); the command `refresh-join` (server and combined nodes ask their own
+    agent first), with a lock between `up` and `refresh-join`. The weekly online job runs `nomad config validate` on
+    the goldens (`internal/assets`, maintainer decision 23). `hack/tent-node-userdata` builds its node through
+    `app.NodeConfigOf`, and the spike's `tentnode` check (v8) boots Nomad. The VM check ran on 2026-10-05 with one
+    finding, accepted as a trade-off: a restart of Docker restarts Nomad's docker tasks. Pending: the online job's
+    first run on Linux.
+  - Next: M2.7 Bootstrap in `update`.
 
 ## Read before changing anything
 
 1. `docs/architecture.md`: the design and the source of truth.
 2. `docs/adr/`: accepted decisions. Do not diverge silently. If an implementation must deviate, write a superseding
    ADR first (see `docs/adr/README.md`).
-3. `docs/platform-notes.md`: verified Nomad, Hetzner and Vultr API facts and quirks as of 2026-09-25, and facts about
-   Ubuntu on nodes as of 2026-09-29.
+3. `docs/platform-notes.md`: verified Nomad, Hetzner and Vultr API facts and quirks as of 2026-09-25, facts about
+   Ubuntu on nodes as of 2026-09-29 (restarts of Docker, containerd and Nomad as of 2026-10-05), and about the Nomad
+   agent on a node as of 2026-10-05.
    - Re-verify items marked ⏳ (prices, availability, versions) before relying on them.
    - Items marked 🔬 are unverified until `hack/vultr-spike` has run.
 4. `docs/roadmap.md`: milestone goals and exit criteria. The work items are GitHub issues in milestones M0–M6

@@ -432,13 +432,16 @@ github.com/ingvarch/tent
 │   │   ├── vultr/       # govultr wrapper, label codec, tasks, nodes, inventory, pricing
 │   │   │   └── vultrfake/ # in-memory fake of vultr.API for provider and core tests
 │   │   └── hetzner/     # hcloud-go wrapper, tasks, nodes, inventory, pricing, lock
-│   ├── nodeconfig/      # tent <-> tent-node contract: NodeConfig, Nomad config rendering, spec hash, user data
+│   ├── nodeconfig/      # tent <-> tent-node contract: NodeConfig, Nomad config rendering, nomad.service, spec hash,
+│   │                    # user data
 │   ├── nodeup/          # tent-node: phase runner over FS and exec, phases, systemd units, install; status.json;
-│   │   │                # the host firewall, Docker, the CNI plugins and the asset cache
+│   │   │                # the host firewall, Docker, the CNI plugins and the asset cache; Nomad: join, install,
+│   │   │                # start, health over mTLS; refresh-join and its lock with up
 │   │   ├── env/         # Environment: a cloud's metadata service, read once per run
 │   │   │   └── vultr/   # Vultr's /v1.json (hetzner/ in M4, IMDSv2 for AWS later)
 │   │   ├── retry/       # what tent-node's retries share: the answers worth another try, a sleep that ctx cancels
-│   │   └── nodeuptest/  # tests only: in-memory FS, scripted runner, fake Ubuntu with systemd, nft, apt and ufw
+│   │   └── nodeuptest/  # tests only: in-memory FS, scripted runner, fake Ubuntu with systemd, nft, apt and ufw;
+│   │                    # tars and zips, HTTPS and mTLS servers
 │   ├── nomadops/        # the ONLY importer of github.com/hashicorp/nomad/api: mTLS client, ACL bootstrap, waits
 │   │   └── nomadfake/   # in-memory Nomad cluster behind nomadops.API, for the app's tests
 │   ├── rollout/         # scale up/down, rolling update, server quorum safety
@@ -451,7 +454,8 @@ github.com/ingvarch/tent
 │   ├── statestore/      # Store interface, file:// and s3://, layout, locking
 │   ├── s3url/           # s3:// URLs of a bucket and prefix, and their S3 clients: the state store, dev uploads
 │   │   └── s3urltest/   # tests only: keeps the developer's AWS configuration out of a test
-│   ├── assets/          # Nomad, CNI and tent-node: URLs and sha256s; checks Nomad's signature
+│   ├── assets/          # Nomad, CNI and tent-node: URLs and sha256s; checks Nomad's signature; the online test of
+│   │                    # nomad config validate on the goldens of nodeconfig
 │   ├── channels/        # embedded channel files: the Nomad versions allowed and tested, the CNI plugins
 │   ├── buildinfo/       # version, commit, date (ldflags); which release a version counts as
 │   └── buildconfig/     # tests only: CI, Makefile and release config agree; what tent-node links
@@ -921,7 +925,7 @@ cloud-init (user_data: minimal cloud-config; vendor package upgrades disabled)
         │                                 # boot) and tent-node-join.timer (join refresh, every 60 s), then starts
         │                                 # the service and waits for it
         └─ tent-node.service: tent-node up   # idempotent phases, see below
-              └─ systemctl start nomad       # M2.6b: up starts Nomad itself
+              └─ systemctl start nomad.service   # after the host firewall; never enabled for boot
 ```
 
 - **No operator, no SSH.** The node bootstraps itself, without the operator being online and without SSH access. This
@@ -944,16 +948,24 @@ cloud-init (user_data: minimal cloud-config; vendor package upgrades disabled)
     `multi-user.target`, which `WantedBy=` orders after the service, nor before `nomad.service`, which `up` starts
     from inside the service.
   - **Finite timeouts:** 45 minutes for `up`, 5 for a join refresh.
+- **Nomad** ([ADR-0030](adr/0030-nomad-on-nodes.md)). `nomad.service` has no `[Install]` section, so it is never
+  enabled: at every boot `up` starts it in the `nomad` phase, after `hostfirewall` has loaded tent's table, so no
+  workload runs before tent's rules.
 - **Commands.** `tent-node install`, `up` and `refresh-join` take `--config`, `/etc/tent/node.json` by default.
   `tent-node version` prints the version. The exit code is 0 on success, 1 when the command fails and 2 for a wrong
-  command line. tent-node logs to stderr, which systemd puts into the journal. `refresh-join` is a stub until M2.6b.
+  command line. tent-node logs to stderr, which systemd puts into the journal.
+- **The lock.** `up` and `refresh-join` take an exclusive `flock` on `/run/tent-node.lock`, so they never run at once.
+  `up` tries again every second while another run holds it, until its context ends; `refresh-join` gives up after
+  4 minutes and exits 0 ([8.2](#82-tent-node-phases)). At boot the timer's job waits in systemd's queue behind
+  `tent-node.service`, so at boot only runs by hand wait for the lock.
 
 ### 8.2 tent-node phases
 
 `tent-node up` runs as a systemd oneshot on every boot, and every boot runs every phase. Each phase compares the machine
-with NodeConfig and acts only on a difference, so a second run changes nothing but `status.json`, and Nomad is
-restarted only when its files changed. `up` runs the phases in the order of the table and stops at the first that
-fails ([ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md)).
+with NodeConfig and acts only on a difference, so a second run changes nothing but `status.json`. Nomad is restarted
+only when its binary, a NodeConfig file (`nomad.service` among them) or `11-instance.hcl` changed; `05-join.hcl`
+never restarts it. `up` runs the phases in the order of the table and stops at the first that fails
+([ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md)).
 
 - **Results.** A phase ends `done` (it changed the machine), `unchanged`, `skipped` or `failed`, with a reason where
   one helps. The phases after a failure are skipped with `not run: <phase> failed`. Once the context has ended, as
@@ -961,33 +973,48 @@ fails ([ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md)).
 - **`/var/lib/tent/status.json`.** `up` writes it on every run, whatever happened, for the operator and
   `tent toolbox dump`: tent-node's version, the spec hash, the start and end times, the instance (id, zone, private
   IP) and each phase's result. Only root reads it: the directory has mode 0700 and the file 0600.
-- **Built in M2.5 and M2.6a:** `preflight`, `system` and `verify` in M2.5; `hostfirewall`, `runtime` and `cni` in
-  M2.6a ([ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md)), over a filesystem, a program runner and an
-  HTTP transport that tests replace with fakes ([15](#15-testing)). `join` and `nomad` are skipped with
-  `not built yet` until M2.6b. After a reboot `hostfirewall` reports `done`, since the kernel has forgotten tent's
-  table and the phase loads it again; the other phases are `unchanged`.
+- **Built in M2.5, M2.6a and M2.6b:** `preflight`, `system` and `verify` in M2.5; `hostfirewall`, `runtime` and `cni`
+  in M2.6a ([ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md)); `join`, `nomad` and the Nomad checks of
+  `verify` in M2.6b ([ADR-0030](adr/0030-nomad-on-nodes.md)). They run over a filesystem, a program runner, an HTTP
+  transport and a dialer that tests replace with fakes ([15](#15-testing)). After a reboot `hostfirewall` and `nomad`
+  report `done`: the kernel has forgotten tent's table, which `hostfirewall` loads again, and `nomad` starts Nomad,
+  which is never enabled. The other phases are `unchanged`.
 - **Stopping a program.** On Unix each program that a phase runs has a process group of its own. When the context
   ends, the runner sends SIGTERM to the group and waits for the program and its output, at most 10 s, after which it
   kills the program. When it stops waiting, it sends SIGKILL to what is left of the group.
+- **Writing files.** `FS.WriteFile` and `FS.WriteStream` write a temporary file beside the target and rename it over
+  the old one. They first remove the regular files `.<base>.tmp*` beside the target, which a write killed by SIGKILL
+  or a power loss leaves; a directory that cannot be listed fails the write. `FS.Open` and `FS.HasContent` read a
+  file as a stream, so a large file is never held in memory whole.
 
 | Phase | What it does |
 |---|---|
 | `preflight` | Checks linux on amd64 or arm64, root, that systemd runs the machine, and Ubuntu, with a warning as the reason outside 24.04 and 26.04. The host name must be NodeConfig's `name`, which protects against mixed-up user data, and tent-node's version that of NodeConfig's `tent-node` asset. Then it reads the metadata service, for at most 3 minutes ([7.1](#71-interfaces)); NodeConfig carries no instance id. It changes nothing. |
 | `system` | Writes the kernel modules of NodeConfig's `system` ([8.3](#83-nodeconfig-contract)) to `/etc/modules-load.d/tent.conf` and loads them with `modprobe`; writes its sysctls to `/etc/sysctl.d/99-tent.conf` and applies that file with `sysctl -p`; turns on NTP with `timedatectl set-ntp true` where timedatectl can, and elsewhere requires `chrony.service` or `systemd-timesyncd.service` to be active; limits the journal to 1 GiB with a drop-in and restarts journald. A command runs only when its file changed, and when it fails, the file goes, so that the next run tries again. A node without modules or sysctls, such as a server, gets no file for them. It does not set the host name. |
 | `hostfirewall` | **Owns the host firewall.** Loads tent's table `inet tent` from `/etc/tent/firewall.nft` (0600) with `nft -f` when the kernel lacks it or holds another version (the table's comment carries the file's sha256); the file replaces only that table, in one transaction. Stops firewalld before the load and turns ufw off after it ([11.5](#115-firewall-and-host-firewall)). The chains: [9.6](#96-network-perimeter); the metadata block: [9.4](#94-secrets-on-nodes-threat-model). |
-| `runtime` | Skipped when NodeConfig's `system.docker` is false. Writes `/etc/docker/daemon.json` (live-restore; json-file logs, 3 files of 10 MB) before any install, so that Docker's first start reads it, and restarts an installed Docker when the file changed; a failed restart removes the file. Installs Ubuntu's `docker.io` when `dpkg-query` does not report it installed: `dpkg --configure -a`, `apt-get update` and `apt-get install --no-install-recommends docker.io`, without questions and keeping changed configuration files, each tried again every 5 s after any failure, such as a lock that another apt holds, for up to 10 minutes. Then enables and starts `docker.service` where it is not; a job that systemd already has for it, such as the start job of a boot, means Docker starts on its own, and that is no change (`systemctl show -p Job`). Docker keeps its iptables backend. |
+| `runtime` | Skipped when NodeConfig's `system.docker` is false. Writes `/etc/docker/daemon.json` (live-restore; json-file logs, 3 files of 10 MB) before any install, so that Docker's first start reads it, and restarts an installed Docker when the file changed, which restarts Nomad's docker tasks: Nomad's docker driver stops the containers that live-restore kept ([ADR-0030](adr/0030-nomad-on-nodes.md)); a failed restart removes the file. Installs Ubuntu's `docker.io` when `dpkg-query` does not report it installed: `dpkg --configure -a`, `apt-get update` and `apt-get install --no-install-recommends docker.io`, without questions and keeping changed configuration files, each tried again every 5 s after any failure, such as a lock that another apt holds, for up to 10 minutes. Then enables and starts `docker.service` where it is not; a job that systemd already has for it, such as the start job of a boot, means Docker starts on its own, and that is no change (`systemctl show -p Job`). Docker keeps its iptables backend. |
 | `cni` | Skipped on servers. Fetches the `cni-plugins` asset through tent-node's asset cache ([8.5](#85-artifacts-and-verification)), checks every entry of the archive, then writes its files into `/opt/cni/bin` with their mode masked to 0755, owned by root. Only `./` and regular files at the top level with plain names pass; a nested path, `..`, an absolute path, a link, a device, a file above 256 MiB or a file that comes twice fails the phase before a file is written. Files that the archive lacks stay. |
-| `join` | Renders `05-join.hcl` with `nodeconfig.RenderJoin`: the seed from NodeConfig's `join`, or the slot list, refreshed from the live peer set when a server is reachable ([ADR-0016](adr/0016-server-discovery-seed-and-refresh.md)). |
-| `nomad` | Downloads the Nomad zip (verified by sha256); creates the directories; writes NodeConfig's files with their owners and modes ([8.4](#84-nomad-configuration-rendering)): keys and the intro token 0600, certificates and the CA 0644, and `/var/lib/nomad/client` is made with 0700 before the token goes into it; on client and combined nodes, renders `11-instance.hcl` with the instance id from the metadata service (`nodeconfig.RenderInstance`); writes `nomad.service`, which tent renders as a NodeConfig file, so it is in the spec hash: it stops Nomad with SIGTERM, not HashiCorp's stock SIGINT, and has a `TimeoutStopSec` above the drain deadline, or `leave_on_terminate` and `drain_on_shutdown` never act, and it has no `After=` or `Requires=` on `tent-node.service`; starts Nomad. The agent runs as root. |
-| `verify` | Checks that `tent-node.service` and `tent-node-join.timer` are enabled. From M2.6b it also checks the local `/v1/agent/health` without waiting for a leader: a leader needs other servers, which may boot later. It changes nothing. |
+| `join` | Renders `/etc/nomad.d/05-join.hcl` with `nodeconfig.RenderJoin` ([8.4](#84-nomad-configuration-rendering)). Once the node's TLS files exist, it asks the servers that answered last (`/var/lib/tent/peers.json`, 0600) and then NodeConfig's seed, one at a time, for `GET /v1/status/peers?stale` over mTLS with the TLS name `server.<region>.nomad`, 5 s each ([9.1](#91-pki)). The first answer is rendered and kept in the peers file; without one, the servers it knows are rendered. The first boot renders the seed alone, since `nomad` writes the TLS files later. On server and combined nodes the peers file holds the node's own address, which refuses the call at boot, since Nomad is not running yet ([ADR-0016](adr/0016-server-discovery-seed-and-refresh.md), [ADR-0030](adr/0030-nomad-on-nodes.md)). |
+| `nomad` | Fetches the Nomad zip through the asset cache ([8.5](#85-artifacts-and-verification)) and writes the one regular file `nomad` in it to `/usr/local/bin/nomad` (0755; the directory 0755, `root:root`) as a stream, only when the file there differs; `LICENSE.txt` and other entries are ignored. Makes `/etc/nomad.d`, `/etc/nomad.d/tls` and `/var/lib/nomad` (0755), and on client and combined nodes `/var/lib/nomad/client` (0700) before the intro token goes into it. Writes each NodeConfig file ([8.4](#84-nomad-configuration-rendering)), `nomad.service` among them, and on client and combined nodes `11-instance.hcl` with the instance id from the metadata service (`nodeconfig.RenderInstance`), when its content, mode or owner differs (`FS.HasContent`). Runs `systemctl daemon-reload` only when `NeedDaemonReload` asks for it. Starts `nomad.service` when it is not active, and restarts it after a change of its binary, a NodeConfig file or `11-instance.hcl`. Before any write that needs a restart it writes `/var/lib/tent/nomad-restart`, which a successful start or restart removes; a failed mark leaves the file unwritten, so the next run writes it and restarts. Never enables it. The agent runs as root. |
+| `verify` | Checks that `tent-node.service` and `tent-node-join.timer` are enabled. Then asks the node's own agent over mTLS (`https://127.0.0.1:4646`, TLS name `localhost`), each check until it answers 200: `GET /v1/status/leader?stale` on server and combined nodes, which answers without a leader (a leader needs other servers, which may boot later); and `GET /v1/agent/health?type=client` on client and combined nodes. A 500 or a lost connection is tried again 2 s later, 60 failed tries in all (about 2 minutes); anything else fails at once. It changes nothing. |
 
 `tent-node refresh-join` runs from `tent-node-join.timer`, every `join.refreshInterval` (60 seconds) from boot on,
-and after `tent-node.service`. Until M2.6b it is a stub that changes nothing. Then:
-1. It calls `GET https://<known server>:4646/v1/status/peers`, authenticating with the node's own certificate. The
-   endpoint needs no ACL token.
-2. It rewrites `05-join.hcl` atomically when the peer set changes.
-3. Nomad reads that file only at start, so the refresh never restarts Nomad. It only guarantees that the next start
-   finds the current servers.
+and after `tent-node.service` ([ADR-0030](adr/0030-nomad-on-nodes.md)):
+1. It reads NodeConfig; a config that cannot be read or decoded exits 1. Then it takes the lock, waiting at most
+   4 minutes for it. One deadline of 4m45s, 15 s less than its unit's `TimeoutStartSec`, bounds the whole run.
+2. Without the TLS files it changes nothing. On server and combined nodes it asks the node's own agent first,
+   `https://127.0.0.1:4646/v1/status/peers?stale` with the TLS name `server.<region>.nomad`: the cluster's first
+   server has an empty seed, so only its own agent can name its peers. Then, as `join` does, it asks the servers of
+   the peers file and the seed. A client asks those only.
+3. The first answer wins; an empty one is no answer, since a server answers `[]` before the bootstrap. It rewrites
+   `05-join.hcl` atomically only when the rendering changes, and keeps the answer in the peers file, which never
+   holds `127.0.0.1`.
+4. It runs no command and never restarts Nomad; a refresh only makes Nomad's next start find the current servers.
+5. A refresh exits 0 when it succeeds, and when it changes nothing for want of TLS files, a known server or an
+   answer. Of its failures, only the end of its own lock wait or deadline exits 0, with a line that the next refresh
+   tries again. SIGTERM, whose cause the error names (`Error: refresh 05-join.hcl: terminated signal received`), and
+   any other failure, even one after that deadline, exit 1. A refresh whose first server answers and which changes
+   nothing logs nothing.
 
 ### 8.3 NodeConfig contract
 
@@ -1004,6 +1031,7 @@ type NodeConfig struct {
 	NodeGroup  string
 	Name       string            // the node's name, also its hostname; no cloud instance id
 	Role       v1alpha1.Role     // server | client | combined
+	Region     string            // the Nomad region, for the TLS name of the servers; not in the spec hash
 	Assets     []Asset           // {Name, Version, URLs (mirrors), SHA256}: nomad, tent-node; cni-plugins on clients
 	Files      []File            // {Path, Mode, Owner, Content, PerNode, Secret} (8.4)
 	Join       Join              // {Strategy: seed-and-refresh, Servers []netip.Addr, RefreshInterval}
@@ -1013,8 +1041,9 @@ type NodeConfig struct {
 }
 ```
 
-- **Checks and encoding.** `Validate` checks the header, the names, the provider, the role and the form of every
-  asset, file, join setting, system setting and firewall rule, and that a stored spec hash is the config's own. A
+- **Checks and encoding.** `Validate` checks the header, the names, the provider, the role, the region and the form
+  of every asset, file, join setting, system setting and firewall rule, and that a stored spec hash is the config's
+  own. The region follows the rule of `spec.nomad.region` (`v1alpha1.RegionOK`). A
   kernel module or a sysctl key must start with a letter or a digit: `modprobe` would read a leading dash as an
   option, and `sysctl.d` ignores the errors of a line whose key starts with one. `Encode` writes indented JSON, the
   same bytes for the same config. `Decode` refuses unknown fields and anything after the object, then validates.
@@ -1027,10 +1056,13 @@ type NodeConfig struct {
   would otherwise mark every server out of date. The names are constants of `nodeconfig` (`NomadAsset`,
   `CNIPluginsAsset`, `TentNodeAsset`), which `internal/assets` uses too. A name must be a DNS label, as a rule's name
   must (below): tent-node names the asset's file in its cache after it ([8.5](#85-artifacts-and-verification)).
-- **Built by `internal/app`.** `groupTemplates` makes a template per node group: the model's provider, the agent
-  configuration from the completed specs, the CA bundle, the assets, the join strategy, the system settings, the host
-  firewall and the spec hash. `nodeConfig` adds what one node has: its name, `10-node.hcl`, its certificate and key,
-  the seed of servers, and on client and combined nodes the intro token.
+- **Built by `internal/app`.** `groupTemplates` makes a template per node group: the model's provider, the Nomad
+  region from `spec.nomad.region`, the agent configuration from the completed specs, the CA bundle, `nomad.service`,
+  the assets, the join strategy, the system settings, the host firewall and the spec hash. `nodeConfig` adds what one
+  node has: its name, `10-node.hcl`, its certificate and key, the seed of servers, and on client and combined nodes
+  the intro token. `NodeConfigOf` (with `NewNode`) runs these steps for one new node, after `model.New` and the
+  assets, and refuses a missing Nomad version or group before any request. `hack/tent-node-userdata` uses it, and
+  `update` must build a node's config the same way (M2.7).
 - **Join:** `seed-and-refresh`, the private addresses of the servers that exist when the node is created, and a
   refresh every minute ([11.2](#112-server-discovery-seed-and-refresh)).
 - **System**, per role. Servers get none.
@@ -1062,10 +1094,12 @@ type NodeConfig struct {
 - **Size.** One budget for every provider: the whole cloud-config must fit in 24 KiB (`nodeconfig.MaxUserDataBytes`),
   which leaves headroom under Hetzner's 32 KiB (decision 14 of [18](#18-open-questions)). Above it `UserData` fails
   with `user data: node group <group> needs <n> bytes, more than the 24576 that fit`.
-  - The largest config of each role leaves at least 8 KiB for `extraConfig`. With two CAs, a 2 KiB intro token, a
-    1.5 KiB presigned tent-node URL, a mirror per asset and 5 seeds, the user data takes 8.9 KiB on a server and
-    11.5 KiB on a combined node (tests, 2026-09-29). A combined node built from real data, with 621 bytes of
-    `extraConfig`, takes about 10.3 KiB.
+  - The largest config of each role leaves at least 8 KiB for `extraConfig`. With `nomad.service`, two CAs, a 2 KiB
+    intro token, a 1.5 KiB presigned tent-node URL, a mirror per asset, 5 seeds, 12 meta keys and every firewall rule,
+    the user data takes 9.4 KiB on a server, 11.8 KiB on a client and 12.0 KiB on a combined node, which leaves
+    12.0 KiB for `extraConfig` (tests, 2026-10-03). A combined node built from real data, with 621 bytes of
+    `extraConfig`, takes about 10.7 KiB (10858 to 11042 bytes in five runs, since the size varies with the real
+    keys).
   - Vultr's API accepts at least 4 MiB, and 64 KiB worked end to end ([11.6](#116-user_data)). A provider that allows
     less than 24 KiB, such as AWS with 16 KB, brings `Capabilities.MaxUserDataBytes`.
   - Fallback if a provider's limit is too small: user data carries only a short-lived presigned URL and a key for an
@@ -1088,7 +1122,7 @@ type NodeConfig struct {
 
   | File | Contents | Scope | Mode | Roles | Written by |
   |---|---|---|---|---|---|
-  | `00-tent.hcl` | tent's settings: `server` and `client` blocks by role, ACL, TLS, telemetry | group, in the hash | 0644 | all | tent |
+  | `00-tent.hcl` | tent's settings: `server` and `client` blocks by role, ACL, TLS, Consul auto-join off, no update check, telemetry | group, in the hash | 0644 | all | tent |
   | `01-gossip.hcl` | `server { encrypt }` | group, secret, not in the hash | 0600 | server, combined | tent |
   | `05-join.hcl` | `server_join { retry_join = [...] }` | node, kept current by tent-node | 0644 | all | tent-node |
   | `10-node.hcl` | `name`, `datacenter`; `bootstrap_expect` on servers | node | 0644 | all | tent |
@@ -1102,6 +1136,28 @@ type NodeConfig struct {
   The user files exist only when their part of `extraConfig` is set. The intro token goes to
   `/var/lib/nomad/client/intro_token.jwt` (0600, secret) on client and combined nodes
   ([9.3](#93-client-introduction)).
+- **`nomad.service`** (`nodeconfig.RenderNomadService`, [ADR-0030](adr/0030-nomad-on-nodes.md)) is a NodeConfig file
+  of every role too: `/etc/systemd/system/nomad.service`, 0644, group-level and in the hash, the same on every node.
+  Compared with HashiCorp's stock unit it has:
+  - SIGTERM where the stock unit sends SIGINT, so `leave_on_terminate` acts;
+  - systemd's default stop timeout of 90 s, which covers the 5-second graceful wait;
+  - `After=docker.service` and no other tie to Docker, so a shutdown stops Nomad while Docker still answers;
+  - no `[Install]`, so the unit is never enabled ([8.1](#81-bootstrap-chain)).
+
+  It keeps `Type=notify`, `KillMode=process`, the reload by SIGHUP and the stock limits, and has no order on
+  `tent-node.service` and no `Delegate=`. The text: [Appendix A](#appendix-a-nomad-agent-configuration-sketches).
+- **No update check, no Consul auto-join.** `00-tent.hcl` sets `disable_update_check = true` and a `consul` block
+  with `server_auto_join = false` and `client_auto_join = false` (both default to true), so the agent does not look
+  for Nomad servers in Consul, which tent never runs. A client's Consul fingerprinter still asks Consul every 15 s.
+- **No drain at shutdown** (decision 25 of [18](#18-open-questions), [ADR-0030](adr/0030-nomad-on-nodes.md)).
+  `00-tent.hcl` sets no `drain_on_shutdown`: a client that drained itself when Nomad stops would come back from a
+  reboot or a restart of Nomad ineligible, and Nomad has no setting that undoes it
+  ([platform notes §1.6](platform-notes.md#16-the-agent-on-a-node)). So a reboot kills a client's tasks without a
+  migration; they come back when the client restarts them, if it is back first, or when the scheduler replaces them
+  after the missed heartbeats, and the node comes back eligible. A restart of Nomad does not drain, and
+  `KillMode=process` is there so that the tasks keep running (seen on the M2.6b VM checks). tent drains a client
+  through the API before it removes it ([ADR-0017](adr/0017-api-driven-server-removal.md)). tent does not support a
+  `drain_on_shutdown` in `extraConfig`.
 - **Values known only at runtime** (private IP, interface name) are go-sockaddr templates that select the interface by
   cluster CIDR. Nomad supports them in `bind_addr`, `addresses`, `advertise` and `client.network_interface`.
   Interface names vary on both Vultr and Hetzner, so this matters on both.
@@ -1125,17 +1181,18 @@ type NodeConfig struct {
 - **Spec hash** (`nodeconfig.SpecHash`): the first 16 lower-case hex digits of the sha256 of a canonical JSON of the
   group-level configuration, in format 1.
   - Included: the group files that are not secret (`00-tent.hcl`, `98-user-server.hcl`, `99-user-client.hcl`, the CA
-    bundle) with their path, mode, owner and content; each asset's name, version and sha256, tent-node's included;
-    the system settings; the host firewall.
+    bundle, `nomad.service`) with their path, mode, owner and content; each asset's name, version and sha256,
+    tent-node's included; the system settings; the host firewall.
   - Excluded: the node's name, the per-node files (`05-join.hcl`, `10-node.hcl`, `11-instance.hcl`, the certificate,
-    the key, the intro token), the secret files (`01-gossip.hcl`), the join settings, mirror URLs and the provider,
-    which a cluster never changes. The hash does not depend on the order of rules, files or assets.
+    the key, the intro token), the secret files (`01-gossip.hcl`), the join settings, mirror URLs, the provider, which
+    a cluster never changes, and the region, which `00-tent.hcl` carries. The hash does not depend on the order of
+    rules, files or assets.
   - So a different download mirror never rolls the cluster (a kops pitfall), and a new CA does. A new tent version
     that changes rendering or tent-node rolls nodes, and the plan says why.
   - A test pins the hash of a fixed config. A change of the canonical form raises the format.
 - **Format.** Nomad parses the agent configuration with HCL1. Rendering uses text templates with strict quoting. The
-  golden files are authoritative, and tests parse each one back with `github.com/hashicorp/hcl` v1.
-  `nomad config validate` does not check them yet; M2.5 left it to M2.6b.
+  golden files are authoritative, and tests parse each one back with `github.com/hashicorp/hcl` v1. The `online` CI
+  job checks them each week with `nomad config validate` ([16](#16-technology-stack-and-releases)).
 
 The golden files and a sketch: [Appendix A](#appendix-a-nomad-agent-configuration-sketches).
 
@@ -1160,9 +1217,14 @@ The golden files and a sketch: [Appendix A](#appendix-a-nomad-agent-configuratio
   clock for the signature check, so from then a plan needs releases.hashicorp.com, and for a release build github.com
   (decision 12 of [18](#18-open-questions)).
 - **tent-node's downloads** (M2.6a, [ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md)). tent-node keeps
-  one file per asset, `/var/lib/tent/assets/<name>` (0600; `/var/lib/tent` and `assets` 0700). A file whose sha256
-  matches NodeConfig's is used without a download. Any other content, such as an older version, is removed before the
-  download, so each asset has at most one version on disk.
+  one file per asset, `/var/lib/tent/assets/<name>` (0600; `/var/lib/tent` and `assets` 0700). A file with
+  NodeConfig's sha256, mode 0600 and owner root is used without a download; tent-node checks it as a stream
+  (`FS.HasContent`), so a hit holds no asset in memory. A file with the right content and a wrong mode or owner is
+  rewritten from itself as a stream. Any other content, such as an older version, is hashed as a stream and removed
+  before the download, so each asset has at most one version on disk. The phases get the cache file's path: `nomad`
+  opens its zip with `FS.Open`, and `cni` reads its archive once with `ReadFile` and checks the sha256 of the bytes it
+  unpacks, so a cache file changed after the check fails the phase. No path reads a whole cached asset into memory
+  but `cni`'s one read.
   - It tries the asset's URLs in turn, through Go's default transport and proxy settings, and follows up to 10
     redirects itself, as GitHub's release downloads need.
   - Up to 3 tries per URL, 2 s apart, after a failed connection, a 429, a 5xx other than 501, or a body that stalls,
@@ -1170,6 +1232,10 @@ The golden files and a sketch: [Appendix A](#appendix-a-nomad-agent-configuratio
     once.
   - Limits: 10 minutes per try, 60 s for the headers, 60 s without a byte of the body, 256 MiB.
   - Errors and logs show URLs without their query or password (`nodeconfig.RedactURL`).
+  - **The Nomad zip** (M2.6b, [ADR-0030](adr/0030-nomad-on-nodes.md)), about 55 MB, is read from the cache file at
+    any offset, so the `nomad` phase holds neither the zip nor the binary in it, about 140 MB, whole; a download holds
+    the zip in memory while it checks its sha256. The phase hashes the binary and compares it with
+    `/usr/local/bin/nomad`, and writes it only when they differ, as a stream through a temporary file.
 - **The key expires.** HashiCorp's key and its signing subkey expire on 2030-03-01
   ([platform notes §1.4](platform-notes.md#14-downloads-and-verification)). tent checks a signature at the current
   time, so from then on it verifies no Nomad download, older releases included, and fails with `HashiCorp's release
@@ -1243,6 +1309,13 @@ certificate details are in [ADR-0024](adr/0024-cluster-pki-storage-and-certifica
 - **Operator certificates** use `cli.<region>.nomad`, with `clientAuth` only. They are short-lived and issued on
   demand by `tent export nomad`, whose TTL defaults to 24 hours. `internal/pki` takes any TTL above zero.
 - **mTLS** is on for RPC and HTTP: `verify_server_hostname = true`, and `verify_https_client = true` by default.
+- **tent-node's calls** to Nomad's HTTP API (`join`, `refresh-join` and `verify`, M2.6b,
+  [ADR-0030](adr/0030-nomad-on-nodes.md)) use `net/http` and `crypto/tls` alone, since `nomadops` would link
+  `nomad/api` into tent-node: TLS 1.2 or newer, the cluster's CA bundle as the only roots, the node's certificate and
+  key, no proxy, no redirects, 5 s per call and answers of at most 1 MiB. A call to a server at its private address
+  names `server.<region>.nomad`, with the region from NodeConfig. Of the calls to the node's own agent at `127.0.0.1`,
+  `verify`'s name `localhost`, and `refresh-join`'s names `server.<region>.nomad`, which a server's certificate
+  carries. Errors and logs never show the URL.
 - **The gossip encryption key** is used on servers only. It is 32 random bytes in standard base64, as
   `nomad operator gossip keyring generate` makes.
 - **The ACL bootstrap secret** is a random lower-case UUID of version 4 ([9.2](#92-acl-and-tokens)).
@@ -1324,7 +1397,7 @@ the VM, and by default that includes containers.
   - a container started with a plain `docker run` outside Nomad, which gets NET_RAW by Docker's default. Nomad's docker
     driver drops it.
 - After a reboot the table is back once `tent-node.service` has run. Until then no Nomad workload runs: Nomad starts
-  only from `up` (M2.6b).
+  only from `up`, after the table ([ADR-0030](adr/0030-nomad-on-nodes.md)).
 
 Scrubbing on Vultr works like this:
 - Vultr lets user data be changed after creation.
@@ -1670,8 +1743,10 @@ tent therefore uses the generic seed-and-refresh strategy
    takes them from `GET /v2/instances/{id}/vpcs` (`ip_address`, `mac_address`). On first bootstrap,
    `server-0` is created first, and the remaining servers get `[server-0]`. Serf join is transitive, so
    `bootstrap_expect` sees every server.
-2. **Refresh.** On boot and every 60 seconds, tent-node asks a known server for `GET /v1/status/peers` and rewrites
-   `05-join.hcl` whenever the peer set changes.
+2. **Refresh.** At every boot, before Nomad starts, the `join` phase of `up` asks the servers that answered last and
+   then the seed for `GET /v1/status/peers?stale` and renders the answer into `05-join.hcl`
+   ([8.2](#82-tent-node-phases)). `refresh-join` does it every 60 seconds, and on server and combined nodes asks the
+   node's own agent first, so the cluster's first server learns its peers. Neither restarts Nomad.
 3. **Rollout guard.** Before replacing servers, every node must be healthy. Between server replacements tent waits at
    least one refresh interval.
 
@@ -2735,17 +2810,51 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
      - `docker.service`: enable, start, restart, `show -p Job` and their states. `Reboot` leaves an enabled Docker
        inactive with a queued start job, as the timing of the M2.6a VM check on 24.04 suggests.
    - Golden files hold tent's nftables ruleset for each role and `daemon.json`. The tests check that a second `up`
-     changes nothing and makes no request, that after a simulated reboot `hostfirewall` loads the table again and
+     changes nothing and downloads nothing, that after a simulated reboot `hostfirewall` loads the table again and
      reports `done`, that `ufw disable` runs once and never while `ENABLED=no`, and that a server gets neither
      Docker nor the CNI plugins. They also cover the install's retries, with fake time (`testing/synctest`), and
      each kind of bad tar entry.
+   - **Built in M2.6b** ([ADR-0030](adr/0030-nomad-on-nodes.md)). Its dialer fails every call too, so a test sends the
+     machine's calls to a `nodeuptest` server through `Server.Dial`. More fakes in `nodeuptest`:
+     - `Zip` builds zips of stored entries, also one whose header gives a wrong size, and `NomadZip` one as HashiCorp
+       ships Nomad: `LICENSE.txt`, then `nomad`;
+     - `ServeMTLS` is an `httptest` server with a node's certificate from `internal/pki` that requires a client
+       certificate of the CA; `Server.Dial` stands in for the host's dialer whatever address it is asked for, and
+       records the address;
+     - `Agent` (`ServeAgent`) is a fake Nomad agent over `ServeMTLS`: its peers, a leader answer without a leader,
+       and a health check that answers 500 as often as a test sets; `Hang` is a dialer that answers nothing until the
+       call's context ends;
+     - `Runner.Next` queues a one-time answer of a command before the one that `On` gave it;
+     - the in-memory filesystem has `Open`, `WriteStream` and `HasContent`, and the fake Ubuntu has
+       `systemctl restart` and `/usr/local/bin`; `Reboot` starts the enabled units again and leaves the others
+       inactive, so `nomad.service` stays inactive until `up` starts it.
+   - A golden file holds `nomad.service`. The tests check that:
+     - a second `up` neither writes the binary nor restarts Nomad;
+     - a changed file restarts Nomad once, also when the run that wrote it failed before the restart, and a directory
+       change or a reload alone restarts nothing;
+     - a server gets no `/var/lib/nomad/client` and no `11-instance.hcl`;
+     - `verify` tries 60 times, 2 s apart (with fake time and refused dials), and passes on a 500 and then a 200 over
+       loopback without a wait, since `testing/synctest` cannot wait on a real socket;
+     - `up` holds the lock while the phases run.
+
+     They also cover each kind of bad zip, `join`'s fallbacks to the known servers, the lock with real `flock` calls
+     on Unix, and `refresh-join`: a changed and an unchanged answer, no answer, a server asking its own agent first,
+     the lock wait and the deadline with their exit codes, and a failed write.
+   - `hack/vultr-spike/spike.sh --only tentnode` (spike v8) boots a development build of tent-node on a real Vultr VM
+     and reboots it, with the user data of `hack/tent-node-userdata`: the only node of a cluster `tent-node-check`, a
+     combined node with `bootstrap_expect = 1`, no seed and no intro token, built by `app.NodeConfigOf`, with
+     throwaway secrets (decision 24 of [18](#18-open-questions)). The check records the phases, Nomad's unit, an ACL
+     bootstrap, a docker job in bridge mode across a restart of Docker (its container kept or replaced), of
+     containerd and of Nomad, `refresh-join`'s first real mTLS peers call, and after the reboot the client eligible
+     and Nomad stopped before Docker; it also records needrestart, `20auto-upgrades`, `debconf-show docker.io` and
+     `docker.service`'s relations ([README](../hack/vultr-spike/README.md)).
    - `ExecRunner`'s process groups are tested on Unix with real processes, checked by their recorded ids.
    - The tests run on Linux, macOS and Windows. `OSFS` sets and compares modes and owners only on Unix, and the tests
      of modes and owners skip Windows.
    - A test in `internal/buildconfig` lists what `./cmd/tent-node` links with `go list -deps`
      ([5](#5-repository-layout-and-dependency-rules)).
-   - `hack/vultr-spike/spike.sh --only tentnode` boots a development build of tent-node on a real Vultr VM and
-     reboots it.
+   - `TestNomadAgentFiles`, on every pull request, fails when a golden of `internal/nodeconfig` goes to no role, so
+     the weekly `nomad config validate` ([16](#16-technology-stack-and-releases)) covers every golden.
 5. **E2E on Vultr** (`//go:build e2e`, black box):
    - Region `ams`, falling back to `fra` or `lhr`.
    - Scenarios: `smoke`, `ha`, `upgrade` and `security`.
@@ -2807,8 +2916,11 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
   - govulncheck, also weekly;
   - the `online` job, weekly and never on pull requests: the tests named `…Online` read public release sites with
     `TENT_TEST_ONLINE=1`. They check that the recommended Nomad of `stable` still verifies with the embedded HashiCorp
-    key, and fail when the key expires within 180 days ([8.5](#85-artifacts-and-verification)). The job can also be
-    run by hand (`workflow_dispatch`); a manual run starts only this job, and every other job of `ci.yml` skips it.
+    key, and fail when the key expires within 180 days ([8.5](#85-artifacts-and-verification)). They also run
+    `nomad config validate` of the channel's minimum and recommended Nomad on each role's goldens of
+    `internal/nodeconfig` (`TestNomadConfigValidateOnline` in `internal/assets`, decision 23 of
+    [18](#18-open-questions)). The job can also be run by hand (`workflow_dispatch`); a manual run starts only this
+    job, and every other job of `ci.yml` skips it.
     `internal/buildconfig` checks that every test that reads `TENT_TEST_ONLINE` has such a name;
   - the licences of every module tent or tent-node links, on each platform the release builds for: each must be
     Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT or MPL-2.0, and every licence file other than a NOTICE must name
@@ -2850,10 +2962,13 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
 | Nomad 2.x version skew rules not yet restated | broken upgrades | channels allow one major version from a minimum, and tent warns about versions they have not tested; servers before clients |
 | HashiCorp's embedded release key expires on 2030-03-01, or is rotated or revoked | tent cannot verify Nomad downloads, or trusts a revoked key | a weekly CI job fails 180 days before the expiry; a tent release embeds the new key ([8.5](#85-artifacts-and-verification)) |
 | BUSL licence of Nomad | a paid managed offering would need a commercial licence | tent downloads official binaries and never redistributes them; stays free (not legal advice) |
-| Nomad reads a rendered value differently from the HCL1 that the tests use: Nomad parses with its fork `v1.0.1-nomad-1`, the tests with upstream v1.0.0 | a node does not start, or runs with another setting | strict quoting refuses what HCL1 cannot read back; tests parse every golden back; `nomad config validate` of the goldens, left to M2.6b |
+| Nomad reads a rendered value differently from the HCL1 that the tests use: Nomad parses with its fork `v1.0.1-nomad-1`, the tests with upstream v1.0.0 | a node does not start, or runs with another setting | strict quoting refuses what HCL1 cannot read back; tests parse every golden back; the weekly `online` job runs `nomad config validate` of the channel's minimum and recommended Nomad on the goldens ([ADR-0030](adr/0030-nomad-on-nodes.md)) |
+| A reboot of a client kills its tasks without a migration, since clients do not drain themselves at shutdown | the tasks are down until the client restarts them, if it is back first, or the scheduler replaces them after the missed heartbeats | a self-drain would leave the node ineligible after every reboot or restart (hashicorp/nomad#17093); tent drains a client through the API before it removes it ([ADR-0017](adr/0017-api-driven-server-removal.md), [ADR-0030](adr/0030-nomad-on-nodes.md)) |
+| A client's servers are not up within `verify`'s 2 minutes | `up` fails on the client, and on the first boot `install` and cloud-init, though Nomad joins later | M2.7 creates clients after the servers are healthy and judges a client by its registration in Nomad |
+| tent-node restarts Docker, after a hand edit of `daemon.json` and an `up` by hand, or dockerd crashes | the node's docker tasks restart after the restart policy's delay (17-20 s seen): Nomad's docker driver stops the containers that live-restore kept ([platform notes §6.4](platform-notes.md#64-restarts-of-docker-containerd-and-nomad)) | accepted on 2026-10-05 ([ADR-0030](adr/0030-nomad-on-nodes.md)); tent-node restarts Docker only for its own `daemon.json` |
 | nomadops relies on Nomad answers read in the v1.11.3 source, not in 2.0.7: the text `ACL bootstrap already done`, 403 from `token/self` for an unknown secret, the report in the 429 of an unhealthy cluster | a repeated bootstrap fails, or a health wait runs out | nomadops matches status codes and one message prefix; E2E runs real Nomad from M2.9 ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)) |
 | `extraConfig` overrides tent's settings, such as `data_dir`, the TLS paths, the dynamic ports or Nomad's bridge subnet (`bridge_network_subnet`) | a node cannot find its files, a client is refused, or the host firewall blocks workloads | documented as unsupported ([3.3](#33-api-rules), [8.4](#84-nomad-configuration-rendering)) |
-| A unit ordering between cloud-init, tent-node and Nomad hangs the boot, or `up` hangs | the node never comes up; cloud-init never finishes | `install` waits for `up`, and no unit is ordered on cloud-init, `multi-user.target` or `nomad.service` (a unit test checks); finite start timeouts (45 minutes for `up`); `status.json` on every run; the M2.5 VM check boots and reboots a node ([8.1](#81-bootstrap-chain)) |
+| A unit ordering between cloud-init, tent-node and Nomad hangs the boot, or `up` hangs | the node never comes up; cloud-init never finishes | `install` waits for `up`, and no unit is ordered on cloud-init, `multi-user.target` or `nomad.service`, nor `nomad.service` on `tent-node.service` (a unit test checks); `nomad.service` is never enabled; finite start timeouts (45 minutes for `up`); `status.json` on every run; the M2.5 VM check boots and reboots a node ([8.1](#81-bootstrap-chain)) |
 | Secrets in user data | node impersonation if metadata leaks | mitigations in [9.4](#94-secrets-on-nodes-threat-model), including scrubbing on Vultr; bootstrap controller in v2 |
 | Hetzner rate limit (3600/h per project) | slow or failing large rollouts | snapshots, batched waits, adaptive throttling, targeted rollouts, one project per cluster |
 
@@ -2935,8 +3050,30 @@ Decided on 2026-09-29:
     service on a node gets no answer. A workload with CAP_NET_ADMIN or CAP_NET_RAW can still set the mark, such as a
     task that the operator gives NET_RAW for ping ([9.4](#94-secrets-on-nodes-threat-model)).
 
-Decisions 18 to 20 are recorded in [ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md), and decision 21 in
-[ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md).
+Decided on 2026-09-30:
+
+22. **The Nomad region on the node:** NodeConfig carries `region`, validated as `spec.nomad.region` is and outside the
+    spec hash, since `00-tent.hcl` brings the region into it already. tent-node names the servers it calls
+    `server.<region>.nomad`. Parsing the region from the node's certificate was the alternative
+    ([8.3](#83-nodeconfig-contract)).
+23. **`nomad config validate` of the goldens:** an `…Online` test in the weekly `online` CI job, not on every pull
+    request and not only in a VM check. On 2026-10-02 the maintainer added that it runs with both the channel's minimum
+    and its recommended Nomad: a key added after the minimum would break a cluster pinned to an older allowed version
+    ([16](#16-technology-stack-and-releases)).
+24. **The secrets of the tent-node VM check:** `hack/tent-node-userdata` makes a throwaway CA, the node's certificate
+    and a gossip key on each run, for one combined node with `enforcement = "warn"` and no intro token. They sit in the
+    user data of a VM that is deleted after the check; there is no scrub before M2.7 ([15](#15-testing)).
+
+Decided on 2026-10-05:
+
+25. **No drain at shutdown:** clients do not drain themselves when Nomad stops, since Nomad's self-drain leaves them
+    ineligible after their next start; `00-tent.hcl` sets no `drain_on_shutdown`. tent's own removals drain a client
+    through the Nomad API first ([8.4](#84-nomad-configuration-rendering),
+    [ADR-0017](adr/0017-api-driven-server-removal.md)).
+
+Decisions 18 to 20 are recorded in [ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md), decision 21 in
+[ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md), and decisions 22 to 25 in
+[ADR-0030](adr/0030-nomad-on-nodes.md).
 
 ---
 
@@ -2967,9 +3104,10 @@ same template with `attr \"name\"`.
 
 ```hcl
 # Rendered by tent. Do not edit: changes are overwritten on the next boot.
-region             = "global"
-data_dir           = "/var/lib/nomad"
-leave_on_terminate = true # leave the cluster gracefully when Nomad stops
+region               = "global"
+data_dir             = "/var/lib/nomad"
+leave_on_terminate   = true # leave the cluster gracefully when Nomad stops
+disable_update_check = true
 
 addresses {
   http = "127.0.0.1 <private>"
@@ -2988,11 +3126,6 @@ client {
   network_interface = "<interface>"
   min_dynamic_port  = 20000
   max_dynamic_port  = 32000
-
-  drain_on_shutdown {
-    deadline           = "10m"
-    ignore_system_jobs = true
-  }
 
   options {
     "driver.allowlist"     = "docker,exec"
@@ -3023,6 +3156,12 @@ tls {
 
   verify_server_hostname = true
   verify_https_client    = true
+}
+
+# There is no Consul: do not look for Nomad servers in it.
+consul {
+  server_auto_join = false
+  client_auto_join = false
 }
 
 telemetry {
@@ -3080,6 +3219,31 @@ client {
     "tent_instance_id" = "cb676a46-66fd-4dfb-b839-443f2e6c0b60"
   }
 }
+```
+
+**Every role: `/etc/systemd/system/nomad.service`** ([8.4](#84-nomad-configuration-rendering)), from
+[`nomad.service.golden`](../internal/nodeconfig/testdata/nomad.service.golden):
+
+```ini
+# Rendered by tent. Do not edit: changes are overwritten on the next boot.
+[Unit]
+Description=The Nomad agent of this node
+Documentation=https://developer.hashicorp.com/nomad
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/nomad agent -config /etc/nomad.d
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+KillSignal=SIGTERM
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+LimitNPROC=infinity
+TasksMax=infinity
+OOMScoreAdjust=-1000
 ```
 
 ---

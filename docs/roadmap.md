@@ -30,7 +30,9 @@ and, from M2 on, in the E2E suite on Vultr.
 ## Maintainer decisions
 
 These come from [architecture §18](architecture.md#18-open-questions). The first six were decided on 2026-09-25, the
-seventh to the fifteenth on 2026-09-28, and the sixteenth to the twenty-first on 2026-09-29.
+seventh to the fifteenth on 2026-09-28, the sixteenth to the twenty-first on 2026-09-29, the twenty-second to the
+twenty-fourth on 2026-09-30, and the twenty-fifth on 2026-10-05. The maintainer extended the twenty-third on
+2026-10-02.
 
 | # | Question | Decision |
 |---|---|---|
@@ -55,6 +57,10 @@ seventh to the fifteenth on 2026-09-28, and the sixteenth to the twenty-first on
 | 19 | The handover from cloud-init to tent-node | `install` starts `tent-node.service` and waits for it; the unit is not ordered on `cloud-final.service`, `cloud-init.target`, `cloud-config.service`, `multi-user.target` or `nomad.service` (nor, as a precaution since M2.6a, `cloud-init-main.service`), and has a finite `TimeoutStartSec`; `up` starts Nomad itself, and `verify` checks it without waiting for a leader |
 | 20 | The provider on the node | NodeConfig carries `provider`, validated and outside the spec hash; tent-node picks its metadata service by it |
 | 21 | The metadata service on a node | only tent-node's socket reaches it, by the socket mark `0x747`; every other packet to it is dropped, from the host and from containers; root `curl` on a node gets no answer, and a workload with CAP_NET_ADMIN or CAP_NET_RAW can still set the mark ([ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md)) |
+| 22 | The Nomad region on the node | a `region` field in NodeConfig, validated as `spec.nomad.region` is and outside the spec hash; tent-node calls servers as `server.<region>.nomad` ([ADR-0030](adr/0030-nomad-on-nodes.md)) |
+| 23 | `nomad config validate` of the golden files | an online test in the weekly CI job, not on every pull request; since 2026-10-02 with both the channel's minimum and its recommended Nomad |
+| 24 | The secrets of the tent-node VM check | `hack/tent-node-userdata` makes a throwaway CA, node certificate and gossip key per run; they sit in the user data of a VM that is deleted after the check, with no scrub before M2.7 |
+| 25 | Draining at shutdown | clients do not drain themselves when Nomad stops, since Nomad's self-drain leaves them ineligible after their next start; tent's own removals drain a client through the Nomad API ([ADR-0030](adr/0030-nomad-on-nodes.md)) |
 
 New questions for the maintainer are issues with the `decision` label.
 

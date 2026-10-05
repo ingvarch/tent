@@ -6,7 +6,12 @@
   verified it on 2026-09-29) and by [ADR-0029](0029-host-firewall-runtime-and-cni-on-nodes.md) (the asset names are
   constants of `nodeconfig`; rule and asset names are DNS labels; client and combined nodes get rules from Nomad's
   and Docker's bridges; of the M2.6 follow-ups, the metadata block matches tent-node's socket mark, and the Nomad
-  items move to M2.6b)
+  items move to M2.6b) and by [ADR-0030](0030-nomad-on-nodes.md) (NodeConfig gains `region`, validated and out of the
+  spec hash; `nomad.service` is a group-level NodeConfig file of every role, in the hash; `00-tent.hcl` turns off the
+  update check and Consul auto-join and has no `drain_on_shutdown`, so the unit keeps systemd's stop timeout; the M2.6
+  follow-ups on `/var/lib/nomad/client`, the unit's signal and `nomad config validate` of the goldens are done; the
+  user data grows by about 0.5 KiB and still leaves 12.0 KiB for `extraConfig`
+  ([architecture §8.3](../architecture.md#83-nodeconfig-contract)))
 - **Date:** 2026-09-29
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0006](0006-two-binaries-and-nodeconfig.md) (the size budget, the instance id),

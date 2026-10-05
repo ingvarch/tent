@@ -1,6 +1,8 @@
 # ADR-0005: Immutable nodes and Nomad-aware rolling updates
 
-- **Status:** Accepted; server removal amended by [ADR-0017](0017-api-driven-server-removal.md)
+- **Status:** Accepted; server removal amended by [ADR-0017](0017-api-driven-server-removal.md); amended by
+  [ADR-0030](0030-nomad-on-nodes.md) (tent sets no `drain_on_shutdown`: a client that drains itself at shutdown
+  comes back ineligible; tent drains a client through the Nomad API before it removes it, ADR-0017)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0004](0004-layered-architecture.md), [ADR-0009](0009-server-discovery-fixed-ip-slots.md),
