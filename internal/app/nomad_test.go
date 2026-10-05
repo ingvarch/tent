@@ -305,6 +305,17 @@ func (c *worldClient) Nodes(ctx context.Context) (v []nomadops.Node, err error) 
 	return v, nil
 }
 
+func (c *worldClient) Peers(ctx context.Context) (v []nomadops.Peer, err error) {
+	err = c.do(ctx, nomadfake.Call{Name: "Peers"}, func(ctx context.Context) (err error) {
+		v, err = c.inner.Peers(ctx)
+		return
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
 func (c *worldClient) Health(ctx context.Context) (v nomadops.Health, err error) {
 	err = c.do(ctx, nomadfake.Call{Name: "Health"}, func(ctx context.Context) (err error) {
 		v, err = c.inner.Health(ctx)

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/netip"
 	"reflect"
 	"slices"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/nomadops/nomadfake"
@@ -102,6 +104,10 @@ var apiCalls = []apiCall{
 		_, err := a.Health(ctx)
 		return err
 	}},
+	{"Peers", func(ctx context.Context, a nomadops.API) error {
+		_, err := a.Peers(ctx)
+		return err
+	}},
 }
 
 func TestAPICallsCoverTheAPI(t *testing.T) {
@@ -166,10 +172,10 @@ func argOf(name string) string {
 	return ""
 }
 
-// TestACLCallsNeedTheBootstrap checks that, before the ACL system is bootstrapped, Nodes, Health and IntroToken fail
-// for good as Nomad's 403 does, while Leader and Bootstrap work; and that they work after the bootstrap.
+// TestACLCallsNeedTheBootstrap checks that, before the ACL system is bootstrapped, Nodes, Health, Peers and IntroToken
+// fail for good as Nomad's 403 does, while Leader and Bootstrap work; and that they work after the bootstrap.
 func TestACLCallsNeedTheBootstrap(t *testing.T) {
-	for _, name := range []string{"IntroToken", "Nodes", "Health"} {
+	for _, name := range []string{"IntroToken", "Nodes", "Health", "Peers"} {
 		t.Run(name, func(t *testing.T) {
 			f, a := newAPI()
 			var call apiCall
@@ -202,6 +208,7 @@ func TestNewCluster(t *testing.T) {
 	f, a := newBootstrappedAPI(t)
 	f.Register(nomadops.Node{Name: "prod-workers-0", Status: "ready", Eligible: true})
 	f.SetHealth(nomadops.Health{Healthy: true, Voters: 3})
+	f.SetPeers([]nomadops.Peer{{Name: "prod-servers-0.eu", Voter: true}})
 	f.Fail(t, "Bootstrap", errBoom)
 	f.NewCluster()
 	if _, err := a.Leader(t.Context()); !errors.Is(err, nomadops.ErrNotReady) {
@@ -223,7 +230,10 @@ func TestNewCluster(t *testing.T) {
 	if h, err := a.Health(t.Context()); err != nil || h != (nomadops.Health{}) {
 		t.Errorf("Health() = %+v, %v; want the zero Health", h, err)
 	}
-	if got, want := len(f.Calls()), 7; got != want {
+	if peers, err := a.Peers(t.Context()); err != nil || len(peers) != 0 {
+		t.Errorf("Peers() = %v, %v; want none", peers, err)
+	}
+	if got, want := len(f.Calls()), 8; got != want {
 		t.Errorf("%d calls logged, want %d", got, want)
 	}
 	if got := len(f.Tokens()); got != 1 {
@@ -433,7 +443,7 @@ func TestNodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Nodes: %v", err)
 	}
-	if diff := cmp.Diff(want, got); diff != "" {
+	if diff := cmp.Diff(want, got, cmpopts.EquateComparable(netip.Addr{})); diff != "" {
 		t.Errorf("Nodes() (-want +got):\n%s", diff)
 	}
 	got[0].Status = "down"
@@ -442,6 +452,64 @@ func TestNodes(t *testing.T) {
 	}
 	wantCalls(t, f, bootstrapCall,
 		nomadfake.Call{Name: "Nodes"}, nomadfake.Call{Name: "Nodes"}, nomadfake.Call{Name: "Nodes"})
+}
+
+// TestRegisterListsOneNameAtTwoAddresses checks that a node of the same name at another address is listed beside the
+// first, as Nomad lists a node that went down beside its replacement, and that one at the same address replaces it.
+func TestRegisterListsOneNameAtTwoAddresses(t *testing.T) {
+	f, a := newBootstrappedAPI(t)
+	old, fresh := netip.MustParseAddr("10.64.0.6"), netip.MustParseAddr("10.64.0.9")
+	f.Register(nomadops.Node{Name: "prod-workers-0", Address: old, Status: "ready", Eligible: true})
+	f.Register(nomadops.Node{Name: "prod-workers-0", Address: fresh, Status: "initializing"})
+	f.Register(nomadops.Node{Name: "prod-workers-0", Address: old, Status: "down", Eligible: true}) // replaces the first
+	f.Register(nomadops.Node{Name: "prod-workers-1", Status: "ready", Eligible: true})
+	f.Register(nomadops.Node{Name: "prod-workers-1", Status: "down"}) // no address on both: the same node
+	want := []nomadops.Node{
+		{Name: "prod-workers-0", Address: old, Status: "down", Eligible: true},
+		{Name: "prod-workers-0", Address: fresh, Status: "initializing"},
+		{Name: "prod-workers-1", Status: "down"},
+	}
+	got, err := a.Nodes(t.Context())
+	if err != nil {
+		t.Fatalf("Nodes: %v", err)
+	}
+	if diff := cmp.Diff(want, got, cmpopts.EquateComparable(netip.Addr{})); diff != "" {
+		t.Errorf("Nodes() (-want +got):\n%s", diff)
+	}
+}
+
+func TestPeers(t *testing.T) {
+	f, a := newBootstrappedAPI(t)
+	if got, err := a.Peers(t.Context()); err != nil || got == nil || len(got) != 0 {
+		t.Errorf("Peers() of a new fake = %#v, %v; want an empty list", got, err)
+	}
+	peers := []nomadops.Peer{
+		{Name: "prod-servers-0.eu", Address: netip.MustParseAddrPort("10.64.0.3:4647"), Voter: true},
+		{Name: "prod-servers-1.eu", Address: netip.MustParseAddrPort("10.64.0.4:4647")},
+	}
+	f.SetPeers(peers)
+	peers[0].Name = "changed" // the fake keeps a copy
+	got, err := a.Peers(t.Context())
+	if err != nil {
+		t.Fatalf("Peers: %v", err)
+	}
+	want := []nomadops.Peer{
+		{Name: "prod-servers-0.eu", Address: netip.MustParseAddrPort("10.64.0.3:4647"), Voter: true},
+		{Name: "prod-servers-1.eu", Address: netip.MustParseAddrPort("10.64.0.4:4647")},
+	}
+	if diff := cmp.Diff(want, got, cmpopts.EquateComparable(netip.AddrPort{}, netip.Addr{})); diff != "" {
+		t.Errorf("Peers() (-want +got):\n%s", diff)
+	}
+	got[0].Voter = false
+	if again, _ := a.Peers(t.Context()); !again[0].Voter {
+		t.Errorf("changing a returned list changed the fake: %+v", again)
+	}
+	f.SetHealth(nomadops.Health{Healthy: true, Voters: 3}) // does not touch the peers
+	if again, _ := a.Peers(t.Context()); len(again) != 2 {
+		t.Errorf("SetHealth changed the peers: %+v", again)
+	}
+	wantCalls(t, f, bootstrapCall, nomadfake.Call{Name: "Peers"}, nomadfake.Call{Name: "Peers"},
+		nomadfake.Call{Name: "Peers"}, nomadfake.Call{Name: "Peers"})
 }
 
 func TestHealth(t *testing.T) {

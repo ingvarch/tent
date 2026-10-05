@@ -116,3 +116,8 @@ func (s *Servers) Nodes(ctx context.Context) ([]Node, error) {
 func (s *Servers) Health(ctx context.Context) (Health, error) {
 	return try(ctx, s, func(a API) (Health, error) { return a.Health(ctx) })
 }
+
+// Peers returns the servers of the Raft configuration.
+func (s *Servers) Peers(ctx context.Context) ([]Peer, error) {
+	return try(ctx, s, func(a API) ([]Peer, error) { return a.Peers(ctx) })
+}
