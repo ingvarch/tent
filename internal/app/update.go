@@ -72,12 +72,13 @@ func (s NodeStep) String() string {
 // With apply it takes the cluster's lock and plans again under it. When that plan has changes, it calls OnUpdatePlan
 // with it, then OnWarning with each warning about the cluster, such as a Nomad API that the whole internet may reach
 // or a Nomad version that the channel has not tested. Then it raises the tent version, writes the missing secrets,
-// and applies the plan in this order: the infrastructure's changes other than its deletes; the node creates, one at a
-// time, servers first; the waits for nodes that an interrupted update created; the node deletes; and the
-// infrastructure's deletes, so that a firewall group goes only once its nodes are gone. A create or a wait may take
-// 10 minutes. The first step that fails stops the update, and running it again finishes the job. Once every step has
-// succeeded, Update writes the completed spec when the plan says so. It returns the plan it applied, made under the
-// lock, with the error; the plan says Applied once every step has succeeded, or at once when it has no changes.
+// and applies the plan in this order: the infrastructure's changes other than its deletes; the waits for the server
+// and combined nodes that an interrupted update created, then the creates of the missing server and combined nodes;
+// then the same for client nodes; the node deletes; and the infrastructure's deletes, so that a firewall group goes
+// only once its nodes are gone. Nodes are created one at a time. A create or a wait may take 10 minutes. The first
+// step that fails stops the update, and running it again finishes the job. Once every step has succeeded, Update
+// writes the completed spec when the plan says so. It returns the plan it applied, made under the lock, with the
+// error; the plan says Applied once every step has succeeded, or at once when it has no changes.
 func (s *Service) Update(ctx context.Context, cluster string, apply bool) (_ UpdatePlan, err error) {
 	defer func() { err = stopped(ctx, err) }()
 	l, err := s.layout(ctx, cluster)

@@ -132,16 +132,16 @@ const waitOp = "5f0c2a9e-8d1b-4c7e-9f3a-2b6d8e1c4a70"
 func exampleNodes() []app.NodeChange {
 	return []app.NodeChange{
 		{
+			Action: app.NodeWait, Name: "prod-servers-1", Group: "servers", Role: v1alpha1.RoleServer, Zone: "ams",
+			MachineType: "vc2-2c-4gb", Image: "ubuntu-24.04", ID: "instance-2", Op: waitOp,
+		},
+		{
 			Action: app.NodeCreate, Name: "prod-servers-2", Group: "servers", Role: v1alpha1.RoleServer, Zone: "ams",
 			MachineType: "vc2-2c-4gb", Image: "ubuntu-24.04",
 		},
 		{
 			Action: app.NodeCreate, Name: "prod-workers-1", Group: "workers", Role: v1alpha1.RoleClient, Zone: "ams",
 			MachineType: "vc2-4c-8gb", Image: "ubuntu-24.04",
-		},
-		{
-			Action: app.NodeWait, Name: "prod-servers-1", Group: "servers", Role: v1alpha1.RoleServer, Zone: "ams",
-			MachineType: "vc2-2c-4gb", Image: "ubuntu-24.04", ID: "instance-2", Op: waitOp,
 		},
 		{Action: app.NodeDelete, Name: "prod-old-0", ID: "instance-7", Reason: "not in the spec"},
 		{Action: app.NodeDelete, Name: "prod-workers-0", ID: "instance-5", Reason: "duplicate"},
@@ -158,7 +158,7 @@ var secretNames = []string{
 // someNodes returns a create and a delete of nodes.
 func someNodes() []app.NodeChange {
 	nodes := exampleNodes()
-	return []app.NodeChange{nodes[1], nodes[5]}
+	return []app.NodeChange{nodes[2], nodes[5]}
 }
 
 // exampleUpdate is an update plan with every part.

@@ -226,9 +226,74 @@ func TestPlanNodes(t *testing.T) {
 				member(s3, 0, "i-1", minutes(1)), notReady(member(s3, 1, "i-2", minutes(1))),
 			},
 			want: []NodeChange{
-				wantCreate(s3, 2, "ams"), wantCreate(w2, 1, "ams"),
-				wantWait(s3, notReady(member(s3, 1, "i-2", minutes(1)))),
-				wantWait(w2, notReady(member(w2, 0, "i-4", minutes(2)))),
+				wantWait(s3, notReady(member(s3, 1, "i-2", minutes(1)))), wantCreate(s3, 2, "ams"),
+				wantWait(w2, notReady(member(w2, 0, "i-4", minutes(2)))), wantCreate(w2, 1, "ams"),
+			},
+		},
+		{
+			name:   "a pending server and a missing server: the wait first",
+			groups: []model.NodeGroup{s3},
+			instances: []cloud.Instance{
+				member(s3, 0, "i-1", minutes(1)), notReady(member(s3, 1, "i-2", minutes(1))),
+			},
+			want: []NodeChange{
+				wantWait(s3, notReady(member(s3, 1, "i-2", minutes(1)))), wantCreate(s3, 2, "ams"),
+			},
+		},
+		{
+			name:   "a pending client and a missing client: the wait first",
+			groups: []model.NodeGroup{w2},
+			instances: []cloud.Instance{
+				notReady(member(w2, 0, "i-1", minutes(1))),
+			},
+			want: []NodeChange{
+				wantWait(w2, notReady(member(w2, 0, "i-1", minutes(1)))), wantCreate(w2, 1, "ams"),
+			},
+		},
+		{
+			name:   "a pending client does not hold back the servers' creates",
+			groups: []model.NodeGroup{apps, s3},
+			instances: []cloud.Instance{
+				notReady(member(apps, 0, "i-4", minutes(1))), member(s3, 0, "i-1", minutes(1)),
+			},
+			want: []NodeChange{
+				wantCreate(s3, 1, "ams"), wantCreate(s3, 2, "ams"),
+				wantWait(apps, notReady(member(apps, 0, "i-4", minutes(1)))), wantCreate(apps, 1, "ams"),
+			},
+		},
+		{
+			name:   "a pending server is waited for before the servers' creates, whatever the group names",
+			groups: []model.NodeGroup{apps, s3},
+			instances: []cloud.Instance{
+				notReady(member(apps, 0, "i-4", minutes(1))), notReady(member(s3, 0, "i-1", minutes(1))),
+			},
+			want: []NodeChange{
+				wantWait(s3, notReady(member(s3, 0, "i-1", minutes(1)))),
+				wantCreate(s3, 1, "ams"), wantCreate(s3, 2, "ams"),
+				wantWait(apps, notReady(member(apps, 0, "i-4", minutes(1)))), wantCreate(apps, 1, "ams"),
+			},
+		},
+		{
+			name:   "waits of one role go by node name, not by age",
+			groups: []model.NodeGroup{s3},
+			instances: []cloud.Instance{
+				notReady(member(s3, 2, "i-1", minutes(1))), notReady(member(s3, 0, "i-2", minutes(2))),
+			},
+			want: []NodeChange{
+				wantWait(s3, notReady(member(s3, 0, "i-2", minutes(2)))),
+				wantWait(s3, notReady(member(s3, 2, "i-1", minutes(1)))),
+				wantCreate(s3, 1, "ams"),
+			},
+		},
+		{
+			name:   "combined nodes are ordered with the servers",
+			groups: []model.NodeGroup{app1, node1},
+			instances: []cloud.Instance{
+				notReady(member(app1, 0, "i-4", minutes(1))),
+			},
+			want: []NodeChange{
+				wantCreate(node1, 0, "ams"),
+				wantWait(app1, notReady(member(app1, 0, "i-4", minutes(1)))),
 			},
 		},
 		{
@@ -248,7 +313,7 @@ func TestPlanNodes(t *testing.T) {
 			},
 		},
 		{
-			name:   "the order of changes: creates, waits, deletes",
+			name:   "the order of changes: server waits and creates, client waits and creates, deletes",
 			groups: []model.NodeGroup{apps, s3},
 			instances: []cloud.Instance{
 				member(old, 0, "i-7", minutes(1)),
@@ -256,8 +321,8 @@ func TestPlanNodes(t *testing.T) {
 				member(s3, 0, "i-1", minutes(1)), notReady(member(s3, 1, "i-2", minutes(1))),
 			},
 			want: []NodeChange{
-				wantCreate(s3, 2, "ams"), wantCreate(apps, 1, "ams"),
-				wantWait(s3, notReady(member(s3, 1, "i-2", minutes(1)))),
+				wantWait(s3, notReady(member(s3, 1, "i-2", minutes(1)))), wantCreate(s3, 2, "ams"),
+				wantCreate(apps, 1, "ams"),
 				wantDelete(member(apps, 0, "i-5", minutes(2)), "duplicate"),
 				wantDelete(member(old, 0, "i-7", minutes(1)), "not in the spec"),
 			},
