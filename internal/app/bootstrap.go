@@ -1,0 +1,385 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/netip"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/ingvarch/tent/api/v1alpha1"
+	"github.com/ingvarch/tent/internal/cloud"
+	"github.com/ingvarch/tent/internal/model"
+	"github.com/ingvarch/tent/internal/nodeconfig"
+	"github.com/ingvarch/tent/internal/nomadops"
+	"github.com/ingvarch/tent/internal/pki"
+	"github.com/ingvarch/tent/internal/statestore"
+)
+
+// nomadTimeout is how long each wait of the Nomad step may take: for a leader, for healthy servers and for a node to
+// register.
+const nomadTimeout = 10 * time.Minute
+
+// operatorCertTTL is how long the operator certificate that tent calls Nomad with is valid: longer than any run. It is
+// made for one run and never stored.
+const operatorCertTTL = 24 * time.Hour
+
+// errNoNomad is why an update that needs Nomad fails when the service has no way to reach it.
+var errNoNomad = errors.New("no Nomad client is set up")
+
+// changesNodes reports whether the node changes create or wait for a node.
+func changesNodes(changes []NodeChange) bool {
+	return slices.ContainsFunc(changes, func(c NodeChange) bool { return c.Action != NodeDelete })
+}
+
+// clusterServers returns how many machines the server and combined groups of the cluster have.
+func clusterServers(m *model.Cluster) int {
+	servers := 0
+	for _, g := range m.Groups {
+		if g.Role.RunsServer() {
+			servers += max(g.Size, 0)
+		}
+	}
+	return servers
+}
+
+// planNomad returns what an update does with Nomad. It bootstraps the ACL system and waits for healthy servers while
+// the store holds no mark of the bootstrap, and also when no server or combined machine stays: the servers that come
+// are a new Nomad whatever the mark says. With the mark and servers that stay it only waits for healthy servers, when
+// the changes create or wait for a server or combined node. It is nil when Nomad needs nothing.
+func planNomad(m *model.Cluster, changes []NodeChange, staying []cloud.Instance, marked bool) *NomadStep {
+	servers := clusterServers(m)
+	switch {
+	case !marked || len(staying) == 0:
+		return &NomadStep{Bootstrap: true, Servers: servers}
+	case slices.ContainsFunc(changes, func(c NodeChange) bool { return c.Action != NodeDelete && isServerChange(c) }):
+		return &NomadStep{Servers: servers}
+	}
+	return nil
+}
+
+// needsNomad reports whether applying the plan calls Nomad: for the Nomad step, or for the intro token of a client.
+func (u updateRun) needsNomad() bool {
+	return u.plan.Nomad != nil ||
+		slices.ContainsFunc(u.plan.Nodes, func(c NodeChange) bool { return c.Action != NodeDelete && !isServerChange(c) })
+}
+
+// prepareNodes gives each create and wait of the plan the spec hash of its group, and builds the user data of each as
+// the apply will, with the longest seed and, for a client, an intro token of the size of a large real one, so that a
+// node whose user data does not fit fails the plan. The certificate that it issues for the check is not kept.
+func (u *updateRun) prepareNodes(m *model.Cluster, now time.Time) error {
+	seed := lastAddresses(m.CIDR, u.builder.servers)
+	for i, c := range u.plan.Nodes {
+		if c.Action == NodeDelete {
+			continue
+		}
+		u.plan.Nodes[i].SpecHash = u.builder.specHash(c.Group)
+		var intro pki.Secret
+		if u.builder.role(c.Group) == v1alpha1.RoleClient {
+			intro = standInIntroToken()
+		}
+		if _, err := u.userData(c, now, seed, intro); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// userData returns the user data of the node that the change c creates or waits for: the NodeConfig of its group with
+// the node's name, a certificate issued at now, the seed and the intro token.
+func (u updateRun) userData(c NodeChange, now time.Time, seed []netip.Addr, intro pki.Secret) (cloud.UserData, error) {
+	cert, err := u.secrets.ca.IssueNode(u.builder.role(c.Group), u.region, now)
+	if err != nil {
+		return nil, fmt.Errorf("node %s: %w", c.Name, err)
+	}
+	nc, err := u.builder.node(c.Group, c.Name, c.Zone, cert, seed, intro)
+	if err != nil {
+		return nil, err
+	}
+	data, err := nodeconfig.UserData(nc)
+	if err != nil {
+		return nil, err
+	}
+	return cloud.UserData(data), nil
+}
+
+// lastAddresses returns n addresses of the IPv4 prefix p, from its last one down: the longest texts that a seed can
+// hold. For another prefix it returns n times the prefix's address.
+func lastAddresses(p netip.Prefix, n int) []netip.Addr {
+	addrs := make([]netip.Addr, 0, max(n, 0))
+	a := p.Addr()
+	if p.Addr().Is4() {
+		a = netip.AddrFrom4(lastOf(p))
+	}
+	for range max(n, 0) {
+		addrs = append(addrs, a)
+		if prev := a.Prev(); prev.IsValid() && p.Contains(prev) {
+			a = prev
+		}
+	}
+	return addrs
+}
+
+// lastOf returns the last address of the IPv4 prefix p.
+func lastOf(p netip.Prefix) [4]byte {
+	a := p.Masked().Addr().As4()
+	host := 32 - p.Bits()
+	for i := range a {
+		bits := min(max(host-8*(3-i), 0), 8)
+		a[i] |= byte(uint(1)<<bits - 1)
+	}
+	return a
+}
+
+// applier carries out the node changes and the Nomad step of an update.
+type applier struct {
+	s *Service
+	u updateRun
+	// known are the servers that exist, by name: those that stay and those that this run made or waited for.
+	known []cloud.Instance
+	api   nomadops.API // over the known servers; nil until a step needs it
+}
+
+// run carries out the node changes in the order of the plan: the server and combined nodes, the Nomad step, the clients
+// and the deletes.
+func (a *applier) run(ctx context.Context) error {
+	var servers, clients, deletes []NodeChange
+	for _, c := range a.u.plan.Nodes {
+		switch {
+		case c.Action == NodeDelete:
+			deletes = append(deletes, c)
+		case isServerChange(c):
+			servers = append(servers, c)
+		default:
+			clients = append(clients, c)
+		}
+	}
+	for _, c := range servers {
+		if err := a.applyServer(ctx, c); err != nil {
+			return err
+		}
+	}
+	if a.u.plan.Nomad != nil {
+		if err := a.nomadStep(ctx, servers); err != nil {
+			return err
+		}
+	}
+	for _, c := range clients {
+		if err := a.applyClient(ctx, c); err != nil {
+			return err
+		}
+	}
+	for _, c := range deletes {
+		if err := a.s.applyNode(ctx, a.u.nodes, a.u.cluster, c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// applyServer creates the server or combined node of c, or waits for it, and adds it to the known servers. The node
+// boots with the private addresses of the other known servers as its seed.
+func (a *applier) applyServer(ctx context.Context, c NodeChange) error {
+	in, err := a.s.applyNodeWith(ctx, a.u.nodes, a.u.cluster, c, func(context.Context) (cloud.UserData, error) {
+		seed, err := a.seed(c.Name, false)
+		if err != nil {
+			return nil, err
+		}
+		return a.u.userData(c, a.s.now(), seed, nil)
+	})
+	if err != nil {
+		return err
+	}
+	a.know(in)
+	return nil
+}
+
+// applyClient creates the client node of c, or waits for it, with an intro token, then waits until it registers.
+func (a *applier) applyClient(ctx context.Context, c NodeChange) error {
+	_, err := a.s.applyNodeWith(ctx, a.u.nodes, a.u.cluster, c, func(ctx context.Context) (cloud.UserData, error) {
+		api, err := a.nomadAPI()
+		if err != nil {
+			return nil, err
+		}
+		seed, err := a.seed(c.Name, true)
+		if err != nil {
+			return nil, err
+		}
+		intro, err := api.IntroToken(ctx, nomadops.IntroRequest{
+			NodeName: c.Name, NodePool: a.u.builder.nodePool(c.Group), TTL: nomadops.MaxIntroTTL,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("intro token for node %s: %w", c.Name, err)
+		}
+		return a.u.userData(c, a.s.now(), seed, intro)
+	})
+	if err != nil {
+		return err
+	}
+	return a.register(ctx, c.Name)
+}
+
+// seed returns the private addresses of the known servers other than the node called name, in the order of their
+// names. It fails when servers are known and none has an address yet, as a server's join would be in vain; and when
+// none is known, if the node is not a server.
+func (a *applier) seed(name string, client bool) ([]netip.Addr, error) {
+	var seed []netip.Addr
+	var missing []string
+	for _, in := range a.known {
+		switch {
+		case in.Name == name:
+		case in.PrivateIP.IsValid():
+			seed = append(seed, in.PrivateIP)
+		default:
+			missing = append(missing, in.Name)
+		}
+	}
+	if len(seed) > 0 || len(missing) == 0 && !client {
+		return seed, nil
+	}
+	detail := ""
+	if len(missing) > 0 {
+		detail = " (" + strings.Join(missing, ", ") + ")"
+	}
+	return nil, fmt.Errorf("node %s: no server of %s has a private address yet%s; run the command again", name,
+		clusterLabel(a.u.cluster), detail)
+}
+
+// know adds the machine of a server to the known servers, in the place of the one of its name.
+func (a *applier) know(in cloud.Instance) {
+	i := slices.IndexFunc(a.known, func(k cloud.Instance) bool { return k.Name == in.Name })
+	if i < 0 {
+		a.known = append(a.known, in)
+	} else {
+		a.known[i] = in
+	}
+	slices.SortFunc(a.known, func(x, y cloud.Instance) int { return strings.Compare(x.Name, y.Name) })
+}
+
+// nomadAPI returns the API over the known servers that have a public address, which it makes on its first call: one
+// client for each, with an operator certificate of the run and the ACL bootstrap secret as the token.
+func (a *applier) nomadAPI() (nomadops.API, error) {
+	if a.api != nil {
+		return a.api, nil
+	}
+	if a.s.Nomad == nil {
+		return nil, errNoNomad
+	}
+	u := a.u
+	cert, err := u.secrets.ca.IssueOperator(u.region, operatorCertTTL, a.s.now())
+	if err != nil {
+		return nil, err
+	}
+	var servers []nomadops.Server
+	for _, in := range a.known {
+		if !in.PublicIP.IsValid() {
+			continue
+		}
+		addr := net.JoinHostPort(in.PublicIP.String(), strconv.Itoa(model.APIPort))
+		api, err := a.s.Nomad(nomadops.Config{
+			Address: addr, Region: u.region, CA: u.secrets.ca.Bundle(), Cert: cert, Token: u.secrets.bootstrap,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("reach server %s: %w", in.Name, err)
+		}
+		servers = append(servers, nomadops.Server{Address: addr, API: api})
+	}
+	if len(servers) == 0 {
+		return nil, fmt.Errorf("%s: no server has a public address", clusterLabel(u.cluster))
+	}
+	if a.api, err = nomadops.NewServers(servers...); err != nil {
+		return nil, err
+	}
+	return a.api, nil
+}
+
+// nomadStep waits for a leader, bootstraps the ACL system when the plan says so, waits for healthy servers that all
+// vote, stores the mark of the bootstrap when it bootstrapped, and waits for each combined node of servers to
+// register.
+func (a *applier) nomadStep(ctx context.Context, servers []NodeChange) error {
+	api, err := a.nomadAPI()
+	if err != nil {
+		return err
+	}
+	if err := a.step(NomadEvent{Action: NomadLeader}, func() (NomadEvent, error) {
+		waitCtx, cancel := context.WithTimeout(ctx, nomadTimeout)
+		defer cancel()
+		leader, err := nomadops.WaitLeader(waitCtx, api)
+		if err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			err = fmt.Errorf("%w; tent reaches the servers on port %d: check spec.access.api", err, model.APIPort)
+		}
+		return NomadEvent{Action: NomadLeader, Leader: leader}, err
+	}); err != nil {
+		return err
+	}
+	if a.u.plan.Nomad.Bootstrap {
+		if err := a.step(NomadEvent{Action: NomadBootstrap}, func() (NomadEvent, error) {
+			return NomadEvent{Action: NomadBootstrap}, api.Bootstrap(ctx, a.u.secrets.bootstrap)
+		}); err != nil {
+			return fmt.Errorf("bootstrap the ACL system: %w", err)
+		}
+	}
+	want := a.u.plan.Nomad.Servers
+	if err := a.step(NomadEvent{Action: NomadHealthy, Voters: want}, func() (NomadEvent, error) {
+		waitCtx, cancel := context.WithTimeout(ctx, nomadTimeout)
+		defer cancel()
+		h, err := nomadops.WaitHealthy(waitCtx, api, want)
+		return NomadEvent{Action: NomadHealthy, Voters: h.Voters}, err
+	}); err != nil {
+		return err
+	}
+	if a.u.plan.Nomad.Bootstrap {
+		if err := a.markBootstrapped(ctx); err != nil {
+			return err
+		}
+	}
+	for _, c := range servers {
+		if c.Role == v1alpha1.RoleCombined {
+			if err := a.register(ctx, c.Name); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// markBootstrapped stores the mark that the ACL system was bootstrapped.
+func (a *applier) markBootstrapped(ctx context.Context) error {
+	path := a.u.layout.NomadBootstrapped()
+	mark := []byte(a.s.now().UTC().Format(time.RFC3339) + "\n")
+	if _, err := a.s.Store.Put(ctx, path, mark, statestore.PutOptions{}); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// register waits until the node called name has registered with the servers.
+func (a *applier) register(ctx context.Context, name string) error {
+	api, err := a.nomadAPI()
+	if err != nil {
+		return err
+	}
+	return a.step(NomadEvent{Action: NomadRegister, Node: name}, func() (NomadEvent, error) {
+		waitCtx, cancel := context.WithTimeout(ctx, nomadTimeout)
+		defer cancel()
+		_, err := nomadops.WaitNode(waitCtx, api, name)
+		return NomadEvent{Action: NomadRegister, Node: name}, err
+	})
+}
+
+// step reports the Nomad step that started describes as started, runs do, and reports it as done with the event that
+// do returns, or as failed with its error, which step returns.
+func (a *applier) step(started NomadEvent, do func() (NomadEvent, error)) error {
+	a.s.progress(Progress{Step: NodeStarted, Nomad: &started})
+	done, err := do()
+	if err != nil {
+		a.s.progress(Progress{Step: NodeFailed, Err: err, Nomad: &started})
+		return err
+	}
+	a.s.progress(Progress{Step: NodeDone, Nomad: &done})
+	return nil
+}

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,9 +17,13 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
+	"github.com/ingvarch/tent/internal/assets"
+	"github.com/ingvarch/tent/internal/assets/assetstest"
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/cloud/vultr"
 	"github.com/ingvarch/tent/internal/cloud/vultr/vultrfake"
+	"github.com/ingvarch/tent/internal/nomadops"
+	"github.com/ingvarch/tent/internal/nomadops/nomadfake"
 	"github.com/ingvarch/tent/internal/statestore"
 )
 
@@ -200,6 +206,33 @@ func onVultr(f *vultrfake.Fake) Providers {
 	}
 }
 
+// testAssets serves the release files that nodes download from assetstest, and gives a development build of tent the
+// tent-node that it needs.
+func testAssets() assets.Options {
+	return assets.Options{
+		Client: &http.Client{Transport: assetstest.New()}, DevURL: assetstest.DevURL, DevSHA256: assetstest.DevSHA256,
+		Now: assetstest.Now,
+	}
+}
+
+// staticNomad returns the Nomad factory of a cluster that has a leader, three healthy servers that vote, and the three
+// workers of the test cluster registered. Its ACL system counts as bootstrapped with the token of the first client
+// that is made, which is the secret that tent holds, as that of a cluster that an earlier run built. It does not follow the
+// cloud, and the CLI tests check output, not the order of the calls.
+func staticNomad() func(nomadops.Config) (nomadops.API, error) {
+	f := nomadfake.New()
+	f.SetLeader("10.64.0.3:4647")
+	f.SetHealth(nomadops.Health{Healthy: true, Voters: 3})
+	for i := range 3 {
+		f.Register(nomadops.Node{Name: fmt.Sprintf("prod-workers-%d", i), Status: "ready", Eligible: true})
+	}
+	var once sync.Once
+	return func(cfg nomadops.Config) (nomadops.API, error) {
+		once.Do(func() { f.SetBootstrapped(cfg.Token) })
+		return f.Client(cfg), nil
+	}
+}
+
 // runOn executes tent with args as Execute does, its providers reaching the Vultr fake f.
 func runOn(t *testing.T, f *vultrfake.Fake, args ...string) result {
 	t.Helper()
@@ -211,7 +244,7 @@ func runProviders(t *testing.T, p Providers, args ...string) result {
 	t.Helper()
 	var out, errOut syncBuffer
 	code := executeTest(t.Context(), t, args, Streams{In: strings.NewReader(""), Out: &out, Err: &errOut},
-		WithProviders(p))
+		WithProviders(p), WithAssets(testAssets()), WithNomad(staticNomad()))
 	return result{code, out.String(), errOut.String()}
 }
 

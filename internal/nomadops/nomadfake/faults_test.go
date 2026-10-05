@@ -19,7 +19,7 @@ func TestEveryCallTakesFaults(t *testing.T) {
 	for _, c := range apiCalls {
 		t.Run(c.name, func(t *testing.T) {
 			ctx := t.Context()
-			f, a := newAPI()
+			f, a := newBootstrappedAPI(t)
 			f.Fail(t, c.name, errBoom)
 			f.LoseResponse(t, c.name)
 			if err := c.call(ctx, a); !errors.Is(err, errBoom) || err.Error() != errBoom.Error() {
@@ -30,14 +30,14 @@ func TestEveryCallTakesFaults(t *testing.T) {
 				t.Errorf("after the faults: %v, want success", err)
 			}
 			call := nomadfake.Call{Name: c.name, Arg: argOf(c.name)}
-			wantCalls(t, f, call, call, call)
+			wantCalls(t, f, bootstrapCall, call, call, call)
 		})
 	}
 }
 
 // TestFaultedCallsReturnNoValue checks that a call that fails because of a fault returns no value with the error.
 func TestFaultedCallsReturnNoValue(t *testing.T) {
-	f, a := newAPI()
+	f, a := newBootstrappedAPI(t)
 	ctx := t.Context()
 	f.Register(nomadops.Node{Name: "prod-workers-0", Status: "ready", Eligible: true})
 	f.SetHealth(nomadops.Health{Healthy: true, Voters: 3})
@@ -94,7 +94,7 @@ func TestLoseResponseCarriesTheCallOut(t *testing.T) {
 }
 
 func TestFaultsApplyInOrder(t *testing.T) {
-	f, a := newAPI()
+	f, a := newBootstrappedAPI(t)
 	ctx := t.Context()
 	other := errors.New("other")
 	f.Fail(t, "Leader", errBoom)

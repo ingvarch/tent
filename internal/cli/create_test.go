@@ -12,7 +12,6 @@ import (
 
 	"github.com/ingvarch/tent/internal/channels"
 	"github.com/ingvarch/tent/internal/cloud/vultr/vultrfake"
-	"github.com/ingvarch/tent/internal/english"
 )
 
 // createdProd is what creating the test cluster prints.
@@ -407,18 +406,31 @@ func TestCreateClusterChecksTheNomadVersion(t *testing.T) {
 	s.wantEmpty(t)
 }
 
+// untestedChannel returns a lookup of the release channels in which stable tests only Nomad 2.0.6, so that the
+// version 2.0.7 that assetstest serves is allowed but untested.
+func untestedChannel(t *testing.T) func(string) (*channels.Channel, error) {
+	t.Helper()
+	return func(name string) (*channels.Channel, error) {
+		c, err := channels.Load(name)
+		if err != nil || name != "stable" {
+			return c, err
+		}
+		c.Nomad.Tested = []string{"2.0.6"}
+		return c, nil
+	}
+}
+
 // TestCreateClusterYesWarnsOfAnUntestedNomad warns once of a Nomad version that the channel allows but has not
 // tested, although both the create and the update find it.
 func TestCreateClusterYesWarnsOfAnUntestedNomad(t *testing.T) {
-	stable, err := channels.Load("stable")
-	if err != nil {
-		t.Fatal(err)
-	}
-	untested := "WARNING: Nomad 2.99.0 is not tested by this tent; channel stable tests " +
-		english.And(stable.Nomad.Tested)
+	const untested = "WARNING: Nomad 2.0.7 is not tested by this tent; channel stable tests 2.0.6"
 	synctest.Test(t, func(t *testing.T) {
 		s := newState(t)
-		got := runOn(t, vultrfake.New(), createProd(s, "--yes", "--nomad-version", "2.99.0")...)
+		opts := &globalOptions{
+			providers: onVultr(vultrfake.New()), assets: testAssets(), nomad: staticNomad(),
+			channels: untestedChannel(t),
+		}
+		got := runWith(t, opts, createProd(s, "--yes", "--nomad-version", "2.0.7")...)
 		if got.code != 0 || got.out != createdProd+built {
 			t.Errorf("exit code = %d, stdout\n%s\nwant 0 and\n%s", got.code, got.out, createdProd+built)
 		}

@@ -10,15 +10,33 @@ import (
 	"slices"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
+	"github.com/ingvarch/tent/internal/assets"
 	"github.com/ingvarch/tent/internal/cli"
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/cloud/vultr"
+	"github.com/ingvarch/tent/internal/nomadops"
 )
 
 // main runs tent; cli.Execute handles Ctrl-C and SIGTERM.
 func main() {
 	os.Exit(cli.Execute(context.Background(), os.Args[1:], cli.Streams{In: os.Stdin, Out: os.Stdout, Err: os.Stderr},
-		cli.WithProviders(providers(os.Getenv))))
+		cli.WithProviders(providers(os.Getenv)), cli.WithAssets(nodeAssets(os.Getenv)), cli.WithNomad(nomadServer)))
+}
+
+// nodeAssets returns where nodes find the tent-node of a development build: TENT_NODE_URL and its sha256 in
+// TENT_NODE_SHA256. A release build ignores them.
+func nodeAssets(getenv func(string) string) assets.Options {
+	return assets.Options{DevURL: getenv("TENT_NODE_URL"), DevSHA256: getenv("TENT_NODE_SHA256")}
+}
+
+// nomadServer returns the API of the Nomad server that cfg names. It returns a nil API with the error, so that the
+// caller's nil check holds.
+func nomadServer(cfg nomadops.Config) (nomadops.API, error) {
+	client, err := nomadops.New(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
 }
 
 // providers returns the clouds that tent manages clusters on: Vultr, with the API key in VULTR_API_KEY. It reads the

@@ -16,26 +16,35 @@ type secretWrite struct {
 	data pki.Secret
 }
 
+// clusterSecrets are the secrets a run uses: the stored ones, or the new ones that writes holds.
+type clusterSecrets struct {
+	ca        *pki.CA
+	gossip    pki.Secret
+	bootstrap pki.Secret
+	writes    []secretWrite // the secrets that the store lacks, with their new contents
+}
+
 // planSecrets reads which of the cluster's secrets the store holds: the CA's key and bundle, the gossip key and the
-// ACL bootstrap secret. It returns the missing ones with new contents, in the order the layout gives: a new CA's key
-// and bundle, or a bundle signed with the stored key when the key is there alone; a new gossip key; a new bootstrap
-// secret. A bundle without its key, or a stored secret that does not load, is an error that names the paths: tent
-// never replaces a cluster's secrets.
-func (s *Service) planSecrets(ctx context.Context, l statestore.Layout) ([]secretWrite, error) {
+// ACL bootstrap secret. It returns all four, the stored values or new ones, and in writes the missing ones with their
+// new contents, in the order the layout gives: a new CA's key and bundle, or a bundle signed with the stored key when
+// the key is there alone; a new gossip key; a new bootstrap secret. A bundle without its key, or a stored secret that
+// does not load, is an error that names the paths: tent never replaces a cluster's secrets.
+func (s *Service) planSecrets(ctx context.Context, l statestore.Layout) (clusterSecrets, error) {
 	stored := map[string]pki.Secret{}
 	for _, p := range l.Secrets() {
 		data, _, err := s.Store.Get(ctx, p)
 		switch {
 		case errors.Is(err, statestore.ErrNotFound):
 		case err != nil:
-			return nil, err
+			return clusterSecrets{}, err
 		default:
 			stored[p] = data
 		}
 	}
-	made := map[string]pki.Secret{}
-	if err := s.planCA(l, stored, made); err != nil {
-		return nil, err
+	made, current := map[string]pki.Secret{}, map[string]pki.Secret{}
+	ca, err := s.planCA(l, stored, made)
+	if err != nil {
+		return clusterSecrets{}, err
 	}
 	for _, sec := range []struct {
 		path  string
@@ -47,49 +56,51 @@ func (s *Service) planSecrets(ctx context.Context, l statestore.Layout) ([]secre
 	} {
 		data, ok := stored[sec.path]
 		if !ok {
-			made[sec.path] = sec.make()
-			continue
+			data = sec.make()
+			made[sec.path] = data
+		} else if err := sec.check(data); err != nil {
+			return clusterSecrets{}, fmt.Errorf("%s: %w", sec.path, err)
 		}
-		if err := sec.check(data); err != nil {
-			return nil, fmt.Errorf("%s: %w", sec.path, err)
-		}
+		current[sec.path] = data
 	}
-	var writes []secretWrite
+	secrets := clusterSecrets{ca: ca, gossip: current[l.GossipKey()], bootstrap: current[l.ACLBootstrapSecret()]}
 	for _, p := range l.Secrets() {
 		if data, ok := made[p]; ok {
-			writes = append(writes, secretWrite{p, data})
+			secrets.writes = append(secrets.writes, secretWrite{p, data})
 		}
 	}
-	return writes, nil
+	return secrets, nil
 }
 
-// planCA checks the cluster's CA among the stored secrets and puts the contents that complete it into made, by path,
-// as planSecrets says.
-func (s *Service) planCA(l statestore.Layout, stored, made map[string]pki.Secret) error {
+// planCA returns the cluster's CA: the stored one, or a new one. It checks the stored key and bundle, and puts the
+// contents that complete the CA into made, by path, as planSecrets says.
+func (s *Service) planCA(l statestore.Layout, stored, made map[string]pki.Secret) (*pki.CA, error) {
 	key, hasKey := stored[l.CAKey()]
 	bundle, hasBundle := stored[l.CABundle()]
 	switch {
 	case !hasKey && !hasBundle:
 		ca, err := pki.NewCA(l.Cluster(), s.now())
 		if err != nil {
-			return err
+			return nil, err
 		}
 		made[l.CAKey()], made[l.CABundle()] = ca.Key(), pki.Secret(ca.Bundle())
+		return ca, nil
 	case !hasKey:
-		return fmt.Errorf("the CA key %s is missing, but the CA bundle %s is there; restore the key: tent never "+
+		return nil, fmt.Errorf("the CA key %s is missing, but the CA bundle %s is there; restore the key: tent never "+
 			"replaces a cluster's CA", l.CAKey(), l.CABundle())
 	case !hasBundle:
 		ca, err := pki.NewCAFromKey(l.Cluster(), key, s.now())
 		if err != nil {
-			return fmt.Errorf("%s: %w", l.CAKey(), err)
+			return nil, fmt.Errorf("%s: %w", l.CAKey(), err)
 		}
 		made[l.CABundle()] = pki.Secret(ca.Bundle())
-	default:
-		if _, err := pki.LoadCA(bundle, key); err != nil {
-			return fmt.Errorf("%s and %s: %w", l.CAKey(), l.CABundle(), err)
-		}
+		return ca, nil
 	}
-	return nil
+	ca, err := pki.LoadCA(bundle, key)
+	if err != nil {
+		return nil, fmt.Errorf("%s and %s: %w", l.CAKey(), l.CABundle(), err)
+	}
+	return ca, nil
 }
 
 // relativePaths returns the paths of the writes relative to the cluster of the layout l, such as pki/private/ca.key.

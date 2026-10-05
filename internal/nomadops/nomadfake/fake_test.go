@@ -42,6 +42,19 @@ func newAPI() (*nomadfake.Fake, nomadops.API) {
 	return f, f.Client(nomadops.Config{Token: pki.NewBootstrapSecret()})
 }
 
+// newBootstrappedAPI is newAPI after a bootstrap with bootstrapSecret, the first call in the fake's log.
+func newBootstrappedAPI(t *testing.T) (*nomadfake.Fake, nomadops.API) {
+	t.Helper()
+	f, a := newAPI()
+	if err := a.Bootstrap(t.Context(), bootstrapSecret); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	return f, a
+}
+
+// bootstrapCall is the Call that newBootstrappedAPI logs.
+var bootstrapCall = nomadfake.Call{Name: "Bootstrap", Arg: redacted}
+
 // wantCalls checks the fake's log of calls.
 func wantCalls(t *testing.T, f *nomadfake.Fake, want ...nomadfake.Call) {
 	t.Helper()
@@ -153,6 +166,94 @@ func argOf(name string) string {
 	return ""
 }
 
+// TestACLCallsNeedTheBootstrap checks that, before the ACL system is bootstrapped, Nodes, Health and IntroToken fail
+// for good as Nomad's 403 does, while Leader and Bootstrap work; and that they work after the bootstrap.
+func TestACLCallsNeedTheBootstrap(t *testing.T) {
+	for _, name := range []string{"IntroToken", "Nodes", "Health"} {
+		t.Run(name, func(t *testing.T) {
+			f, a := newAPI()
+			var call apiCall
+			for _, c := range apiCalls {
+				if c.name == name {
+					call = c
+				}
+			}
+			checkErr(t, call.call(t.Context(), a), "nomadfake: "+name+": permission denied", false)
+			if _, err := a.Leader(t.Context()); err != nil {
+				t.Errorf("Leader before the bootstrap: %v", err)
+			}
+			if err := a.Bootstrap(t.Context(), bootstrapSecret); err != nil {
+				t.Fatalf("Bootstrap: %v", err)
+			}
+			if err := call.call(t.Context(), a); err != nil {
+				t.Errorf("%s after the bootstrap: %v", name, err)
+			}
+			wantCalls(t, f,
+				nomadfake.Call{Name: name, Arg: argOf(name)}, nomadfake.Call{Name: "Leader"},
+				nomadfake.Call{Name: "Bootstrap", Arg: redacted}, nomadfake.Call{Name: name, Arg: argOf(name)},
+			)
+		})
+	}
+}
+
+// TestNewCluster checks that NewCluster makes the cluster as New does, whatever it held, and keeps the log of calls,
+// the clients' tokens and the faults.
+func TestNewCluster(t *testing.T) {
+	f, a := newBootstrappedAPI(t)
+	f.Register(nomadops.Node{Name: "prod-workers-0", Status: "ready", Eligible: true})
+	f.SetHealth(nomadops.Health{Healthy: true, Voters: 3})
+	f.Fail(t, "Bootstrap", errBoom)
+	f.NewCluster()
+	if _, err := a.Leader(t.Context()); !errors.Is(err, nomadops.ErrNotReady) {
+		t.Errorf("Leader after NewCluster = %v, want no leader", err)
+	}
+	f.SetLeader(leader)
+	if _, err := a.Nodes(t.Context()); err == nil || errors.Is(err, nomadops.ErrNotReady) {
+		t.Errorf("Nodes after NewCluster = %v, want a permanent error: the ACL system is not bootstrapped", err)
+	}
+	if err := a.Bootstrap(t.Context(), pki.NewBootstrapSecret()); !errors.Is(err, errBoom) {
+		t.Errorf("Bootstrap = %v, want the fault that was set before", err)
+	}
+	if err := a.Bootstrap(t.Context(), pki.NewBootstrapSecret()); err != nil {
+		t.Errorf("Bootstrap with another secret: %v", err)
+	}
+	if nodes, err := a.Nodes(t.Context()); err != nil || len(nodes) != 0 {
+		t.Errorf("Nodes() = %v, %v; want none", nodes, err)
+	}
+	if h, err := a.Health(t.Context()); err != nil || h != (nomadops.Health{}) {
+		t.Errorf("Health() = %+v, %v; want the zero Health", h, err)
+	}
+	if got, want := len(f.Calls()), 7; got != want {
+		t.Errorf("%d calls logged, want %d", got, want)
+	}
+	if got := len(f.Tokens()); got != 1 {
+		t.Errorf("%d tokens kept, want 1", got)
+	}
+}
+
+// TestSetBootstrapped checks that SetBootstrapped makes a cluster that was bootstrapped with the secret, as a
+// Bootstrap call does, without logging a call and without a leader.
+func TestSetBootstrapped(t *testing.T) {
+	f := nomadfake.New()
+	a := f.Client(nomadops.Config{Token: pki.NewBootstrapSecret()})
+	s := pki.NewBootstrapSecret()
+	f.SetBootstrapped(s)
+	orig := slices.Clone(s)
+	s[0]++ // the fake keeps a copy
+	f.SetLeader(leader)
+	if _, err := a.Nodes(t.Context()); err != nil {
+		t.Errorf("Nodes: %v", err)
+	}
+	if err := a.Bootstrap(t.Context(), orig); err != nil {
+		t.Errorf("Bootstrap with the secret as it was: %v", err)
+	}
+	err := a.Bootstrap(t.Context(), pki.NewBootstrapSecret())
+	if !errors.Is(err, nomadops.ErrBootstrapMismatch) {
+		t.Errorf("Bootstrap with another secret = %v, want ErrBootstrapMismatch", err)
+	}
+	wantCalls(t, f, nomadfake.Call{Name: "Nodes"}, bootstrapCall, bootstrapCall)
+}
+
 func TestBootstrap(t *testing.T) {
 	f, a := newAPI()
 	ctx := t.Context()
@@ -245,7 +346,7 @@ func claims(t *testing.T, jwt secret.Secret) map[string]string {
 }
 
 func TestIntroToken(t *testing.T) {
-	f, a := newAPI()
+	f, a := newBootstrappedAPI(t)
 	ctx := t.Context()
 	jwt, err := a.IntroToken(ctx, introRequest)
 	if err != nil {
@@ -281,7 +382,7 @@ func TestIntroToken(t *testing.T) {
 			t.Errorf("the claims of IntroToken(%+v) = %v, want %v", req, got, want)
 		}
 	}
-	wantCalls(t, f,
+	wantCalls(t, f, bootstrapCall,
 		nomadfake.Call{Name: "IntroToken", Arg: "prod-workers-1 default 30m0s"},
 		nomadfake.Call{Name: "IntroToken", Arg: "prod-workers-1 default 1m0s"},
 		nomadfake.Call{Name: "IntroToken", Arg: "prod-workers-2 default 30m0s"},
@@ -315,7 +416,7 @@ func TestIntroTokenRefusesABadRequest(t *testing.T) {
 }
 
 func TestNodes(t *testing.T) {
-	f, a := newAPI()
+	f, a := newBootstrappedAPI(t)
 	ctx := t.Context()
 	got, err := a.Nodes(ctx)
 	if err != nil || got == nil || len(got) != 0 {
@@ -339,11 +440,12 @@ func TestNodes(t *testing.T) {
 	if got, _ := a.Nodes(ctx); got[0].Status != "ready" {
 		t.Errorf("changing a returned list changed the fake: %+v", got)
 	}
-	wantCalls(t, f, nomadfake.Call{Name: "Nodes"}, nomadfake.Call{Name: "Nodes"}, nomadfake.Call{Name: "Nodes"})
+	wantCalls(t, f, bootstrapCall,
+		nomadfake.Call{Name: "Nodes"}, nomadfake.Call{Name: "Nodes"}, nomadfake.Call{Name: "Nodes"})
 }
 
 func TestHealth(t *testing.T) {
-	f, a := newAPI()
+	f, a := newBootstrappedAPI(t)
 	if got, err := a.Health(t.Context()); err != nil || got != (nomadops.Health{}) {
 		t.Errorf("Health() of a new fake = %+v, %v; want the zero Health", got, err)
 	}
@@ -352,7 +454,7 @@ func TestHealth(t *testing.T) {
 	if got, err := a.Health(t.Context()); err != nil || got != want {
 		t.Errorf("Health() = %+v, %v; want %+v", got, err, want)
 	}
-	wantCalls(t, f, nomadfake.Call{Name: "Health"}, nomadfake.Call{Name: "Health"})
+	wantCalls(t, f, bootstrapCall, nomadfake.Call{Name: "Health"}, nomadfake.Call{Name: "Health"})
 }
 
 // TestContextEnded checks that a call whose context has ended fails as the client's does, reaches nothing and is not
@@ -476,6 +578,10 @@ func TestCallsNameTheServerOfTheClient(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			f := nomadfake.New()
 			f.SetLeader(leader)
+			earlier := f.Client(nomadops.Config{Address: "198.51.100.9:4646"})
+			if err := earlier.Bootstrap(t.Context(), bootstrapSecret); err != nil {
+				t.Fatalf("Bootstrap: %v", err)
+			}
 			first := f.Client(nomadops.Config{Address: "198.51.100.1:4646", Token: pki.NewBootstrapSecret()})
 			second := f.Client(nomadops.Config{Address: "198.51.100.2:4646", Token: pki.NewBootstrapSecret()})
 			anonymous := f.Client(nomadops.Config{Token: pki.NewBootstrapSecret()})
@@ -488,6 +594,7 @@ func TestCallsNameTheServerOfTheClient(t *testing.T) {
 
 			arg := argOf(c.name)
 			wantCalls(t, f,
+				nomadfake.Call{Name: "Bootstrap", Server: "198.51.100.9:4646", Arg: redacted},
 				nomadfake.Call{Name: c.name, Server: "198.51.100.1:4646", Arg: arg},
 				nomadfake.Call{Name: c.name, Server: "198.51.100.2:4646", Arg: arg},
 				nomadfake.Call{Name: c.name, Server: "198.51.100.1:4646", Arg: arg},

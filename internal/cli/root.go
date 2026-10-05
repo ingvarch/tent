@@ -12,7 +12,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
+	"github.com/ingvarch/tent/internal/assets"
 	"github.com/ingvarch/tent/internal/cloud"
+	"github.com/ingvarch/tent/internal/nomadops"
 )
 
 // Streams are where a command reads its input and writes its output.
@@ -34,6 +36,17 @@ type Option func(*globalOptions)
 // commands fail: tent reaches no cloud.
 func WithProviders(p Providers) Option {
 	return func(o *globalOptions) { o.providers = p }
+}
+
+// WithAssets tells update cluster where the files that nodes download are found; without it, it reads the public
+// release sites.
+func WithAssets(a assets.Options) Option {
+	return func(o *globalOptions) { o.assets = a }
+}
+
+// WithNomad gives tent the way to reach one Nomad server, for update cluster.
+func WithNomad(nomad func(nomadops.Config) (nomadops.API, error)) Option {
+	return func(o *globalOptions) { o.nomad = nomad }
 }
 
 // exitChanges is tent's exit code when --exit-code finds a plan with changes.
