@@ -25,7 +25,9 @@ func newUpdateClusterCommand(opts *globalOptions) *cobra.Command {
 		Long: "Bring the cloud objects of the cluster named by NAME or --name to its specs in the state store: its " +
 			"network, firewalls and SSH keys, and its nodes, which are created or deleted until each node group " +
 			"has its size. It also makes the cluster's missing CA, gossip key and ACL bootstrap secret in the " +
-			"state store, and never replaces them. In this version the nodes are empty machines without Nomad. " +
+			"state store, and never replaces them. It starts Nomad on the nodes, bootstraps its ACL system and " +
+			"waits for the servers to be healthy and the clients to register. A development build of tent needs " +
+			"TENT_NODE_URL and TENT_NODE_SHA256 to find the tent-node that its nodes run. " +
 			"Without --yes it prints the plan and changes nothing. With --yes it prints the plan, applies it, " +
 			"prints each step on stderr as it goes, and then prints what it did; with -o json or -o yaml it " +
 			"prints the plan it applied. tent reads the cloud's credentials from the environment: VULTR_API_KEY " +

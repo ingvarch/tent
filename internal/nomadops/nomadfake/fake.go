@@ -30,7 +30,8 @@ import (
 //
 // The fake is simpler than Nomad in these ways:
 //   - It checks no ACL token: each call succeeds whatever token its client holds. Tokens tells which tokens the
-//     clients got.
+//     clients got. Only before the bootstrap does a call fail: Nodes, Health and IntroToken fail for good, as
+//     Nomad's 403, until a Bootstrap succeeds; Leader and Bootstrap work.
 //   - It lists one node per name, where Nomad also lists a node that went down until it collects it.
 //
 // Faults change the outcome of the next call of a nomadops.API method, named as in the interface, such as Bootstrap:
@@ -68,6 +69,22 @@ func (f *Fake) SetLeader(addr string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.leader = addr
+}
+
+// NewCluster makes the cluster a new one, as New returns it: without a leader, nodes or bootstrap, and with the zero
+// Health. The log of calls, the clients' tokens and the faults stay.
+func (f *Fake) NewCluster() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.leader, f.bootstrapped, f.nodes, f.health = "", nil, nil, nomadops.Health{}
+}
+
+// SetBootstrapped makes the cluster one whose ACL system was bootstrapped with a copy of bootstrapSecret, without a
+// call and whether or not the cluster has a leader.
+func (f *Fake) SetBootstrapped(bootstrapSecret secret.Secret) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bootstrapped = slices.Clone(bootstrapSecret)
 }
 
 // Register lists the node, in the place of the node of the same name when there is one, and after the others when
@@ -123,6 +140,8 @@ func (f *Fake) Calls() []Call {
 var (
 	errNoLeader = errors.New("no leader")
 	errLost     = errors.New("the answer was lost")
+	// errDenied is the 403 of Nomad for a call that needs an ACL token before any exists.
+	errDenied = errors.New("permission denied")
 )
 
 // callError is the error of a call that the fake fails.
@@ -213,6 +232,9 @@ func (c client) IntroToken(ctx context.Context, req nomadops.IntroRequest) (secr
 	}
 	var jwt secret.Secret
 	err := c.f.call(ctx, c.server, "IntroToken", req.NodeName+" "+req.NodePool+" "+req.TTL.String(), func() error {
+		if c.f.bootstrapped == nil {
+			return errDenied
+		}
 		claims, err := json.Marshal(map[string]string{"nomad_node_name": req.NodeName, "nomad_node_pool": req.NodePool})
 		if err != nil {
 			return err
@@ -228,6 +250,9 @@ func (c client) IntroToken(ctx context.Context, req nomadops.IntroRequest) (secr
 func (c client) Nodes(ctx context.Context) ([]nomadops.Node, error) {
 	var nodes []nomadops.Node
 	err := c.f.call(ctx, c.server, "Nodes", "", func() error {
+		if c.f.bootstrapped == nil {
+			return errDenied
+		}
 		nodes = append(make([]nomadops.Node, 0, len(c.f.nodes)), c.f.nodes...)
 		return nil
 	})
@@ -237,6 +262,9 @@ func (c client) Nodes(ctx context.Context) ([]nomadops.Node, error) {
 func (c client) Health(ctx context.Context) (nomadops.Health, error) {
 	var h nomadops.Health
 	err := c.f.call(ctx, c.server, "Health", "", func() error {
+		if c.f.bootstrapped == nil {
+			return errDenied
+		}
 		h = c.f.health
 		return nil
 	})

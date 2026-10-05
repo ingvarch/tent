@@ -22,6 +22,9 @@ import (
 
 const completedPath = "prod/cluster.completed.yaml"
 
+// markPath is the object that marks the cluster's ACL system as bootstrapped.
+const markPath = "prod/nomad/bootstrapped"
+
 // newCluster returns a service over a store with the test cluster, its completed spec and its tent version, and the
 // Vultr fake that its providers reach, which holds nothing.
 func newCluster(t *testing.T) (*app.Service, *vultrfake.Fake) {
@@ -50,7 +53,8 @@ var allState = []string{completedPath, serversPath, workersPath, clusterPath, ve
 // builtState is every object of the test cluster as newBuilt leaves it, with its secrets, in the order DeleteCluster
 // deletes them.
 var builtState = []string{
-	completedPath, serversPath, workersPath, aclPath, gossipPath, caBundlePath, caKeyPath, clusterPath, versionPath,
+	completedPath, serversPath, workersPath, markPath, aclPath, gossipPath, caBundlePath, caKeyPath, clusterPath,
+	versionPath,
 }
 
 // builtNodes are the node deletes of the test cluster as newBuilt builds it.
@@ -429,6 +433,7 @@ func TestDeleteCluster(t *testing.T) {
 			devSpecs = append(devSpecs, strings.ReplaceAll(doc, "prod", "dev"))
 		}
 		mustCreate(t, svc, devSpecs...)
+		withNomadOf(svc, f, "dev")
 		if _, err := svc.Update(t.Context(), "dev", true); err != nil {
 			t.Fatalf("Update dev: %v", err)
 		}

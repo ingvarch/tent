@@ -3,7 +3,6 @@ package app_test
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -40,19 +39,19 @@ const (
 // keyedClusterYAML is the test cluster prod with the SSH keys ops and dev.
 const keyedClusterYAML = clusterYAML + "  sshKeys:\n  - " + opsKey + "\n  - " + devKey + "\n"
 
-// placeholderUserData is what the nodes boot with.
-const placeholderUserData = "#cloud-config\npackage_update: false\npackage_upgrade: false\n"
-
-// withCloud gives svc providers that reach a new Vultr fake, and returns the fake and the buffer that the provider
-// logs to as JSON. Every provider other than vultr is unknown.
+// withCloud gives svc providers that reach a new Vultr fake, the release files of assetstest and a Nomad that follows
+// the fake, and returns the fake and the buffer that the provider logs to as JSON. Every provider other than vultr is
+// unknown.
 func withCloud(svc *app.Service) (*vultrfake.Fake, *bytes.Buffer) {
 	f := vultrfake.New()
+	withNomad(svc, f)
 	return f, withAPI(svc, f)
 }
 
-// withAPI gives svc providers that reach Vultr through api, and returns the buffer that the provider logs to as JSON.
-// Every provider other than vultr is unknown.
+// withAPI gives svc providers that reach Vultr through api and the release files of assetstest, and returns the buffer
+// that the provider logs to as JSON. Every provider other than vultr is unknown.
 func withAPI(svc *app.Service, api vultr.API) *bytes.Buffer {
+	withAssets(svc)
 	var log bytes.Buffer
 	p := vultr.New(api, vultr.WithLogger(slog.New(slog.NewJSONHandler(&log, nil))))
 	svc.Providers = func(name v1alpha1.Provider) (cloud.Provider, error) {
@@ -97,25 +96,42 @@ func wantConverged(t *testing.T, svc *app.Service) {
 	}
 }
 
-// node is an instance of the fake as the tests see it: its name, its region, its tent tags without the operation id,
-// and its user data.
+// specHashTag is the tag of a node's spec hash as the tests see it, with the hash masked.
+const specHashTag = cloud.LabelSpecHash + "=<hash>"
+
+// node is an instance of the fake as the tests see it: its name, its region and its tent tags without the operation
+// id, the spec hash masked.
 type node struct {
 	Name, Zone string
 	Tags       []string
-	UserData   string
 }
 
 // nodes returns the fake's instances in creation order. It fails the test unless each carries an operation id of its
-// own.
+// own, and a spec hash of 16 hex digits that is the same in its node group.
 func nodes(t *testing.T, f *vultrfake.Fake) []node {
 	t.Helper()
 	var out []node
 	ops := map[string]bool{}
+	hashes := map[string]string{} // by node group
 	for _, in := range f.Instances() {
 		n := node{Name: in.Hostname, Zone: in.Region}
 		op := opOf(in.Tags)
+		group := tagOf(in.Tags, cloud.LabelNodeGroup)
 		for _, tag := range in.Tags {
-			if !strings.HasPrefix(tag, cloud.LabelOp+"=") {
+			switch {
+			case strings.HasPrefix(tag, cloud.LabelOp+"="):
+			case strings.HasPrefix(tag, cloud.LabelSpecHash+"="):
+				hash := strings.TrimPrefix(tag, cloud.LabelSpecHash+"=")
+				if !specHashPattern.MatchString(tag) {
+					t.Errorf("instance %s has the spec hash %q, want 16 hex digits", in.Hostname, hash)
+				}
+				if hashes[group] != "" && hashes[group] != hash {
+					t.Errorf("instance %s has the spec hash %s, another node of group %s has %s", in.Hostname, hash, group,
+						hashes[group])
+				}
+				hashes[group] = hash
+				n.Tags = append(n.Tags, specHashTag)
+			default:
 				n.Tags = append(n.Tags, tag)
 			}
 		}
@@ -123,11 +139,6 @@ func nodes(t *testing.T, f *vultrfake.Fake) []node {
 			t.Errorf("instance %s has the operation id %q; want one of its own", in.Hostname, op)
 		}
 		ops[op] = true
-		data, err := base64.StdEncoding.DecodeString(f.UserData(in.ID))
-		if err != nil {
-			t.Errorf("the user data of instance %s: %v", in.Hostname, err)
-		}
-		n.UserData = string(data)
 		out = append(out, n)
 	}
 	return out
@@ -137,8 +148,7 @@ func nodes(t *testing.T, f *vultrfake.Fake) []node {
 func wantNode(group string, role v1alpha1.Role, index int) node {
 	return node{
 		Name: fmt.Sprintf("prod-%s-%d", group, index), Zone: "ams",
-		Tags:     []string{"tent/cluster=prod", "tent/nodegroup=" + group, "tent/role=" + string(role)},
-		UserData: placeholderUserData,
+		Tags: []string{"tent/cluster=prod", "tent/nodegroup=" + group, "tent/role=" + string(role), specHashTag},
 	}
 }
 
@@ -157,11 +167,15 @@ func wantNodes(t *testing.T, f *vultrfake.Fake, want ...node) {
 	}
 }
 
-// createOf is the planned create of the node index of the test cluster's group, whose role is role.
+// hashMask stands for a spec hash in the node changes that the tests compare.
+const hashMask = "<hash>"
+
+// createOf is the planned create of the node index of the test cluster's group, whose role is role, with the spec hash
+// masked.
 func createOf(group string, role v1alpha1.Role, index int) app.NodeChange {
 	return app.NodeChange{
 		Action: app.NodeCreate, Name: fmt.Sprintf("prod-%s-%d", group, index), Group: group, Role: role, Zone: "ams",
-		MachineType: "vc2-2c-4gb", Image: v1alpha1.DefaultImage,
+		MachineType: "vc2-2c-4gb", Image: v1alpha1.DefaultImage, SpecHash: hashMask,
 	}
 }
 
@@ -170,9 +184,26 @@ func deleteOf(name, id, reason string) app.NodeChange {
 	return app.NodeChange{Action: app.NodeDelete, Name: name, ID: id, Reason: reason}
 }
 
+// wantNodeChanges fails the test unless the plan's node changes are these. A spec hash must be 16 hex digits and the
+// same for the changes of a node group, and shows as hashMask.
 func wantNodeChanges(t *testing.T, plan app.UpdatePlan, want ...app.NodeChange) {
 	t.Helper()
-	if diff := cmp.Diff(want, plan.Nodes); diff != "" {
+	got := slices.Clone(plan.Nodes)
+	hashes := map[string]string{} // by node group
+	for i, c := range got {
+		if c.SpecHash == "" {
+			continue
+		}
+		if !specHashPattern.MatchString("tent/spec-hash=" + c.SpecHash) {
+			t.Errorf("the change of %s has the spec hash %q, want 16 hex digits", c.Name, c.SpecHash)
+		}
+		if hashes[c.Group] != "" && hashes[c.Group] != c.SpecHash {
+			t.Errorf("the change of %s has the spec hash %s, another change of group %s has %s", c.Name, c.SpecHash,
+				c.Group, hashes[c.Group])
+		}
+		hashes[c.Group], got[i].SpecHash = c.SpecHash, hashMask
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("the node changes (-want +got):\n%s", diff)
 	}
 }
@@ -200,13 +231,20 @@ func wantEngineChanges(t *testing.T, p *engine.Plan, want ...string) {
 }
 
 // progressLine returns a line for p: "infra <type> <key> <action>" for an infrastructure event, "going <n>" for the
-// wait for n nodes to go, and "node <step> <action> <name>" for a node step, with the error of a failed step.
+// wait for n nodes to go, "nomad <step> <action> [<node>]" for a step of the Nomad step and "node <step> <action>
+// <name>" for a node step, with the error of a failed step.
 func progressLine(p app.Progress) string {
 	switch {
 	case p.Infra != nil:
 		return fmt.Sprintf("infra %s %s %s", p.Infra.Type, p.Infra.Key, p.Infra.Action)
 	case p.Going > 0:
 		return fmt.Sprintf("going %d", p.Going)
+	case p.Nomad != nil:
+		line := strings.TrimSpace(fmt.Sprintf("nomad %s %s %s", p.Step, p.Nomad.Action, p.Nomad.Node))
+		if p.Err != nil {
+			line += ": " + p.Err.Error()
+		}
+		return line
 	}
 	line := fmt.Sprintf("node %s %s %s", p.Step, p.Node.Action, p.Node.Name)
 	if p.Err != nil {
@@ -225,6 +263,11 @@ func recordProgress(svc *app.Service) *[]string {
 // nodeSteps returns the progress lines of a node change that succeeded: started, then done.
 func nodeSteps(action, name string) []string {
 	return []string{"node started " + action + " " + name, "node done " + action + " " + name}
+}
+
+// registerSteps returns the progress lines of the wait for the node called name to register, which succeeded.
+func registerSteps(name string) []string {
+	return []string{"nomad started register " + name, "nomad done register " + name}
 }
 
 // fullSpec returns what the completed spec holds: the test cluster's specs with every default and, unless the spec
@@ -327,10 +370,13 @@ func firewallGroupID(t *testing.T, f *vultrfake.Fake, role string) string {
 }
 
 // opOf returns the operation id in the tags of an instance.
-func opOf(tags []string) string {
+func opOf(tags []string) string { return tagOf(tags, cloud.LabelOp) }
+
+// tagOf returns the value of the tag called label in the tags of an instance, "" when it has none.
+func tagOf(tags []string, label string) string {
 	for _, tag := range tags {
-		if op, ok := strings.CutPrefix(tag, cloud.LabelOp+"="); ok {
-			return op
+		if v, ok := strings.CutPrefix(tag, label+"="); ok {
+			return v
 		}
 	}
 	return ""
@@ -362,6 +408,7 @@ var allCreates = []app.NodeChange{
 
 func TestUpdatePlan(t *testing.T) {
 	svc, f := newUpdate(t)
+	sites := withAssets(svc)
 	rec := &writeLog{Store: svc.Store}
 	svc.Store = rec
 	svc.OnProgress = func(p app.Progress) { t.Errorf("progress without apply: %s", progressLine(p)) }
@@ -372,6 +419,9 @@ func TestUpdatePlan(t *testing.T) {
 	}
 	wantInfraChanges(t, plan, infraCreates...)
 	wantNodeChanges(t, plan, allCreates...)
+	if want := (&app.NomadStep{Bootstrap: true, Servers: 3}); !cmp.Equal(plan.Nomad, want) {
+		t.Errorf("the plan's Nomad step is %+v, want %+v", plan.Nomad, want)
+	}
 	if plan.Applied {
 		t.Error("the plan says it was applied")
 	}
@@ -380,6 +430,9 @@ func TestUpdatePlan(t *testing.T) {
 	}
 	if len(rec.writes) != 0 {
 		t.Errorf("writes to the store: %v", rec.writes)
+	}
+	if got := len(sites.URLs()); got != 2 {
+		t.Errorf("the plan read %d release files %v, want Nomad's SHA256SUMS and its signature", got, sites.URLs())
 	}
 	wantOnlyReads(t, f)
 	wantNodes(t, f)
@@ -425,7 +478,7 @@ func TestUpdate(t *testing.T) {
 			t.Errorf("the provider logged:\n%s", log)
 		}
 
-		// The infrastructure's events come first, in any order, then the node steps in order.
+		// The infrastructure's events come first, in any order, then the node steps and the Nomad step in order.
 		split := slices.IndexFunc(*progress, func(line string) bool { return strings.HasPrefix(line, "node ") })
 		if split < 0 {
 			t.Fatalf("no node steps in the progress:\n%s", strings.Join(*progress, "\n"))
@@ -440,12 +493,18 @@ func TestUpdate(t *testing.T) {
 		if diff := cmp.Diff(wantInfra, infra); diff != "" {
 			t.Errorf("the infrastructure's progress (-want +got):\n%s", diff)
 		}
-		var wantSteps []string
-		for _, n := range allNodes {
-			wantSteps = append(wantSteps, nodeSteps("create", n.Name)...)
-		}
+		wantSteps := slices.Concat(
+			nodeSteps("create", "prod-servers-0"), nodeSteps("create", "prod-servers-1"),
+			nodeSteps("create", "prod-servers-2"),
+			[]string{
+				"nomad started leader", "nomad done leader", "nomad started bootstrap", "nomad done bootstrap",
+				"nomad started healthy", "nomad done healthy",
+			},
+			nodeSteps("create", "prod-workers-0"), registerSteps("prod-workers-0"),
+			nodeSteps("create", "prod-workers-1"), registerSteps("prod-workers-1"),
+		)
 		if diff := cmp.Diff(wantSteps, (*progress)[split:]); diff != "" {
-			t.Errorf("the node steps (-want +got):\n%s", diff)
+			t.Errorf("the node steps and the Nomad step (-want +got):\n%s", diff)
 		}
 
 		// A second update changes nothing, and needs no lock for that.
@@ -640,7 +699,10 @@ func TestUpdateStopsAtAFailedCreate(t *testing.T) {
 			t.Errorf("%d SSH keys, want both: the delete waits for the next update", len(keys))
 		}
 		wantNodes(t, f, allNodes...)
-		wantStored(t, svc.Store, completedPath, completed)
+		if bytes.Equal(get(t, svc.Store, completedPath), completed) {
+			t.Error("the completed spec is the old one after the failed run, want the new one")
+		}
+		wantStored(t, svc.Store, completedPath, fullSpec(t, svc))
 		wantLockFree(t, svc.Store)
 
 		plan = mustUpdate(t, svc)
@@ -661,7 +723,7 @@ func TestUpdateReportsTheMachines(t *testing.T) {
 		svc, _ := newUpdate(t)
 		var steps []app.Progress
 		svc.OnProgress = func(p app.Progress) {
-			if p.Infra == nil {
+			if p.Infra == nil && p.Nomad == nil {
 				steps = append(steps, p)
 			}
 		}
@@ -710,7 +772,7 @@ func TestUpdateReportsTheMachineItWaitedFor(t *testing.T) {
 		pendingWorker(t, svc, f)
 		var done []string
 		svc.OnProgress = func(p app.Progress) {
-			if p.Infra == nil && p.Step == app.NodeDone {
+			if p.Infra == nil && p.Nomad == nil && p.Step == app.NodeDone {
 				done = append(done, fmt.Sprintf("%s %s %s %s", p.Node.Action, p.Node.Name, p.Instance.ID,
 					p.Instance.PrivateIP))
 			}
@@ -902,7 +964,7 @@ func TestUpdateHoldsTheLock(t *testing.T) {
 		other := &app.Service{Store: svc.Store, Version: "dev"}
 		var errs []error
 		svc.OnProgress = func(p app.Progress) {
-			if p.Infra == nil && p.Step == app.NodeStarted {
+			if p.Infra == nil && p.Nomad == nil && p.Step == app.NodeStarted {
 				errs = append(errs, replaceWorkers(t, other))
 			}
 		}
@@ -920,13 +982,14 @@ func TestUpdateHoldsTheLock(t *testing.T) {
 	})
 }
 
-// TestUpdateInterrupted interrupts the update as it starts the first node, as Ctrl-C would.
+// TestUpdateInterrupted interrupts the update as it starts the first node, as Ctrl-C would. The completed spec is
+// stored by then, and no node exists.
 func TestUpdateInterrupted(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newUpdate(t)
 		ctx, interrupt := context.WithCancel(t.Context())
 		svc.OnProgress = func(p app.Progress) {
-			if p.Infra == nil && p.Step == app.NodeStarted {
+			if p.Infra == nil && p.Nomad == nil && p.Step == app.NodeStarted {
 				interrupt()
 			}
 		}
@@ -936,9 +999,7 @@ func TestUpdateInterrupted(t *testing.T) {
 			t.Errorf("errors.Is(%v, context.Canceled) = false", err)
 		}
 		wantLockFree(t, svc.Store)
-		if paths := list(t, svc.Store, completedPath); len(paths) != 0 {
-			t.Errorf("the completed spec is written: %v", paths)
-		}
+		wantStored(t, svc.Store, completedPath, fullSpec(t, svc))
 		wantNodes(t, f)
 	})
 }

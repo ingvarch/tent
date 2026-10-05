@@ -19,8 +19,8 @@ import (
 	"github.com/ingvarch/tent/internal/statestore"
 )
 
-// The integration tests run whole flows of the use cases with the Vultr provider on its fake: golden files of the
-// calls that reach Vultr, runs cut at every call, and lost answers at every create.
+// The integration tests run whole flows of the use cases with the Vultr provider on its fake and a Nomad that follows
+// it: golden files of the calls that reach Vultr and Nomad, runs cut at every call, and lost answers at every create.
 
 // The example cluster of the architecture, section 3.1, with 2 workers.
 const (
@@ -80,26 +80,61 @@ spec:
 `
 )
 
-// exampleStore returns a service over a new file store that holds the example cluster, and the store's root.
-func exampleStore(t *testing.T) (*app.Service, string) {
+// exampleCombinedYAML is the node group of the example cluster that runs combined nodes, in place of the servers and
+// the workers. Its cluster runs with clientIntroduction warn, as combined nodes need.
+const exampleCombinedYAML = `apiVersion: tent/v1alpha1
+kind: NodeGroup
+metadata:
+  name: all
+  cluster: prod
+spec:
+  role: combined
+  machineType: vc2-2c-4gb
+  image: ubuntu-24.04
+  size: 3
+`
+
+// exampleCluster is a cluster of the integration tests: its name for a subtest and its specs.
+type exampleCluster struct {
+	name string
+	docs []string
+}
+
+// exampleClusters are the clusters that the runs cut at every call and every write build: the example of the
+// architecture, and one of three combined nodes.
+var exampleClusters = []exampleCluster{
+	{"servers and workers", []string{exampleClusterYAML, exampleServersYAML, exampleWorkersYAML}},
+	{"combined", []string{
+		strings.Replace(exampleClusterYAML, "clientIntroduction: strict", "clientIntroduction: warn", 1),
+		exampleCombinedYAML,
+	}},
+}
+
+// exampleStore returns a service over a new file store that holds the specs docs, or the example cluster when there are
+// none, and the store's root.
+func exampleStore(t *testing.T, docs ...string) (*app.Service, string) {
 	t.Helper()
+	if len(docs) == 0 {
+		docs = exampleClusters[0].docs
+	}
 	svc, root := newService(t)
-	mustCreate(t, svc, exampleClusterYAML, exampleServersYAML, exampleWorkersYAML)
+	mustCreate(t, svc, docs...)
 	return svc, root
 }
 
-// newExample returns a service whose store holds the example cluster, and the empty Vultr fake that its providers
-// reach. Call it in a synctest bubble, where an update does not wait in real time.
-func newExample(t *testing.T) (*app.Service, *vultrfake.Fake) {
+// newExample returns a service whose store holds the specs docs, or the example cluster when there are none; the empty
+// Vultr fake that its providers reach; and the Nomad that follows the fake. Call it in a synctest bubble, where an
+// update does not wait in real time.
+func newExample(t *testing.T, docs ...string) (*app.Service, *vultrfake.Fake, *nomadWorld) {
 	t.Helper()
-	svc, _ := exampleStore(t)
+	svc, _ := exampleStore(t, docs...)
 	f, _ := withCloud(svc)
-	return svc, f
+	return svc, f, withNomad(svc, f)
 }
 
 // newExampleFrom is newExample over a copy of the store at the root template, from exampleStore. The store syncs each
 // write to disk, which makes writing the specs anew take most of a short test's time; the copy does not sync.
-func newExampleFrom(t *testing.T, template string) (*app.Service, *vultrfake.Fake) {
+func newExampleFrom(t *testing.T, template string) (*app.Service, *vultrfake.Fake, *nomadWorld) {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "state")
 	if err := os.CopyFS(root, os.DirFS(template)); err != nil {
@@ -111,16 +146,17 @@ func newExampleFrom(t *testing.T, template string) (*app.Service, *vultrfake.Fak
 	}
 	svc := &app.Service{Store: s, Version: "dev"}
 	f, _ := withCloud(svc)
-	return svc, f
+	return svc, f, withNomad(svc, f)
 }
 
-// buildExample builds the example cluster on an empty fake, in a bubble of its own, and returns the plan and the
-// calls of the build, as flowCalls gives them, and the cloud it leaves, as cloudView gives it.
-func buildExample(t *testing.T) (plan app.UpdatePlan, calls, view []string) {
+// buildExample builds the cluster of the specs docs, or the example cluster when there are none, on an empty fake, in a
+// bubble of its own, and returns the plan and the calls of the build, as flowCalls gives them, and the cloud it
+// leaves, as cloudView gives it.
+func buildExample(t *testing.T, docs ...string) (plan app.UpdatePlan, calls, view []string) {
 	t.Helper()
 	synctest.Test(t, func(t *testing.T) {
-		svc, f := newExample(t)
-		plan, calls = updateFlow(t, svc, f)
+		svc, f, w := newExample(t, docs...)
+		plan, calls = updateFlow(t, svc, f, w)
 		view = cloudView(f)
 	})
 	return plan, calls, view
@@ -131,7 +167,7 @@ func buildExample(t *testing.T) (plan app.UpdatePlan, calls, view []string) {
 func deleteExample(t *testing.T) (calls []string) {
 	t.Helper()
 	synctest.Test(t, func(t *testing.T) {
-		svc, f := newExample(t)
+		svc, f, _ := newExample(t)
 		mustUpdate(t, svc)
 		calls = deleteFlow(t, svc, f)
 		wantPaths(t, svc.Store)
@@ -142,6 +178,8 @@ func deleteExample(t *testing.T) (calls []string) {
 var (
 	// idPattern matches the ids that the fake gives out.
 	idPattern = regexp.MustCompile(`\b(?:ssh-key|vpc|firewall|instance)-[0-9]+\b`)
+	// specHashPattern matches the tag that holds a node group's spec hash.
+	specHashPattern = regexp.MustCompile(`tent/spec-hash=[0-9a-f]{16}\b`)
 	// opPattern matches an operation id.
 	opPattern = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 )
@@ -209,18 +247,22 @@ func subject(c vultrfake.Call, names map[string]string) string {
 	return names[idPattern.FindString(c.Arg)]
 }
 
-// flowCalls runs a use case with svc and returns the calls that reached f, each as line gives it. run carries out the
-// use case and returns the infrastructure plan it applied.
+// flowCalls runs a use case with svc and returns the calls that reached f, each as line gives it, with the calls that
+// reached the Nomad of w, each as its line gives it, in the place of the Vultr call that came after them. w may be nil.
+// run carries out the use case and returns the infrastructure plan it applied.
 //
 // The engine applies the changes of a plan in parallel, so the order of their calls differs from run to run. So the
 // calls of each run of the engine, from its first event to its last with no node step in between, come grouped by the
 // object they act on, in the order of the plan's changes; the calls on one object keep their order, since one change
 // makes them one after another. The calls without an object, such as the list of the nodes before a firewall group's
 // delete, come first. Every other call keeps its place.
-func flowCalls(t *testing.T, svc *app.Service, f *vultrfake.Fake, run func() *engine.Plan) []string {
+func flowCalls(t *testing.T, svc *app.Service, f *vultrfake.Fake, w *nomadWorld, run func() *engine.Plan) []string {
 	t.Helper()
 	nm := names(f)
-	start := len(f.Calls())
+	start, nomadStart := len(f.Calls()), 0
+	if w != nil {
+		nomadStart = len(w.Log())
+	}
 	var runs [][2]int // the engine's runs, as [from, to) in the calls of the flow
 	open := false
 	svc.OnProgress = func(p app.Progress) {
@@ -259,18 +301,29 @@ func flowCalls(t *testing.T, svc *app.Service, f *vultrfake.Fake, run func() *en
 	for _, r := range runs {
 		slices.SortStableFunc(calls[r[0]:r[1]], func(a, b vultrfake.Call) int { return cmp.Compare(rank(a), rank(b)) })
 	}
-	lines := make([]string, len(calls))
+	var nomad []nomadCall
+	if w != nil {
+		nomad = w.Log()[nomadStart:]
+	}
+	var lines []string
 	for i, c := range calls {
-		lines[i] = line(c, nm)
+		for ; len(nomad) > 0 && nomad[0].Cloud-start <= i; nomad = nomad[1:] {
+			lines = append(lines, w.line(nomad[0].Call))
+		}
+		lines = append(lines, line(c, nm))
+	}
+	for _, c := range nomad {
+		lines = append(lines, w.line(c.Call))
 	}
 	return lines
 }
 
-// updateFlow applies the update of the test cluster and returns its plan and its calls, as flowCalls gives them.
-func updateFlow(t *testing.T, svc *app.Service, f *vultrfake.Fake) (app.UpdatePlan, []string) {
+// updateFlow applies the update of the test cluster and returns its plan and its calls, as flowCalls gives them, those
+// of Nomad included.
+func updateFlow(t *testing.T, svc *app.Service, f *vultrfake.Fake, w *nomadWorld) (app.UpdatePlan, []string) {
 	t.Helper()
 	var plan app.UpdatePlan
-	calls := flowCalls(t, svc, f, func() *engine.Plan {
+	calls := flowCalls(t, svc, f, w, func() *engine.Plan {
 		plan = mustUpdate(t, svc)
 		return plan.Infra
 	})
@@ -280,7 +333,7 @@ func updateFlow(t *testing.T, svc *app.Service, f *vultrfake.Fake) (app.UpdatePl
 // deleteFlow deletes the test cluster and returns its calls, as flowCalls gives them.
 func deleteFlow(t *testing.T, svc *app.Service, f *vultrfake.Fake) []string {
 	t.Helper()
-	return flowCalls(t, svc, f, func() *engine.Plan { return mustDelete(t, svc).Infra })
+	return flowCalls(t, svc, f, nil, func() *engine.Plan { return mustDelete(t, svc).Infra })
 }
 
 // callsText returns the lines of calls, one per line, with the operation ids numbered in the order they first show:
@@ -297,17 +350,17 @@ func callsText(lines []string) string {
 
 // TestFlowGoldens builds the example cluster on an empty cloud, scales the workers of the built cluster from 2 to 3,
 // and deletes the built cluster. The plans of the two updates and the calls that each of the three runs makes to
-// Vultr match golden files.
+// Vultr and Nomad match golden files.
 func TestFlowGoldens(t *testing.T) {
 	plan, calls, _ := buildExample(t)
 	checkGolden(t, "flow_build.plan.golden", planText(t, plan))
 	checkGolden(t, "flow_build.calls.golden", callsText(calls))
 
 	synctest.Test(t, func(t *testing.T) {
-		svc, f := newExample(t)
+		svc, f, w := newExample(t)
 		mustUpdate(t, svc)
 		mustReplace(t, svc, edit(t, exampleWorkersYAML, "size: 2", "size: 3"))
-		plan, calls := updateFlow(t, svc, f)
+		plan, calls := updateFlow(t, svc, f, w)
 		checkGolden(t, "flow_scale.plan.golden", planText(t, plan))
 		checkGolden(t, "flow_scale.calls.golden", callsText(calls))
 	})

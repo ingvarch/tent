@@ -17,9 +17,10 @@ import (
 // leaderAddr is the RPC address of the leader of the waits' cluster.
 const leaderAddr = "10.0.0.5:4647"
 
-// newFake returns a cluster without a leader, and a client of it.
+// newFake returns a cluster without a leader whose ACL system is bootstrapped, and a client of it.
 func newFake() (*nomadfake.Fake, nomadops.API) {
 	f := nomadfake.New()
+	f.SetBootstrapped(pki.NewBootstrapSecret())
 	return f, f.Client(nomadops.Config{Token: pki.NewBootstrapSecret()})
 }
 

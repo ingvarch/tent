@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/netip"
 	"slices"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/ingvarch/tent/internal/assets"
 	"github.com/ingvarch/tent/internal/buildinfo"
 	"github.com/ingvarch/tent/internal/channels"
+	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/english"
 	"github.com/ingvarch/tent/internal/model"
 	"github.com/ingvarch/tent/internal/nodeconfig"
@@ -386,11 +389,7 @@ func newNodeBuilder(ctx context.Context, in builderInput, cache assetCache) (*no
 	for name, g := range groupSpecs(groups) {
 		b.pools[name] = g.Spec.Nomad.NodePool
 	}
-	for _, g := range m.Groups {
-		if g.Role.RunsServer() {
-			b.servers += g.Size
-		}
-	}
+	b.servers = clusterServers(m)
 	return b, nil
 }
 
@@ -407,6 +406,9 @@ func (b *nodeBuilder) node(group, name, zone string, cert pki.Certificate, seed 
 
 // specHash returns the spec hash of the nodes of group, "" for a group that the builder lacks.
 func (b *nodeBuilder) specHash(group string) string { return b.templates[group].SpecHash }
+
+// role returns the role of the nodes of group, "" for a group that the builder lacks.
+func (b *nodeBuilder) role(group string) v1alpha1.Role { return b.templates[group].Role }
 
 // nodePool returns the Nomad node pool of the nodes of group, "" for a group that the builder lacks.
 func (b *nodeBuilder) nodePool(group string) string { return b.pools[group] }
@@ -457,4 +459,53 @@ func withNode(nc nodeconfig.NodeConfig, name, zone string, bootstrapExpect int, 
 		return nil, err
 	}
 	return &nc, nil
+}
+
+// standInIntroTokenSize is the size of the intro token that the checks of a plan use: about three times that of a real
+// token, which is under 1 KiB for a node name of 30 characters.
+const standInIntroTokenSize = 2048
+
+// standInIntroToken returns text of standInIntroTokenSize bytes that is shaped like an intro token, three base64url
+// parts, and that gzip shrinks no more than a real one. It is the same every time.
+func standInIntroToken() pki.Secret {
+	raw := make([]byte, standInIntroTokenSize)
+	_, _ = rand.NewChaCha8([32]byte{}).Read(raw) // never fails
+	text := base64.RawURLEncoding.EncodeToString(raw)[:standInIntroTokenSize-2]
+	third := len(text) / 3
+	return pki.Secret(text[:third] + "." + text[third:2*third] + "." + text[2*third:])
+}
+
+// assetOptions returns the options that find the release files that nodes download: the service's, with its clock
+// when they have none.
+func (s *Service) assetOptions() assets.Options {
+	opts := s.Assets
+	if opts.Now == nil {
+		opts.Now = s.now
+	}
+	return opts
+}
+
+// planBuilder returns the builder of the NodeConfig of the nodes of the cluster m, whose specs are objs and whose
+// channel is ch, with the run's secrets. It asks the provider p for the architecture of each node group's machines and
+// reads the release files, or takes them from cache.
+func (s *Service) planBuilder(ctx context.Context, p cloud.Provider, m *model.Cluster, objs spec.Objects,
+	ch *channels.Channel, secrets clusterSecrets, cache assetCache,
+) (*nodeBuilder, error) {
+	archs := make(map[string]string, len(m.Groups))
+	byType := map[string]string{}
+	for _, g := range m.Groups {
+		arch, ok := byType[g.MachineType]
+		if !ok {
+			var err error
+			if arch, err = p.Arch(ctx, g.MachineType); err != nil {
+				return nil, fmt.Errorf("architecture of %s: %w", g.MachineType, err)
+			}
+			byType[g.MachineType] = arch
+		}
+		archs[g.Name] = arch
+	}
+	return newNodeBuilder(ctx, builderInput{
+		Specs: objs, Channel: ch, Assets: s.assetOptions(), TentVersion: s.Version, Archs: archs,
+		Gossip: secrets.gossip, CABundle: secrets.ca.Bundle(),
+	}, cache)
 }

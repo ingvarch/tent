@@ -11,6 +11,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/ingvarch/tent/internal/assets"
+	"github.com/ingvarch/tent/internal/channels"
+	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/statestore"
 )
 
@@ -49,6 +52,12 @@ type globalOptions struct {
 	openStore func(ctx context.Context, url string) (statestore.Store, error)
 	// providers returns the cloud provider that a cluster's spec names; nil when tent reaches no cloud.
 	providers Providers
+	// assets says where the files that nodes download are found.
+	assets assets.Options
+	// nomad returns the API of one Nomad server; nil when tent reaches no Nomad.
+	nomad func(nomadops.Config) (nomadops.API, error)
+	// channels returns the release channel called name; the channels embedded in tent when nil.
+	channels func(name string) (*channels.Channel, error)
 }
 
 // addFlags adds the global flags to cmd and its subcommands.

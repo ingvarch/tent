@@ -28,6 +28,7 @@ ListInstanceVPCs <prod-servers-1>
 ListInstanceVPCs <prod-servers-2>
 ListInstanceVPCs <prod-workers-0>
 ListInstanceVPCs <prod-workers-1>
+nomad IntroToken prod-workers-2 default 30m0s (prod-servers-0)
 ListInstances tent/op=<op1>
 ListSSHKeys
 ListVPCs
@@ -40,3 +41,4 @@ GetInstance <prod-workers-2>
 GetInstance <prod-workers-2>
 GetInstance <prod-workers-2>
 ListInstanceVPCs <prod-workers-2>
+nomad Nodes (prod-servers-0)

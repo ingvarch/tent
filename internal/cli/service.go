@@ -39,6 +39,9 @@ func (o *globalOptions) service(cmd *cobra.Command, validate v1alpha1.ValidateOp
 		LockTimeout: o.lockTimeout,
 		Validate:    validate,
 		Providers:   o.cloudProviders(),
+		Assets:      o.assets,
+		Nomad:       o.nomad,
+		Channels:    o.channels,
 		OnWait: func(holder error) {
 			// A notice that fails to print changes nothing.
 			_, _ = fmt.Fprintf(stderr, "%v; waiting up to %s (--lock-timeout)\n", holder, o.lockTimeout)

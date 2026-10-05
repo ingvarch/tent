@@ -15,8 +15,11 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
+	"github.com/ingvarch/tent/internal/app"
+	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/cloud/vultr"
 	"github.com/ingvarch/tent/internal/cloud/vultr/vultrfake"
+	"github.com/ingvarch/tent/internal/nomadops/nomadfake"
 	"github.com/ingvarch/tent/internal/secrettest"
 	"github.com/ingvarch/tent/internal/statestore"
 )
@@ -57,7 +60,7 @@ func cloudView(f *vultrfake.Fake) []string {
 			strings.Join(in.Tags, ","), nm[in.FirewallGroupID], named(req.AttachVPC), named(req.SSHKeys)))
 	}
 	for i, v := range view {
-		view[i] = callKey(v)
+		view[i] = specHashPattern.ReplaceAllString(callKey(v), cloud.LabelSpecHash+"=<hash>")
 	}
 	slices.Sort(view)
 	return view
@@ -89,10 +92,28 @@ func atCall(f *vultrfake.Fake, key string, n int, act vultrfake.Hook) vultrfake.
 	}
 }
 
-// cutCase cuts a run at one of the calls that an uninterrupted run makes.
+// atNomadCall returns a hook that hands the n-th call whose line, as the world's line gives it, is key to act, and
+// carries every other call out.
+func atNomadCall(w *nomadWorld, key string, n int, act nomadHook) nomadHook {
+	var mu sync.Mutex
+	seen := map[string]int{}
+	return func(ctx context.Context, c nomadfake.Call, next func(context.Context) error) error {
+		k := w.line(c)
+		mu.Lock()
+		seen[k]++
+		hit := k == key && seen[k] == n
+		mu.Unlock()
+		if !hit {
+			return next(ctx)
+		}
+		return act(ctx, c, next)
+	}
+}
+
+// cutCase cuts a run at one of the calls that an uninterrupted run makes, to Vultr or to Nomad.
 type cutCase struct {
 	index int    // the call's place among the calls of the uninterrupted run, from 1: its line in the golden file
-	key   string // the call, as callKey gives it
+	key   string // the call, as callKey gives it; a call to Nomad starts with "nomad "
 	n     int    // the call is the n-th with that key
 	after bool   // the run's context ends just after the fake carried the call out; otherwise just before the call
 }
@@ -120,29 +141,42 @@ func eachCut(t *testing.T, calls []string, test func(t *testing.T, c cutCase)) {
 	}
 }
 
-// runCut runs a use case on f with a context that ends at the call of c: just before the call reaches the fake, or
-// just after the fake carried it out, when the call fails as the client fails for an ended context and loses its
-// answer, as a request in flight does when tent is interrupted. It fails the test unless the run made the call and
-// stopped with an error that matches context.Canceled, and changed nothing in the store s but for writing secrets that
-// s lacked, as an update does before the infrastructure. It returns the secrets that the run wrote.
-func runCut(t *testing.T, f *vultrfake.Fake, s statestore.Store, c cutCase, run func(context.Context) error) (
-	wrote map[string][]byte,
-) {
+// runCut runs a use case on f and w with a context that ends at the call of c: just before the call reaches the fake,
+// or just after the fake carried it out, when the call fails as the client fails for an ended context and loses its
+// answer, as a request in flight does when tent is interrupted. w may be nil for a use case that calls no Nomad. It
+// fails the test unless the run made the call and stopped with an error that matches context.Canceled, and changed
+// nothing in the store s but for writing the secrets that s lacked, the completed spec and the mark of the Nomad
+// bootstrap, and deleting a stale mark, as an update does. It returns the secrets that the run wrote.
+func runCut(t *testing.T, f *vultrfake.Fake, w *nomadWorld, s statestore.Store, c cutCase,
+	run func(context.Context) error,
+) (wrote map[string][]byte) {
 	t.Helper()
 	stored, before := snapshot(t, s), secretsOf(t, s)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	var cut atomic.Bool
-	f.SetHook(atCall(f, c.key, c.n, func(ctx context.Context, _ vultrfake.Call, next func(context.Context) error) error {
+	act := func(ctx context.Context, next func(context.Context) error) error {
 		cut.Store(true)
 		if c.after {
 			_ = next(ctx) // carried out; its answer is lost
 		}
 		cancel()
 		return next(ctx)
+	}
+	f.SetHook(atCall(f, c.key, c.n, func(ctx context.Context, _ vultrfake.Call, next func(context.Context) error) error {
+		return act(ctx, next)
 	}))
+	if w != nil {
+		w.SetHook(atNomadCall(w, c.key, c.n,
+			func(ctx context.Context, _ nomadfake.Call, next func(context.Context) error) error {
+				return act(ctx, next)
+			}))
+	}
 	err := run(ctx)
 	f.SetHook(nil)
+	if w != nil {
+		w.SetHook(nil)
+	}
 	if !cut.Load() {
 		t.Fatalf("the run made no call %s", c.key)
 	}
@@ -154,6 +188,15 @@ func runCut(t *testing.T, f *vultrfake.Fake, s statestore.Store, c cutCase, run 
 		if _, ok := before[p]; !ok {
 			wrote[p], stored[p] = data, hidden(string(data))
 		}
+	}
+	paths := list(t, s, "")
+	if _, ok := stored[completedPath]; !ok && slices.Contains(paths, completedPath) {
+		stored[completedPath] = string(get(t, s, completedPath))
+	}
+	if slices.Contains(paths, markPath) {
+		stored[markPath] = string(get(t, s, markPath))
+	} else {
+		delete(stored, markPath) // an update deletes a mark that no server stands behind
 	}
 	wantSnapshot(t, s, stored)
 	wantLockFree(t, s)
@@ -177,25 +220,97 @@ func wantSecretsKept(t *testing.T, s statestore.Store, kept map[string][]byte) {
 	}
 }
 
-// TestUpdateCutAtEveryCall builds the example cluster with a run cut at each of the calls of an uninterrupted build,
-// just before it and just after it. The next run, with a fresh context, leaves the cloud as the uninterrupted build
-// does, without a second copy of any object, keeps the secrets that the cut run wrote, and a run after it has nothing
-// to change.
+// wantBuilt fails the test unless the build of the example cluster in the store s, on f and w, is whole after the runs
+// that a test cut: the cloud is as an uninterrupted build leaves it, with one instance per node, the mark of the
+// bootstrap is stored, Nomad's ACL system was bootstrapped by at most two calls, the secrets of kept are as they were
+// written, and the next plan has no changes.
+func wantBuilt(t *testing.T, svc *app.Service, f *vultrfake.Fake, w *nomadWorld, want []string,
+	kept map[string][]byte,
+) {
+	t.Helper()
+	wantView(t, f, want)
+	if !slices.Contains(list(t, svc.Store, ""), markPath) {
+		t.Errorf("the store holds no %s", markPath)
+	}
+	if n := countNomad(w, "Bootstrap"); n < 1 || n > 2 {
+		t.Errorf("%d Bootstrap calls reached Nomad, want 1 or 2", n)
+	}
+	wantSecretsKept(t, svc.Store, kept)
+	wantConverged(t, svc)
+	wantLockFree(t, svc.Store)
+}
+
+// countNomad returns how many calls of the nomadops.API method name reached the Nomad fake of w.
+func countNomad(w *nomadWorld, name string) int {
+	n := 0
+	for _, c := range w.Log() {
+		if c.Name == name {
+			n++
+		}
+	}
+	return n
+}
+
+// TestUpdateCutAtEveryCall builds each example cluster, the one of servers and workers and the combined one, with a run
+// cut at each of the calls of an uninterrupted build to Vultr and to Nomad, just before it and just after it. The next
+// run, with a fresh context, leaves the cloud as the uninterrupted build does, without a second copy of any object,
+// keeps the secrets that the cut run wrote, and a run after it has nothing to change.
 func TestUpdateCutAtEveryCall(t *testing.T) {
-	_, calls, want := buildExample(t)
-	_, template := exampleStore(t)
-	eachCut(t, calls, func(t *testing.T, c cutCase) {
-		svc, f := newExampleFrom(t, template)
-		wrote := runCut(t, f, svc.Store, c, func(ctx context.Context) error {
-			_, err := svc.Update(ctx, "prod", true)
-			return err
+	for _, ex := range exampleClusters {
+		t.Run(ex.name, func(t *testing.T) {
+			_, calls, want := buildExample(t, ex.docs...)
+			_, template := exampleStore(t, ex.docs...)
+			eachCut(t, calls, func(t *testing.T, c cutCase) {
+				svc, f, w := newExampleFrom(t, template)
+				wrote := runCut(t, f, w, svc.Store, c, func(ctx context.Context) error {
+					_, err := svc.Update(ctx, "prod", true)
+					return err
+				})
+				mustUpdate(t, svc)
+				wantBuilt(t, svc, f, w, want, wrote)
+			})
 		})
+	}
+}
+
+// builtTemplate builds the cluster of the specs docs in a new store, on a fake of its own, and returns the store's
+// root.
+func builtTemplate(t *testing.T, docs ...string) string {
+	t.Helper()
+	svc, root := exampleStore(t, docs...)
+	synctest.Test(t, func(t *testing.T) {
+		f, _ := withCloud(svc)
+		withNomad(svc, f)
 		mustUpdate(t, svc)
-		wantView(t, f, want)
-		wantSecretsKept(t, svc.Store, wrote)
-		wantConverged(t, svc)
-		wantLockFree(t, svc.Store)
 	})
+	return root
+}
+
+// TestUpdateCutAtEveryCallOfARebuild rebuilds each example cluster on an empty cloud and a new Nomad, from a store
+// that holds the built cluster's secrets and its mark of the bootstrap, with a run cut at each of the calls of an
+// uninterrupted rebuild, just before it and just after it. After the next run the cloud is as the uninterrupted
+// rebuild leaves it, the new Nomad is bootstrapped and the mark is stored again.
+func TestUpdateCutAtEveryCallOfARebuild(t *testing.T) {
+	for _, ex := range exampleClusters {
+		t.Run(ex.name, func(t *testing.T) {
+			template := builtTemplate(t, ex.docs...)
+			var calls, want []string
+			synctest.Test(t, func(t *testing.T) {
+				svc, f, w := newExampleFrom(t, template)
+				_, calls = updateFlow(t, svc, f, w)
+				want = cloudView(f)
+			})
+			eachCut(t, calls, func(t *testing.T, c cutCase) {
+				svc, f, w := newExampleFrom(t, template)
+				wrote := runCut(t, f, w, svc.Store, c, func(ctx context.Context) error {
+					_, err := svc.Update(ctx, "prod", true)
+					return err
+				})
+				mustUpdate(t, svc)
+				wantBuilt(t, svc, f, w, want, wrote)
+			})
+		})
+	}
 }
 
 // errCut is why a put or a delete that a test cut failed.
@@ -240,55 +355,82 @@ func (s *cutStore) call(op, p string, carry func() error) error {
 			return err
 		}
 	}
-	return fmt.Errorf("%s %q: %w", op, p, errCut)
+	return cutError(op, p)
 }
 
-// TestUpdateCutAtEverySecretWrite builds the example cluster with a run cut at each write of a secret, just before
-// the store writes it and just after, when the answer is lost. The cut run stops before the infrastructure, with an
-// error that shows none of the secrets it made. The next run leaves the cloud as an uninterrupted build does, with one
-// CA, one gossip key and one ACL bootstrap secret, and keeps each secret that the cut run wrote byte for byte.
-func TestUpdateCutAtEverySecretWrite(t *testing.T) {
-	_, _, want := buildExample(t)
-	_, template := exampleStore(t)
-	for _, after := range []bool{false, true} {
-		when := "before"
-		if after {
-			when = "after"
-		}
-		for _, p := range secretPaths {
-			t.Run(when+" "+path.Base(p), func(t *testing.T) {
-				t.Parallel()
-				synctest.Test(t, func(t *testing.T) {
-					svc, f := newExampleFrom(t, template)
-					store := svc.Store
-					cut := &cutStore{Store: store, path: p, after: after}
-					svc.Store = cut
+// cutError returns the error of the call op of path p that a test cut.
+func cutError(op, p string) error { return fmt.Errorf("%s %q: %w", op, p, errCut) }
 
-					_, err := svc.Update(t.Context(), "prod", true)
-					if err == nil {
-						t.Fatal("the cut run succeeded")
-					}
-					shown := map[string]string{"the error": err.Error()}
-					if secrettest.CheckHidden(t, shown, cut.received(t, p), ""); t.Failed() {
-						t.FailNow() // the error would show a secret
-					}
-					if !errors.Is(err, errCut) {
-						t.Fatalf("the cut run returned %v, want an error that matches %v", err, errCut)
-					}
-					wantOnlyReads(t, f)
-					wantLockFree(t, cut)
-					wrote := secretsOf(t, store)
-					if _, ok := wrote[p]; ok != after {
-						t.Errorf("the cut run wrote %s: %t, want %t", p, ok, after)
-					}
+// TestUpdateCutAtEveryStateWrite builds each example cluster with a run cut at each write of a secret, of the completed
+// spec and of the mark of the Nomad bootstrap, just before the store writes it and just after, when the answer is
+// lost. The cut run stops with an error that shows none of the secrets, and that names the write when it is the one of
+// the completed spec or of the mark. A cut before the mark leaves Nomad bootstrapped and the next run bootstraps
+// again; a cut after it leaves the next run to go straight to the clients. The next run leaves the cloud as an
+// uninterrupted build does, with one CA, one gossip key and one ACL bootstrap secret, and keeps each secret that the
+// cut run wrote byte for byte.
+func TestUpdateCutAtEveryStateWrite(t *testing.T) {
+	for _, ex := range exampleClusters {
+		_, _, want := buildExample(t, ex.docs...)
+		_, template := exampleStore(t, ex.docs...)
+		for _, after := range []bool{false, true} {
+			when := "before"
+			if after {
+				when = "after"
+			}
+			for _, p := range append(slices.Clone(secretPaths), completedPath, markPath) {
+				t.Run(ex.name+" "+when+" "+path.Base(p), func(t *testing.T) {
+					t.Parallel()
+					synctest.Test(t, func(t *testing.T) {
+						svc, f, w := newExampleFrom(t, template)
+						store := svc.Store
+						cut := &cutStore{Store: store, path: p, after: after}
+						svc.Store = cut
 
-					svc.Store = store
-					mustUpdate(t, svc)
-					wantView(t, f, want)
-					wantSecretsKept(t, store, wrote)
-					wantConverged(t, svc)
+						_, err := svc.Update(t.Context(), "prod", true)
+						if err == nil {
+							t.Fatal("the cut run succeeded")
+						}
+						shown := map[string]string{"the error": err.Error()}
+						// The completed spec and the mark are written after every secret.
+						last := p
+						if !isSecret(p) {
+							last = aclPath
+						}
+						if secrettest.CheckHidden(t, shown, cut.received(t, last), ""); t.Failed() {
+							t.FailNow() // the error would show a secret
+						}
+						if !errors.Is(err, errCut) {
+							t.Fatalf("the cut run returned %v, want an error that matches %v", err, errCut)
+						}
+						switch cause := cutError("put", p).Error(); p {
+						case completedPath:
+							wantError(t, err, "write the completed spec: "+cause)
+						case markPath:
+							wantError(t, err, "write "+markPath+": "+cause)
+						}
+						wantLockFree(t, cut)
+						if p != markPath {
+							wantOnlyReads(t, f)
+						}
+						wrote := secretsOf(t, store)
+						if _, ok := wrote[p]; isSecret(p) && ok != after {
+							t.Errorf("the cut run wrote %s: %t, want %t", p, ok, after)
+						}
+						marked := slices.Contains(list(t, store, ""), markPath)
+						if p == markPath && marked != after {
+							t.Errorf("the cut run wrote the mark: %t, want %t", marked, after)
+						}
+						before := countNomad(w, "Bootstrap")
+
+						svc.Store = store
+						mustUpdate(t, svc)
+						wantBuilt(t, svc, f, w, want, wrote)
+						if p == markPath && after && countNomad(w, "Bootstrap") != before {
+							t.Error("the next run bootstrapped again although the mark was stored")
+						}
+					})
 				})
-			})
+			}
 		}
 	}
 }
@@ -300,9 +442,9 @@ func TestDeleteCutAtEveryCall(t *testing.T) {
 	calls := deleteExample(t)
 	_, template := exampleStore(t)
 	eachCut(t, calls, func(t *testing.T, c cutCase) {
-		svc, f := newExampleFrom(t, template)
+		svc, f, _ := newExampleFrom(t, template)
 		mustUpdate(t, svc)
-		runCut(t, f, svc.Store, c, func(ctx context.Context) error {
+		runCut(t, f, nil, svc.Store, c, func(ctx context.Context) error {
 			_, err := svc.DeleteCluster(ctx, "prod", true, false)
 			return err
 		})
@@ -354,6 +496,7 @@ func TestDeleteCutAtEveryStateDelete(t *testing.T) {
 
 					svc.Store = store
 					if hasKey && !hasBundle {
+						withNomad(svc, f) // the new bootstrap secret belongs to a Nomad that nobody has bootstrapped
 						key := get(t, store, caKeyPath)
 						mustCreate(t, svc, serversYAML, workersYAML)
 						plan := mustUpdate(t, svc)
@@ -401,7 +544,7 @@ func TestUpdateLosesTheAnswerOfEveryCreate(t *testing.T) {
 		t.Run(fmt.Sprintf("%03d %s", i+1, method), func(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
-				svc, f := newExampleFrom(t, template)
+				svc, f, _ := newExampleFrom(t, template)
 				var lost atomic.Bool
 				f.SetHook(atCall(f, key, 1,
 					func(ctx context.Context, c vultrfake.Call, next func(context.Context) error) error {

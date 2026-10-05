@@ -15,14 +15,17 @@ import (
 )
 
 // stableChannel returns a lookup of the release channels in which stable allows Nomad from minimum, recommends
-// recommended and tests tested. Other names are unknown, as for the embedded channels.
+// recommended and tests tested, and pins the CNI plugins of the embedded stable channel. Other names are unknown, as
+// for the embedded channels.
 func stableChannel(minimum, recommended string, tested ...string) func(string) (*channels.Channel, error) {
 	return func(name string) (*channels.Channel, error) {
-		if name != "stable" {
-			return channels.Load(name)
+		embedded, err := channels.Load(name)
+		if err != nil || name != "stable" {
+			return embedded, err
 		}
 		return &channels.Channel{
 			Name: name, Nomad: channels.Nomad{Minimum: minimum, Recommended: recommended, Tested: tested},
+			CNI: embedded.CNI,
 		}, nil
 	}
 }
@@ -205,7 +208,7 @@ func TestUpdateWarnsOfAnUntestedNomad(t *testing.T) {
 			t.Helper()
 			n := 0
 			for _, e := range events {
-				if !strings.HasPrefix(e, "node ") && !strings.HasPrefix(e, "infra ") {
+				if !strings.HasPrefix(e, "node ") && !strings.HasPrefix(e, "infra ") && !strings.HasPrefix(e, "nomad ") {
 					n++
 				}
 			}

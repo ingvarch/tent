@@ -385,7 +385,7 @@ func TestPlanNodes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &model.Cluster{Name: "prod", Groups: tc.groups}
 			instances := slices.Clone(tc.instances)
-			got := planNodes(m, instances)
+			got, _ := planNodes(m, instances)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("planNodes (-want +got):\n%s", diff)
 			}
@@ -393,8 +393,47 @@ func TestPlanNodes(t *testing.T) {
 				t.Errorf("planNodes changed the instances (-before +after):\n%s", diff)
 			}
 			slices.Reverse(instances)
-			if diff := cmp.Diff(got, planNodes(m, instances)); diff != "" {
+			reversed, _ := planNodes(m, instances)
+			if diff := cmp.Diff(got, reversed); diff != "" {
 				t.Errorf("planNodes of the instances in reverse order (-in order +reversed):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestPlanNodesServers returns the machines of the server and combined groups that stay, by name, and leaves out the
+// duplicates, the surplus, the machines of client groups and those of another cluster.
+func TestPlanNodesServers(t *testing.T) {
+	combined := nodeGroup("all", v1alpha1.RoleCombined, 1)
+	s3 := servers(3)
+	s0, s1, s2 := member(s3, 0, "i-1", minutes(1)), member(s3, 1, "i-2", minutes(2)), member(s3, 2, "i-3", minutes(3))
+	for _, tc := range []struct {
+		name      string
+		groups    []model.NodeGroup
+		instances []cloud.Instance
+		want      []cloud.Instance
+	}{
+		{"none exist", []model.NodeGroup{s3, workers(2)}, nil, nil},
+		{"in the order of their names", []model.NodeGroup{s3}, []cloud.Instance{s2, s0, s1}, []cloud.Instance{s0, s1, s2}},
+		{"not ready ones too", []model.NodeGroup{s3}, []cloud.Instance{s0, notReady(s1)},
+			[]cloud.Instance{s0, notReady(s1)}},
+		{"clients are no servers", []model.NodeGroup{servers(1), workers(2)},
+			[]cloud.Instance{member(workers(2), 0, "i-4", minutes(4)), s0}, []cloud.Instance{s0}},
+		{"combined nodes are servers", []model.NodeGroup{combined},
+			[]cloud.Instance{member(combined, 0, "i-5", minutes(5))}, []cloud.Instance{member(combined, 0, "i-5", minutes(5))}},
+		{"a surplus node goes", []model.NodeGroup{servers(1)}, []cloud.Instance{s1, s0}, []cloud.Instance{s0}},
+		{"a duplicate goes", []model.NodeGroup{servers(1)}, []cloud.Instance{s0, changed(s0, func(in *cloud.Instance) {
+			in.ID, in.Created = "i-9", minutes(9)
+		})}, []cloud.Instance{s0}},
+		{"a node of another group goes", []model.NodeGroup{servers(1)},
+			[]cloud.Instance{s0, changed(s1, func(in *cloud.Instance) { in.Group = "gone" })}, []cloud.Instance{s0}},
+		{"another cluster's node is not ours", []model.NodeGroup{servers(1)},
+			[]cloud.Instance{s0, changed(s1, func(in *cloud.Instance) { in.Cluster = "dev" })}, []cloud.Instance{s0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, got := planNodes(&model.Cluster{Name: "prod", Groups: tc.groups}, slices.Clone(tc.instances))
+			if diff := cmp.Diff(tc.want, got, cmpopts.EquateComparable(netip.Addr{})); diff != "" {
+				t.Errorf("the servers (-want +got):\n%s", diff)
 			}
 		})
 	}

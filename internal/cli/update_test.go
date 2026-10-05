@@ -42,7 +42,8 @@ const updatePlan = `+ vultr.VPC/prod
 
 Plan: 3 to create, 0 to update, 0 to replace, 0 to delete.
 Nodes: 6 to create, 0 to wait for, 0 to delete.
-State: pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token and cluster.completed.yaml will be written.
+Nomad: bootstrap the ACL system and wait for 3 healthy servers.
+State: pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token, cluster.completed.yaml and nomad/bootstrapped will be written.
 `
 
 // applyHint is what update cluster prints on stderr after a plan with changes.
@@ -52,8 +53,9 @@ const applyHint = "run with --yes to apply the changes\n"
 // then a line that sums up what it did.
 const built = updatePlan + "\n" +
 	"Applied: 3 created, 0 updated, 0 replaced, 0 deleted. Nodes: 6 created, 0 waited for, 0 deleted. " +
-	"Wrote pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token and " +
-	"cluster.completed.yaml.\n"
+	"Nomad: bootstrapped the ACL system; 3 servers are healthy. " +
+	"Wrote pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token, " +
+	"cluster.completed.yaml and nomad/bootstrapped.\n"
 
 // secretPaths are the test cluster's secrets in the store, in the order an update writes them.
 var secretPaths = []string{
@@ -96,16 +98,30 @@ func wantInstances(t *testing.T, f *vultrfake.Fake, names ...string) {
 }
 
 // buildLines returns the progress lines of an update that builds the test cluster on an empty cloud: the
-// infrastructure's, which run in parallel and so come sorted, then the nodes' in order.
+// infrastructure's, which run in parallel and so come sorted, then the nodes' and Nomad's in order: the servers, the
+// Nomad step, and each worker with the line of its registration.
 func buildLines() (infra, nodes []string) {
 	for _, k := range infraKeys {
 		infra = append(infra, "creating "+k, "created "+k)
 	}
 	slices.Sort(infra)
 	for i, n := range nodeNames {
+		if n == "prod-workers-0" {
+			nodes = append(nodes, nomadLines...)
+		}
 		nodes = append(nodes, "creating node "+n, fmt.Sprintf("created node %s (10.64.0.%d)", n, i+3))
+		if strings.Contains(n, "workers") {
+			nodes = append(nodes, "waiting for node "+n+" to register", "node "+n+" registered")
+		}
 	}
 	return infra, nodes
+}
+
+// nomadLines are the progress lines of the Nomad step of the build, between the servers and the workers.
+var nomadLines = []string{
+	"waiting for a Nomad leader", "Nomad has a leader (10.64.0.3:4647)",
+	"bootstrapping the ACL system", "bootstrapped the ACL system",
+	"waiting for 3 healthy Nomad servers", "3 Nomad servers are healthy",
 }
 
 // wantBuildProgress fails the test unless errOut holds the progress lines of an update that builds the test cluster
@@ -148,6 +164,10 @@ type planJSON struct {
 	Nodes []struct {
 		Action, Name, Group, Role string
 	}
+	Nomad *struct {
+		Bootstrap bool
+		Servers   int
+	}
 	Secrets       []string
 	CompletedSpec bool
 }
@@ -165,6 +185,13 @@ func decodePlan(t *testing.T, out string) planJSON {
 // wantPlanJSON fails the test unless p creates the test cluster on an empty cloud.
 func wantPlanJSON(t *testing.T, p planJSON) {
 	t.Helper()
+	wantPlanJSONOf(t, p, nodeNames)
+}
+
+// wantPlanJSONOf fails the test unless p creates the nodes of the test cluster that are called names on an empty
+// cloud, and bootstraps Nomad for its three servers.
+func wantPlanJSONOf(t *testing.T, p planJSON, names []string) {
+	t.Helper()
 	var infra []string
 	for _, c := range p.Infrastructure.Changes {
 		infra = append(infra, c.Action+" "+c.Kind+"/"+c.Name)
@@ -181,7 +208,7 @@ func wantPlanJSON(t *testing.T, p planJSON) {
 		nodes = append(nodes, n.Action+" "+n.Name+" "+n.Group+" "+n.Role)
 	}
 	want = nil
-	for _, n := range nodeNames {
+	for _, n := range names {
 		group, role := "servers", "server"
 		if strings.Contains(n, "workers") {
 			group, role = "workers", "client"
@@ -190,6 +217,9 @@ func wantPlanJSON(t *testing.T, p planJSON) {
 	}
 	if diff := cmp.Diff(want, nodes); diff != "" {
 		t.Errorf("the node changes (-want +got):\n%s", diff)
+	}
+	if p.Nomad == nil || !p.Nomad.Bootstrap || p.Nomad.Servers != 3 {
+		t.Errorf("the Nomad step is %+v, want the bootstrap and 3 servers", p.Nomad)
 	}
 	want = nil
 	for _, secret := range secretPaths {
@@ -236,7 +266,7 @@ func TestUpdateClusterExitCode(t *testing.T) {
 	s := withCluster(t)
 	var out, errOut syncBuffer
 	code := Execute(t.Context(), update(s, "--exit-code"), Streams{In: strings.NewReader(""), Out: &out, Err: &errOut},
-		WithProviders(onVultr(vultrfake.New())))
+		WithProviders(onVultr(vultrfake.New())), WithAssets(testAssets()), WithNomad(staticNomad()))
 	wantResult(t, result{code, out.String(), errOut.String()}, 2, updatePlan, applyHint)
 }
 
@@ -346,7 +376,8 @@ var openAPILine = strings.TrimSuffix(openAPIWarning, "\n")
 
 // progressEvent is a progress line of -o json.
 type progressEvent struct {
-	Type, Event, Step, Kind, Name, Action, ID, Address, Wait, Cause, Error string
+	Type, Event, Step, Kind, Name, Action, ID, Address, Wait, Cause, Error, Leader string
+	Voters                                                                         int
 }
 
 // decodeProgress decodes the progress lines of -o json, one JSON object each, and skips the other lines of stderr,
@@ -388,11 +419,14 @@ func TestUpdateClusterApplyJSON(t *testing.T) {
 			t.Error("the plan does not say it was applied")
 		}
 		events := decodeProgress(t, got.errOut)
-		var infra, nodes []progressEvent
+		var infra, nodes, nomad []progressEvent
 		for _, e := range events {
-			if e.Type == "node" {
+			switch e.Type {
+			case "node":
 				nodes = append(nodes, e)
-			} else {
+			case "nomad":
+				nomad = append(nomad, e)
+			default:
 				infra = append(infra, e)
 			}
 		}
@@ -422,6 +456,25 @@ func TestUpdateClusterApplyJSON(t *testing.T) {
 		}
 		if diff := cmp.Diff(wantNodes, nodes); diff != "" {
 			t.Errorf("the nodes' events (-want +got):\n%s", diff)
+		}
+		wantNomad := []progressEvent{
+			{Type: "nomad", Step: "started", Action: "leader"},
+			{Type: "nomad", Step: "done", Action: "leader", Leader: "10.64.0.3:4647"},
+			{Type: "nomad", Step: "started", Action: "bootstrap"},
+			{Type: "nomad", Step: "done", Action: "bootstrap"},
+			{Type: "nomad", Step: "started", Action: "healthy", Voters: 3},
+			{Type: "nomad", Step: "done", Action: "healthy", Voters: 3},
+		}
+		for _, n := range nodeNames[3:] {
+			wantNomad = append(wantNomad,
+				progressEvent{Type: "nomad", Step: "started", Action: "register", Name: n},
+				progressEvent{Type: "nomad", Step: "done", Action: "register", Name: n})
+		}
+		if diff := cmp.Diff(wantNomad, nomad); diff != "" {
+			t.Errorf("the Nomad events (-want +got):\n%s", diff)
+		}
+		if i := slices.IndexFunc(events, func(e progressEvent) bool { return e.Type == "nomad" }); i != len(infra)+6 {
+			t.Errorf("the first Nomad event is event %d, want %d: after the three servers", i, len(infra)+6)
 		}
 		if i := slices.IndexFunc(events, func(e progressEvent) bool { return e.Type == "node" }); i != len(infra) {
 			t.Errorf("the first node event is event %d, want %d: after the infrastructure's", i, len(infra))
@@ -516,7 +569,8 @@ func TestUpdateClusterWaits(t *testing.T) {
 		pendingWorker(t, s, f)
 		wantResult(t, runOn(t, f, update(s, "--yes")...), 0,
 			waitPlan+"\nNodes: 0 created, 1 waited for, 0 deleted.\n",
-			openAPIWarning+"waiting for node prod-workers-2\nnode prod-workers-2 (10.64.0.8) is ready\n")
+			openAPIWarning+"waiting for node prod-workers-2\nnode prod-workers-2 (10.64.0.8) is ready\n"+
+				"waiting for node prod-workers-2 to register\nnode prod-workers-2 registered\n")
 	})
 }
 
@@ -611,34 +665,51 @@ func TestUpdateClusterPrintsThePlanItApplies(t *testing.T) {
 // lockLost is the error of a change that was saved although its lock was lost at the end.
 const lockLost = "Error: the change is saved, but the lock of cluster prod was lost before tent released it"
 
+// withoutWorkers returns the plan or the summary text of the test cluster's build as it reads for the servers alone:
+// no line of a worker, and three nodes instead of six.
+func withoutWorkers(text string) string {
+	var lines []string
+	for line := range strings.Lines(text) {
+		if !strings.Contains(line, "prod-workers-") {
+			lines = append(lines, line)
+		}
+	}
+	return strings.NewReplacer("Nodes: 6 to create", "Nodes: 3 to create", "Nodes: 6 created", "Nodes: 3 created").
+		Replace(strings.Join(lines, ""))
+}
+
 // TestBuildLosesItsLock prints what update --yes and create --yes did, and fails with the error that says the change
-// is saved, when the lock is lost after the update has written the completed spec.
+// is saved, when the lock is lost after the update has written the mark of the Nomad bootstrap. The cluster has no
+// workers: the mark is then the last write, and a node created after the lock was lost would stop the run.
 func TestBuildLosesItsLock(t *testing.T) {
+	serversOnly := nodeNames[:3]
+	builtServers := withoutWorkers(built)
 	for _, tc := range []struct {
 		name   string
-		stored bool // the store holds the test cluster before the run
+		stored bool // the store holds the test cluster, with no worker, before the run
 		args   func(s state) []string
 		check  func(t *testing.T, out string)
 	}{
 		{"update", true, func(s state) []string { return update(s, "--yes") }, func(t *testing.T, out string) {
-			if out != built {
-				t.Errorf("stdout\n%s\nwant the plan and what it did\n%s", out, built)
+			if out != builtServers {
+				t.Errorf("stdout\n%s\nwant the plan and what it did\n%s", out, builtServers)
 			}
 		}},
 		{"update -o json", true, func(s state) []string { return update(s, "--yes", "-o", "json") },
 			func(t *testing.T, out string) {
 				plan := decodePlan(t, out)
-				wantPlanJSON(t, plan)
+				wantPlanJSONOf(t, plan, serversOnly)
 				if !plan.Applied {
 					t.Error("the plan does not say it was applied")
 				}
 			}},
-		{"create", false, func(s state) []string { return createProd(s, "--yes") }, func(t *testing.T, out string) {
-			if out != createdProd+built {
-				t.Errorf("stdout\n%s\nwant the create's lines, the plan and what it did\n%s", out, createdProd+built)
-			}
-		}},
-		{"create -o json", false, func(s state) []string { return createProd(s, "--yes", "-o", "json") },
+		{"create", false, func(s state) []string { return createProd(s, "--yes", "--workers", "0") },
+			func(t *testing.T, out string) {
+				if want := createdProd + builtServers; out != want {
+					t.Errorf("stdout\n%s\nwant the create's lines, the plan and what it did\n%s", out, want)
+				}
+			}},
+		{"create -o json", false, func(s state) []string { return createProd(s, "--yes", "--workers", "0", "-o", "json") },
 			func(t *testing.T, out string) {
 				var got struct {
 					Changes []changeOutput  `json:"changes"`
@@ -659,21 +730,26 @@ func TestBuildLosesItsLock(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				s := newState(t)
 				if tc.stored {
-					s = withCluster(t)
+					s.put(t, clusterPath, clusterYAML)
+					s.put(t, serversPath, serversYAML)
+					s.put(t, workersPath, strings.Replace(workersYAML, "size: 3", "size: 0", 1))
 				}
 				f := vultrfake.New()
 				losing := func(st statestore.Store) statestore.Store {
-					return losingStore{Store: st, after: "prod/cluster.completed.yaml"}
+					return losingStore{Store: st, after: "prod/nomad/bootstrapped"}
 				}
-				got := runWith(t, &globalOptions{openStore: wrapped(losing), providers: onVultr(f)}, tc.args(s)...)
+				opts := &globalOptions{
+					openStore: wrapped(losing), providers: onVultr(f), assets: testAssets(), nomad: staticNomad(),
+				}
+				got := runWith(t, opts, tc.args(s)...)
 
 				if got.code != 1 || !strings.HasSuffix(got.errOut, "\n"+lockLost+"\n") {
 					t.Errorf("exit code = %d, stderr\n%s\nwant 1 and the error\n%s", got.code, got.errOut, lockLost)
 				}
 				tc.check(t, got.out)
-				wantInstances(t, f, nodeNames...)
-				if _, ok := s.objects(t)["prod/cluster.completed.yaml"]; !ok {
-					t.Error("the update did not write the completed spec")
+				wantInstances(t, f, serversOnly...)
+				if _, ok := s.objects(t)["prod/nomad/bootstrapped"]; !ok {
+					t.Error("the update did not write the mark of the Nomad bootstrap")
 				}
 			})
 		})
@@ -779,9 +855,15 @@ func TestUpdateClusterHelp(t *testing.T) {
 		"--yes", "--exit-code", "--allow-single-server", "VULTR_API_KEY",
 		"It also makes the cluster's missing CA, gossip key and ACL bootstrap secret in the state store, and never " +
 			"replaces them.",
+		"It starts Nomad on the nodes, bootstraps its ACL system and waits for the servers to be healthy and the " +
+			"clients to register.",
+		"TENT_NODE_URL and TENT_NODE_SHA256",
 	} {
 		if got.code != 0 || !strings.Contains(got.out, want) {
 			t.Errorf("exit code = %d, stdout\n%s\nwant 0 and it to hold %q", got.code, got.out, want)
 		}
+	}
+	if strings.Contains(got.out, "without Nomad") {
+		t.Errorf("stdout\n%s\nwant no claim that the nodes run without Nomad", got.out)
 	}
 }

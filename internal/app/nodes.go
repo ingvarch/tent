@@ -80,7 +80,9 @@ const (
 // index. A server's seed holds the private addresses of the servers that exist, and a server that is not ready has
 // none until its wait returns, so the waits run before the creates. The waits and creates of client nodes follow in
 // the same order; the deletes come last, by name, then ID.
-func planNodes(m *model.Cluster, instances []cloud.Instance) []NodeChange {
+//
+// It also returns the machines of the server and combined groups that stay, by name: the servers the cluster has.
+func planNodes(m *model.Cluster, instances []cloud.Instance) (changes []NodeChange, servers []cloud.Instance) {
 	owned := slices.DeleteFunc(slices.Clone(instances), func(in cloud.Instance) bool { return in.Cluster != m.Name })
 	slices.SortStableFunc(owned, compareAge)
 	taken := make(map[string]bool, len(owned)) // the names of the listed machines and of the new ones
@@ -112,24 +114,29 @@ func planNodes(m *model.Cluster, instances []cloud.Instance) []NodeChange {
 				waits = append(waits, waitFor(g, in))
 			}
 		}
+		if g.Role.RunsServer() {
+			servers = append(servers, nodes...)
+		}
 		creates = append(creates, createNodes(m.Name, g, nodes, taken)...)
 	}
 	slices.SortStableFunc(creates, func(a, b NodeChange) int {
-		return cmp.Or(cmp.Compare(clientRank(a.Role), clientRank(b.Role)), strings.Compare(a.Group, b.Group))
+		return cmp.Or(cmp.Compare(clientRank(a), clientRank(b)), strings.Compare(a.Group, b.Group))
 	})
 	slices.SortFunc(waits, func(a, b NodeChange) int {
-		return cmp.Or(cmp.Compare(clientRank(a.Role), clientRank(b.Role)), compareNameID(a, b))
+		return cmp.Or(cmp.Compare(clientRank(a), clientRank(b)), compareNameID(a, b))
 	})
 	slices.SortFunc(deletes, compareNameID)
+	slices.SortFunc(servers, func(a, b cloud.Instance) int { return strings.Compare(a.Name, b.Name) })
 	// Both are sorted by rank, so the server and combined changes are a prefix of each.
 	waitsOfServers, createsOfServers := serverCount(waits), serverCount(creates)
 	return slices.Concat(
-		waits[:waitsOfServers], creates[:createsOfServers], waits[waitsOfServers:], creates[createsOfServers:], deletes)
+		waits[:waitsOfServers], creates[:createsOfServers], waits[waitsOfServers:], creates[createsOfServers:], deletes,
+	), servers
 }
 
 // serverCount returns how many of the changes, sorted by clientRank, are those of server and combined nodes.
 func serverCount(changes []NodeChange) int {
-	i := slices.IndexFunc(changes, func(c NodeChange) bool { return c.Role == v1alpha1.RoleClient })
+	i := slices.IndexFunc(changes, func(c NodeChange) bool { return !isServerChange(c) })
 	if i < 0 {
 		return len(changes)
 	}
@@ -190,12 +197,16 @@ func deleteNode(in cloud.Instance, reason string) NodeChange {
 	return NodeChange{Action: NodeDelete, Name: in.Name, ID: in.ID, Reason: reason}
 }
 
+// isServerChange reports whether the change belongs to the servers' phase: any change that is not a client's. A
+// machine with an empty role label counts with the servers.
+func isServerChange(c NodeChange) bool { return c.Role != v1alpha1.RoleClient }
+
 // clientRank orders creates and waits: server and combined nodes before clients.
-func clientRank(r v1alpha1.Role) int {
-	if r == v1alpha1.RoleClient {
-		return 1
+func clientRank(c NodeChange) int {
+	if isServerChange(c) {
+		return 0
 	}
-	return 0
+	return 1
 }
 
 // compareAge orders machines oldest first: by creation time, a machine without one last, then by ID.

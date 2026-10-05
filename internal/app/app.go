@@ -1,6 +1,6 @@
 // Package app runs tent's use cases: it creates, gets, replaces and edits cluster specs in the state store, removes a
-// stale cluster lock, updates a cluster's cloud objects to its specs, and deletes a cluster's cloud objects and its
-// state.
+// stale cluster lock, updates a cluster's cloud objects and nodes to its specs, bootstraps Nomad on a new cluster, and
+// deletes a cluster's cloud objects and its state.
 package app
 
 import (
@@ -9,8 +9,10 @@ import (
 	"time"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
+	"github.com/ingvarch/tent/internal/assets"
 	"github.com/ingvarch/tent/internal/channels"
 	"github.com/ingvarch/tent/internal/cloud"
+	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/statestore"
 )
 
@@ -40,6 +42,11 @@ type Service struct {
 	// Providers returns the cloud provider that a cluster's spec names, for an update or a delete. It fails for a
 	// provider that tent does not know or cannot reach, such as one without its credentials.
 	Providers func(v1alpha1.Provider) (cloud.Provider, error)
+	// Assets says where the files that nodes download are found; the zero value reads the public release sites. An
+	// update gives it its clock when Assets.Now is nil.
+	Assets assets.Options
+	// Nomad returns the API of one Nomad server.
+	Nomad func(nomadops.Config) (nomadops.API, error)
 	// OnProgress, when set, is told what happens while an update or a delete applies its plan. One update or delete
 	// never calls it concurrently.
 	OnProgress func(Progress)
@@ -50,11 +57,13 @@ type Service struct {
 	// OnDeletePlan, when set, is called with the plan of a delete, made under the cluster's lock, just before the
 	// delete applies it. When it returns an error, the delete stops before it changes anything and returns that error.
 	OnDeletePlan func(DeletePlan) error
-	// Now, when set, returns the current time for new CA certificates; it defaults to time.Now.
+	// Now, when set, returns the current time for new CA, node and operator certificates, for the mark of the Nomad
+	// bootstrap and, unless Assets.Now is set, for the signature check of the downloaded files; it defaults to
+	// time.Now.
 	Now func() time.Time
 }
 
-// now returns the current time for new CA certificates: that of Now, or else time.Now.
+// now returns the current time: that of Now, or else time.Now.
 func (s *Service) now() time.Time {
 	if s.Now != nil {
 		return s.Now()
