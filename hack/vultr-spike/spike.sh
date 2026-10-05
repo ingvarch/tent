@@ -10,7 +10,7 @@
 # Portable bash (3.2+, macOS default), requires: curl, jq 1.6+, ssh, ssh-keygen, awk, od; tentnode also go and gzip.
 set -euo pipefail
 
-readonly SPIKE_VERSION="6"
+readonly SPIKE_VERSION="8"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 readonly SCRIPT_DIR
 REPO_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
@@ -103,6 +103,7 @@ TN_UD=""        # tentnode: instance T's user data, from hack/tent-node-userdata
 TN_JSON_SHA=""  # tentnode: the sha256 of the node.json in it
 TN_REBOOT_S=""  # tentnode: seconds from the reboot to SSH on the new boot
 TN_COMMENT=""   # tentnode: the comment of tent's nftables table on the first boot
+TN_ALLOC=""     # tentnode: the allocation of the job that ran on the first boot
 VPC_MARKER="" SSH_MARKER="" FG_MARKER=""
 SSH_NAME_USED=""
 
@@ -162,7 +163,12 @@ getv() { local n="$1"; printf '%s' "${!n:-}"; }
 b64enc() { base64 | tr -d '\n'; }
 b64dec() { if base64 -d </dev/null >/dev/null 2>&1; then base64 -d; else base64 -D; fi; }
 urlencode() { jq -rn --arg v "$1" '$v|@uri'; }
-oneline() { tr '\n' ' ' | tr -s ' ' | head -c "${1:-300}"; }
+oneline() { # oneline [N]: the input on one line, spaces squeezed, without the space of its last line end, N characters
+  local s
+  s=$(tr '\n' ' ' | tr -s ' ')
+  s=${s% }
+  printf '%s' "${s:0:${1:-300}}"
+}
 
 sha256() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'; else shasum -a 256 | awk '{print $1}'; fi
@@ -1519,19 +1525,41 @@ check_objstore() {
 }
 
 # ---------------------------------------------------------------------------------------------------------------
-# tentnode: a development build of tent-node on instance T, a client booted with the user data of
-# hack/tent-node-userdata, checked on a real machine. TENT_NODE_URL carries a signature: nothing logs it, and hide_url
-# masks it in what the report takes from the instance.
+# tentnode: a development build of tent-node on instance T, the combined node of a cluster of one node, booted with the
+# user data of hack/tent-node-userdata, checked on a real machine. TENT_NODE_URL carries a signature: nothing logs it,
+# and hide_url masks it in what the report takes from the instance. The user data carries the node's key and the
+# gossip key of a CA that the tool makes for this run alone, and the ACL token stays in a root-only file on T: the
+# report shows none of them, and T is deleted at the end.
 
+# The phases of up in the order they run, as status.json lists them.
+readonly TN_PHASES="preflight system hostfirewall runtime cni join nomad verify"
 # The plugins of Nomad's bridge network, which the cni phase must put into /opt/cni/bin.
 readonly TN_PLUGINS="bridge firewall host-local loopback portmap"
-# The files that tent-node's install and up write; of /opt/cni/bin, the plugins of Nomad's bridge network. After a
-# reboot, up must change none but status.json.
+# The files that hold a secret: tn_files records their size, not their sha256. node.json holds the same secrets but
+# keeps its sha256, which the checks compare with the user data's: a sha256 of random keys reveals nothing of them.
+readonly TN_SECRET_FILES="/etc/nomad.d/01-gossip.hcl /etc/nomad.d/tls/agent-key.pem"
+# The files that tent-node's install, up and refresh-join write; of /opt/cni/bin, the plugins of Nomad's bridge
+# network. After a reboot, up must change none but status.json.
 TN_FILES="/etc/tent/node.json /usr/local/bin/tent-node /etc/systemd/system/tent-node.service
 /etc/systemd/system/tent-node-join.service /etc/systemd/system/tent-node-join.timer /etc/modules-load.d/tent.conf
 /etc/sysctl.d/99-tent.conf /etc/systemd/journald.conf.d/tent.conf /etc/tent/firewall.nft /etc/docker/daemon.json
-/var/lib/tent/assets/cni-plugins $(for p in $TN_PLUGINS; do printf '/opt/cni/bin/%s ' "$p"; done)/var/lib/tent/status.json"
+/var/lib/tent/assets/cni-plugins $(for p in $TN_PLUGINS; do printf '/opt/cni/bin/%s ' "$p"; done)
+/var/lib/tent/assets/nomad /usr/local/bin/nomad /etc/systemd/system/nomad.service /etc/nomad.d/00-tent.hcl
+/etc/nomad.d/01-gossip.hcl /etc/nomad.d/05-join.hcl /etc/nomad.d/10-node.hcl /etc/nomad.d/11-instance.hcl
+/etc/nomad.d/tls/ca.pem /etc/nomad.d/tls/agent.pem /etc/nomad.d/tls/agent-key.pem /var/lib/tent/peers.json
+/var/lib/tent/status.json"
 readonly TN_FILES
+# The ACL token that the bootstrap on T makes, in a root-only file on T.
+readonly TN_TOKEN_FILE="/root/tn-acl-token"
+# The start of a script on T that runs the nomad CLI against the local agent over mTLS with the node's certificate,
+# and with the ACL token once the bootstrap has made it. The token stays on T: only T's shell reads the file.
+readonly TN_NOMAD_SH="export NOMAD_ADDR=https://127.0.0.1:4646 NOMAD_CACERT=/etc/nomad.d/tls/ca.pem \
+NOMAD_CLIENT_CERT=/etc/nomad.d/tls/agent.pem NOMAD_CLIENT_KEY=/etc/nomad.d/tls/agent-key.pem
+if [ -s $TN_TOKEN_FILE ]; then NOMAD_TOKEN=\$(cat $TN_TOKEN_FILE); export NOMAD_TOKEN; fi
+"
+# The job of the check: a web server in busybox on Nomad's bridge with a dynamic port, which answers TN_JOB_BODY.
+readonly TN_JOB="tn-web"
+readonly TN_JOB_BODY="tent-node-check"
 # The metadata probes: the image of their containers, the URL they must not reach, and a URL that a container with a
 # network reaches, so that a probe that fails for want of any network is not taken for a block. The verdicts match
 # the messages of busybox 1.38's wget: "download timed out" and "server returned error".
@@ -1556,17 +1584,19 @@ prepare_tentnode() {
       die "bin/tent-node_linux_amd64 is not the tent-node with TENT_NODE_SHA256: run make dev-upload again, or set TENT_NODE_VERSION"
     TENT_NODE_VERSION=$("$REPO_DIR/bin/tent" version -o json | jq -r .version) || die "bin/tent version failed"
   fi
+  # The user data holds the node's key and the gossip key: it stays in WORK, which only this user reads and cleanup
+  # removes.
   TN_UD="$WORK/tentnode-ud.yaml"
   # The name is instance T's host name: create_instance names T $RUN_TAG-t. The CIDR is the VPC's: tentnode makes one
-  # VPC, with the first of VPC_MASKS.
+  # VPC, with the first of VPC_MASKS. On Vultr the zone is the region.
   cidr="$VPC_SUBNET/${VPC_MASKS%% *}"
   (cd "$REPO_DIR" && go run ./hack/tent-node-userdata -name "$RUN_TAG-t" -version "$TENT_NODE_VERSION" \
-    -role client -cidr "$cidr") >"$TN_UD" || die "hack/tent-node-userdata failed"
+    -cidr "$cidr" -zone "$REGION") >"$TN_UD" || die "hack/tent-node-userdata failed"
   TN_JSON_SHA=$(awk '/encoding: gz\+b64/ {f = 1} f && $1 == "content:" {print $2; exit}' "$TN_UD" | b64dec |
     gzip -dc | sha256) || die "the user data holds no gz+b64 node.json"
   bytes=$(wc -c <"$TN_UD" | tr -d ' ')
-  row "tent-node under test" "version $TENT_NODE_VERSION, sha256 $TENT_NODE_SHA256; user data $bytes bytes, node.json sha256 $TN_JSON_SHA; cluster CIDR $cidr" \
-    "a client NodeConfig without secrets: tent-node and the CNI plugins, Docker, and tent's host firewall for the CIDR"
+  row "tent-node under test" "version $TENT_NODE_VERSION, sha256 $TENT_NODE_SHA256; user data $bytes bytes, node.json sha256 $TN_JSON_SHA; cluster CIDR $cidr, zone $REGION" \
+    "the combined node of a cluster of one node: Nomad, the CNI plugins and tent-node, Docker, tent's host firewall for the CIDR, and a CA, certificate and gossip key made for this run"
 }
 
 tn_ssh() { ssh_x "$T_PUB" "$@" 2>/dev/null; } # tn_ssh COMMAND...: runs on instance T
@@ -1577,10 +1607,14 @@ tn_out() { # tn_out COMMAND: runs COMMAND on T and prints its output, or why SSH
   if [ -n "$out" ]; then printf '%s\n' "$out"; else ssh_unknown "$T_PUB"; fi
 }
 
-tn_files() { # the modification time and sha256 of each of TN_FILES on T, one line each
+tn_files() { # the modification time and sha256 of each of TN_FILES on T, one line each; of a secret file, its size
   tn_ssh "for f in $(printf '%s' "$TN_FILES" | tr '\n' ' '); do
-    if [ -e \"\$f\" ]; then printf '%s mtime %s sha256 %s\n' \"\$f\" \"\$(stat -c %Y \"\$f\")\" \"\$(sha256sum <\"\$f\" | cut -d' ' -f1)\"
-    else printf '%s missing\n' \"\$f\"; fi
+    if [ ! -e \"\$f\" ]; then printf '%s missing\n' \"\$f\"; continue; fi
+    case ' $TN_SECRET_FILES ' in
+      *\" \$f \"*) s=\"size \$(stat -c %s \"\$f\")\" ;;
+      *) s=\"sha256 \$(sha256sum <\"\$f\" | cut -d' ' -f1)\" ;;
+    esac
+    printf '%s mtime %s %s\n' \"\$f\" \"\$(stat -c %Y \"\$f\")\" \"\$s\"
   done"
 }
 
@@ -1588,19 +1622,28 @@ tn_missing() { # tn_missing FILE: the files that a tn_files snapshot in FILE lis
   sed -n 's/^\([^ ]*\) missing$/\1/p' "$1" | paste -sd ' ' -
 }
 
-tn_status() { # tn_status FILE: reads T's status.json into FILE and prints its phases as "name status (reason)"
-  tn_ssh 'cat /var/lib/tent/status.json' >"$1" || true
-  [ -s "$1" ] || { printf 'missing: %s' "$(ssh_state "$T_PUB")"; return 0; }
+tn_status() { # tn_status FILE: reads T's status.json into FILE and prints its phases as "name status (reason)",
+  # "missing" when T has none, or why SSH failed
+  # Only SSH fails the command: a missing file is an empty answer.
+  if ! tn_ssh 'cat /var/lib/tent/status.json 2>/dev/null; true' >"$1"; then
+    : >"$1"
+    ssh_unknown "$T_PUB"
+    return 0
+  fi
+  [ -s "$1" ] || { printf 'missing'; return 0; }
   jq -r '[.phases[]? | "\(.name) \(.status)" + (if .reason then " (\(.reason))" else "" end)] | join(", ")' "$1" 2>/dev/null ||
     printf 'unreadable'
 }
 
-tn_phases_are() { # tn_phases_are FILE MACHINE FIREWALL: are the phases in FILE those of a client's up, with system,
-  # runtime and cni MACHINE and hostfirewall FIREWALL? The first up gives done and done; one after a reboot unchanged
-  # and done, since the kernel forgets tent's table; another on a set-up node unchanged and unchanged.
-  jq -e --arg m "$2" --arg f "$3" '[.phases[]? | [.name, .status]] == [["preflight", "unchanged"], ["system", $m],
-    ["hostfirewall", $f], ["runtime", $m], ["cni", $m], ["join", "skipped"], ["nomad", "skipped"],
-    ["verify", "unchanged"]]' "$1" >/dev/null 2>&1
+tn_phases_are() { # tn_phases_are FILE STATUS...: are the phases in FILE those of TN_PHASES, in order, with the
+  # statuses given in that order?
+  local f="$1" want="" p
+  shift
+  for p in $TN_PHASES; do
+    want="$want${want:+, }$p ${1:-?}"
+    if [ $# -gt 0 ]; then shift; fi
+  done
+  [ "$(jq -r '[.phases[]? | "\(.name) \(.status)"] | join(", ")' "$f" 2>/dev/null || true)" = "$want" ]
 }
 
 tn_instance() { # tn_instance FILE: the instance and the version in status.json against the API and the tent-node under test
@@ -1722,10 +1765,9 @@ tn_first_boot() { # checks T after the first boot: cloud-init wrote node.json, d
   out=$(tn_out 'for u in tent-node.service tent-node-join.timer; do printf "%s %s/%s; " "$u" "$(systemctl is-active "$u")" "$(systemctl is-enabled "$u")"; done')
   if [ "$out" = "$units" ]; then res="as expected: $out"; else res="UNEXPECTED: $out"; fi
   row "tent-node units (active/enabled)" "$res" "want tent-node.service and tent-node-join.timer active and enabled"
-  res=$(tn_status "$s1" | hide_url)
-  if tn_phases_are "$s1" "done" "done"; then res="as expected: $res"; else res="UNEXPECTED: $res"; fi
-  row "status.json after the first boot" "$res" \
-    "preflight unchanged; system, hostfirewall, runtime and cni done; join and nomad skipped; verify unchanged"
+  tn_status_row "$s1" "status.json after the first boot" \
+    "preflight unchanged; system, hostfirewall, runtime, cni, join and nomad done; verify unchanged, with Nomad healthy" \
+    unchanged "done" "done" "done" "done" "done" "done" unchanged
   out=$(tn_out "stat -c '%a %U:%G %n' /var/lib/tent /var/lib/tent/status.json | paste -sd ';' -")
   row "status.json: instance and version" "$(tn_instance "$s1"); modes $out" \
     "the metadata environment on a real Vultr instance (nodeup/env/vultr)"
@@ -1751,7 +1793,7 @@ tn_first_files() { # records the modification time and sha256 of tent-node's fil
     res="all $(wc -l <"$WORK/files-1.txt" | tr -d ' ') present"
   fi
   row "tent-node's files after the first boot" "$res" \
-    "install writes the units; system, hostfirewall, runtime and cni their files; up status.json"
+    "install writes the units; system, hostfirewall, runtime, cni, join and nomad their files; up status.json; refresh-join peers.json"
 }
 
 tn_mono() { # tn_mono MICROSECONDS: a monotonic timestamp as seconds, or "-" when the event did not happen this boot
@@ -1803,6 +1845,35 @@ tn_image() {
   done <<<"$out"
   row "apt's timers and up (first boot, monotonic)" "${res:-$(ssh_unknown "$T_PUB")}" \
     "runtime retries each apt command for up to 10 min while apt-daily or unattended-upgrades holds dpkg's locks"
+}
+
+# tn_upgrade_records: what can restart Docker or containerd on a node without tent, as records: needrestart and its
+# mode, which restarts services after upgrades; the switches of unattended upgrades; the docker.io package's question
+# whether its upgrades restart Docker; and how docker.service depends on containerd, which says whether a restart of
+# containerd restarts Docker.
+# shellcheck disable=SC2016 # the single-quoted commands expand on instance T
+tn_upgrade_records() {
+  local out
+  tn_out 'dpkg -l needrestart 2>&1; echo; grep -r "^\$nrconf{restart}" /etc/needrestart/ 2>&1' |
+    detail "dpkg -l needrestart; its restart mode (T, first boot)"
+  out=$(tn_out 'dpkg-query -W -f "\${Package} \${Version} \${db:Status-Abbrev}\n" needrestart 2>&1
+    if [ -d /etc/needrestart ]; then
+      grep -rh "^\$nrconf{restart}" /etc/needrestart/ 2>/dev/null || echo "no \$nrconf{restart} line: the package default"
+    fi')
+  row "needrestart (first boot)" "$(printf '%s' "$out" | oneline 300)" \
+    "a record: needrestart restarts services after upgrades by its mode; containerd and Docker among them"
+  out=$(tn_out 'cat /etc/apt/apt.conf.d/20auto-upgrades 2>&1')
+  printf '%s\n' "$out" | detail "/etc/apt/apt.conf.d/20auto-upgrades (T, first boot)"
+  row "Unattended upgrades (first boot)" "$(printf '%s' "$out" | oneline 300)" \
+    "a record: whether apt upgrades packages, containerd's among them, by itself every day"
+  out=$(tn_out 'debconf-show docker.io 2>&1')
+  printf '%s\n' "$out" | detail "debconf-show docker.io (T, first boot)"
+  row "docker.io's debconf answers (first boot)" "$(printf '%s' "$out" | oneline 300)" \
+    "a record: docker.io/restart says whether the package restarts Docker at its upgrades"
+  out=$(tn_out 'systemctl show -p Restart,Requires,BindsTo,PartOf,Wants,After docker.service 2>&1')
+  printf '%s\n' "$out" | detail "systemctl show -p Restart,Requires,BindsTo,PartOf,Wants,After docker.service (T, first boot)"
+  row "docker.service and containerd (first boot)" "$(printf '%s' "$out" | oneline 400)" \
+    "a record: Requires=, BindsTo= or PartOf= on containerd.service would restart Docker with it; Wants= and After= do not"
 }
 
 tn_tables() { # tn_tables FILE: reads nft -j list tables on T into FILE and prints its tables as "family name (comment)"
@@ -1968,28 +2039,34 @@ tn_host_probe() {
     "decision 21: the output chain drops what lacks tent-node's mark"
 }
 
-# tn_container_probe TITLE PULLED CHAIN [DOCKER_RUN_OPTION]: probes the metadata service from a container on T, after
-# the control URL. PULLED is the output of the image's pull; CHAIN is the chain of tent's table whose metadata drop the
-# probe meets: output on the host's network, forward on a bridge. The container prints wget's exit code and message for
-# the metadata service after "metadata-exit". busybox prints "download timed out" for a connection that stalls as for
-# one that is dropped, so a pass is that timeout with a reached control and a drop counter that grew during the probe.
-# An answer, an HTTP error among them, or a timeout that the counter did not see is a failed check; anything else, such
-# as a refused connection, is unknown.
-# shellcheck disable=SC2016 # the single-quoted part expands in the container
+# tn_container_probe TITLE PULLED CHAIN [DOCKER_RUN_OPTION]: probes the metadata service from a new container of
+# TN_IMAGE on T, as tn_probe does. PULLED is the output of the image's pull.
 tn_container_probe() {
-  local script out res before after
-  script="wget -q -T 5 -O /dev/null $TN_CONTROL_URL && echo control-ok || echo control-failed
-"'o=$(wget -q -T 3 -O /dev/null '"$TN_METADATA_URL"' 2>&1); echo "metadata-exit $? $o"'
   case "$2" in
     *"exit 0") ;;
     *) row "$1" "unknown: docker pull $TN_IMAGE failed: $(printf '%s' "${2:-$(ssh_unknown "$T_PUB")}" | oneline 200)" ""
       return 0 ;;
   esac
-  before=$(tn_drops "$3")
-  out=$(tn_ssh "timeout 120 docker run --rm ${4:-} $TN_IMAGE sh -c '$script' 2>&1; echo \"exit \$?\"" || true)
-  after=$(tn_drops "$3")
+  tn_probe "$1" "$3" "docker run --rm ${4:-} $TN_IMAGE"
+}
+
+# tn_probe TITLE CHAIN DOCKER: probes the metadata service from a container on T, after the control URL. DOCKER is the
+# docker command that runs sh in the container, such as docker run or docker exec. CHAIN is the chain of tent's table
+# whose metadata drop the probe meets: output on the host's network, forward on a bridge. The container prints wget's
+# exit code and message for the metadata service after "metadata-exit". busybox prints "download timed out" for a
+# connection that stalls as for one that is dropped, so a pass is that timeout with a reached control and a drop
+# counter that grew during the probe. An answer, an HTTP error among them, or a timeout that the counter did not see is
+# a failed check; anything else, such as a refused connection, is unknown.
+# shellcheck disable=SC2016 # the single-quoted part expands in the container
+tn_probe() {
+  local script out res before after
+  script="wget -q -T 5 -O /dev/null $TN_CONTROL_URL && echo control-ok || echo control-failed
+"'o=$(wget -q -T 3 -O /dev/null '"$TN_METADATA_URL"' 2>&1); echo "metadata-exit $? $o"'
+  before=$(tn_drops "$2")
+  out=$(tn_ssh "timeout 120 $3 sh -c '$script' 2>&1; echo \"exit \$?\"" || true)
+  after=$(tn_drops "$2")
   { printf '%s\n' "${out:-$(ssh_unknown "$T_PUB")}"
-    printf "drops in tent's %s chain: %s packets before the probe, %s after\n" "$3" "$before" "$after"; } |
+    printf "drops in tent's %s chain: %s packets before the probe, %s after\n" "$2" "$before" "$after"; } |
     detail "$1 (T)"
   case "$out" in
     "") res=$(ssh_unknown "$T_PUB") ;;
@@ -2001,7 +2078,7 @@ tn_container_probe() {
       res="unknown: timed out, but the container reached no network: $TN_CONTROL_URL failed too" ;;
     *) res="unknown" ;;
   esac
-  row "$1" "$res; drops in tent's $3 chain $before, then $after: $(printf '%s' "$out" | oneline 200)" \
+  row "$1" "$res; drops in tent's $2 chain $before, then $after: $(printf '%s' "$out" | oneline 200)" \
     "decision 21: tent's chains drop what lacks tent-node's mark"
 }
 
@@ -2022,22 +2099,739 @@ tn_metadata_block() {
     *) res="as expected: output $before packets, forward $fwd packets" ;;
   esac
   row "Metadata drops after the probes" "$res" "the host and host-network probes count in output, the bridge probe in forward"
+  tn_up_by_hand "tent-node up by hand" "first boot" "its metadata read carries the mark, so the output chain lets it through"
+  after=$(tn_drops output)
+  if [ "$before" != "?" ] && [ "$before" = "$after" ]; then res="as expected"; else res="UNEXPECTED"; fi
+  row "Output drops during up by hand" "$res: $before packets before, $after after" "up sends nothing unmarked to the metadata service"
+  tn_status_row "$s" "status.json after up by hand" \
+    "every phase unchanged: tent's table is loaded with the same comment, and Nomad runs with the same files" \
+    unchanged unchanged unchanged unchanged unchanged unchanged unchanged unchanged
+  tn_out 'nft list chain inet tent output 2>&1; nft list chain inet tent forward 2>&1' |
+    detail "nft list chain inet tent output and forward (T, after the probes and up by hand)"
+}
+
+# tn_up_by_hand TITLE WHEN IMPACT: runs tent-node up on T by hand and records its output and a row, which exit 0 passes.
+# shellcheck disable=SC2016 # the single-quoted command expands on instance T
+tn_up_by_hand() {
+  local out res
   out=$(tn_ssh 'o=$(/usr/local/bin/tent-node up 2>&1); rc=$?; printf "%s\n" "$o" | tail -n 40; echo "exit $rc"' | hide_url || true)
-  printf '%s\n' "${out:-$(ssh_unknown "$T_PUB")}" | detail "tent-node up by hand (T, first boot)"
+  printf '%s\n' "${out:-$(ssh_unknown "$T_PUB")}" | detail "tent-node up by hand (T, $2)"
   case "$(printf '%s\n' "$out" | tail -1)" in
     "exit 0") res="as expected: exit 0" ;;
     "") res=$(ssh_unknown "$T_PUB") ;;
     *) res="FAILED: $(printf '%s\n' "$out" | tail -3 | oneline 300 || true)" ;;
   esac
-  row "tent-node up by hand" "$res" "its metadata read carries the mark, so the output chain lets it through"
-  after=$(tn_drops output)
-  if [ "$before" != "?" ] && [ "$before" = "$after" ]; then res="as expected"; else res="UNEXPECTED"; fi
-  row "Output drops during up by hand" "$res: $before packets before, $after after" "up sends nothing unmarked to the metadata service"
-  res=$(tn_status "$s" | hide_url)
-  if tn_phases_are "$s" unchanged unchanged; then res="as expected: $res"; else res="UNEXPECTED: $res"; fi
-  row "status.json after up by hand" "$res" "every phase unchanged: tent's table is loaded with the same comment"
-  tn_out 'nft list chain inet tent output 2>&1; nft list chain inet tent forward 2>&1' |
-    detail "nft list chain inet tent output and forward (T, after the probes and up by hand)"
+  row "$1" "$res" "$3"
+}
+
+# tn_status_row FILE TITLE IMPACT STATUS...: reads T's status.json into FILE and records its phases in a row, as
+# expected when they have the statuses that tn_phases_are takes.
+tn_status_row() {
+  local f="$1" title="$2" impact="$3" res
+  shift 3
+  res=$(tn_status "$f" | hide_url)
+  if tn_phases_are "$f" "$@"; then
+    res="as expected: $res"
+  elif [ -s "$f" ] || [ "$res" = missing ]; then
+    res="UNEXPECTED: $res"
+  fi
+  row "$title" "$res" "$impact"
+}
+
+# tn_nomad_unit WHEN: nomad.service as up started it: active, never enabled for boot (it has no [Install], so
+# systemctl calls it static), Type=notify, ordered after docker.service and network-online.target, with systemd's
+# default stop timeout of 90 s, since the client does not drain at shutdown, and not restarted by systemd. Its status
+# and the time it became active are a record.
+# shellcheck disable=SC2016 # the single-quoted commands expand on instance T
+tn_nomad_unit() {
+  local out res typ after stop restarts mono real state enabled docker network
+  tn_out 'systemctl status nomad.service --no-pager -l 2>&1 | head -n 40' | hide_url |
+    detail "systemctl status nomad.service (T, $1)"
+  out=$(tn_ssh 'for p in Type After TimeoutStopUSec NRestarts ActiveEnterTimestampMonotonic ActiveEnterTimestamp; do
+      printf "%s|" "$(systemctl show -p "$p" --value nomad.service)"
+    done
+    printf "%s|%s\n" "$(systemctl is-active nomad.service)" "$(systemctl is-enabled nomad.service 2>&1)"' || true)
+  if [ -z "$out" ]; then
+    row "nomad.service ($1)" "$(ssh_unknown "$T_PUB")" ""
+    return 0
+  fi
+  IFS='|' read -r typ after stop restarts mono real state enabled <<<"$out"
+  case " $after " in *" docker.service "*) docker=yes ;; *) docker=no ;; esac
+  case " $after " in *" network-online.target "*) network=yes ;; *) network=no ;; esac
+  res="UNEXPECTED"
+  if [ "$state" = active ] && [ "$enabled" = static ] && [ "$typ" = notify ] && [ "$stop" = "1min 30s" ] &&
+    [ "$restarts" = 0 ] && [ "$docker" = yes ] && [ "$network" = yes ]; then
+    res="as expected"
+  fi
+  row "nomad.service ($1)" "$res: $state, is-enabled $enabled, Type=$typ, TimeoutStopUSec ${stop:-?}, NRestarts ${restarts:-?}; After lists docker.service: $docker, network-online.target: $network; active since ${real:-?}, $(tn_mono "$mono") after boot" \
+    "up starts it after the host firewall and never enables it; at shutdown it stops before Docker, within systemd's default 90 s"
+}
+
+# tn_acl_bootstrap: bootstraps the cluster's ACLs on T with the nomad CLI. Its output, the token, goes only into
+# TN_TOKEN_FILE, a root-only file on T, from which TN_NOMAD_SH gives it to the later nomad commands: it never leaves T.
+# The row shows the exit code, nomad's error, the file's mode and whether it holds a UUID.
+# shellcheck disable=SC2016 # the single-quoted commands expand on instance T
+tn_acl_bootstrap() {
+  local out res
+  out=$(tn_ssh "$TN_NOMAD_SH"'f='"$TN_TOKEN_FILE"'
+    (umask 077; nomad acl bootstrap -t "{{.SecretID}}" >"$f.new") 2>&1
+    rc=$?
+    if [ "$rc" = 0 ]; then mv "$f.new" "$f"; else rm -f "$f.new"; fi
+    u="no UUID"
+    if grep -Eqx "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" "$f" 2>/dev/null; then u="a UUID"; fi
+    echo "token file $(stat -c "%a %U:%G" "$f" 2>/dev/null || echo missing), $u; exit $rc"' | oneline 300 || true)
+  case "$out" in
+    "") res=$(ssh_unknown "$T_PUB") ;;
+    *"token file 600 root:root, a UUID; exit 0") res="as expected: exit 0; the token file is 600 root:root and holds a UUID" ;;
+    *) res="FAILED: $out" ;;
+  esac
+  row "ACL bootstrap on T (nomad acl bootstrap)" "$res" "ACLs work on a real node; the token stays in a root-only file on T"
+}
+
+# tn_nomad_cluster WHEN: the cluster through the local agent's API with the node's certificate. The leader, which needs
+# no token, is T's RPC address; with the token, T is the only server, alive, and the only client: ready, eligible, in
+# the pool default and the datacenter of its zone, with tent's meta, its instance id among them.
+# shellcheck disable=SC2016 # the single-quoted commands expand on instance T
+tn_nomad_cluster() {
+  local out res leader want members nodes self
+  leader=$(tn_ssh 'curl -sS -m 10 --cacert /etc/nomad.d/tls/ca.pem --cert /etc/nomad.d/tls/agent.pem \
+    --key /etc/nomad.d/tls/agent-key.pem https://127.0.0.1:4646/v1/status/leader 2>&1' | oneline 200 || true)
+  want="\"$T_VPC_IP:4647\""
+  case "$leader" in
+    "") res=$(ssh_unknown "$T_PUB") ;;
+    "$want") res="as expected: $leader" ;;
+    *) res="UNEXPECTED: $leader, want $want" ;;
+  esac
+  row "Nomad leader ($1)" "$res" "GET /v1/status/leader over mTLS with the node's certificate: T leads its cluster of one"
+  tn_ssh "$TN_NOMAD_SH"'nomad server members 2>&1; echo; nomad node status -self 2>&1' | hide_url |
+    detail "nomad server members; nomad node status -self (T, $1)" || true
+  out=$(tn_ssh "$TN_NOMAD_SH"'printf "members: %s\n" "$(nomad server members -t "{{range .}}{{.Name}} {{.Status}};{{end}}" 2>&1 | tr "\n" " ")"
+    printf "nodes: %s\n" "$(nomad node status -t "{{len .}}" 2>&1 | tr "\n" " ")"
+    printf "self: %s\n" "$(nomad node status -self -t "{{.Name}} {{.Status}} {{.SchedulingEligibility}} {{.NodePool}} {{.Datacenter}} {{.Meta.tent_instance_id}} {{.Meta.tent_cluster}} {{.Meta.tent_nodegroup}}" 2>&1 | tr "\n" " ")"' || true)
+  # nomad ends its output with a line end, which the script on T turned into a space.
+  members=$(printf '%s\n' "$out" | sed -n 's/^members: //p' | oneline)
+  nodes=$(printf '%s\n' "$out" | sed -n 's/^nodes: //p' | oneline)
+  self=$(printf '%s\n' "$out" | sed -n 's/^self: //p' | oneline)
+  if [ -z "$out" ]; then
+    res=$(ssh_unknown "$T_PUB")
+  elif [ "$members" = "$RUN_TAG-t.global alive;" ]; then
+    res="as expected: $members"
+  else
+    res="UNEXPECTED: ${members:-no answer}"
+  fi
+  row "Nomad servers ($1)" "$res" "nomad server members: T alone, alive"
+  want="$RUN_TAG-t ready eligible default $REGION $T_ID tent-node-check nodes"
+  if [ -z "$out" ]; then
+    res=$(ssh_unknown "$T_PUB")
+  elif [ "$nodes" = 1 ] && [ "$self" = "$want" ]; then
+    res="as expected: 1 node: $self"
+  else
+    res="UNEXPECTED: ${nodes:-?} node(s); this one: ${self:-no answer}; want $want"
+  fi
+  row "Nomad client ($1)" "$res" \
+    "name, status, eligibility, pool, datacenter, and the meta tent_instance_id (11-instance.hcl), tent_cluster and tent_nodegroup"
+}
+
+# tn_nomad: Nomad on T after the first boot: the unit, the ACL bootstrap and the cluster, and the lines of Nomad's
+# journal that name client introduction, as a record.
+tn_nomad() {
+  local out res
+  tn_nomad_unit "first boot"
+  tn_acl_bootstrap
+  tn_nomad_cluster "first boot"
+  # Only SSH fails the command: no line is an empty answer.
+  if out=$(tn_ssh 'journalctl -b -u nomad.service --no-pager -o cat | grep -i "introduction" | head -n 5; true'); then
+    res=$(printf '%s' "$out" | oneline 300)
+    res=${res:-no line names it}
+  else
+    res=$(ssh_unknown "$T_PUB")
+  fi
+  row "Client introduction in Nomad's journal" "$res" \
+    "a record: a cluster with a combined group runs enforcement warn, so the client registers without an intro token"
+}
+
+# tn_job_spec: the job of the check: busybox's httpd on Nomad's bridge, on port 8080 inside, which a dynamic port of
+# the node maps to.
+tn_job_spec() {
+  cat <<EOF
+job "$TN_JOB" {
+  datacenters = ["*"]
+
+  group "web" {
+    network {
+      mode = "bridge"
+      port "http" {
+        to = 8080
+      }
+    }
+
+    task "web" {
+      driver = "docker"
+
+      config {
+        image   = "$TN_IMAGE"
+        command = "sh"
+        args    = ["-c", "mkdir -p /www && echo $TN_JOB_BODY >/www/index.html && exec httpd -f -p 8080 -h /www"]
+      }
+
+      resources {
+        cpu    = 50
+        memory = 32
+      }
+    }
+  }
+}
+EOF
+}
+
+# tn_alloc_script: the script on T, with the job's name in JOB, that waits up to 3 minutes for an allocation of the
+# job that runs, is to keep running, and whose task started in this boot. Right after a reboot the server still shows a
+# restored allocation as it was before, running, until the client reports again, so only the task's start time tells.
+# It prints "allocs:" and the allocations as "ID CLIENT-STATUS DESIRED-STATUS TASK-STATE STARTED;" each (STARTED in
+# seconds since 1970), or nomad's error; "boot:" and when this boot began; and "fresh:" and the allocation it waited for,
+# or nothing.
+tn_alloc_script() {
+  cat <<'EOF'
+b=$(awk '/^btime/ {print $2}' /proc/stat)
+f=""
+for i in $(seq 1 36); do
+  a=$(nomad job allocs -t "{{range .}}{{.ID}} {{.ClientStatus}} {{.DesiredStatus}} {{with .TaskStates.web}}{{.State}} {{.StartedAt.Unix}}{{else}}none 0{{end}};{{end}}" "$JOB" 2>&1 | tr "\n" " ")
+  f=$(printf "%s" "$a" | tr ";" "\n" |
+    awk -v b="$b" '$2 == "running" && $3 == "run" && $4 == "running" && $5 >= b {print $1; exit}')
+  if [ -n "$f" ]; then break; fi
+  sleep 5
+done
+echo "allocs: $a"
+echo "boot: $b"
+echo "fresh: $f"
+EOF
+}
+
+# tn_wait_alloc: runs tn_alloc_script on T and prints what it prints; nothing when SSH fails.
+tn_wait_alloc() {
+  { printf '%s' "$TN_NOMAD_SH"; tn_alloc_script; } >"$WORK/wait-alloc.sh"
+  tn_ssh "JOB=$TN_JOB sh -s" <"$WORK/wait-alloc.sh" || true
+}
+
+# tn_running ALLOCS: the allocation that tn_wait_alloc waited for, or nothing.
+tn_running() { printf '%s\n' "$1" | sed -n 's/^fresh: //p'; }
+
+# tn_allocs ALLOCS: the allocations that tn_wait_alloc printed, on one line without the last ";", and when this boot
+# began.
+tn_allocs() {
+  local s
+  s=$(printf '%s\n' "$1" | sed -n 's/^allocs: //p' | oneline 300)
+  printf '%s (ID, client status, desired status, task state, task start); this boot began at %s' "${s%;}" \
+    "$(printf '%s\n' "$1" | sed -n 's/^boot: //p')"
+}
+
+# tn_no_alloc VERDICT ALLOCS: the result of a row when no allocation of the job runs, from what tn_wait_alloc printed:
+# unknown when SSH failed, else VERDICT with the job's allocations.
+tn_no_alloc() {
+  if [ -z "$2" ]; then
+    ssh_unknown "$T_PUB"
+  else
+    printf '%s: no allocation of the job started in this boot and runs within 3 minutes: %s' "$1" "$(tn_allocs "$2")"
+  fi
+}
+
+# tn_port_script: the script on T, with the address in IP, the port in PORT and the job's text in BODY, that asks the
+# port up to 7 times, 5 s apart, until it answers BODY, and prints the last answer, curl's exit code and the try.
+tn_port_script() {
+  cat <<'EOF'
+i=1
+while :; do
+  o=$(curl -sS -m 5 "http://$IP:$PORT/" 2>&1)
+  rc=$?
+  if { [ "$rc" = 0 ] && [ "$o" = "$BODY" ]; } || [ "$i" -ge 7 ]; then break; fi
+  i=$((i + 1))
+  sleep 5
+done
+printf '%s exit %s on try %s\n' "$o" "$rc" "$i"
+EOF
+}
+
+# tn_job_port ALLOC WHEN: the job's port answers from T's host at T's private address. Nomad gives the port from the
+# dynamic ports on the address of the private interface; a pass is TN_JOB_BODY from there, which only the job serves,
+# within 30 s, as a task that has just started may need.
+# shellcheck disable=SC2016 # the single-quoted command expands on instance T
+tn_job_port() {
+  local out res label port to ip
+  out=$(tn_ssh "$TN_NOMAD_SH"'nomad alloc status -t "{{range .AllocatedResources.Shared.Ports}}{{.Label}} {{.Value}} {{.To}} {{.HostIP}};{{end}}" '"$1"' 2>&1' |
+    oneline 200 || true)
+  read -r label port to ip <<<"$(printf '%s' "$out" | tr ';' '\n' | awk '$1 == "http"' | head -n 1)"
+  case "$port" in
+    "" | *[!0-9]*)
+      row "The job's port from the host ($2)" "unknown: no http port: ${out:-$(ssh_unknown "$T_PUB")}" ""
+      return 0 ;;
+  esac
+  tn_port_script >"$WORK/port.sh"
+  out=$(tn_ssh "IP=$ip PORT=$port BODY=$TN_JOB_BODY sh -s" <"$WORK/port.sh" | oneline 200 || true)
+  res="FAILED"
+  case "$out" in
+    "$TN_JOB_BODY exit 0 on try "*)
+      if [ "$ip" = "$T_VPC_IP" ] && [ "$to" = 8080 ] && [ "$port" -ge 20000 ] && [ "$port" -le 32000 ]; then
+        res="as expected"
+      fi ;;
+  esac
+  row "The job's port from the host ($2)" "$res: $label $ip:$port to $to answered: ${out:-$(ssh_unknown "$T_PUB")}" \
+    "bridge networking: the CNI plugins, portmap and a dynamic port on the private address"
+}
+
+# tn_job: runs the job on T: an allocation of it runs, its port answers from the host, and its container on Nomad's
+# bridge does not reach the metadata service, as tn_probe judges it from the drop in tent's forward chain. Sets
+# TN_ALLOC.
+# shellcheck disable=SC2016 # the single-quoted commands expand on instance T
+tn_job() {
+  local out allocs
+  tn_job_spec >"$WORK/job.nomad.hcl"
+  out=$(tn_ssh "cat >/root/$TN_JOB.nomad.hcl && $TN_NOMAD_SH"'nomad job run -detach /root/'"$TN_JOB"'.nomad.hcl 2>&1
+    echo "exit $?"' <"$WORK/job.nomad.hcl" || true)
+  allocs=$(tn_wait_alloc)
+  TN_ALLOC=$(tn_running "$allocs")
+  { printf 'nomad job run -detach:\n%s\n\n' "${out:-$(ssh_unknown "$T_PUB")}"
+    tn_ssh "$TN_NOMAD_SH"'nomad job status '"$TN_JOB"' 2>&1; echo; docker ps -a 2>&1; echo; docker images 2>&1' || true; } |
+    detail "the job $TN_JOB (T, first boot)"
+  if [ -z "$TN_ALLOC" ]; then
+    row "The job $TN_JOB" "$(tn_no_alloc FAILED "$allocs")" "a docker job on Nomad's bridge with a dynamic port"
+    return 0
+  fi
+  row "The job $TN_JOB" "as expected: allocation $TN_ALLOC runs" "a docker job on Nomad's bridge with a dynamic port"
+  tn_out "$TN_NOMAD_SH"'nomad alloc status '"$TN_ALLOC"' 2>&1' | detail "nomad alloc status (T, first boot)"
+  tn_job_port "$TN_ALLOC" "first boot"
+  tn_probe "Metadata from the job's container on Nomad's bridge" forward "docker exec web-$TN_ALLOC"
+}
+
+# tn_job_state: one line from T: docker.service's monotonic active time | the job's container: id, running, start
+# time | the allocation's status, its task's restarts and start in seconds since 1970 | nomad.service's monotonic
+# active time | its NRestarts | is-active | the node's status and eligibility.
+# shellcheck disable=SC2016 # the single-quoted command expands on instance T
+tn_job_state() {
+  tn_ssh "$TN_NOMAD_SH"'printf "%s|%s|%s|%s|%s|%s|%s\n" \
+    "$(systemctl show -p ActiveEnterTimestampMonotonic --value docker.service)" \
+    "$(docker inspect -f "{{.Id}} {{.State.Running}} {{.State.StartedAt}}" web-'"$TN_ALLOC"' 2>&1 | head -n 1)" \
+    "$(nomad alloc status -t "{{.ClientStatus}} {{with .TaskStates.web}}{{.Restarts}} {{.StartedAt.Unix}}{{else}}none{{end}}" '"$TN_ALLOC"' 2>&1 | head -n 1)" \
+    "$(systemctl show -p ActiveEnterTimestampMonotonic --value nomad.service)" \
+    "$(systemctl show -p NRestarts --value nomad.service)" "$(systemctl is-active nomad.service)" \
+    "$(nomad node status -self -t "{{.Status}} {{.SchedulingEligibility}}" 2>&1 | head -n 1)"' || true
+}
+
+# tn_container_runs CONTAINER: does the container, as tn_job_state shows it, run?
+tn_container_runs() { case "$1" in *" true "*) return 0 ;; *) return 1 ;; esac; }
+
+# tn_daemon_edit: the script that adds a harmless key to daemon.json on T, Docker's default "debug": false, and
+# prints how many lines have it.
+tn_daemon_edit() {
+  cat <<'EOF'
+sed -i '1s/^{$/{\n  "debug": false,/' /etc/docker/daemon.json
+grep -c '"debug": false' /etc/docker/daemon.json
+EOF
+}
+
+# tn_settle_script: the script on T, with the job's allocation in ALLOC, its task's restarts before in RESTARTS, its
+# container's id and start before in CID and CSTART, and the unit that was restarted in UNIT, that watches the task for
+# up to 3 minutes. It stops once the task runs in a start after the unit became active again with more restarts (the
+# task was replaced), or a minute after that with the task running as before (kept), and prints the allocation's client
+# status with the task's state, restarts and start in seconds since 1970, the container's id, running and start, when
+# the unit became active again in seconds since 1970, and how long after that the watch ended, a "key|value" line each.
+tn_settle_script() {
+  cat <<'EOF'
+b=$(awk '/^btime/ {print $2}' /proc/stat)
+since=$((b + $(systemctl show -p ActiveEnterTimestampMonotonic --value "$UNIT") / 1000000))
+i=0
+while :; do
+  now=$(date +%s)
+  t=$(nomad alloc status -t "{{.ClientStatus}} {{with .TaskStates.web}}{{.State}} {{.Restarts}} {{.StartedAt.Unix}}{{else}}none none 0{{end}}" "$ALLOC" 2>&1 | head -n 1)
+  c=$(docker inspect -f "{{.Id}} {{.State.Running}} {{.State.StartedAt}}" "web-$ALLOC" 2>&1 | head -n 1)
+  set -- $t
+  if [ "$1 $2" = "running running" ]; then
+    if [ "${3:-x}" -gt "$RESTARTS" ] 2>/dev/null && [ "${4:-x}" -ge "$since" ] 2>/dev/null; then break; fi
+    if [ $((now - since)) -ge 60 ] && [ "$3" = "$RESTARTS" ] && [ "$c" = "$CID true $CSTART" ]; then break; fi
+  fi
+  if [ "$i" -ge 36 ]; then break; fi
+  i=$((i + 1))
+  sleep 5
+done
+echo "task|$t"
+echo "container|$c"
+echo "since|$since"
+echo "waited|$((now - since))"
+EOF
+}
+
+# tn_watch UNIT BEFORE: runs tn_settle_script on T for the unit that was restarted, with the task and the container as
+# BEFORE, a tn_job_state line, shows them, and prints what it prints; nothing when SSH fails or BEFORE is not such a
+# line.
+tn_watch() {
+  local c a cid running cstart restarts
+  IFS='|' read -r _ c a _ <<<"$2"
+  read -r cid running cstart <<<"$c"
+  read -r _ restarts _ <<<"$a"
+  # Only words that the script on T takes as they are.
+  case "$TN_ALLOC" in "" | *[!0-9a-f-]*) return 0 ;; esac
+  case "$cid" in "" | *[!0-9a-f]*) return 0 ;; esac
+  case "$restarts" in "" | *[!0-9]*) return 0 ;; esac
+  case "$cstart" in "" | *[!0-9A-Za-z:.+-]*) return 0 ;; esac
+  [ "$running" = true ] || return 0
+  { printf '%s' "$TN_NOMAD_SH"; tn_settle_script; } >"$WORK/settle.sh"
+  tn_ssh "ALLOC=$TN_ALLOC UNIT=$1 RESTARTS=$restarts CID=$cid CSTART=$cstart sh -s" <"$WORK/settle.sh" || true
+}
+
+# tn_outcome WATCH ALLOC CONTAINER UNIT: what tn_watch saw happen to the task, from the allocation and the container
+# before, as tn_job_state shows them: "kept" (no restart, the same container), "replaced, back running N s after UNIT
+# was active again" (more restarts, a later start, a new container that runs), or nothing when the task does not run or
+# the two disagree.
+tn_outcome() {
+  local task container since cs ts r2 s2 r1
+  task=$(tn_key task "$1")
+  container=$(tn_key container "$1")
+  since=$(tn_key since "$1")
+  read -r cs ts r2 s2 <<<"$task"
+  read -r _ r1 _ <<<"$2"
+  [ "$cs $ts" = "running running" ] || return 0
+  case "$r1:$r2:$s2:$since" in *[!0-9:]* | :* | *::* | *:) return 0 ;; esac
+  if [ "$r2" = "$r1" ] && [ "$container" = "$3" ]; then
+    echo "kept"
+  elif [ "$r2" -gt "$r1" ] && [ "$s2" -ge "$since" ] && tn_container_runs "$container" && [ "$container" != "$3" ]; then
+    echo "replaced, back running $((s2 - since)) s after $4 was active again"
+  fi
+}
+
+# tn_nomad_lines SINCE WHEN: records the lines of nomad.service's journal since SINCE, seconds since 1970, that name a
+# wait, a termination, an EOF or a restart.
+tn_nomad_lines() {
+  tn_ssh "{ journalctl -u nomad.service --since @${1:-0} --no-pager -o short-monotonic |
+    grep -iE 'wait|terminat|eof|restart' || echo 'no line names a wait, a termination, an EOF or a restart'; } |
+    tail -n 40" | hide_url | detail "journalctl -u nomad.service since $2: waits, terminations, EOFs, restarts (T)" ||
+    true
+}
+
+# tn_docker_restart: a changed daemon.json makes up restart Docker. After a harmless key is added, up by hand must
+# write tent's daemon.json again and restart docker.service, and leave nomad.service as it was. live-restore keeps the
+# container across the restart, but Nomad 2.0.7's docker driver loses its wait on it when dockerd restarts, and stops it
+# when the wait breaks (handle.go, a guard against a wait that returned incorrectly); the task then runs in a new
+# container after the restart policy's delay. The maintainer accepts that. So a pass is the same allocation running
+# again within 3 minutes, its container kept or replaced, which the row says, with how long the task took to run again.
+tn_docker_restart() {
+  local out res before after watch outcome d1 c1 a1 n1 d2 n2 restarted
+  if [ -z "$TN_ALLOC" ]; then
+    row "The job across Docker's restart" "unknown: no allocation of the job runs" ""
+    return 0
+  fi
+  tn_daemon_edit >"$WORK/daemon-edit.sh"
+  before=$(tn_job_state)
+  out=$(tn_ssh 'sh -s' <"$WORK/daemon-edit.sh" || true)
+  if [ "$out" != 1 ]; then
+    row "The job across Docker's restart" "unknown: the key did not go into daemon.json: ${out:-$(ssh_unknown "$T_PUB")}" ""
+    return 0
+  fi
+  tn_up_by_hand "tent-node up after a change of daemon.json" "daemon.json changed" \
+    "runtime writes tent's daemon.json again and restarts Docker"
+  tn_status_row "$WORK/status-docker.json" "status.json after up with a changed daemon.json" \
+    "runtime done, with Docker restarted; every other phase unchanged, so Nomad is not restarted" \
+    unchanged unchanged unchanged "done" unchanged unchanged unchanged unchanged
+  watch=$(tn_watch docker.service "$before")
+  after=$(tn_job_state)
+  if [ -z "$watch" ] || [ -z "$after" ]; then
+    row "The job across Docker's restart" "$(ssh_unknown "$T_PUB")" ""
+    return 0
+  fi
+  IFS='|' read -r d1 c1 a1 n1 _ <<<"$before"
+  IFS='|' read -r d2 _ _ n2 _ <<<"$after"
+  restarted=no
+  if [ -n "$d1" ] && [ -n "$d2" ] && [ "$d1" != "$d2" ]; then restarted=yes; fi
+  outcome=$(tn_outcome "$watch" "$a1" "$c1" docker.service)
+  res="UNEXPECTED"
+  if [ "$restarted" = yes ] && [ -n "$n1" ] && [ "$n1" = "$n2" ] && [ -n "$outcome" ]; then res="as expected"; fi
+  row "The job across Docker's restart" "$res: ${outcome:-the task does not run again within 3 minutes, or its restarts and container disagree}; docker.service restarted: $restarted; allocation (status, task state, restarts, start) at the end [$(tn_key task "$watch")], task restarts and start before [${a1#running }]; container before [$c1], at the end [$(tn_key container "$watch")]; watched until $(tn_key waited "$watch") s after docker.service was active again; nomad.service active at $(tn_mono "$n1"), then $(tn_mono "$n2")" \
+    "Nomad 2.0.7's docker driver stops the container when its wait breaks (handle.go, a guard against a wait that returned incorrectly), so a restart of dockerd may replace the live-restored container; either way the same allocation runs again, and Nomad is not restarted"
+  tn_nomad_lines "$(tn_key since "$watch")" "Docker's restart"
+  tn_job_port "$TN_ALLOC" "after Docker's restart"
+}
+
+# tn_containerd_restart: containerd's package restarts containerd.service at each of its upgrades, which unattended
+# upgrades may run on every node at once. A restart of containerd while the job runs must leave the job's container
+# (its id and start), the task (no restart), Docker and Nomad as they were, and the port answering; the row says what
+# happened otherwise. The lines of nomad.service since the restart that name a wait, a termination, an EOF or a restart
+# are a record.
+# shellcheck disable=SC2016 # the single-quoted command expands on instance T
+tn_containerd_restart() {
+  local out before after watch outcome res d1 c1 a1 n1 d2 n2 title="containerd's restart with the job running"
+  if [ -z "$TN_ALLOC" ]; then
+    row "$title" "unknown: no allocation of the job runs" ""
+    return 0
+  fi
+  before=$(tn_job_state)
+  out=$(tn_ssh 'systemctl restart containerd.service 2>&1; echo "exit $?"' | oneline 300 || true)
+  watch=$(tn_watch containerd.service "$before")
+  after=$(tn_job_state)
+  if [ -z "$out" ] || [ -z "$watch" ] || [ -z "$after" ]; then
+    row "$title" "$(ssh_unknown "$T_PUB")" ""
+    return 0
+  fi
+  IFS='|' read -r d1 c1 a1 n1 _ <<<"$before"
+  IFS='|' read -r d2 _ _ n2 _ <<<"$after"
+  outcome=$(tn_outcome "$watch" "$a1" "$c1" containerd.service)
+  res="UNEXPECTED"
+  if [ "$out" = "exit 0" ] && [ "$outcome" = kept ] && [ -n "$d1" ] && [ "$d1" = "$d2" ] && [ -n "$n1" ] &&
+    [ "$n1" = "$n2" ]; then
+    res="as expected"
+  fi
+  row "$title" "$res: systemctl restart containerd.service: $out; the task: ${outcome:-does not run again within 3 minutes, or its restarts and container disagree}; allocation (status, task state, restarts, start) at the end [$(tn_key task "$watch")], task restarts and start before [${a1#running }]; container before [$c1], at the end [$(tn_key container "$watch")]; watched until $(tn_key waited "$watch") s after containerd.service was active again; docker.service active at $(tn_mono "$d1"), then $(tn_mono "$d2"); nomad.service active at $(tn_mono "$n1"), then $(tn_mono "$n2")" \
+    "containerd's package restarts containerd.service at every upgrade, unattended, on every node: the container, the task, Docker and Nomad must stay"
+  tn_nomad_lines "$(tn_key since "$watch")" "containerd's restart"
+  tn_job_port "$TN_ALLOC" "after containerd's restart"
+}
+
+# tn_restart_script: the script on T, with the unit in UNIT, that restarts it by hand, waits up to 1 minute for the node
+# to report ready, and prints the restart's exit code and output, how long it took in milliseconds, when it began in
+# seconds since 1970, and how many lines of the unit's journal since then name a drain, a "key|value" line each.
+tn_restart_script() {
+  cat <<'EOF'
+s=$(date +%s)
+t0=$(date +%s%N)
+o=$(systemctl restart "$UNIT" 2>&1)
+rc=$?
+t1=$(date +%s%N)
+i=0
+while [ "$i" -lt 12 ] && [ "$(nomad node status -self -t "{{.Status}}" 2>/dev/null)" != ready ]; do
+  sleep 5
+  i=$((i + 1))
+done
+echo "rc|$rc"
+echo "out|$(printf '%s' "$o" | tr '\n' ' ')"
+echo "took|$(((t1 - t0) / 1000000))"
+echo "since|$s"
+echo "drain|$(journalctl -u "$UNIT" --since "@$s" -o cat --no-pager | grep -ci drain)"
+EOF
+}
+
+# tn_nomad_restart: a restart of Nomad by hand while the job runs leaves the job's task running: KillMode=process keeps
+# the task's processes and Docker its container, the client reattaches to them, and with no drain the node stays
+# eligible. systemd's NRestarts counts only the restarts that Restart= makes, and a restart by hand sets it to 0, so a
+# later ActiveEnterTimestamp proves the restart. After it, the node must report ready, and the client has 15 s to
+# restore the allocation, since the server shows it as it was until the client reports. A pass is: the restart exits
+# 0; nomad.service is active with a later active time and NRestarts 0; the container keeps its id and start time; the
+# allocation runs with the same task restarts and task start; the node is ready and eligible; no line of nomad.service
+# since the restart names a drain; and the port answers. The agent's lines that name a drain, restoring or
+# reattaching are a record.
+tn_nomad_restart() {
+  local out before after rc said took since drain res c1 a1 n1 c2 a2 n2 r2 s2 node2
+  local title="Nomad's restart with the job running"
+  if [ -z "$TN_ALLOC" ]; then
+    row "$title" "unknown: no allocation of the job runs" ""
+    return 0
+  fi
+  before=$(tn_job_state)
+  { printf '%s' "$TN_NOMAD_SH"; tn_restart_script; } >"$WORK/restart.sh"
+  out=$(tn_ssh "UNIT=nomad.service sh -s" <"$WORK/restart.sh" | hide_url || true)
+  sleep 15
+  after=$(tn_job_state)
+  if [ -z "$out" ] || [ -z "$after" ]; then
+    row "$title" "$(ssh_unknown "$T_PUB")" ""
+    return 0
+  fi
+  rc=$(tn_key rc "$out")
+  said=$(tn_key out "$out")
+  said=${said% }
+  took=$(tn_key took "$out")
+  since=$(tn_key since "$out")
+  drain=$(tn_key drain "$out")
+  IFS='|' read -r _ c1 a1 n1 _ <<<"$before"
+  IFS='|' read -r _ c2 a2 n2 r2 s2 node2 <<<"$after"
+  res="UNEXPECTED"
+  case "$n1:$n2" in
+    *[!0-9:]* | :* | *:) ;;
+    *) if [ "$rc" = 0 ] && [ "$n2" -gt "$n1" ] && [ "$r2" = 0 ] && [ "$s2" = active ] && tn_container_runs "$c2" &&
+      [ "$c1" = "$c2" ] && [ "${a1#running }" != "$a1" ] && [ "$a2" = "$a1" ] && [ "$node2" = "ready eligible" ] &&
+      [ "$drain" = 0 ]; then res="as expected"; fi ;;
+  esac
+  row "$title" "$res: systemctl restart exit ${rc:-?} after ${took:-?} ms${said:+ ($said)}; nomad.service active at $(tn_mono "$n1"), then $(tn_mono "$n2"), NRestarts ${r2:-?}, ${s2:-?}; container before [$c1], after [$c2]; allocation (status, task restarts, task start) before [$a1], after [$a2]; node ${node2:-?}; lines of nomad.service that name a drain since the restart: ${drain:-?}" \
+    "KillMode=process: the task keeps running and the client reattaches to it; no drain, so the node stays eligible"
+  tn_ssh "{ journalctl -u nomad.service --since @${since:-0} --no-pager -o short-monotonic |
+    grep -iE 'drain|reattach|restor' || echo 'no line names a drain, restoring or reattaching'; } | tail -n 40" |
+    hide_url | detail "journalctl -u nomad.service since Nomad's restart: drain, restoring and reattaching (T)" || true
+  tn_job_port "$TN_ALLOC" "after Nomad's restart"
+}
+
+# tn_join_check: the script on T, with the node's private address in IP, that waits up to 3 minutes for a run of
+# refresh-join that rewrote 05-join.hcl, then up to 2 minutes for one more run that starts after it, and prints what
+# tn_join_timer judges, a "key|value" line each. A run that has started when the wait ends finishes first.
+tn_join_check() {
+  cat <<'EOF'
+j() { journalctl -b _PID=1 UNIT=tent-node-join.service -o cat --no-pager; }
+runs() { j | grep -c "^Finished"; }
+rewrites() {
+  journalctl -b -u tent-node-join.service -o cat --no-pager | grep -F 'msg="05-join.hcl joins the servers that answered"'
+}
+state() {
+  for f in /etc/nomad.d/05-join.hcl /var/lib/tent/peers.json; do
+    printf "%s mtime %s sha256 %s; " "$f" "$(stat -c %Y "$f" 2>/dev/null || echo -)" \
+      "$(sha256sum 2>/dev/null <"$f" | cut -d" " -f1)"
+  done
+}
+i=0
+while [ "$i" -lt 36 ] && [ -z "$(rewrites)" ]; do sleep 5; i=$((i + 1)); done
+i=0
+while [ "$i" -lt 12 ] && [ "$(systemctl is-active tent-node-join.service)" = activating ]; do sleep 5; i=$((i + 1)); done
+before=$(runs)
+first=$(state)
+i=0
+while [ "$i" -lt 24 ] && [ "$(runs)" -le "$before" ]; do sleep 5; i=$((i + 1)); done
+echo "rewrite|$(rewrites | tail -n 1)"
+echo "rewrites|$(rewrites | wc -l | tr -d ' ')"
+echo "runs|$before|$(runs)"
+echo "failed|$(j | grep -c "Failed with result")"
+echo "result|$(systemctl show -p Result --value tent-node-join.service)"
+echo "first|$first"
+echo "later|$(state)"
+echo "retry|$(grep -cFx "    retry_join = [\"$IP:4648\"]" /etc/nomad.d/05-join.hcl 2>/dev/null)"
+echo "peers|$(cat /var/lib/tent/peers.json 2>/dev/null)"
+EOF
+}
+
+# tn_join_timer: refresh-join keeps 05-join.hcl current. On a server or combined node it asks the node's own agent
+# first, over mTLS with the ServerName server.<region>.nomad: once T's Nomad has a leader, the first run gets T's
+# address back, rewrites 05-join.hcl once to join it (the server form, port 4648) and writes peers.json; the runs after
+# it change nothing. A pass is that rewrite and its log line, the files as it left them across a later run, and no
+# failed run. The timer and the journal of tent-node-join.service are records.
+tn_join_timer() {
+  local out res rewrite rewrites runs failed result first later retry peers want impact
+  tn_out 'systemctl list-timers --all --no-pager tent-node-join.timer 2>&1' |
+    detail "systemctl list-timers tent-node-join.timer (T, first boot)"
+  tn_join_check >"$WORK/join-check.sh"
+  out=$(tn_ssh "IP=$T_VPC_IP sh -s" <"$WORK/join-check.sh" | hide_url || true)
+  tn_ssh 'journalctl -b -u tent-node-join.service --no-pager -o short-monotonic | tail -n 60' | hide_url |
+    detail "journalctl -u tent-node-join.service (T, first boot)" || true
+  tn_out 'cat /etc/nomad.d/05-join.hcl /var/lib/tent/peers.json 2>&1' |
+    detail "/etc/nomad.d/05-join.hcl and /var/lib/tent/peers.json after refresh-join (T, first boot)"
+  rewrite=$(tn_key rewrite "$out")
+  rewrites=$(tn_key rewrites "$out")
+  runs=$(tn_key runs "$out")
+  failed=$(tn_key failed "$out")
+  result=$(tn_key result "$out")
+  first=$(tn_key first "$out")
+  first=${first%; }
+  later=$(tn_key later "$out")
+  later=${later%; }
+  retry=$(tn_key retry "$out")
+  peers=$(tn_key peers "$out")
+  want="[\"$T_VPC_IP\"]"
+  impact="refresh-join asks T's own agent over mTLS (ServerName server.<region>.nomad), rewrites 05-join.hcl once and leaves it"
+  if [ -z "$out" ]; then
+    row "tent-node-join.timer and refresh-join" "$(ssh_unknown "$T_PUB")" "$impact"
+    return 0
+  fi
+  if [ -z "$rewrite" ]; then
+    res="UNEXPECTED: no run of refresh-join rewrote 05-join.hcl within 3 minutes"
+  elif [ "$rewrites" = 1 ] && [ "$failed" = 0 ] && [ "$result" = success ] && [ "$retry" = 1 ] &&
+    [ "$peers" = "$want" ] && [ "${runs#*|}" != "${runs%|*}" ] && [ "$first" = "$later" ] &&
+    [ "${first#*mtime -}" = "$first" ]; then
+    res="as expected"
+  else
+    res="UNEXPECTED"
+  fi
+  if [ "$first" = "$later" ]; then later="the same"; fi
+  row "tent-node-join.timer and refresh-join" "$res: ${rewrite:-no rewrite}; ${rewrites:-?} rewrite line(s); runs ${runs%|*}, then ${runs#*|}, ${failed:-?} failed, last result ${result:-?}; 05-join.hcl joins $T_VPC_IP:4648: ${retry:-?} line(s); peers.json ${peers:-missing}, want $want; across a later run the files were ${first:-?}, then ${later:-?}" \
+    "$impact"
+}
+
+# tn_key KEY OUTPUT: the value of the line "KEY|value" in OUTPUT.
+tn_key() { printf '%s\n' "$2" | sed -n "s/^$1|//p" | head -n 1; }
+
+# tn_start_order: after the reboot, Nomad started only once the hostfirewall phase had loaded tent's table: the start of
+# nomad.service against the log line of the hostfirewall phase in tent-node's journal, both monotonic in this boot.
+# shellcheck disable=SC2016 # the single-quoted command expands on instance T
+tn_start_order() {
+  local f="$WORK/journal-up-2.json" fw start res
+  tn_ssh 'journalctl -b 0 -u tent-node.service -o json --no-pager' >"$f" || true
+  fw=$(jq -rs '[.[] | select((.MESSAGE | type) == "string" and (.MESSAGE | test("msg=phase phase=hostfirewall ")))][0]
+    | .__MONOTONIC_TIMESTAMP // ""' "$f" 2>/dev/null || true)
+  start=$(tn_ssh 'systemctl show -p InactiveExitTimestampMonotonic --value nomad.service' || true)
+  res="UNEXPECTED"
+  case "$fw:$start" in
+    *[!0-9:]* | :* | *:) res="unknown" ;;
+    *) if [ "$start" != 0 ] && [ "$start" -ge "$fw" ]; then res="as expected"; fi ;;
+  esac
+  row "Nomad's start after the reboot" "$res: hostfirewall logged its result at $(tn_seconds "$fw"), nomad.service started at $(tn_seconds "$start") (monotonic)" \
+    "nomad.service has no [Install]: only up starts it, after the host firewall"
+  # join asks the servers in peers.json while Nomad is still stopped, so T's own address refuses it.
+  { jq -rs '[.[] | select((.MESSAGE | type) == "string" and (.MESSAGE | test("a server did not answer"))) | .MESSAGE]
+      | if length == 0 then "no such line" else .[] end' "$f" 2>/dev/null || echo "unreadable"; } | hide_url |
+    detail "join's warnings in tent-node's journal (T, after the reboot)"
+}
+
+# tn_job_after_reboot: Nomad runs the job again after the reboot. The tasks died with the machine, without a
+# migration; after the boot the client restores the allocation or the scheduler replaces it, so a pass is a running
+# allocation, the same or a new one, and its port. The allocations with their client and desired status and the
+# node's eligibility are in the row, and the first boot's allocation, its status and events, in the details, whatever
+# the verdict.
+# shellcheck disable=SC2016 # the single-quoted command expands on instance T
+tn_job_after_reboot() {
+  local allocs alloc which eligibility
+  allocs=$(tn_wait_alloc)
+  alloc=$(tn_running "$allocs")
+  eligibility=$(tn_ssh "$TN_NOMAD_SH"'nomad node status -self -t "{{.SchedulingEligibility}}" 2>&1' | oneline 200 ||
+    true)
+  tn_out "$TN_NOMAD_SH"'nomad job status '"$TN_JOB"' 2>&1' | detail "nomad job status $TN_JOB (T, after the reboot)"
+  if [ -n "$TN_ALLOC" ]; then
+    tn_out "$TN_NOMAD_SH"'nomad alloc status '"$TN_ALLOC"' 2>&1' |
+      detail "nomad alloc status of the first boot's allocation $TN_ALLOC (T, after the reboot)"
+  fi
+  if [ -z "$alloc" ]; then
+    row "The job after the reboot" "$(tn_no_alloc UNEXPECTED "$allocs"); node eligibility: ${eligibility:-?}" \
+      "Nomad runs the job again"
+    return 0
+  fi
+  if [ "$alloc" = "$TN_ALLOC" ]; then which="the one of the first boot"; else which="a new one; the first boot's was $TN_ALLOC"; fi
+  row "The job after the reboot" "as expected: allocation $alloc runs, $which; $(tn_allocs "$allocs"); node eligibility: ${eligibility:-?}" \
+    "Nomad runs the job again"
+  tn_job_port "$alloc" "after the reboot"
+}
+
+# tn_shutdown: how the reboot stopped Nomad with the job running, from the journal of the boot before it.
+# nomad.service orders after docker.service, so its stop must begin and end before Docker's stop begins. The client
+# does not drain at shutdown, so Nomad stops in seconds, and no line of nomad.service from its stop on names a drain.
+# The boot saw Docker's restart, Nomad's restart by hand and maybe a failed Nomad before, so the last line of each kind
+# in PID 1's journal is the shutdown's, and the drain lines count from that last stop on. The shutdown lines of
+# nomad.service and docker.service are records.
+tn_shutdown() {
+  local f="$WORK/journal-pid1-1.json" n="$WORK/journal-nomad-1.json" out ns nd ds res drain=""
+  # Only SSH fails the command: a journal without the previous boot is empty.
+  if ! tn_ssh 'journalctl -b -1 _PID=1 -o json --no-pager 2>/dev/null; true' >"$f"; then
+    res=$(ssh_unknown "$T_PUB")
+  else
+    out=$(jq -rs 'def at(u; re): [.[] | select(.UNIT == u and (.MESSAGE | type) == "string" and (.MESSAGE | test(re)))]
+        | last | .__MONOTONIC_TIMESTAMP // "";
+      "\(at("nomad.service"; "^Stopping ")):\(at("nomad.service"; "^Stopped |Deactivated successfully|Failed with result")):\(at("docker.service"; "^Stopping "))"' \
+      "$f" 2>/dev/null || true)
+    IFS=: read -r ns nd ds <<<"$out"
+    case "$ns:$nd:$ds" in
+      *[!0-9:]* | :* | *::* | *:)
+        res="unknown: the previous boot's journal lacks the stop of nomad.service or docker.service: [$out]" ;;
+      *)
+        if tn_ssh 'journalctl -b -1 -u nomad.service -o json --no-pager 2>/dev/null; true' >"$n"; then
+          drain=$(jq -rs --argjson from "$ns" '[.[] | select((.MESSAGE | type) == "string" and (.MESSAGE | test("drain"; "i"))
+            and ((.__MONOTONIC_TIMESTAMP | tonumber) >= $from))] | length' "$n" 2>/dev/null || true)
+        fi
+        if [ "$nd" -lt "$ns" ]; then
+          res="UNEXPECTED: the journal has no end of nomad.service's last stop"
+        elif [ "$nd" -gt "$ds" ]; then
+          res="UNEXPECTED: Docker's stop began before Nomad had stopped"
+        else
+          case "$drain" in
+            0) res="as expected" ;;
+            "" | *[!0-9]*) res="unknown: nomad.service's journal of that boot is unreadable" ;;
+            *) res="UNEXPECTED: $drain lines of nomad.service name a drain from its stop on, which tent does not configure" ;;
+          esac
+        fi
+        res="$res: nomad.service's last stop began at $(tn_seconds "$ns"), its last end at $(tn_seconds "$nd") ($(tn_seconds $((nd - ns))) later), docker.service's last stop began at $(tn_seconds "$ds") (monotonic); lines that name a drain from Nomad's stop on: ${drain:-?}" ;;
+    esac
+  fi
+  row "Shutdown with the job running (the reboot)" "$res; SSH answered ${TN_REBOOT_S:-?}s after the reboot began" \
+    "no drain at shutdown: Nomad stops in seconds, before Docker begins to stop (After=docker.service)"
+  tn_ssh 'journalctl -b -1 -u nomad.service -u docker.service --no-pager -o short-monotonic | tail -n 60' | hide_url |
+    detail "journalctl -b -1 -u nomad.service -u docker.service: the shutdown (T)" || true
 }
 
 # tn_listeners: what listens on T right after SSH came back after the reboot, and whether up had run by then.
@@ -2051,7 +2845,7 @@ tn_listeners() {
     printf "%s%s %s %s", (NR > 1 ? "; " : ""), $1, $5, p}')
   row "Listening right after SSH came back (after the reboot)" \
     "${out:+$(printf '%s\n' "$out" | sed -n 1p); }${sockets:-$(ssh_unknown "$T_PUB")}" \
-    "until up loads tent's table after a reboot, only sshd and systemd's own sockets should listen"
+    "until up loads tent's table after a reboot, only sshd and systemd's own sockets should listen; Nomad once up started it"
 }
 
 tn_second_boot() { # checks T after the reboot: tent-node.service ran up again, which changed nothing but status.json
@@ -2068,9 +2862,14 @@ tn_second_boot() { # checks T after the reboot: tent-node.service ran up again, 
   res=$(tn_status "$s2" | hide_url)
   t1=$(jq -r '.started // ""' "$s1" 2>/dev/null || true)
   t2=$(jq -r '.started // ""' "$s2" 2>/dev/null || true)
-  if [ -n "$t2" ] && [ "$t2" != "$t1" ] && tn_phases_are "$s2" unchanged "done"; then res="as expected: $res"; else res="UNEXPECTED: $res"; fi
+  if [ -n "$t2" ] && [ "$t2" != "$t1" ] &&
+    tn_phases_are "$s2" unchanged unchanged "done" unchanged unchanged unchanged "done" unchanged; then
+    res="as expected: $res"
+  elif [ -s "$s2" ] || [ "$res" = missing ]; then
+    res="UNEXPECTED: $res"
+  fi
   row "status.json after the reboot" "$res; started $t1, then $t2" \
-    "every phase unchanged but hostfirewall done: the kernel forgot tent's table"
+    "every phase unchanged but hostfirewall and nomad done: the kernel forgot tent's table, and only up starts Nomad"
   row "status.json after the reboot: instance and version" "$(tn_instance "$s2")" ""
   { jq . "$s2" 2>/dev/null || cat "$s2"; } | hide_url | detail "/var/lib/tent/status.json (T, after the reboot)"
   res=$(tn_tables "$f")
@@ -2131,17 +2930,31 @@ check_tentnode() {
   fi
   tn_first_boot
   tn_image
+  tn_upgrade_records
   tn_machine
   tn_reloads
   tn_metadata_block
+  tn_nomad
+  tn_job
+  # Docker's and containerd's restarts check that Nomad was not restarted, so they come before Nomad's restart.
+  tn_docker_restart
+  tn_containerd_restart
+  tn_nomad_restart
+  tn_join_timer
+  # After every change by hand, so that the reboot's comparison sees only what up did at boot.
   tn_first_files
-  # A reboot runs up again at boot: it must change nothing but status.json.
+  # A reboot runs up again at boot: it must change nothing but status.json, and start Nomad.
   if ! tn_reboot; then
     row "Reboot T" "no boot id before the reboot, or no SSH on a new boot within ${READY_TIMEOUT}s: $(ssh_unknown "$T_PUB")" \
       "the second up was not checked"
     return 0
   fi
   tn_second_boot
+  tn_nomad_unit "after the reboot"
+  tn_start_order
+  tn_nomad_cluster "after the reboot"
+  tn_job_after_reboot
+  tn_shutdown
 }
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -2312,8 +3125,8 @@ main() {
   esac
   # Without SSH the checks start once the API reports A ready, about a minute after the create.
   if [ "$instances" -gt 0 ] && [ "$NEED_SSH" = 0 ]; then duration="5-10 minutes"; fi
-  # tentnode waits for Docker's install on the first boot, then reboots.
-  if want tentnode; then duration="10-20 minutes"; fi
+  # tentnode waits for Docker's install and Nomad on the first boot, runs a job, restarts Docker, then reboots.
+  if want tentnode; then duration="10-30 minutes"; fi
   if [ "$KEEP" = 1 ]; then keep_note=" (NOT deleted: --keep given)"; fi
   cat >&2 <<EOF
 
