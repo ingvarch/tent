@@ -2,4 +2,4 @@
 * text=auto eol=lf
 
 # Release files as published: their signatures cover the exact bytes.
-internal/assets/testdata/** -text
+internal/assets/assetstest/testdata/** -text

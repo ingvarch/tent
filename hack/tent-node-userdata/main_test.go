@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"net/netip"
-	"os"
 	"regexp"
 	"slices"
 	"strings"
@@ -24,6 +23,7 @@ import (
 
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/assets"
+	"github.com/ingvarch/tent/internal/assets/assetstest"
 	"github.com/ingvarch/tent/internal/channels"
 	"github.com/ingvarch/tent/internal/nodeconfig"
 	"github.com/ingvarch/tent/internal/pki"
@@ -42,52 +42,32 @@ const (
 var testSum = strings.Repeat("ab", 32)
 
 // testNow is when the tests run the tool: HashiCorp's release key is valid then.
-var testNow = time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+var testNow = assetstest.Now()
 
 // The Nomad that the stable channel recommends, and its zip's sha256 in HashiCorp's signed SHA256SUMS.
 const (
-	nomadVersion = "2.0.7"
+	nomadVersion = assetstest.NomadVersion
 	nomadDir     = "https://releases.hashicorp.com/nomad/" + nomadVersion + "/"
-	nomadSum     = "4c9b8a0850d6fd9caadbbab09b3e6fdf8b77aa777729543c70c61b85acca68c1"
+	nomadSum     = assetstest.NomadSHA256
 )
 
-// releases answers requests from its files by full URL, without a network. Any other URL is 404.
-type releases map[string][]byte
+// noReleases answers every request with 404.
+type noReleases struct{}
 
-func (r releases) RoundTrip(req *http.Request) (*http.Response, error) {
-	body, ok := r[req.URL.String()]
-	code := http.StatusOK
-	if !ok {
-		code = http.StatusNotFound
-	}
+func (noReleases) RoundTrip(req *http.Request) (*http.Response, error) {
 	return &http.Response{
-		StatusCode: code,
-		Status:     fmt.Sprintf("%d %s", code, http.StatusText(code)),
+		StatusCode: http.StatusNotFound,
+		Status:     "404 Not Found",
 		Header:     http.Header{},
-		Body:       io.NopCloser(bytes.NewReader(body)),
+		Body:       http.NoBody,
 		Request:    req,
 	}, nil
-}
-
-// nomadReleases serves HashiCorp's own SHA256SUMS of the Nomad of the stable channel and its signature, as
-// releases.hashicorp.com published them.
-func nomadReleases(t *testing.T) releases {
-	t.Helper()
-	r := releases{}
-	for _, name := range []string{"nomad_" + nomadVersion + "_SHA256SUMS", "nomad_" + nomadVersion + "_SHA256SUMS.sig"} {
-		data, err := os.ReadFile("../../internal/assets/testdata/" + name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		r[nomadDir+name] = data
-	}
-	return r
 }
 
 // runTool runs the tool with args at testNow, with HashiCorp's release files, and returns its exit code and output.
 func runTool(t *testing.T, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
-	return runWith(t, nomadReleases(t), args...)
+	return runWith(t, assetstest.New(), args...)
 }
 
 // runWith is runTool with the release files that rt serves.
@@ -546,7 +526,7 @@ func TestInvalidValuesFail(t *testing.T) {
 // TestNoNomadRelease checks that the tool fails when Nomad's signed release files are not there.
 func TestNoNomadRelease(t *testing.T) {
 	setNode(t, testURL, testSum)
-	code, out, errOut := runWith(t, releases{}, "-name", testName, "-version", testVersion)
+	code, out, errOut := runWith(t, noReleases{}, "-name", testName, "-version", testVersion)
 	const want = "find Nomad " + nomadVersion + ": get " + nomadDir + "nomad_" + nomadVersion + "_SHA256SUMS: 404 Not Found"
 	if code != exitError || out != "" || !strings.Contains(errOut, want) {
 		t.Errorf("exit %d, stdout %q, stderr %q; want exit %d and an error that says %q", code, out, errOut, exitError,

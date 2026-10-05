@@ -10,7 +10,6 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/netip"
-	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -23,6 +22,7 @@ import (
 
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/assets"
+	"github.com/ingvarch/tent/internal/assets/assetstest"
 	"github.com/ingvarch/tent/internal/channels"
 	"github.com/ingvarch/tent/internal/model"
 	"github.com/ingvarch/tent/internal/nodeconfig"
@@ -105,7 +105,7 @@ spec:
 )
 
 // testNow is when the test CA and certificates are made, and when the signatures of releases are checked.
-var testNow = time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+var testNow = assetstest.Now()
 
 // at returns a clock that stands at t.
 func at(t time.Time) func() time.Time { return func() time.Time { return t } }
@@ -158,10 +158,10 @@ const (
 // The assets that resolveAssets finds for tent of a development build: Nomad 2.0.7 with the sha256 of its zip in
 // HashiCorp's signed SHA256SUMS, and the tent-node at a development build's URL with its sha256.
 const (
-	signedNomadSum = "4c9b8a0850d6fd9caadbbab09b3e6fdf8b77aa777729543c70c61b85acca68c1"
+	signedNomadSum = assetstest.NomadSHA256
 	devTentVersion = "v0.3.0-4-gabc1234"
-	devTentURL     = "https://tent-dev.s3.example.com/tent-node_linux_amd64?X-Amz-Signature=0123"
-	devTentSum     = "4444444444444444444444444444444444444444444444444444444444444444"
+	devTentURL     = assetstest.DevURL
+	devTentSum     = assetstest.DevSHA256
 )
 
 var (
@@ -725,51 +725,15 @@ func TestNodeConfigHidesSecrets(t *testing.T) {
 	secrettest.CheckHidden(t, secrettest.Printed(t, *nc), secrets, "[secret, ")
 }
 
-// sites answers requests from its files by full URL, without a network. Any other URL is 404.
-type sites map[string]string
-
-func (s sites) RoundTrip(r *http.Request) (*http.Response, error) {
-	body, ok := s[r.URL.String()]
-	code := http.StatusOK
-	if !ok {
-		code = http.StatusNotFound
-	}
-	return &http.Response{
-		StatusCode: code,
-		Status:     fmt.Sprintf("%d %s", code, http.StatusText(code)),
-		Header:     http.Header{},
-		Body:       io.NopCloser(strings.NewReader(body)),
-		Request:    r,
-	}, nil
-}
-
-// nomadReleases serves HashiCorp's own SHA256SUMS of Nomad 2.0.7 and its signature, as releases.hashicorp.com
-// published them. They verify with HashiCorp's embedded key at testNow.
-func nomadReleases(t *testing.T) sites {
-	t.Helper()
-	const dir = "https://releases.hashicorp.com/nomad/2.0.7/"
-	s := sites{}
-	for _, name := range []string{"nomad_2.0.7_SHA256SUMS", "nomad_2.0.7_SHA256SUMS.sig"} {
-		data, err := os.ReadFile("../assets/testdata/" + name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		s[dir+name] = string(data)
-	}
-	return s
-}
-
 func TestResolveAssets(t *testing.T) {
 	const (
 		release = "https://github.com/ingvarch/tent/releases/download/v0.3.0/"
-		nodeSum = "3333333333333333333333333333333333333333333333333333333333333333"
+		nodeSum = assetstest.TentNodeSHA256
 	)
 	stable, err := channels.Load("stable")
 	if err != nil {
 		t.Fatal(err)
 	}
-	withRelease := nomadReleases(t)
-	withRelease[release+"checksums.txt"] = nodeSum + "  tent-node_linux_amd64\n"
 	cni := nodeconfig.Asset{Name: "cni-plugins", Version: "1.9.1", URLs: []string{cniURL}, SHA256: stableCNI}
 	for _, tc := range []struct {
 		name    string
@@ -782,7 +746,7 @@ func TestResolveAssets(t *testing.T) {
 			version: "v0.3.0",
 			// A release ignores the variables of a development build.
 			opts: assets.Options{
-				Client: &http.Client{Transport: withRelease}, DevURL: devTentURL, DevSHA256: devTentSum, Now: at(testNow),
+				Client: &http.Client{Transport: assetstest.New()}, DevURL: devTentURL, DevSHA256: devTentSum, Now: at(testNow),
 			},
 			want: []nodeconfig.Asset{signedNomad, cni, {Name: "tent-node", Version: "v0.3.0",
 				URLs: []string{release + "tent-node_linux_amd64"}, SHA256: nodeSum}},
@@ -791,7 +755,7 @@ func TestResolveAssets(t *testing.T) {
 			name:    "a development build of tent",
 			version: devTentVersion,
 			opts: assets.Options{
-				Client: &http.Client{Transport: nomadReleases(t)}, DevURL: devTentURL, DevSHA256: devTentSum,
+				Client: &http.Client{Transport: assetstest.New()}, DevURL: devTentURL, DevSHA256: devTentSum,
 				Now: at(testNow),
 			},
 			want: []nodeconfig.Asset{signedNomad, cni, devTentNode},
@@ -830,29 +794,30 @@ func TestResolveAssetsErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		ch      *channels.Channel
-		sites   sites
+		sites   http.RoundTripper
+		nomad   string // the Nomad version to find
 		now     time.Time
 		version string
 		arch    string
 		want    string // the start of the error
 	}{
 		{
-			name: "no Nomad release", ch: stable, sites: sites{}, version: "v0.3.0", arch: "amd64",
-			want: "find Nomad 2.0.7: get " + sums + ": 404 Not Found",
+			name: "no Nomad release", ch: stable, sites: assetstest.New(), nomad: "2.0.6", version: "v0.3.0",
+			arch: "amd64", want: "find Nomad 2.0.6: get " + strings.ReplaceAll(sums, "2.0.7", "2.0.6") + ": 404 Not Found",
 		},
 		{
-			name: "HashiCorp's key expired", ch: stable, sites: nomadReleases(t),
+			name: "HashiCorp's key expired", ch: stable, sites: assetstest.New(),
 			now: time.Date(2030, 3, 2, 12, 0, 0, 0, time.UTC), version: "v0.3.0", arch: "amd64",
 			want: "find Nomad 2.0.7: verify " + sums + " with " + sums + ".sig: HashiCorp's release key embedded in " +
 				"this tent expired on 2030-03-01: a newer tent, with the renewed key, is needed: ",
 		},
 		{
-			name: "no CNI plugins for the architecture", ch: amd64Only, sites: nomadReleases(t), version: "v0.3.0",
+			name: "no CNI plugins for the architecture", ch: amd64Only, sites: assetstest.New(), version: "v0.3.0",
 			arch: "arm64",
 			want: "find the CNI plugins: channel edge has no CNI plugins for arm64",
 		},
 		{
-			name: "a development build without its tent-node", ch: stable, sites: nomadReleases(t),
+			name: "a development build without its tent-node", ch: stable, sites: assetstest.New(),
 			version: "v0.3.0-4-gabc1234", arch: "amd64",
 			want: "find tent-node: tent v0.3.0-4-gabc1234 is a development build, so no release holds its " +
 				"tent-node: set TENT_NODE_URL and TENT_NODE_SHA256 to a tent-node built from the same commit",
@@ -864,7 +829,11 @@ func TestResolveAssetsErrors(t *testing.T) {
 				now = tc.now
 			}
 			opts := assets.Options{Client: &http.Client{Transport: tc.sites}, Now: at(now)}
-			got, err := resolveAssets(t.Context(), opts, tc.ch, "2.0.7", tc.version, tc.arch)
+			nomad := tc.nomad
+			if nomad == "" {
+				nomad = assetstest.NomadVersion
+			}
+			got, err := resolveAssets(t.Context(), opts, tc.ch, nomad, tc.version, tc.arch)
 			if err == nil || !strings.HasPrefix(err.Error(), tc.want) {
 				t.Errorf("resolveAssets() error = %v, want one that starts with %s", err, tc.want)
 			}
@@ -1072,21 +1041,10 @@ func payloadOf(t *testing.T, userData []byte) []byte {
 	return node
 }
 
-// logged answers from its sites and records the URLs that it is asked for.
-type logged struct {
-	sites sites
-	urls  []string
-}
-
-func (l *logged) RoundTrip(r *http.Request) (*http.Response, error) {
-	l.urls = append(l.urls, r.URL.String())
-	return l.sites.RoundTrip(r)
-}
-
 // newNode returns the new node called name of the group of the specs in docs, with the test CA's certificate for its
 // role, three seeds and intro, and the assets of the stable channel, HashiCorp's signed release files and a
 // development build's tent-node, which l serves.
-func newNode(t *testing.T, l *logged, ca *pki.CA, gossip pki.Secret, group, name string, intro pki.Secret,
+func newNode(t *testing.T, l *assetstest.Sites, ca *pki.CA, gossip pki.Secret, group, name string, intro pki.Secret,
 	docs ...string,
 ) NewNode {
 	t.Helper()
@@ -1131,7 +1089,7 @@ func TestNodeConfigOf(t *testing.T) {
 		{"combined", "dev", "prod-dev-2", []string{nodeClusterYAML, nodeCombinedYAML}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			n := newNode(t, &logged{sites: nomadReleases(t)}, ca, gossip, tc.group, tc.node, tc.intro, tc.docs...)
+			n := newNode(t, assetstest.New(), ca, gossip, tc.group, tc.node, tc.intro, tc.docs...)
 			got, err := NodeConfigOf(t.Context(), n)
 			if err != nil {
 				t.Fatalf("NodeConfigOf: %v", err)
@@ -1199,7 +1157,7 @@ func TestNodeConfigOfErrors(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			l := &logged{sites: nomadReleases(t)}
+			l := assetstest.New()
 			n := newNode(t, l, ca, gossip, "servers", "prod-servers-0", nil, nodeClusterYAML, nodeServersYAML,
 				nodeWorkersYAML)
 			tc.edit(&n)
@@ -1210,8 +1168,8 @@ func TestNodeConfigOfErrors(t *testing.T) {
 			if nc != nil {
 				t.Error("NodeConfigOf() returned a config with the error")
 			}
-			if fetched := len(l.urls) > 0; fetched != tc.fetches {
-				t.Errorf("NodeConfigOf() asked for %q; want requests: %t", l.urls, tc.fetches)
+			if fetched := len(l.URLs()) > 0; fetched != tc.fetches {
+				t.Errorf("NodeConfigOf() asked for %q; want requests: %t", l.URLs(), tc.fetches)
 			}
 		})
 	}
