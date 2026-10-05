@@ -128,6 +128,10 @@ func onVultr(m *model.Cluster) error {
 // Nodes returns the provider itself: its List, Create, Stop, Delete and ScrubUserData are the machine primitives.
 func (p *Provider) Nodes() cloud.Nodes { return p }
 
+// Arch returns cloud.ArchAMD64 for every plan without a call: Vultr has no arm64 Cloud Compute plan. Validate has
+// checked the plan before.
+func (p *Provider) Arch(context.Context, string) (string, error) { return cloud.ArchAMD64, nil }
+
 // InfraKinds returns the kinds of the objects that the tasks of BuildInfra manage: firewall groups, VPCs and SSH
 // keys, in the order to delete them.
 func (p *Provider) InfraKinds() []engine.Kind {

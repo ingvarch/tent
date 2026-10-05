@@ -9,6 +9,12 @@ import (
 	"github.com/ingvarch/tent/internal/model"
 )
 
+// CPU architectures of machines, named as Go names them.
+const (
+	ArchAMD64 = "amd64"
+	ArchARM64 = "arm64"
+)
+
 // Provider is a cloud that tent provisions clusters on. The core reaches a cloud only through it. It has the methods
 // that checking specs, building or deleting a cluster's infrastructure and managing its machines need; the methods
 // for server discovery, user data and capabilities join it with the code that first uses them.
@@ -29,6 +35,9 @@ type Provider interface {
 	Inventory(ctx context.Context, cluster string) (engine.Snapshot, error)
 	// Nodes returns the primitives that list, create, stop and delete machines and scrub their user data.
 	Nodes() Nodes
+	// Arch returns the CPU architecture, ArchAMD64 or ArchARM64, of the machines of machineType. A provider that must
+	// ask its API for it uses ctx and may fail.
+	Arch(ctx context.Context, machineType string) (string, error)
 }
 
 // ErrUnsupportedProvider matches the error of a provider that tent cannot manage clusters on yet, so tent has made no
