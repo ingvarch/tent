@@ -42,6 +42,7 @@ func TestLayoutPaths(t *testing.T) {
 		{"CABundle", l.CABundle(), "prod/pki/ca-bundle.pem"},
 		{"GossipKey", l.GossipKey(), "prod/secrets/gossip.key"},
 		{"ACLBootstrapSecret", l.ACLBootstrapSecret(), "prod/secrets/acl-bootstrap-token"},
+		{"NomadBootstrapped", l.NomadBootstrapped(), "prod/nomad/bootstrapped"},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s() = %q, want %q", tc.name, tc.got, tc.want)

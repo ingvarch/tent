@@ -75,6 +75,9 @@ func (l Layout) GossipKey() string { return l.Prefix() + "secrets/gossip.key" }
 // ACLBootstrapSecret returns the path of the secret of the ACL bootstrap token.
 func (l Layout) ACLBootstrapSecret() string { return l.Prefix() + "secrets/acl-bootstrap-token" }
 
+// NomadBootstrapped returns the path of the mark that the cluster's ACL system is bootstrapped.
+func (l Layout) NomadBootstrapped() string { return l.Prefix() + "nomad/bootstrapped" }
+
 // Secrets returns the paths of the CA key, the CA bundle, the gossip key and the ACL bootstrap secret, in the order
 // they are written: a CA key without a bundle can be completed, a bundle without its key cannot.
 func (l Layout) Secrets() []string {
