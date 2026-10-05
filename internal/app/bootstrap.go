@@ -200,7 +200,7 @@ func (a *applier) applyServer(ctx context.Context, c NodeChange) error {
 
 // applyClient creates the client node of c, or waits for it, with an intro token, then waits until it registers.
 func (a *applier) applyClient(ctx context.Context, c NodeChange) error {
-	_, err := a.s.applyNodeWith(ctx, a.u.nodes, a.u.cluster, c, func(ctx context.Context) (cloud.UserData, error) {
+	in, err := a.s.applyNodeWith(ctx, a.u.nodes, a.u.cluster, c, func(ctx context.Context) (cloud.UserData, error) {
 		api, err := a.nomadAPI()
 		if err != nil {
 			return nil, err
@@ -220,7 +220,7 @@ func (a *applier) applyClient(ctx context.Context, c NodeChange) error {
 	if err != nil {
 		return err
 	}
-	return a.register(ctx, c.Name)
+	return a.register(ctx, in)
 }
 
 // seed returns the private addresses of the known servers other than the node called name, in the order of their
@@ -339,7 +339,7 @@ func (a *applier) nomadStep(ctx context.Context, servers []NodeChange) error {
 	}
 	for _, c := range servers {
 		if c.Role == v1alpha1.RoleCombined {
-			if err := a.register(ctx, c.Name); err != nil {
+			if err := a.register(ctx, a.knownServer(c.Name)); err != nil {
 				return err
 			}
 		}
@@ -357,17 +357,31 @@ func (a *applier) markBootstrapped(ctx context.Context) error {
 	return nil
 }
 
-// register waits until the node called name has registered with the servers.
-func (a *applier) register(ctx context.Context, name string) error {
+// knownServer returns the known server called name, or a machine of that name without an address when none is known.
+func (a *applier) knownServer(name string) cloud.Instance {
+	for _, in := range a.known {
+		if in.Name == name {
+			return in
+		}
+	}
+	return cloud.Instance{Name: name}
+}
+
+// register waits until the node of the machine has registered with the servers, under the machine's name and at its
+// private address.
+func (a *applier) register(ctx context.Context, in cloud.Instance) error {
+	if !in.PrivateIP.IsValid() {
+		return fmt.Errorf("node %s: the cloud reports no private address for it yet; run the command again", in.Name)
+	}
 	api, err := a.nomadAPI()
 	if err != nil {
 		return err
 	}
-	return a.step(NomadEvent{Action: NomadRegister, Node: name}, func() (NomadEvent, error) {
+	return a.step(NomadEvent{Action: NomadRegister, Node: in.Name}, func() (NomadEvent, error) {
 		waitCtx, cancel := context.WithTimeout(ctx, nomadTimeout)
 		defer cancel()
-		_, err := nomadops.WaitNode(waitCtx, api, name)
-		return NomadEvent{Action: NomadRegister, Node: name}, err
+		_, err := nomadops.WaitNode(waitCtx, api, in.Name, in.PrivateIP)
+		return NomadEvent{Action: NomadRegister, Node: in.Name}, err
 	})
 }
 

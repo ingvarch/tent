@@ -3,6 +3,7 @@ package nomadops_test
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -86,21 +87,34 @@ func TestWaitLeader(t *testing.T) {
 	})
 }
 
-// TestWaitNode checks that WaitNode goes on until the node of the name is ready and eligible: a node that went down, a
-// node that registers, and a ready node that is not eligible do not count, nor does another ready node.
+// addr is the private address of the node that the waits wait for.
+var addr = netip.MustParseAddr("10.64.0.6")
+
+// other is the address of another machine.
+var other = netip.MustParseAddr("10.64.0.7")
+
+// workers0 returns a node called prod-workers-0 at a with the status, eligible for work when eligible is set.
+func workers0(a netip.Addr, status string, eligible bool) nomadops.Node {
+	return nomadops.Node{Name: "prod-workers-0", Status: status, Eligible: eligible, Address: a}
+}
+
+// TestWaitNode checks that WaitNode goes on until the node of the name at the address is ready and eligible: a node
+// that went down, a node that registers, a ready node that is not eligible, another ready node and a ready node of the
+// name at another address do not count.
 func TestWaitNode(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f, a := newFake()
 		f.SetLeader(leaderAddr)
-		f.Register(nomadops.Node{Name: "prod-workers-0", Status: "down", Eligible: true})
-		f.Register(nomadops.Node{Name: "prod-workers-1", Status: "ready", Eligible: true})
-		after(time.Second, func() { f.Register(nomadops.Node{Name: "prod-workers-0", Status: "initializing"}) })
-		after(3*time.Second, func() { f.Register(nomadops.Node{Name: "prod-workers-0", Status: "ready"}) })
-		want := nomadops.Node{Name: "prod-workers-0", Status: "ready", Eligible: true}
+		f.Register(workers0(addr, "down", true))
+		f.Register(nomadops.Node{Name: "prod-workers-1", Status: "ready", Eligible: true, Address: addr})
+		f.Register(workers0(other, "ready", true))
+		after(time.Second, func() { f.Register(workers0(addr, "initializing", false)) })
+		after(3*time.Second, func() { f.Register(workers0(addr, "ready", false)) })
+		want := workers0(addr, "ready", true)
 		after(5*time.Second, func() { f.Register(want) })
 		start := time.Now()
 
-		got, err := nomadops.WaitNode(bounded(t), a, "prod-workers-0")
+		got, err := nomadops.WaitNode(bounded(t), a, "prod-workers-0", addr)
 
 		if err != nil || got != want {
 			t.Errorf("WaitNode() = %+v, %v; want %+v", got, err, want)
@@ -119,17 +133,18 @@ type listed struct {
 
 func (l listed) Nodes(context.Context) ([]nomadops.Node, error) { return l.nodes, nil }
 
-// TestWaitNodeAmongNodesOfTheSameName checks that any ready node of the name ends the wait, whatever the others of
-// that name are.
+// TestWaitNodeAmongNodesOfTheSameName checks that any ready node of the name at the address ends the wait, whatever
+// the others of that name are, and that a ready node at another address never does.
 func TestWaitNodeAmongNodesOfTheSameName(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		want := nomadops.Node{Name: "prod-workers-0", Status: "ready", Eligible: true}
+		want := workers0(addr, "ready", true)
 		for _, nodes := range [][]nomadops.Node{
-			{{Name: "prod-workers-0", Status: "down", Eligible: true}, want},
-			{want, {Name: "prod-workers-0", Status: "initializing", Eligible: true}},
+			{workers0(addr, "down", true), want},
+			{workers0(other, "ready", true), want},
+			{want, workers0(addr, "initializing", true)},
 		} {
 			start := time.Now()
-			got, err := nomadops.WaitNode(bounded(t), listed{nodes: nodes}, "prod-workers-0")
+			got, err := nomadops.WaitNode(bounded(t), listed{nodes: nodes}, "prod-workers-0", addr)
 			if err != nil || got != want {
 				t.Errorf("WaitNode() among %+v = %+v, %v; want %+v", nodes, got, err, want)
 			}
@@ -181,7 +196,7 @@ var (
 		return noValue(got, err)
 	}}
 	waitNode = wait{"WaitNode", "Nodes", func(ctx context.Context, a nomadops.API) error {
-		got, err := nomadops.WaitNode(ctx, a, "prod-workers-0")
+		got, err := nomadops.WaitNode(ctx, a, "prod-workers-0", addr)
 		return noValue(got, err)
 	}}
 	waitHealthy = wait{"WaitHealthy", "Health", func(ctx context.Context, a nomadops.API) error {
@@ -240,23 +255,31 @@ func TestWaitsEndWithTheContext(t *testing.T) {
 			"nomad: wait for a leader" + ended + "nomadfake: Leader: no leader"},
 		{"a node that is not listed", func(f *nomadfake.Fake) {
 			f.SetLeader(leaderAddr)
-			f.Register(nomadops.Node{Name: "prod-workers-1", Status: "ready", Eligible: true})
-		}, waitNode.run, "nomad: wait for node prod-workers-0" + ended + "node prod-workers-0 is not listed"},
+			f.Register(nomadops.Node{Name: "prod-workers-1", Status: "ready", Eligible: true, Address: addr})
+		}, waitNode.run, "nomad: wait for node prod-workers-0" + ended + "node prod-workers-0 is not listed at 10.64.0.6"},
+		{"a node at another address", func(f *nomadfake.Fake) {
+			f.SetLeader(leaderAddr)
+			f.Register(workers0(other, "ready", true))
+		}, waitNode.run, "nomad: wait for node prod-workers-0" + ended + "node prod-workers-0 is not listed at 10.64.0.6"},
+		{"a node that is initializing", func(f *nomadfake.Fake) {
+			f.SetLeader(leaderAddr)
+			f.Register(workers0(addr, "initializing", false))
+		}, waitNode.run, "nomad: wait for node prod-workers-0" + ended + "node prod-workers-0 is initializing"},
 		{"a node that went down", func(f *nomadfake.Fake) {
 			f.SetLeader(leaderAddr)
-			f.Register(nomadops.Node{Name: "prod-workers-0", Status: "down", Eligible: true})
+			f.Register(workers0(addr, "down", true))
 		}, waitNode.run, "nomad: wait for node prod-workers-0" + ended + "node prod-workers-0 is down"},
 		{"a node that is not eligible", func(f *nomadfake.Fake) {
 			f.SetLeader(leaderAddr)
-			f.Register(nomadops.Node{Name: "prod-workers-0", Status: "ready"})
+			f.Register(workers0(addr, "ready", false))
 		}, waitNode.run, "nomad: wait for node prod-workers-0" + ended + "node prod-workers-0 is ready but not eligible"},
 		{"nodes of the same name", nil, func(ctx context.Context, _ nomadops.API) error {
 			_, err := nomadops.WaitNode(ctx, listed{nodes: []nomadops.Node{
-				{Name: "prod-workers-0", Status: "down", Eligible: true},
-				{Name: "prod-workers-0", Status: "initializing", Eligible: true},
-			}}, "prod-workers-0")
+				workers0(addr, "down", true), workers0(addr, "initializing", true), workers0(other, "ready", true),
+			}}, "prod-workers-0", addr)
 			return err
-		}, "nomad: wait for node prod-workers-0" + ended + "the nodes named prod-workers-0 are down and initializing"},
+		}, "nomad: wait for node prod-workers-0" + ended +
+			"the nodes named prod-workers-0 at 10.64.0.6 are down and initializing"},
 		{"unhealthy servers", func(f *nomadfake.Fake) {
 			f.SetLeader(leaderAddr)
 			f.SetHealth(nomadops.Health{Healthy: false, Voters: 3})

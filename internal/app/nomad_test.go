@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strings"
 	"sync"
@@ -42,10 +43,13 @@ type nomadCall struct {
 }
 
 // nomadWorld is the Nomad cluster of one cluster of the test service, which follows a Vultr fake: before each call it
-// sets the fake's leader, health and nodes from the cluster's instances there. The cluster has a leader once as many
-// servers are ready as its specs give, its servers are healthy when every listed one is ready, and each ready client
-// or combined instance has registered, unless it is withheld. A cluster whose servers are all gone is a new,
-// unbootstrapped Nomad when new ones come. The fake's own methods, such as Fail and LoseResponse, are the world's.
+// sets the fake's leader, health, Raft peers and nodes from the cluster's instances there. The cluster has a leader
+// once as many servers are ready as its specs give, and its servers are healthy when every listed one is ready. The
+// ready servers are the voting peers, named <hostname>.global at <private address>:4647, so the peers and
+// Health.Voters stay in step. Once the cluster has a leader, each ready client or combined instance registers at its
+// private address (the first VPC of the instance on the Vultr fake), unless it is withheld. A cluster whose servers
+// are all gone is a new, unbootstrapped Nomad when new ones come. The fake's own methods, such as Fail and
+// LoseResponse, are the world's.
 type nomadWorld struct {
 	*nomadfake.Fake
 	cloud *vultrfake.Fake
@@ -143,7 +147,8 @@ func (w *nomadWorld) nodeName(addr string) string {
 // machine is an instance of the Vultr fake as the world sees it.
 type machine struct {
 	id, name, address, role string
-	ready                   bool // Vultr shows it active, running and ok
+	private                 netip.Addr // its address in the cluster's VPC; invalid while it has none
+	ready                   bool       // Vultr shows it active, running and ok
 }
 
 // machines returns the instances of the world's cluster, in creation order.
@@ -153,8 +158,12 @@ func (w *nomadWorld) machines() []machine {
 		if tagOf(in.Tags, cloud.LabelCluster) != w.name {
 			continue
 		}
+		var private netip.Addr
+		if vpcs := w.cloud.InstanceVPCs(in.ID); len(vpcs) > 0 {
+			private, _ = netip.ParseAddr(vpcs[0].IPAddress)
+		}
 		out = append(out, machine{
-			id: in.ID, name: in.Hostname, address: in.MainIP, role: tagOf(in.Tags, cloud.LabelRole),
+			id: in.ID, name: in.Hostname, address: in.MainIP, role: tagOf(in.Tags, cloud.LabelRole), private: private,
 			ready: in.Status == "active" && in.PowerStatus == "running" && in.ServerStatus == "ok",
 		})
 	}
@@ -209,6 +218,7 @@ func (w *nomadWorld) follow() {
 	w.SetHealth(nomadops.Health{
 		Healthy: !unhealthy && len(servers) > 0 && len(readyServers) == len(servers), Voters: len(readyServers),
 	})
+	w.SetPeers(raftPeers(readyServers))
 	if leader == "" {
 		return
 	}
@@ -216,9 +226,20 @@ func (w *nomadWorld) follow() {
 	defer w.mu.Unlock()
 	for _, m := range clients {
 		if m.ready && !w.withheld[m.name] {
-			w.Register(nomadops.Node{Name: m.name, Status: "ready", Eligible: true})
+			w.Register(nomadops.Node{Name: m.name, Status: "ready", Eligible: true, Address: m.private})
 		}
 	}
+}
+
+// raftPeers returns the servers m as the voting peers of the Raft configuration, at their private addresses.
+func raftPeers(m []machine) []nomadops.Peer {
+	peers := make([]nomadops.Peer, 0, len(m))
+	for _, s := range m {
+		peers = append(peers, nomadops.Peer{
+			Name: s.name + ".global", Address: netip.AddrPortFrom(s.private, 4647), Voter: true,
+		})
+	}
+	return peers
 }
 
 // keepsAServer records the ids of servers and reports whether the machines of the last call that were servers are not

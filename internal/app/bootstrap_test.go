@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"net/netip"
 	"slices"
 	"strings"
 	"sync"
@@ -786,6 +787,36 @@ func TestUpdateWaitsTenMinutes(t *testing.T) {
 			// The machine is ready, so the next run does not look for it again.
 			wantConverged(t, svc)
 		})
+	})
+}
+
+// TestUpdateWaitsForTheMachinesOwnNode checks that the registration wait ignores a ready node of the same name at
+// another address, such as the node of an earlier machine, and fails naming the address of the machine's own node.
+func TestUpdateWaitsForTheMachinesOwnNode(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, w := newRelease(t)
+		w.Withhold("prod-workers-1")
+		w.Register(nomadops.Node{
+			Name: "prod-workers-1", Status: "ready", Eligible: true, Address: netip.MustParseAddr("10.64.9.9"),
+		})
+
+		_, err := svc.Update(t.Context(), "prod", true)
+
+		const prefix = "nomad: wait for node prod-workers-1: context deadline exceeded; last: "
+		const want = "node prod-workers-1 is not listed at 10.64.0.7"
+		if err == nil || !strings.HasPrefix(err.Error(), prefix) || !strings.HasSuffix(err.Error(), want) ||
+			!errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("Update = %v, want an error that starts with %q, ends with %q and matches "+
+				"context.DeadlineExceeded", err, prefix, want)
+		}
+		for _, in := range f.Instances() {
+			if in.Hostname == "prod-workers-1" {
+				if got := f.InstanceVPCs(in.ID)[0].IPAddress; got != "10.64.0.7" {
+					t.Errorf("the machine prod-workers-1 has the address %s, the test expects 10.64.0.7", got)
+				}
+			}
+		}
+		wantLockFree(t, svc.Store)
 	})
 }
 
