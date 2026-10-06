@@ -3,7 +3,7 @@
 ~ vultr.FirewallGroup/prod-servers
     + rules: tcp/4646 from 203.0.113.7/32
 - vultr.SSHKey/prod-99aabbcc (ID ssh-9)
-~ node prod-servers-1 (ID instance-2, wait until it is ready)
+~ node prod-servers-1 (ID instance-2, wait until it joins, scrub its user data)
 + node prod-servers-2 (server, vc2-2c-4gb, ams)
 + node prod-workers-1 (client, vc2-4c-8gb, ams)
 - node prod-old-0 (ID instance-7, not in the spec)

@@ -21,7 +21,8 @@ type NodeAction int
 const (
 	// NodeCreate creates a missing node.
 	NodeCreate NodeAction = iota + 1
-	// NodeWait waits until a node that an earlier, interrupted run created is ready.
+	// NodeWait waits for a node that an earlier run left unfinished: until the cloud reports it ready when the wait
+	// repeats its create, and for a server or combined node until it has joined and its user data is scrubbed.
 	NodeWait
 	// NodeDelete deletes a node.
 	NodeDelete
@@ -43,7 +44,8 @@ func (a NodeAction) String() string {
 func (a NodeAction) MarshalText() ([]byte, error) { return []byte(a.String()), nil }
 
 // NodeChange is one change to the nodes of a cluster. A create and a wait hold what a create request needs, with the
-// hash of the group's node configuration; a wait and a delete hold the ID of the machine, a wait its operation id and a
+// hash of the group's node configuration, except a wait without an operation id, which calls no cloud and holds no
+// hash; a wait and a delete hold the ID of the machine, a wait its operation id, when it repeats a create, and a
 // delete the reason.
 type NodeChange struct {
 	Action      NodeAction    `json:"action"`
@@ -76,8 +78,12 @@ const (
 //     listed machine has, each in the group's zone with the fewest machines, the zone listed first on a tie.
 //   - A machine in a zone that its group no longer lists counts toward the group's size and stays, unless it is among
 //     the newest of a group that is too big. New machines go only into the listed zones.
-//   - A machine that stays and is not ready yet is waited for when its operation id is valid: the wait repeats the
-//     create call that made it, with its id. One with an empty or malformed id still counts, but nothing waits for it.
+//   - A server or combined machine that stays and has not joined is waited for, until its node joins and its user data
+//     is scrubbed. When the cloud reports it not ready and its operation id is valid, the wait repeats the create call
+//     that made it, with its id; otherwise the wait has no operation id and calls no cloud. A machine that joined is
+//     never waited for.
+//   - A client machine that stays and is not ready yet is waited for when its operation id is valid, as above. One with
+//     an empty or malformed id still counts, but nothing waits for it.
 //
 // The waits and creates of server and combined nodes come first: the waits by name, then the creates by group, then
 // index. A server's seed holds the private addresses of the servers that exist, and a server that is not ready has
@@ -113,8 +119,8 @@ func planNodes(m *model.Cluster, instances []cloud.Instance) (changes []NodeChan
 			nodes = nodes[:size]
 		}
 		for _, in := range nodes {
-			if !in.Ready && cloud.ValidOpID(in.Op) {
-				waits = append(waits, waitFor(g, in))
+			if w, ok := waitFor(g, in); ok {
+				waits = append(waits, w)
 			}
 		}
 		if g.Role.RunsServer() {
@@ -186,13 +192,25 @@ func leastUsedZone(zones []string, perZone map[string]int) string {
 	return best
 }
 
-// waitFor returns the wait for the machine in of group g. It keeps the machine's name, group, role and zone, which a
-// create request with its operation id must repeat, and takes the machine type and image from the group.
-func waitFor(g model.NodeGroup, in cloud.Instance) NodeChange {
-	return NodeChange{
-		Action: NodeWait, Name: in.Name, Group: in.Group, Role: in.Role, Zone: in.Zone,
-		MachineType: g.MachineType, Image: g.Image, ID: in.ID, Op: in.Op,
+// waitFor returns the wait for the machine in of group g, and whether there is one. It keeps the machine's name,
+// group, role and zone, which a create request with its operation id must repeat, and takes the machine type and
+// image from the group. The machine's own role label decides, as it does for the order and the routing of waits: a
+// machine that is not labelled client is waited for until it has joined, one labelled client only while its create
+// repeats. The wait keeps the operation id only for a machine that the cloud reports not ready.
+func waitFor(g model.NodeGroup, in cloud.Instance) (NodeChange, bool) {
+	repeats := !in.Ready && cloud.ValidOpID(in.Op)
+	server := in.Role != v1alpha1.RoleClient
+	if server && in.Joined || !server && !repeats {
+		return NodeChange{}, false
 	}
+	w := NodeChange{
+		Action: NodeWait, Name: in.Name, Group: in.Group, Role: in.Role, Zone: in.Zone,
+		MachineType: g.MachineType, Image: g.Image, ID: in.ID,
+	}
+	if repeats {
+		w.Op = in.Op
+	}
+	return w, true
 }
 
 // deleteNode returns the delete of the machine in for reason.

@@ -45,8 +45,8 @@ func workers(size int, zones ...string) model.NodeGroup {
 // minutes returns the time n minutes after the creation of the oldest test instance.
 func minutes(n int) time.Time { return time.Date(2026, 9, 28, 10, n, 0, 0, time.UTC) }
 
-// member returns a ready instance of cluster prod: the node index of group g, in the group's first zone, with id and
-// the operation id opFor(id), created at created.
+// member returns a ready instance of cluster prod that has joined: the node index of group g, in the group's first
+// zone, with id and the operation id opFor(id), created at created.
 func member(g model.NodeGroup, index int, id string, created time.Time) cloud.Instance {
 	return cloud.Instance{
 		ID:      id,
@@ -57,6 +57,7 @@ func member(g model.NodeGroup, index int, id string, created time.Time) cloud.In
 		Zone:    g.Zones[0],
 		Op:      opFor(id),
 		Ready:   true,
+		Joined:  true,
 		Created: created,
 	}
 }
@@ -74,8 +75,24 @@ func changed(in cloud.Instance, change func(*cloud.Instance)) cloud.Instance {
 	return in
 }
 
+// notReady returns in as the cloud shows it before it has booted: not ready and not joined.
 func notReady(in cloud.Instance) cloud.Instance {
-	return changed(in, func(in *cloud.Instance) { in.Ready = false })
+	return changed(in, func(in *cloud.Instance) { in.Ready, in.Joined = false, false })
+}
+
+// labelled returns in with the role label role, as another group's machine or a change by hand could have it.
+func labelled(in cloud.Instance, role v1alpha1.Role) cloud.Instance {
+	return changed(in, func(in *cloud.Instance) { in.Role = role })
+}
+
+// unjoined returns in without the joined label.
+func unjoined(in cloud.Instance) cloud.Instance {
+	return changed(in, func(in *cloud.Instance) { in.Joined = false })
+}
+
+// withoutOp returns in without an operation id.
+func withoutOp(in cloud.Instance) cloud.Instance {
+	return changed(in, func(in *cloud.Instance) { in.Op = "" })
 }
 
 func inZone(in cloud.Instance, zone string) cloud.Instance {
@@ -100,6 +117,14 @@ func wantWait(g model.NodeGroup, in cloud.Instance) NodeChange {
 		Action: NodeWait, Name: in.Name, Group: in.Group, Role: in.Role, Zone: in.Zone,
 		MachineType: g.MachineType, Image: g.Image, ID: in.ID, Op: in.Op,
 	}
+}
+
+// wantJoinWait is the wait for the ready server or combined instance in of group g, which has no operation id: it
+// calls no cloud and only waits until the node joins.
+func wantJoinWait(g model.NodeGroup, in cloud.Instance) NodeChange {
+	w := wantWait(g, in)
+	w.Op = ""
+	return w
 }
 
 // wantDelete is the delete of the instance in for reason.
@@ -239,6 +264,89 @@ func TestPlanNodes(t *testing.T) {
 			want: []NodeChange{
 				wantWait(s3, notReady(member(s3, 1, "i-2", minutes(1)))), wantCreate(s3, 2, "ams"),
 			},
+		},
+		{
+			name:   "a ready server that has not joined is waited for without an operation id",
+			groups: []model.NodeGroup{s3},
+			instances: []cloud.Instance{
+				member(s3, 0, "i-1", minutes(1)), unjoined(member(s3, 1, "i-2", minutes(1))), member(s3, 2, "i-3", minutes(1)),
+			},
+			want: []NodeChange{wantJoinWait(s3, unjoined(member(s3, 1, "i-2", minutes(1))))},
+		},
+		{
+			name:   "a server that is not ready keeps its operation id",
+			groups: []model.NodeGroup{s3},
+			instances: []cloud.Instance{
+				member(s3, 0, "i-1", minutes(1)), member(s3, 1, "i-2", minutes(1)),
+				notReady(member(s3, 2, "i-3", minutes(1))),
+			},
+			want: []NodeChange{wantWait(s3, notReady(member(s3, 2, "i-3", minutes(1))))},
+		},
+		{
+			name:   "a server that is not ready and has no valid operation id is waited for without one",
+			groups: []model.NodeGroup{servers(2)},
+			instances: []cloud.Instance{
+				withoutOp(notReady(member(servers(2), 0, "i-1", minutes(1)))),
+				changed(notReady(member(servers(2), 1, "i-2", minutes(1))), func(in *cloud.Instance) { in.Op = "op-i-2" }),
+			},
+			want: []NodeChange{
+				wantJoinWait(servers(2), withoutOp(notReady(member(servers(2), 0, "i-1", minutes(1))))),
+				wantJoinWait(servers(2), changed(notReady(member(servers(2), 1, "i-2", minutes(1))),
+					func(in *cloud.Instance) { in.Op = "op-i-2" })),
+			},
+		},
+		{
+			name:   "a joined server that the cloud reports not ready is not waited for",
+			groups: []model.NodeGroup{servers(2)},
+			instances: []cloud.Instance{
+				member(servers(2), 0, "i-1", minutes(1)),
+				changed(member(servers(2), 1, "i-2", minutes(1)), func(in *cloud.Instance) { in.Ready = false }),
+			},
+		},
+		{
+			name:   "a ready combined node that has not joined is waited for without an operation id",
+			groups: []model.NodeGroup{node1},
+			instances: []cloud.Instance{
+				unjoined(member(node1, 0, "i-1", minutes(1))),
+			},
+			want: []NodeChange{wantJoinWait(node1, unjoined(member(node1, 0, "i-1", minutes(1))))},
+		},
+		{
+			name:   "waits of servers go by name, with and without an operation id",
+			groups: []model.NodeGroup{s3},
+			instances: []cloud.Instance{
+				unjoined(member(s3, 2, "i-1", minutes(1))), notReady(member(s3, 0, "i-2", minutes(2))),
+				unjoined(member(s3, 1, "i-3", minutes(3))),
+			},
+			want: []NodeChange{
+				wantWait(s3, notReady(member(s3, 0, "i-2", minutes(2)))),
+				wantJoinWait(s3, unjoined(member(s3, 1, "i-3", minutes(3)))),
+				wantJoinWait(s3, unjoined(member(s3, 2, "i-1", minutes(1)))),
+			},
+		},
+		{
+			name:   "a ready client that has not joined gets no wait yet",
+			groups: []model.NodeGroup{w2},
+			instances: []cloud.Instance{
+				member(w2, 0, "i-1", minutes(1)), unjoined(member(w2, 1, "i-2", minutes(1))),
+			},
+		},
+		{
+			name:   "a ready machine labelled client in a server group gets no wait, whatever its group",
+			groups: []model.NodeGroup{s3},
+			instances: []cloud.Instance{
+				member(s3, 0, "i-1", minutes(1)), member(s3, 1, "i-2", minutes(1)),
+				labelled(unjoined(member(s3, 2, "i-3", minutes(1))), v1alpha1.RoleClient),
+			},
+		},
+		{
+			name:   "a ready machine labelled server in a client group is waited for without an operation id",
+			groups: []model.NodeGroup{w2},
+			instances: []cloud.Instance{
+				member(w2, 0, "i-1", minutes(1)),
+				labelled(unjoined(member(w2, 1, "i-2", minutes(1))), v1alpha1.RoleServer),
+			},
+			want: []NodeChange{wantJoinWait(w2, labelled(unjoined(member(w2, 1, "i-2", minutes(1))), v1alpha1.RoleServer))},
 		},
 		{
 			name:   "a pending client and a missing client: the wait first",

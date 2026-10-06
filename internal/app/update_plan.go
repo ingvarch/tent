@@ -146,7 +146,7 @@ func (c NodeChange) line() string {
 	case NodeCreate:
 		return fmt.Sprintf("+ node %s (%s, %s, %s)", c.Name, c.Role, c.MachineType, c.Zone)
 	case NodeWait:
-		return fmt.Sprintf("~ node %s (ID %s, wait until it is ready)", c.Name, c.ID)
+		return fmt.Sprintf("~ node %s (ID %s, wait until it joins, scrub its user data)", c.Name, c.ID)
 	case NodeDelete:
 		if c.Reason == "" {
 			return fmt.Sprintf("- node %s (ID %s)", c.Name, c.ID)

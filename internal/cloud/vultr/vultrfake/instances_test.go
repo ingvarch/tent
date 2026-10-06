@@ -719,6 +719,50 @@ func TestAddInstanceMisuse(t *testing.T) {
 	}
 }
 
+func TestSetInstanceTagsAndUserData(t *testing.T) {
+	f := newInfra(t)
+	f.AddInstance(t, govultr.Instance{ID: "seeded", Tags: []string{"a", "b"}})
+	f.SetBootReads(t, 0, 0)
+	created := mustCreateInstance(t, f, nodeReq("n", "t"))
+	f.SetInstanceUserData(t, "seeded", "c2VlZA==")
+	f.SetInstanceUserData(t, created.ID, "Y3JlYXRlZA==")
+	f.SetInstanceTags(t, "seeded", "b", "x")
+	f.SetInstanceTags(t, created.ID)
+	tags := map[string][]string{}
+	for _, in := range f.Instances() {
+		tags[in.ID] = in.Tags
+	}
+	if diff := cmp.Diff(map[string][]string{"seeded": {"b", "x"}, created.ID: nil}, tags); diff != "" {
+		t.Errorf("the tags (-want +got):\n%s", diff)
+	}
+	if got := f.UserData("seeded"); got != "c2VlZA==" {
+		t.Errorf("the user data of the seeded instance is %q, want c2VlZA==", got)
+	}
+	if got := f.UserData(created.ID); got != "Y3JlYXRlZA==" {
+		t.Errorf("the user data of the created instance is %q, want Y3JlYXRlZA==", got)
+	}
+	if _, ok := f.CreateRequest(created.ID); !ok {
+		t.Error("the create request of the created instance is gone")
+	}
+	wantCalls(t, f, vultrfake.Call{Name: "CreateInstance", Arg: "n"}) // no call of its own
+	for _, tc := range []struct {
+		name string
+		seed func(testing.TB)
+		want string
+	}{
+		{"tags of an unknown instance", func(tb testing.TB) { f.SetInstanceTags(tb, "none", "x") },
+			`vultrfake: SetInstanceTags: no instance "none"`},
+		{"user data of an unknown instance", func(tb testing.TB) { f.SetInstanceUserData(tb, "none", "x") },
+			`vultrfake: SetInstanceUserData: no instance "none"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tb := &fatalTB{TB: t}
+			tc.seed(tb)
+			wantFatal(t, tb, tc.want)
+		})
+	}
+}
+
 func TestInstanceGetters(t *testing.T) {
 	f := newInfra(t)
 	if in, data := f.Instances(), f.UserData("instance-1"); in != nil || data != "" {

@@ -108,26 +108,30 @@ func (s NodeStep) String() string {
 // signed with it; a bundle without its key, or a stored secret that does not load, fails the plan, since tent never
 // replaces a cluster's secrets.
 //
-// A node that is created or waited for boots with the NodeConfig of its group. A plan that creates or waits for a node
-// reads the release files that the nodes download, and fails when a node's user data does not fit what a provider
-// takes. The Nomad step is part of the plan until the store holds the mark of the ACL bootstrap, and also, with the
-// mark, when no server or combined machine of the cluster is left: the servers that come are a new Nomad, so it
-// bootstraps again. After the bootstrap it is part of the plan when the plan creates or waits for a server or combined
-// node. Without apply, or when nothing changes, Update returns the plan and writes nothing.
+// A node that is created or waited for with an operation id boots with the NodeConfig of its group. A plan that does
+// so reads the release files that the nodes download, and fails when a node's user data does not fit what a provider
+// takes. A server or combined machine that has not joined its cluster, which carries no joined label, is waited for
+// until its node joins and its user data is scrubbed; the wait repeats the create only for a machine that the cloud
+// reports not ready. The Nomad step is part of the plan until the store holds the mark of the ACL bootstrap, and
+// also, with the mark, when no server or combined machine of the cluster is left: the servers that come are a new
+// Nomad, so it bootstraps again. After the bootstrap it is part of the plan when the plan creates or waits for a
+// server or combined node. Without apply, or when nothing changes, Update returns the plan and writes nothing.
 //
 // With apply it takes the cluster's lock and plans again under it. When that plan has changes, it calls OnUpdatePlan
 // with it, then OnWarning with each warning about the cluster, such as a Nomad API that the whole internet may reach
 // or a Nomad version that the channel has not tested. Then it raises the tent version, writes the missing secrets and
 // the completed spec, and applies the plan in this order: the infrastructure's changes other than its deletes; the
-// deletion of a stale mark of the bootstrap; the waits for the server and combined nodes that an interrupted update
-// created, then the creates of the missing server and combined nodes; the Nomad step, which waits for a leader,
-// bootstraps the ACL system with the stored secret, waits for healthy servers that all vote, writes the mark, and
-// waits for each combined node to register; then the waits for client nodes and the creates of the missing ones, each
-// client booting with an intro token and registering before the next is made; the node deletes; and the
-// infrastructure's deletes, so that a firewall group goes only once its nodes are gone. Nodes are created one at a
-// time. A create, a wait and each wait of the Nomad step may take 10 minutes. The first step that fails stops the
-// update, and running it again finishes the job. It returns the plan it applied, made under the lock, with the error;
-// the plan says Applied once every step has succeeded, or at once when it has no changes.
+// deletion of a stale mark of the bootstrap; the waits that repeat a create, then the creates, of the server and
+// combined nodes; the Nomad step, which waits for a leader, bootstraps the ACL system with the stored secret, waits
+// for healthy servers that all vote, reads the Raft configuration, and then, for each server and combined node of the
+// plan in order, waits for a combined node to register, checks that its server votes at its private address, and
+// replaces its user data with a stub and labels its machine as joined, and last writes the mark; then the waits for
+// client nodes and the creates of the missing ones, each client booting with an intro token and registering before
+// the next is made; the node deletes; and the infrastructure's deletes, so that a firewall group goes only once its
+// nodes are gone. Nodes are created one at a time. A create, a wait and each wait of the Nomad step may take 10
+// minutes, and a scrub 5. The first step that fails stops the update, and running it again finishes the job. It
+// returns the plan it applied, made under the lock, with the error; the plan says Applied once every step has
+// succeeded, or at once when it has no changes.
 func (s *Service) Update(ctx context.Context, cluster string, apply bool) (_ UpdatePlan, err error) {
 	defer func() { err = stopped(ctx, err) }()
 	l, err := s.layout(ctx, cluster)
@@ -185,9 +189,11 @@ type updateRun struct {
 	completed []byte           // the completed spec
 	warnings  []string         // about the cluster
 	servers   []cloud.Instance // the machines of the server and combined groups that stay, by name
+	listed    []cloud.Instance // every machine the cloud listed, for the machine that a wait names by ID
 	// staleMark is set when the store holds the mark of a bootstrap that the servers of the plan do not stand behind.
 	staleMark bool
-	// builder makes the NodeConfig of the nodes that the plan creates or waits for; it is nil when the plan has none.
+	// builder makes the NodeConfig of the nodes that the plan creates, or waits for with an operation id; it is nil when
+	// the plan has none.
 	builder *nodeBuilder
 }
 
@@ -228,7 +234,7 @@ func (s *Service) planUpdate(ctx context.Context, l statestore.Layout, cache ass
 	if err != nil {
 		return updateRun{}, err
 	}
-	plan, servers, err := planChanges(ctx, p, m)
+	plan, found, err := planChanges(ctx, p, m)
 	if err != nil {
 		return updateRun{}, err
 	}
@@ -237,11 +243,11 @@ func (s *Service) planUpdate(ctx context.Context, l statestore.Layout, cache ass
 		return updateRun{}, err
 	}
 	plan.Secrets, plan.Completed = relativePaths(l, secrets.writes), !bytes.Equal(stored, completed)
-	plan.Nomad = planNomad(m, plan.Nodes, servers, marked)
+	plan.Nomad = planNomad(m, plan.Nodes, found.servers, marked)
 	u := updateRun{
 		plan: plan, cluster: m.Name, layout: l, region: objs.Cluster.Spec.Nomad.Region, nodes: p.Nodes(),
 		secrets: secrets, completed: completed, warnings: s.updateWarnings(objs.Cluster, ch),
-		servers: servers, staleMark: marked && plan.Nomad != nil && plan.Nomad.Bootstrap,
+		servers: found.servers, listed: found.listed, staleMark: marked && plan.Nomad != nil && plan.Nomad.Bootstrap,
 	}
 	if !changesNodes(plan.Nodes) {
 		return u, nil
@@ -336,28 +342,33 @@ func (s *Service) provider(name v1alpha1.Provider) (cloud.Provider, error) {
 	return s.Providers(name)
 }
 
+// machines are the machines of a cluster that an update plans over.
+type machines struct {
+	servers []cloud.Instance // those of the server and combined groups that stay, by name, as planNodes says
+	listed  []cloud.Instance // all that the cloud listed, for the machine that a wait names by ID
+}
+
 // planChanges plans the changes that bring the cloud to the model m: those of the infrastructure, from a fresh
-// inventory, and those of the nodes, from a fresh list of the machines. It also returns the servers that the cluster
-// has, as planNodes says.
-func planChanges(ctx context.Context, p cloud.Provider, m *model.Cluster) (UpdatePlan, []cloud.Instance, error) {
+// inventory, and those of the nodes, from a fresh list of the machines. It also returns the machines it planned over.
+func planChanges(ctx context.Context, p cloud.Provider, m *model.Cluster) (UpdatePlan, machines, error) {
 	snap, err := p.Inventory(ctx, m.Name)
 	if err != nil {
-		return UpdatePlan{}, nil, err
+		return UpdatePlan{}, machines{}, err
 	}
 	tasks, err := p.BuildInfra(ctx, m)
 	if err != nil {
-		return UpdatePlan{}, nil, err
+		return UpdatePlan{}, machines{}, err
 	}
 	infra, err := engine.NewPlan(ctx, tasks, p.InfraKinds(), snap)
 	if err != nil {
-		return UpdatePlan{}, nil, err
+		return UpdatePlan{}, machines{}, err
 	}
 	instances, err := p.Nodes().List(ctx, m.Name)
 	if err != nil {
-		return UpdatePlan{}, nil, err
+		return UpdatePlan{}, machines{}, err
 	}
 	changes, servers := planNodes(m, instances)
-	return UpdatePlan{Infra: infra, Nodes: changes}, servers, nil
+	return UpdatePlan{Infra: infra, Nodes: changes}, machines{servers: servers, listed: instances}, nil
 }
 
 // applyUpdate applies the plan of u in the order that Update gives.

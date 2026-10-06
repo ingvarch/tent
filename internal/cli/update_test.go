@@ -117,11 +117,15 @@ func buildLines() (infra, nodes []string) {
 	return infra, nodes
 }
 
-// nomadLines are the progress lines of the Nomad step of the build, between the servers and the workers.
+// nomadLines are the progress lines of the Nomad step of the build and the scrub of the servers, between the servers
+// and the workers.
 var nomadLines = []string{
 	"waiting for a Nomad leader", "Nomad has a leader (10.64.0.3:4647)",
 	"bootstrapping the ACL system", "bootstrapped the ACL system",
 	"waiting for 3 healthy Nomad servers", "3 Nomad servers are healthy",
+	"scrubbing the user data of node prod-servers-0", "scrubbed the user data of node prod-servers-0",
+	"scrubbing the user data of node prod-servers-1", "scrubbed the user data of node prod-servers-1",
+	"scrubbing the user data of node prod-servers-2", "scrubbed the user data of node prod-servers-2",
 }
 
 // wantBuildProgress fails the test unless errOut holds the progress lines of an update that builds the test cluster
@@ -449,6 +453,14 @@ func TestUpdateClusterApplyJSON(t *testing.T) {
 		}
 		var wantNodes []progressEvent
 		for i, n := range nodeNames {
+			if n == "prod-workers-0" { // the servers are scrubbed before the first client is made
+				for j, server := range nodeNames[:3] {
+					id := fmt.Sprintf("instance-%d", j+1)
+					wantNodes = append(wantNodes,
+						progressEvent{Type: "node", Step: "started", Action: "scrub", Name: server, ID: id},
+						progressEvent{Type: "node", Step: "done", Action: "scrub", Name: server, ID: id})
+				}
+			}
 			wantNodes = append(wantNodes,
 				progressEvent{Type: "node", Step: "started", Action: "create", Name: n},
 				progressEvent{Type: "node", Step: "done", Action: "create", Name: n,
@@ -556,7 +568,7 @@ func instanceLost(id string) error {
 }
 
 // waitPlan is the plan of an update that waits for the worker that pendingWorker left.
-const waitPlan = "~ node prod-workers-2 (ID instance-7, wait until it is ready)\n" +
+const waitPlan = "~ node prod-workers-2 (ID instance-7, wait until it joins, scrub its user data)\n" +
 	"\n" +
 	"Nodes: 0 to create, 1 to wait for, 0 to delete.\n"
 
