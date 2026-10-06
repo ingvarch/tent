@@ -110,12 +110,12 @@ func (s NodeStep) String() string {
 //
 // A node that is created or waited for with an operation id boots with the NodeConfig of its group. A plan that does
 // so reads the release files that the nodes download, and fails when a node's user data does not fit what a provider
-// takes. A server or combined machine that has not joined its cluster, which carries no joined label, is waited for
-// until its node joins and its user data is scrubbed; the wait repeats the create only for a machine that the cloud
-// reports not ready. The Nomad step is part of the plan until the store holds the mark of the ACL bootstrap, and
-// also, with the mark, when no server or combined machine of the cluster is left: the servers that come are a new
-// Nomad, so it bootstraps again. After the bootstrap it is part of the plan when the plan creates or waits for a
-// server or combined node. Without apply, or when nothing changes, Update returns the plan and writes nothing.
+// takes. A machine of any role that has not joined its cluster, which carries no joined label, is waited for until
+// its node joins and its user data is scrubbed; the wait repeats the create only for a machine that the cloud reports
+// not ready. The Nomad step is part of the plan until the store holds the mark of the ACL bootstrap, and also, with
+// the mark, when no server or combined machine of the cluster is left: the servers that come are a new Nomad, so it
+// bootstraps again. After the bootstrap it is part of the plan when the plan creates or waits for a server or
+// combined node. Without apply, or when nothing changes, Update returns the plan and writes nothing.
 //
 // With apply it takes the cluster's lock and plans again under it. When that plan has changes, it calls OnUpdatePlan
 // with it, then OnWarning with each warning about the cluster, such as a Nomad API that the whole internet may reach
@@ -126,12 +126,13 @@ func (s NodeStep) String() string {
 // for healthy servers that all vote, reads the Raft configuration, and then, for each server and combined node of the
 // plan in order, waits for a combined node to register, checks that its server votes at its private address, and
 // replaces its user data with a stub and labels its machine as joined, and last writes the mark; then the waits for
-// client nodes and the creates of the missing ones, each client booting with an intro token and registering before
-// the next is made; the node deletes; and the infrastructure's deletes, so that a firewall group goes only once its
-// nodes are gone. Nodes are created one at a time. A create, a wait and each wait of the Nomad step may take 10
-// minutes, and a scrub 5. The first step that fails stops the update, and running it again finishes the job. It
-// returns the plan it applied, made under the lock, with the error; the plan says Applied once every step has
-// succeeded, or at once when it has no changes.
+// client nodes and the creates of the missing ones, each client booting with an intro token, registering, and then
+// being scrubbed and labelled as a server is, before the next is made; a wait for a client without an operation id
+// asks for no token and calls no cloud until the scrub; the node deletes; and the infrastructure's deletes, so that a
+// firewall group goes only once its nodes are gone. Nodes are created one at a time. A create, a wait and each wait of
+// the Nomad step may take 10 minutes, and a scrub 5. The first step that fails stops the update, and running it again
+// finishes the job. It returns the plan it applied, made under the lock, with the error; the plan says Applied once
+// every step has succeeded, or at once when it has no changes.
 func (s *Service) Update(ctx context.Context, cluster string, apply bool) (_ UpdatePlan, err error) {
 	defer func() { err = stopped(ctx, err) }()
 	l, err := s.layout(ctx, cluster)

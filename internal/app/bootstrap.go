@@ -69,7 +69,8 @@ func planNomad(m *model.Cluster, changes []NodeChange, staying []cloud.Instance,
 	return nil
 }
 
-// needsNomad reports whether applying the plan calls Nomad: for the Nomad step, or for the intro token of a client.
+// needsNomad reports whether applying the plan calls Nomad: for the Nomad step, or for a client's intro token or its
+// registration wait.
 func (u updateRun) needsNomad() bool {
 	return u.plan.Nomad != nil ||
 		slices.ContainsFunc(u.plan.Nodes, func(c NodeChange) bool { return c.Action != NodeDelete && !isServerChange(c) })
@@ -210,9 +211,26 @@ func (a *applier) applyServer(ctx context.Context, c NodeChange) error {
 	return nil
 }
 
-// applyClient creates the client node of c, or waits for it, with an intro token, then waits until it registers.
+// applyClient creates the client node of c, or waits for it with its operation id, with an intro token; then waits
+// until it registers, and scrubs it. A wait without an operation id asks for no token and calls no cloud before the
+// scrub: the machine already exists.
 func (a *applier) applyClient(ctx context.Context, c NodeChange) error {
-	in, err := a.s.applyNodeWith(ctx, a.u.nodes, a.u.cluster, c, func(ctx context.Context) (cloud.UserData, error) {
+	in := a.machineOf(c)
+	if bootsMachine(c) {
+		var err error
+		if in, err = a.bootClient(ctx, c); err != nil {
+			return err
+		}
+	}
+	if err := a.register(ctx, in); err != nil {
+		return err
+	}
+	return a.markJoined(ctx, in)
+}
+
+// bootClient creates the client node of c, or repeats its create, with an intro token, and returns its machine.
+func (a *applier) bootClient(ctx context.Context, c NodeChange) (cloud.Instance, error) {
+	return a.s.applyNodeWith(ctx, a.u.nodes, a.u.cluster, c, func(ctx context.Context) (cloud.UserData, error) {
 		api, err := a.nomadAPI()
 		if err != nil {
 			return nil, err
@@ -229,10 +247,6 @@ func (a *applier) applyClient(ctx context.Context, c NodeChange) error {
 		}
 		return a.u.userData(c, a.s.now(), seed, intro)
 	})
-	if err != nil {
-		return err
-	}
-	return a.register(ctx, in)
 }
 
 // seed returns the private addresses of the known servers other than the node called name, in the order of their
@@ -367,7 +381,7 @@ func (a *applier) scrubServers(ctx context.Context, api nomadops.API, servers []
 		return fmt.Errorf("read the Raft configuration: %w", err)
 	}
 	for _, c := range servers {
-		in := a.serverOf(c)
+		in := a.machineOf(c)
 		if c.Role == v1alpha1.RoleCombined {
 			if err := a.register(ctx, in); err != nil {
 				return err
@@ -429,10 +443,10 @@ func (a *applier) markBootstrapped(ctx context.Context) error {
 	return nil
 }
 
-// serverOf returns the machine of the server or combined change c: the known server of its name, which this run may
-// have made, or else the machine that the cloud listed with its ID, as a wait without an operation id names it. A
-// machine that is neither is returned with its name only.
-func (a *applier) serverOf(c NodeChange) cloud.Instance {
+// machineOf returns the machine of the node change c: the known server of its name, which this run may have made, or
+// else the machine that the cloud listed with its ID, as a wait without an operation id names it. A machine that is
+// neither is returned with its name only.
+func (a *applier) machineOf(c NodeChange) cloud.Instance {
 	if i := slices.IndexFunc(a.known, func(k cloud.Instance) bool { return k.Name == c.Name }); i >= 0 {
 		return a.known[i]
 	}

@@ -119,8 +119,8 @@ func wantWait(g model.NodeGroup, in cloud.Instance) NodeChange {
 	}
 }
 
-// wantJoinWait is the wait for the ready server or combined instance in of group g, which has no operation id: it
-// calls no cloud and only waits until the node joins.
+// wantJoinWait is the wait for the instance in of group g without an operation id: it calls no cloud and only waits
+// until the node joins.
 func wantJoinWait(g model.NodeGroup, in cloud.Instance) NodeChange {
 	w := wantWait(g, in)
 	w.Op = ""
@@ -137,7 +137,7 @@ func TestPlanNodes(t *testing.T) {
 	nodes, node1 := nodeGroup("nodes", v1alpha1.RoleCombined, 3), nodeGroup("nodes", v1alpha1.RoleCombined, 1)
 	app1 := nodeGroup("apps", v1alpha1.RoleClient, 1)
 	old := nodeGroup("old", v1alpha1.RoleClient, 2) // a group that is no longer in the spec
-	s3, w1, w2 := servers(3), workers(1), workers(2)
+	s3, w1, w2, w3 := servers(3), workers(1), workers(2), workers(3)
 	unlabelled := named(changed(member(w1, 0, "i-9", minutes(0)), func(in *cloud.Instance) { in.Group = "" }),
 		"prod-workers-1")
 	for _, tc := range []struct {
@@ -325,19 +325,50 @@ func TestPlanNodes(t *testing.T) {
 			},
 		},
 		{
-			name:   "a ready client that has not joined gets no wait yet",
+			name:   "a ready client that has not joined is waited for without an operation id",
 			groups: []model.NodeGroup{w2},
 			instances: []cloud.Instance{
 				member(w2, 0, "i-1", minutes(1)), unjoined(member(w2, 1, "i-2", minutes(1))),
 			},
+			want: []NodeChange{wantJoinWait(w2, unjoined(member(w2, 1, "i-2", minutes(1))))},
 		},
 		{
-			name:   "a ready machine labelled client in a server group gets no wait, whatever its group",
+			name:   "a client that is not ready keeps its operation id",
+			groups: []model.NodeGroup{w2},
+			instances: []cloud.Instance{
+				member(w2, 0, "i-1", minutes(1)), notReady(member(w2, 1, "i-2", minutes(1))),
+			},
+			want: []NodeChange{wantWait(w2, notReady(member(w2, 1, "i-2", minutes(1))))},
+		},
+		{
+			name:   "a joined client that the cloud reports not ready is not waited for",
+			groups: []model.NodeGroup{w2},
+			instances: []cloud.Instance{
+				member(w2, 0, "i-1", minutes(1)),
+				changed(member(w2, 1, "i-2", minutes(1)), func(in *cloud.Instance) { in.Ready = false }),
+			},
+		},
+		{
+			name:   "waits of clients go by name, with and without an operation id",
+			groups: []model.NodeGroup{w3},
+			instances: []cloud.Instance{
+				unjoined(member(w3, 2, "i-1", minutes(1))), notReady(member(w3, 0, "i-2", minutes(2))),
+				unjoined(member(w3, 1, "i-3", minutes(3))),
+			},
+			want: []NodeChange{
+				wantWait(w3, notReady(member(w3, 0, "i-2", minutes(2)))),
+				wantJoinWait(w3, unjoined(member(w3, 1, "i-3", minutes(3)))),
+				wantJoinWait(w3, unjoined(member(w3, 2, "i-1", minutes(1)))),
+			},
+		},
+		{
+			name:   "a ready machine labelled client in a server group is waited for without an operation id",
 			groups: []model.NodeGroup{s3},
 			instances: []cloud.Instance{
 				member(s3, 0, "i-1", minutes(1)), member(s3, 1, "i-2", minutes(1)),
 				labelled(unjoined(member(s3, 2, "i-3", minutes(1))), v1alpha1.RoleClient),
 			},
+			want: []NodeChange{wantJoinWait(s3, labelled(unjoined(member(s3, 2, "i-3", minutes(1))), v1alpha1.RoleClient))},
 		},
 		{
 			name:   "a ready machine labelled server in a client group is waited for without an operation id",
@@ -405,20 +436,23 @@ func TestPlanNodes(t *testing.T) {
 			},
 		},
 		{
-			name:   "a node that is not ready and has no operation id counts, and is not waited for",
+			name:   "a client that is not ready and has no operation id is waited for without one",
 			groups: []model.NodeGroup{w2},
 			instances: []cloud.Instance{
 				member(w2, 0, "i-1", minutes(1)),
-				changed(notReady(member(w2, 1, "i-2", minutes(2))), func(in *cloud.Instance) { in.Op = "" }),
+				withoutOp(notReady(member(w2, 1, "i-2", minutes(2)))),
 			},
+			want: []NodeChange{wantJoinWait(w2, withoutOp(notReady(member(w2, 1, "i-2", minutes(2)))))},
 		},
 		{
-			name:   "a node that is not ready and has a malformed operation id counts, and is not waited for",
+			name:   "a client that is not ready and has a malformed operation id is waited for without one",
 			groups: []model.NodeGroup{w2},
 			instances: []cloud.Instance{
 				member(w2, 0, "i-1", minutes(1)),
 				changed(notReady(member(w2, 1, "i-2", minutes(2))), func(in *cloud.Instance) { in.Op = "op-i-2" }),
 			},
+			want: []NodeChange{wantJoinWait(w2, changed(notReady(member(w2, 1, "i-2", minutes(2))),
+				func(in *cloud.Instance) { in.Op = "op-i-2" }))},
 		},
 		{
 			name:   "the order of changes: server waits and creates, client waits and creates, deletes",

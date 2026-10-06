@@ -225,6 +225,17 @@ func worker(index int) node { return wantNode("workers", v1alpha1.RoleClient, in
 // allNodes are the nodes of the test cluster in the order the update creates them.
 var allNodes = []node{server(0), server(1), server(2), worker(0), worker(1)}
 
+// allNames are the names of allNodes.
+var allNames = namesOf(allNodes)
+
+func namesOf(nodes []node) []string {
+	names := make([]string, len(nodes))
+	for i, n := range nodes {
+		names[i] = n.Name
+	}
+	return names
+}
+
 // wantNodes fails the test unless the fake holds these instances, in creation order.
 func wantNodes(t *testing.T, f *vultrfake.Fake, want ...node) {
 	t.Helper()
@@ -572,8 +583,8 @@ func TestUpdate(t *testing.T) {
 			},
 			nodeSteps("scrub", "prod-servers-0"), nodeSteps("scrub", "prod-servers-1"),
 			nodeSteps("scrub", "prod-servers-2"),
-			nodeSteps("create", "prod-workers-0"), registerSteps("prod-workers-0"),
-			nodeSteps("create", "prod-workers-1"), registerSteps("prod-workers-1"),
+			nodeSteps("create", "prod-workers-0"), registerSteps("prod-workers-0"), nodeSteps("scrub", "prod-workers-0"),
+			nodeSteps("create", "prod-workers-1"), registerSteps("prod-workers-1"), nodeSteps("scrub", "prod-workers-1"),
 		)
 		if diff := cmp.Diff(wantSteps, (*progress)[split:]); diff != "" {
 			t.Errorf("the node steps and the Nomad step (-want +got):\n%s", diff)
@@ -816,6 +827,9 @@ func TestUpdateReportsTheMachines(t *testing.T) {
 					want = append(want, "started scrub "+s.Name+"  invalid IP", "done scrub "+s.Name+"  invalid IP")
 				}
 			}
+			if i > 2 { // a client is scrubbed once it has registered
+				want = append(want, "started scrub "+n.Name+"  invalid IP", "done scrub "+n.Name+"  invalid IP")
+			}
 		}
 		if diff := cmp.Diff(want, got); diff != "" {
 			t.Errorf("the node steps (-want +got):\n%s", diff)
@@ -859,7 +873,8 @@ func TestUpdateReportsTheMachineItWaitedFor(t *testing.T) {
 
 		mustUpdate(t, svc)
 
-		if diff := cmp.Diff([]string{"wait prod-workers-1 instance-6 10.64.0.7"}, done); diff != "" {
+		want := []string{"wait prod-workers-1 instance-6 10.64.0.7", "scrub prod-workers-1  invalid IP"}
+		if diff := cmp.Diff(want, done); diff != "" {
 			t.Errorf("the done steps (-want +got):\n%s", diff)
 		}
 	})
@@ -1048,7 +1063,7 @@ func TestUpdateHoldsTheLock(t *testing.T) {
 			}
 		}
 		mustUpdate(t, svc)
-		if want := len(allNodes) + 3; len(errs) != want { // the nodes, and the scrub of each server
+		if want := 2 * len(allNodes); len(errs) != want { // the nodes, and the scrub of each
 			t.Fatalf("%d node steps started, want %d", len(errs), want)
 		}
 		for _, err := range errs {
@@ -1190,14 +1205,14 @@ func unmark(t *testing.T, f *vultrfake.Fake, id string) {
 }
 
 // markedBuild is a fake with the five instances of a first build, in which only prod-servers-0 is marked as joined:
-// the other two servers have lost the label and hold their first user data again.
+// the other four have lost the label and hold their first user data again.
 func markedBuild(t *testing.T) *vultrfake.Fake {
 	t.Helper()
 	svc, f, _ := newRelease(t)
 	mustUpdate(t, svc)
-	wantJoined(t, f, "prod-servers-0", "prod-servers-1", "prod-servers-2")
-	for _, id := range []string{f.Instances()[1].ID, f.Instances()[2].ID} {
-		unmark(t, f, id)
+	wantJoined(t, f, allNames...)
+	for _, in := range f.Instances()[1:] {
+		unmark(t, f, in.ID)
 	}
 	return f
 }
@@ -1227,6 +1242,9 @@ func TestJoinedMismatches(t *testing.T) {
 				"no-stub carries tent/joined"}},
 			{"a node that is not marked", []string{"prod-servers-0", "prod-servers-1"}, []string{
 				"prod-servers-1 lacks tent/joined", "prod-servers-1 holds user data other than the stub",
+				"no-stub carries tent/joined"}},
+			{"a client that is not marked", []string{"prod-servers-0", "prod-workers-0"}, []string{
+				"prod-workers-0 lacks tent/joined", "prod-workers-0 holds user data other than the stub",
 				"no-stub carries tent/joined"}},
 			{"an unknown node", []string{"prod-servers-0", "x"}, []string{"no-stub carries tent/joined",
 				"no instance x"}},

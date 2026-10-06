@@ -87,6 +87,8 @@ GetInstance <prod-workers-0>
 GetInstance <prod-workers-0>
 ListInstanceVPCs <prod-workers-0>
 nomad Nodes (prod-servers-0)
+GetInstance <prod-workers-0>
+UpdateInstance <prod-workers-0>
 nomad IntroToken prod-workers-1 default 30m0s (prod-servers-0)
 ListInstances tent/op=<op9>
 ListSSHKeys
@@ -101,3 +103,5 @@ GetInstance <prod-workers-1>
 GetInstance <prod-workers-1>
 ListInstanceVPCs <prod-workers-1>
 nomad Nodes (prod-servers-0)
+GetInstance <prod-workers-1>
+UpdateInstance <prod-workers-1>
