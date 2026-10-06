@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/nomadops"
@@ -56,7 +55,7 @@ func TestPeers(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Peers: %s", show(t, err, clientTokens(token)))
 			}
-			if diff := cmp.Diff(tc.want, got, cmpopts.EquateComparable(netip.AddrPort{}, netip.Addr{})); diff != "" {
+			if diff := cmp.Diff(tc.want, got, equateAddrs); diff != "" {
 				t.Errorf("Peers() (-want +got):\n%s", diff)
 			}
 			checkRequests(t, srv, clientTokens(token), peersRequest)

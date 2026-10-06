@@ -18,6 +18,7 @@ type Node struct {
 	Eligible bool   // the scheduler may place work on the node
 	// Address is the host of the HTTP address that the node advertises; invalid when Nomad gives none that parses.
 	Address netip.Addr
+	Version string // the Nomad version that the client runs
 }
 
 // Is reports whether the node is called name and advertises addr. An invalid addr never matches.
@@ -44,7 +45,7 @@ func (c *Client) Nodes(ctx context.Context) ([]Node, error) {
 		if s != nil {
 			addr, _ := netip.ParseAddr(s.Address) // the invalid Addr when it does not parse
 			nodes = append(nodes, Node{Name: s.Name, Status: s.Status, Eligible: s.SchedulingEligibility == "eligible",
-				Address: addr})
+				Address: addr, Version: s.Version})
 		}
 	}
 	return nodes, nil

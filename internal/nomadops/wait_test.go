@@ -167,7 +167,7 @@ func TestWaitHealthy(t *testing.T) {
 
 		got, err := nomadops.WaitHealthy(bounded(t), a, 3)
 
-		if err != nil || got != want {
+		if err != nil || !cmp.Equal(got, want, equateAddrs) {
 			t.Errorf("WaitHealthy() = %+v, %v; want %+v", got, err, want)
 		}
 		wantTook(t, start, 4*time.Second)
@@ -176,7 +176,7 @@ func TestWaitHealthy(t *testing.T) {
 		// More voters than asked for will do.
 		more := nomadops.Health{Healthy: true, Voters: 5}
 		f.SetHealth(more)
-		if got, err := nomadops.WaitHealthy(bounded(t), a, 3); err != nil || got != more {
+		if got, err := nomadops.WaitHealthy(bounded(t), a, 3); err != nil || !cmp.Equal(got, more, equateAddrs) {
 			t.Errorf("WaitHealthy() = %+v, %v; want %+v", got, err, more)
 		}
 	})
@@ -210,9 +210,9 @@ var (
 var errValue = errors.New("a value came with the error")
 
 // noValue returns err, or errValue when v is not the zero value although err is set.
-func noValue[T comparable](v T, err error) error {
+func noValue[T any](v T, err error) error {
 	var zero T
-	if err != nil && v != zero {
+	if err != nil && !cmp.Equal(v, zero, equateAddrs) {
 		return errors.Join(err, errValue)
 	}
 	return err

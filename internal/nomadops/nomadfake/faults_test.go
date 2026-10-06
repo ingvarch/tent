@@ -57,7 +57,7 @@ func TestFaultedCallsReturnNoValue(t *testing.T) {
 		if got, err := a.Nodes(ctx); err == nil || got != nil {
 			t.Errorf("Nodes() = %v, %v; want an error and no list", got, err)
 		}
-		if got, err := a.Health(ctx); err == nil || got != (nomadops.Health{}) {
+		if got, err := a.Health(ctx); err == nil || !cmp.Equal(got, nomadops.Health{}, equateAddrs) {
 			t.Errorf("Health() = %+v, %v; want an error and the zero Health", got, err)
 		}
 	}

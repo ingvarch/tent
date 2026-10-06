@@ -104,10 +104,11 @@ func (f *Fake) Register(n nomadops.Node) {
 	f.nodes = append(f.nodes, n)
 }
 
-// SetHealth makes h autopilot's view of the servers.
+// SetHealth makes a copy of h autopilot's view of the servers.
 func (f *Fake) SetHealth(h nomadops.Health) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	h.Servers = slices.Clone(h.Servers)
 	f.health = h
 }
 
@@ -278,6 +279,7 @@ func (c client) Health(ctx context.Context) (nomadops.Health, error) {
 			return errDenied
 		}
 		h = c.f.health
+		h.Servers = slices.Clone(h.Servers)
 		return nil
 	})
 	return result(h, err)

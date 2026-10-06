@@ -325,7 +325,7 @@ func TestServersPassArgumentsContextAndValues(t *testing.T) {
 	if err != nil || len(nodes) != 1 || nodes[0].Name != "prod-workers-1" {
 		t.Errorf("Nodes() = %v, %v; want prod-workers-1", nodes, err)
 	}
-	if h, err := s.Health(ctx); err != nil || h != (nomadops.Health{Healthy: true, Voters: 3}) {
+	if h, err := s.Health(ctx); err != nil || !cmp.Equal(h, nomadops.Health{Healthy: true, Voters: 3}, equateAddrs) {
 		t.Errorf("Health() = %+v, %v; want the set one", h, err)
 	}
 	if got, err := s.Peers(ctx); err != nil || len(got) != 1 || got[0].Name != "prod-servers-0.eu" {

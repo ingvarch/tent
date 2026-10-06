@@ -39,12 +39,16 @@ func TestNodes(t *testing.T) {
 		t.Fatalf("Nodes: %s", show(t, err, clientTokens(token)))
 	}
 	want := []nomadops.Node{
-		{Name: "prod-workers-2", Status: "initializing", Eligible: true, Address: netip.MustParseAddr("10.64.0.8")},
-		{Name: "prod-workers-1", Status: "ready", Eligible: false, Address: netip.MustParseAddr("10.64.0.7")},
-		{Name: "prod-workers-0", Status: "ready", Eligible: true, Address: netip.MustParseAddr("10.64.0.6")},
-		{Name: "prod-workers-0", Status: "down", Eligible: true, Address: netip.MustParseAddr("fd00::6")},
+		{Name: "prod-workers-2", Status: "initializing", Eligible: true, Address: netip.MustParseAddr("10.64.0.8"),
+			Version: "2.0.7"},
+		{Name: "prod-workers-1", Status: "ready", Eligible: false, Address: netip.MustParseAddr("10.64.0.7"),
+			Version: "2.0.7"},
+		{Name: "prod-workers-0", Status: "ready", Eligible: true, Address: netip.MustParseAddr("10.64.0.6"),
+			Version: "2.0.7"},
+		{Name: "prod-workers-0", Status: "down", Eligible: true, Address: netip.MustParseAddr("fd00::6"),
+			Version: "2.0.7"},
 	}
-	if diff := cmp.Diff(want, got, cmpopts.EquateComparable(netip.Addr{})); diff != "" {
+	if diff := cmp.Diff(want, got, equateAddrs); diff != "" {
 		t.Errorf("Nodes() (-want +got):\n%s", diff)
 	}
 	checkRequests(t, srv, clientTokens(token), nodesRequest)
@@ -119,7 +123,7 @@ func TestNodesSkipsNull(t *testing.T) {
 					{Name: "prod-workers-1", Status: "initializing", Eligible: true},
 				}
 			}
-			if diff := cmp.Diff(want, got, cmpopts.EquateEmpty(), cmpopts.EquateComparable(netip.Addr{})); diff != "" {
+			if diff := cmp.Diff(want, got, cmpopts.EquateEmpty(), equateAddrs); diff != "" {
 				t.Errorf("Nodes() (-want +got):\n%s", diff)
 			}
 		})
