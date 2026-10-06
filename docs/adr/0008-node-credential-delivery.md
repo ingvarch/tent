@@ -3,7 +3,9 @@
 - **Status:** Accepted; combined server+client nodes are an exception to "servers run no workloads"
   ([ADR-0019](0019-combined-server-client-role.md)); amended by
   [ADR-0029](0029-host-firewall-runtime-and-cni-on-nodes.md) (only tent-node's marked socket reaches the metadata
-  service; root processes are not exempt)
+  service; root processes are not exempt) and by [ADR-0032](0032-joined-label-scrub-and-delete-guard.md) (on Vultr, tent
+  replaces the user data with a stub once the node has joined, with `Nodes.MarkJoined`, which also sets the label
+  `tent/joined=true` in the same request)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0006](0006-two-binaries-and-nodeconfig.md), [ADR-0007](0007-security-baseline.md),
@@ -48,6 +50,8 @@ put into user data at all.
   - Servers are dedicated and run no workloads.
   - Intro tokens are bound to one node name and pool and expire within 30 minutes.
   - **Never on nodes:** cloud API tokens and state store credentials.
+  - **Vultr scrubs.** Once a node has joined its cluster, tent replaces its user data with a stub that holds no
+    secrets ([ADR-0032](0032-joined-label-scrub-and-delete-guard.md)). Hetzner's user data is immutable and stays.
 - **Target (v2, `controller`)**, mandatory before ASG-style groups exist. A bootstrap controller runs on the servers:
   1. The node generates its key locally and sends a CSR with its claimed instance id.
   2. The controller checks the claim against the cloud API. On Hetzner it checks the labels, private IP, creation

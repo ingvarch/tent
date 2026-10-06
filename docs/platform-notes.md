@@ -4,8 +4,9 @@ Facts about Nomad, Hetzner Cloud, Vultr, S3-compatible object stores, prior art 
 design relies on.
 
 > **Verified on 2026-09-25**, [section 5](#5-s3-compatible-object-stores) on 2026-09-26,
-> [section 6](#6-ubuntu-on-nodes) on 2026-09-29 ([6.4](#64-restarts-of-docker-containerd-and-nomad) on 2026-10-05) and
-> [1.6](#16-the-agent-on-a-node) from 2026-09-29 to 2026-10-05.
+> [section 6](#6-ubuntu-on-nodes) on 2026-09-29 ([6.4](#64-restarts-of-docker-containerd-and-nomad) on 2026-10-05,
+> [6.5](#65-cloud-init-and-the-stub) on 2026-10-06) and [1.6](#16-the-agent-on-a-node) from 2026-09-29 to 2026-10-05,
+> and the items of [1.2](#12-features-tent-relies-on) that give their own date.
 > Sources: official documentation, the Hetzner Cloud OpenAPI spec
 > (`https://docs.hetzner.cloud/cloud.spec.json`), the Vultr API reference (OpenAPI spec from a Wayback copy of
 > `https://www.vultr.com/api/`, 2026-09-12) plus live calls to public Vultr endpoints, release APIs and upstream
@@ -52,8 +53,8 @@ design relies on.
 
 The items that name a source file were checked in the Nomad **v1.11.3** source (the Go module cache) on 2026-09-29.
 Files under `api/` are those of the API module at tent's pin ([1.5](#15-licensing)). The source of 2.0.7 was not
-checked offline, except the items that say v2.0.7, which were read in that tag on 2026-09-29. ⏳ Re-check them against
-the version tent runs.
+checked offline, except the items that say v2.0.7, which were read in that tag on 2026-09-29 or on the date they
+give. ⏳ Re-check them against the version tent runs.
 
 **Client introduction** (1.11.0, CE):
 - **Server configuration.** In the `server` block:
@@ -101,6 +102,30 @@ the version tent runs.
   `nomad operator raft transfer-leadership`.
 - **Removing a peer:** `DELETE /v1/operator/raft/peer?id=<raft id>` with a management token. `?address=` returns
   400.
+- **The Raft configuration** (`GET /v1/operator/raft/configuration`; v2.0.7, run on 2026-10-05 and read on
+  2026-10-06) lists every server
+  of the Raft configuration with `Node`, `Address` and `Voter`, and has no lag.
+  - `Operator.RaftGetConfiguration` (`nomad/operator_endpoint.go:46-107`) forwards to the leader and answers a
+    management token only; any other token gets 403.
+  - `Node` is the server's name in Nomad, and `(unknown)` when no Serf member has the Raft address. `Address` is the
+    Raft address, on the RPC port (4647 with tent's configuration). `Voter` is `Suffrage == raft.Voter`.
+- **The autopilot report is a snapshot** that autopilot rebuilds on a timer from the Raft configuration of that
+  moment (raft-autopilot v0.1.6 `nextServers`; run on local Nomad 2.0.7 on 2026-10-05). It lists every Raft server
+  with `Name`, `Address` and `Voter`, also in the body of a 429. It lags Raft, so use it for health and the Raft
+  configuration for membership.
+  - After a SIGKILL of one of three servers, the report answered 200 with the dead server alive, `Voter` and
+    `Healthy` for 41 s (Serf marked it failed at 41 s). It turned 429 at 41.7 s, autopilot removed the server from
+    Raft at 47.8 s, and the report dropped it at 49.8 s. A 200 report does not mean that its servers are up.
+  - A Raft server without a Serf entry stays in the report with `SerfStatus` `left` and the name it had, or an empty
+    one (read, not run).
+- **A node's address in `GET /v1/nodes`** is the host of the client's `advertise.http` (`Node.Stub`,
+  `nomad/structs/structs.go:2296` at v2.0.7, which splits `HTTPAddr`; run on 2026-10-05: a client that advertised
+  `10.64.0.9:15102` showed `"Address":"10.64.0.9"`). It is not the bind address and not `advertise.rpc`. With tent's
+  rendering, which sets `advertise.http` to the node's private address, it is that address.
+  - The run could not use a second host address, since every agent shared 127.0.0.1, and did not run the template
+    that renders tent's address (it needs a real interface in the VPC's CIDR). The real-cloud runs of 2026-10-06
+    (`rugw2m`, `sv3vwb`, `rgfckj`; [3.16](#316-spike-runs)) used it: in `sv3vwb` Nomad listed the replacement client
+    ready and eligible at its private address, 10.64.0.7.
 
 **Node pools** (since 1.6.0):
 - Client configuration: `client { node_pool = "x" }`, default `default`. The built-ins `default` and `all` cannot
@@ -489,6 +514,32 @@ and python over mTLS; the source is the v2.0.7 tag:
   - **`warn`.** After the servers restarted with `enforcement = "warn"`, a client without a token registered, and the
     server logged a warning with `enforcement_level=warn`.
 
+**Nodes of one name and expired intro tokens.** Run on 2026-10-05 against local Nomad 2.0.7 (the official
+`nomad_2.0.7_darwin_arm64.zip`, sha256 `4ada34db43f8b75c80c4e09ce50f4753e661bcb4a3745f415dd4aa7d01483e58`, which
+matches `nomad_2.0.7_SHA256SUMS`): three servers, region `global`, TLS on HTTP and RPC, ACLs on, `strict` client
+introduction unless said otherwise, the default heartbeat and garbage-collection settings. The source is the v2.0.7
+tag:
+- **A killed client reads `down` after 14 to 16 s.** SIGKILL at t=0, polled every 2 s: `ready` at 14.1 s, `down` at
+  16.1 s. The defaults allow 20 to 30 s: a heartbeat TTL of 10 s plus a random stagger of up to 10 s, plus a grace of
+  10 s (`nomad/config.go`, `nomad/heartbeat.go`). After a leader change every node that is not terminal gets
+  `failover_heartbeat_ttl`, 300 s (read, not run), so a dead client can read `ready` for up to 5 minutes then.
+- **The node stays listed.** 5 minutes later it was still `down`; `node_gc_threshold` is 24 h (not waited for).
+- **A new client of the same name registers at once**, as a second node. With an empty data directory, the same HTTP
+  address and a new intro token, `GET /v1/nodes` listed two nodes called `c1`: one `down` and one `ready`, with
+  different IDs and the same `Address`.
+- **An intro token works for 60 s after its expiry.** `VerifyClaim` (`nomad/encrypter.go`) calls go-jose v3.0.5's
+  `Validate`, whose default leeway is one minute. With tokens of TTL 1 s, a new client registered when it started 30,
+  50 and 58 s after `exp`, and was refused at 62, 75 and 80 s (`Permission denied` for `Node.Register`; the server
+  logged `node registration introduction authentication failure … token is expired (exp)`). The client retries on its
+  own and never registers.
+- **Under `warn` an expired token is refused too** (the server logged the same failure with `enforcement_level=warn`),
+  and a client without a token registers (`node registration without introduction token`). `newRegistrationAllowed`
+  (`nomad/node_endpoint.go:312`) returns before it looks at the level when the token fails. The default enforcement is
+  `warn` when the `server` block sets none (`nomad/structs/node.go:860`).
+- **The server accepts any TTL.** `1s`, `5s`, `10s`, `20s`, `1m`, `0s` (the server default, 5 m), `500ms`, `1ms` and
+  `-1s` all answered 200, so a TTL has no lower bound; one above `max_identity_ttl` is cut to it. A TTL that works is
+  limited by the 60 s of leeway.
+
 **What the agent reads once:**
 - **retry_join** is read only at start; SIGHUP does not reload it (live run). SIGHUP reloads the log level, the TLS
   certificates, the scheduler workers, some Raft settings and the client's fingerprinters.
@@ -853,6 +904,13 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
   sends it, keeps the tags. That held with `user_data` and with `firewall_group_id: ""`, and the user data was
   applied. govultr leaves out an empty `firewall_group_id` ([3.2](#32-govultr-)), so its `Instance.Update` cannot
   detach a firewall group.
+
+  **One PATCH with `tags` and `user_data`** is what `Nodes.MarkJoined` sends: every tag the instance has, with
+  `tent/joined=true` added, and the scrub stub. The spike saw `tags` alone and `user_data` with `"tags": null`, never
+  both fields in one call. The M2.7b cluster runs of 2026-10-06 (`rugw2m`, `sv3vwb`, `rgfckj`; [3.16](#316-spike-runs))
+  verified that Vultr applies both: in each run five of five instances carried `tent/joined=true` and a user data
+  that equalled the stub byte for byte. In all three runs Vultr listed the tags sorted (`tent/joined=true` second),
+  although `MarkJoined` sends that tag last.
 - **Private IP and MAC:** `GET /v2/instances/{id}/vpcs` returns `vpcs[]` with `id`, `mac_address` and `ip_address`.
   The instance object also has `internal_ip` and `vpcs[]`.
 - **Power actions.** `halt`, `start` and `reboot` return 204.
@@ -1160,7 +1218,7 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
   HTTP 500 `Call to a member function request() on null`, while the same call answered 200 at about 12:30 UTC that
   day. The failure was without a key: the preflight of the M2.7a cluster check read the plan and its price with the
   key at about 21:37 UTC. The spike's preflight sends the key when it has one, and goes on without the plan's price when
-  the call fails without a key. 🔬 Check again whether the call works without a key.
+  the call fails without a key. On 2026-10-06 the call answered 200 without a key again.
 - **Smallest plans** (checked live for `ams` on 2026-09-25):
 
   | Plan | vCPU / RAM / disk | $/month | Real $/hour (÷ 672) |
@@ -1250,6 +1308,13 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
     created per 24 hours (anecdotal).
   - Not exposed by the API. Raise them in the Console under Billing → Limits.
   - Anecdote: a fresh account showed "maximum instances: 1, maximum billing fee: $1".
+  - **A deleted instance still counts for a short time.** Run `rugw2m` (2026-10-06, 5 instances before the delete):
+    the create that tent sent after the delete of an instance, in the same `update --yes`, failed with `400 Bad
+    Request: Server add failed: You have reached the maximum number of active instances for this account.` The report
+    gives no time between the two calls: the whole run took 11 s, and the plan alone had taken 5 s, so the create came
+    less than 10 s after the delete. In run `sv3vwb` the replacement was created 51 s after the delete of the machine
+    it replaced, where an ordinary create of that run took 50 s, so the limit held that create back for a few seconds
+    at most. Neither run measured how long Vultr counts a deleted instance.
 - **Verification.** A card or PayPal account is required.
 - **TOS and AUP.** Nothing about minimum instance lifetimes. Circumventing limits (for example, with extra accounts) is
   forbidden. Crypto mining is banned.
@@ -1286,7 +1351,8 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
 All runs: region `ams`, plan `vc2-1c-1gb`, Ubuntu 24.04 (`os_id` 2284), except one of the M2.5 VM checks, one M2.6a
 VM check and its rerun, and one M2.6b VM check and its rerun, which ran Ubuntu 26.04 (`os_id` 2760). Runs 1 to 3 ran
 on 2026-09-25, run 4 on 2026-09-27, run 5 on 2026-09-28, the M2.5 VM checks on 2026-09-29, the M2.6a VM checks and
-their reruns on 2026-09-30, and the M2.6b VM checks, their reruns and the M2.7a cluster check on 2026-10-05.
+their reruns on 2026-09-30, the M2.6b VM checks, their reruns and the M2.7a cluster check on 2026-10-05, and the
+three M2.7b cluster runs below, all on 2026-10-06.
 Reports are in `hack/vultr-spike/results/` (git-ignored). The M1 exit run below was not a spike run.
 
 **Run 1 (`tt3s1g`, spike v1)** verified:
@@ -1348,7 +1414,8 @@ and one worker, then two workers.
   `No changes.` and exited with 0, so the firewall rules read back from Vultr without a diff.
 - With the workers raised to 2, an `update --yes` was interrupted with SIGINT 20 s after `creating node …-workers-1`:
   after the POST, while tent waited for the node to be ready. The next `update --yes` planned
-  `~ node …-workers-1 (ID …, wait until it is ready)` and created no instance, and a further `--exit-code` run had no
+  `~ node …-workers-1 (ID …, wait until it is ready)` (the line of that tent; since M2.7b it reads `wait until it
+  joins, scrub its user data`) and created no instance, and a further `--exit-code` run had no
   changes. Vultr listed exactly three instances.
 - `tent delete cluster --yes` deleted the three nodes, both firewall groups, the VPC and the four state objects. The
   API then listed no instance, VPC, firewall group or SSH key with the cluster's marker.
@@ -1487,7 +1554,7 @@ cluster of 3 servers and 2 clients, five instances at once, from an empty accoun
   bridge mode ran on a client after 5 s and was purged.
 - **A second run.** `update cluster --exit-code` exited 0 and `update cluster --yes` printed `cluster … is up to
   date`, each in 4 s. All 5 instances carry a `tent/spec-hash` tag, 2 distinct values (servers and clients).
-- **User data.** All 5 instances still held `/etc/tent/node.json`: nothing scrubs it before M2.7b.
+- **User data.** All 5 instances still held `/etc/tent/node.json`: M2.7a scrubbed nothing.
 - **A client.** `status.json` had `preflight` and `verify` unchanged and every other phase done; `05-join.hcl` listed
   the 3 servers on port 4647. The intro token file was 787 bytes, mode 0600, `root:root`, for the node name
   `spk-qypvsk-workers-0` (the plan's size check assumes up to 2048). The size matches the estimate of 4/3 bytes per name
@@ -1500,11 +1567,82 @@ cluster of 3 servers and 2 clients, five instances at once, from an empty accoun
   cluster was left, and the state store was empty. None of the CA key, gossip key, ACL bootstrap token and operator
   key appeared in tent's output or the report.
 
+**M2.7b cluster check, first run (`rugw2m`, spike v10, `--only cluster --unregistered`, 2026-10-06)** ran tent
+`v0.1.0-rc.2-53-g638ebd9-dirty` with a development tent-node on Ubuntu 24.04, `ams`, `vc2-1c-1gb`. It built the cluster
+of the M2.7a check, 3 servers and 2 clients, and the replacement of a client then failed (below). The three rows
+after it, the replacement, its node and the final `update --exit-code`, did not run. It verified:
+- **The build.** `tent create cluster --yes` exited 0 after 543 s. The leader, the ACL bootstrap and the healthy
+  servers showed at 268 s, and the clients registered 142 s and 275 s after the leader line. Five `scrubbed the user
+  data of node …` lines followed, a server's after the healthy servers and a client's after its registration.
+- **The scrub.** Five of five instances carried `tent/joined=true` beside `tent/spec-hash`, and their user data, read
+  from `GET /v2/instances/{id}/user-data`, equalled tent's stub byte for byte and held no `/etc/tent/node.json`. So
+  one PATCH set the tags and the user data ([3.3](#33-instances)). `update --exit-code` exited 0 and `update --yes`
+  printed `is up to date`, each in 4 s.
+- **A reboot of a client** left `/etc/tent/node.json` with its sha256. SSH answered after 53 s and Nomad listed the
+  node ready and eligible 54 s after the reboot.
+- **The delete guard.** With one client in the specs, `update` and `update --yes` each exited 1 in 5 s and 4 s with
+  `update would delete a node that joined Nomad: …-workers-1`, and 5 instances stayed. With the specs restored, the
+  plan was empty.
+- **A client that never registered.** `systemctl stop nomad.service` left the unit `inactive`, and it was still
+  inactive 1711 s later, so nothing starts Nomad again. The purge of its node answered HTTP 200. At an age of 1946 s
+  the plan was a delete as `not registered` and a create of the same name, exit 0 in 5 s.
+- **The delete.** `tent delete cluster --yes` exited 0 after 19 s. The VPC delete was retried three times (0.9 s,
+  1.6 s, 3.3 s) while Vultr still said that servers were attached. Nothing was left in the Vultr API or the state
+  store, and no secret was in the output.
+
+It found two things, both fixed:
+- **cloud-init read degraded after the reboot.** `cloud-init status --wait --long` printed `status: done`,
+  `extended_status: degraded done` and exit 2, with the recoverable error `Failed at merging in cloud config part
+  from part-001: empty cloud config`. The stub was a header and a comment ([6.5](#65-cloud-init-and-the-stub)). The
+  stub got a line `{}`. The row had called this as expected, since it read only `errors: []`.
+- **The replacement failed at the account's limit** ([3.14](#314-account-limits-terms-and-operations-)): `update
+  --yes` exited 1 after 11 s. The Vultr provider now sends a node create again that the instance limit refuses
+  within 2 minutes of its own delete.
+
+**M2.7b cluster check, second run (`sv3vwb`, spike v11, `--only cluster --unregistered`, 2026-10-06)** ran tent
+`v0.1.0-rc.2-54-g7d1c6fd-dirty` the same way, with the two fixes in the code. Spike v11 changed three things against
+v10: the stub's bytes, the cloud-init verdict of the reboot row (it needs `status: done`, exit 0 and no recoverable
+error), and the row of the replacement, which also gives the seconds between the delete and the create and the time
+that a client's create took in the build. It verified:
+- **The build.** `tent create cluster --yes` exited 0 after 484 s. The leader, the bootstrap and the healthy servers
+  showed at 212 s, the clients registered 140 s and 271 s after the leader line, and five of five instances carried
+  `tent/joined=true` and the stub of three lines. `update --exit-code` exited 0 in 6 s and `update --yes` printed `is
+  up to date` in 3 s. Three voters were back 1 s after a server's restart.
+- **cloud-init after the reboot was healthy:** `status: done`, `extended_status: done`, `errors: []`,
+  `recoverable_errors: {}`, exit 0 ([6.5](#65-cloud-init-and-the-stub)). The row itself read `UNEXPECTED: cloud-init
+  status ? (errors [])`: `cloud-init status --wait` printed `..status: done`, and the script read the status only at
+  the start of a line. The script is fixed, and the third run shows the row as expected; the details of this report
+  hold the healthy status.
+- **The delete guard** exited 1 in 5 s and 4 s with 5 instances left, and `--exit-code` after the specs were
+  restored exited 0 in 4 s.
+- **A client that never registered.** Nomad was inactive after the stop and still inactive 1711 s later. At an age of
+  1944 s the plan was the delete as `not registered` and the create, exit 0 in 6 s. `tent update cluster --yes` then
+  exited 0 in 142 s: it deleted, created, registered and scrubbed the client. The new machine took the node's name
+  and Nomad listed it ready and eligible at 10.64.0.7. `update --exit-code` after it exited 0 in 7 s.
+- **Vultr gave the replacement the private address of the machine it replaced:** 10.64.0.7 for the new instance
+  `222dbfa9-…` as for the old `4b4c83f4-…`.
+- **The delete.** `tent delete cluster --yes` exited 0 after 18 s and left nothing; the state store was empty; no
+  secret was in the output.
+
+The report does not say whether Vultr refused the replacement's create: the provider logs a refusal at info level, and
+the run was made without `-v`. `created node` came 51 s after `deleted node`, against 50 s for a client's create in the
+build, so a retry cost a few seconds at most ([3.14](#314-account-limits-terms-and-operations-)). Unit tests cover the
+retry.
+
+**M2.7b cluster check, third run (`rgfckj`, spike v11, `--only cluster`, 2026-10-06)** ran tent
+`v0.1.0-rc.2-54-g17bc737-dirty` with the fixed script and without `--unregistered`. Every row read as expected, and
+the client check was skipped. `tent create cluster --yes` exited 0 after 429 s; the leader and the bootstrap showed at
+185 s and the healthy servers at 188 s; the clients registered 124 s and 243 s after the leader line; five of five
+instances carried `tent/joined=true` and the stub. After the reboot of a client SSH answered after 53 s, Nomad listed
+the node ready and eligible 54 s after the reboot, and the row read `cloud-init status done, exit 0, no recoverable
+error` (`status: done` without dots, `extended_status: done`, `recoverable_errors: {}`, exit 0). The delete guard
+exited 1 in 7 s and 4 s with 5 instances left. `tent delete cluster --yes` exited 0 after 20 s and left nothing.
+
 **Still open:**
 - Object Storage conditional writes ([3.12](#312-object-storage-)).
 - Images other than Ubuntu 24.04 were not checked, except Ubuntu 26.04 by one M2.5 VM check, one M2.6a VM check and
   its rerun, and one M2.6b VM check and its rerun, for tent-node only.
-- Account limits beyond 5 concurrent instances were not tested (the M2.7a cluster check ran 5).
+- Account limits beyond 5 concurrent instances were not tested (the M2.7a check and the three M2.7b runs ran 5).
 - What `/vpcs` answers in the first 30 s after a create ([3.5](#35-vpc)).
 
 ---
@@ -1811,6 +1949,22 @@ containers, unless an item says otherwise.
   `libc6` security upgrade restarts Nomad. The tasks survive a restart of Nomad ([3.16](#316-spike-runs)). Vultr's
   images have needrestart (3.6-7ubuntu4.5 on 24.04, 3.11-1ubuntu2 on 26.04), with no `$nrconf{restart}` line, the
   package's default, and unattended-upgrades on (`20auto-upgrades`), on the M2.6b VM reruns of 2026-10-05.
+
+### 6.5 cloud-init and the stub
+
+- **cloud-init refuses a cloud-config that loads to nothing.** The handler (`cloudinit/handlers/cloud_config.py`)
+  raises `ValueError("empty cloud config")`. The stub of M2.7b first held a header and a comment, which is YAML that
+  loads to nothing. Checked on 2026-10-06 with the handler itself, in an ubuntu:24.04 container with cloud-init
+  26.1-0ubuntu1~24.04.1: that stub logs `Failed at merging in cloud config part from part-001: empty cloud config`,
+  and the same stub with a line `{}` after the comment loads as an empty mapping and merges without a warning.
+- **A degraded status keeps `status: done` and `errors: []`.** `cloud-init status --wait --long` shows it in
+  `extended_status: degraded done`, in the items under `recoverable_errors:`, and in exit code 2. A healthy node prints
+  `extended_status: done`, `recoverable_errors: {}` and exits 0.
+- **On a real node.** After the reboot of a scrubbed client, run `rugw2m` (2026-10-06) showed the degraded status, with
+  the warning above. With the stub of three lines (`#cloud-config`, the comment, `{}`), run `sv3vwb` showed the healthy
+  one.
+- **`--wait` prints a dot for each wait,** on the line of the status (`..status: done` in run `sv3vwb`; the line had
+  no dots in `rugw2m`), so a reader of the output must not expect the status at the start of a line.
 
 ---
 

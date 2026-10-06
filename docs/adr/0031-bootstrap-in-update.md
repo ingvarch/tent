@@ -1,6 +1,9 @@
 # ADR-0031: Bootstrap in `update`
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by [ADR-0032](0032-joined-label-scrub-and-delete-guard.md) (the limits "Secrets stay in
+  user data", "A ready machine that has not registered is not seen" and "A health wait that stops" are closed, the M2.7b
+  follow-up is built, and the bootstrap mark is written after the servers' scrubs; a renamed server group is refused
+  once its machines carry the joined label; of item 4, only a create and a wait that repeats a create read the assets)
 - **Date:** 2026-10-05
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),
@@ -19,7 +22,8 @@
 Until M2.7 `update` made empty machines. M2.7a makes `tent update cluster --yes` (and `create --yes`) build a running,
 secured Nomad cluster: servers with real user data, a leader, the ACL system bootstrapped with the stored secret,
 healthy servers that all vote, and clients with intro tokens that register. The scrub of user data, nodes that never
-registered and the guard against deleting a registered node or a Raft peer are M2.7b's.
+registered and the guard against deleting a registered node or a Raft peer were left to M2.7b
+([ADR-0032](0032-joined-label-scrub-and-delete-guard.md)).
 
 The facts that shaped it. The ones about Nomad were verified on 2026-10-05 on a local Nomad 2.0.7 and in its source
 ([platform notes §1.6](../platform-notes.md#16-the-agent-on-a-node)):
@@ -55,10 +59,11 @@ The facts that shaped it. The ones about Nomad were verified on 2026-10-05 on a 
 3. **One node builder** (`internal/app`) makes the NodeConfig of every node: the template of each node group, then one
    config per node from its name, zone, certificate, seed and intro token. `update` and `app.NodeConfigOf` use it, so
    the VM check tool and `update` cannot diverge.
-4. **The assets are read only by a plan that creates or waits for a node.** Such a plan needs
-   releases.hashicorp.com, and for a release build github.com. A plan that creates or waits for no node needs neither,
+4. **The assets are read only by a plan that creates a node or repeats the create of one.** Such a plan needs
+   releases.hashicorp.com, and for a release build github.com. A plan that does neither needs neither,
    nor `TENT_NODE_URL`: a run that changes no node, or a drift check (`--exit-code`) of a cluster whose nodes are all
-   there. A drift check that finds a node to create or wait for reads the assets like any other plan.
+   there. A drift check that finds a node to create, or a machine whose create it must repeat, reads the assets like any
+   other plan; one that finds only machines to wait for reads none.
    - They are read once per architecture and once per run: the builder keeps them in a cache that the plan and the
      apply share. The cache key is the Nomad version, the tent version and the architecture, without the channel; a
      second embedded channel needs its name in the key.
@@ -82,8 +87,8 @@ The facts that shaped it. The ones about Nomad were verified on 2026-10-05 on a 
    `Bootstrap` is safe to repeat, and a second `IntroToken` makes a token that nothing uses, so writes move on too.
    ([Architecture §13.2](../architecture.md#132-tent-update-cluster---yes) has the error texts.)
 8. **The Nomad step** waits for a leader, bootstraps the ACL system, waits until the servers are healthy and all vote,
-   and then writes the mark. tent reaches one `nomadops` client per server with a public address, on port 4646, with the
-   operator certificate and the bootstrap secret as the token.
+   and then writes the mark (M2.7b writes it after the scrubs of the servers). tent reaches one `nomadops` client per
+   server with a public address, on port 4646, with the operator certificate and the bootstrap secret as the token.
    - **The mark** is `<cluster>/nomad/bootstrapped` in the state store. Without it, or when no server or combined
      machine of the cluster stays, the Nomad step is planned with the bootstrap, so a run cut before the servers were
      healthy is finished by the next run. In the second case `update` deletes the stored mark before the first node
@@ -143,13 +148,11 @@ The facts that shaped it. The ones about Nomad were verified on 2026-10-05 on a 
 
 ### Negative / trade-offs
 
-- **Secrets stay in user data** until the scrub of M2.7b: node keys, the gossip key and, for a client, an intro token
-  (its use ends at registration, within 30 minutes). Anyone who can read the metadata service from the VM reads them.
-  [Architecture §9.4](../architecture.md#94-secrets-on-nodes-threat-model) has the threat model.
-- **A ready machine that has not registered is not seen.** After a cut between a client's create and its registration,
-  the next run plans nothing. The same holds for a combined node cut between the mark and its registration.
-- **A health wait that stops** after a server change on a cluster with the mark and servers that stay is not repeated
-  once the server is ready: the next plan has no server change, so no Nomad step.
+- **Closed by M2.7b** ([ADR-0032](0032-joined-label-scrub-and-delete-guard.md)):
+  - Secrets stay in user data until the scrub. The scrub runs once a node has joined.
+  - A ready machine that has not registered is not seen. The plan waits for every machine without the joined label.
+  - A health wait that stops is not repeated. A server without the label is waited for, so the next plan has a
+    Nomad step.
 - **A renamed server group** has no machine that stays, so `update` deletes the mark, builds the new group as a new
   Nomad with its own bootstrap and deletes the old machines last.
 - **A plan made before the CA is stored** issues a new CA in memory each time, so its spec hashes differ from plan to
@@ -162,9 +165,9 @@ The facts that shaped it. The ones about Nomad were verified on 2026-10-05 on a 
 
 ### Follow-ups
 
-- **M2.7b:** the scrub of user data after registration; nodes that never registered, such as a client whose intro token
-  expired; and decision 27 of [architecture §18](../architecture.md#18-open-questions): until M3, `update` refuses
-  to delete a node that registered or a Raft peer.
+- **M2.7b** (built, [ADR-0032](0032-joined-label-scrub-and-delete-guard.md)): the scrub of user data once a node has
+  joined; nodes that never registered, such as a client whose intro token expired; and decision 27 of [architecture
+  §18](../architecture.md#18-open-questions): until M3, `update` refuses to delete a node that joined.
 - **M2.8:** `tent export nomad` replaces `hack/tent-operator`, the tool that gives the real-cloud check its access to
   the Nomad API.
 - **M3:** server removal through the API; the E2E check of ADR-0016 that a client rejoins after every server has been

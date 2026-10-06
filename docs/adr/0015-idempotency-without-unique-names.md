@@ -1,7 +1,9 @@
 # ADR-0015: Idempotent creation on clouds without unique names
 
 - **Status:** Accepted. Amended by [ADR-0023](0023-vultr-inventory-dedupe-and-images.md) (which copy the dedupe
-  pass keeps on Vultr). The follow-ups are done.
+  pass keeps on Vultr) and by [ADR-0032](0032-joined-label-scrub-and-delete-guard.md) (the dedupe of machines keeps a
+  machine that carries the joined label, then one that is not a client that never registered, then the oldest; a twin
+  that registered is labelled and kept). The follow-ups are done.
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** extends [ADR-0003](0003-cloud-is-source-of-truth.md); [ADR-0010](0010-state-store-and-locking.md),
@@ -44,7 +46,10 @@ Vultr has no such guard:
   duplicates.
   - tent keeps the one whose operation id matches the plan, otherwise the oldest.
   - It deletes the others.
-  - An instance that has already registered in Nomad is never deleted by dedupe. It is reported instead.
+  - An instance that has already registered in Nomad is never deleted by dedupe. It is reported instead. Among
+    machines, a joined one stays before one that has not joined, then one that is not a client that never registered
+    before one that is, then the oldest; a twin that registered gets the joined label from the guard and stays
+    ([ADR-0032](0032-joined-label-scrub-and-delete-guard.md)).
 - **Locking.** The cluster lock lives in the state store: a conditional put or `flock`
   ([ADR-0010](0010-state-store-and-locking.md), architecture §10.4). Clouds without unique names offer no
   cloud-native mutex.

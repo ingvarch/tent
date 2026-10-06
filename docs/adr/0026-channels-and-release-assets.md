@@ -6,12 +6,11 @@
   tent-node binaries in `checksums.txt`, and development builds upload to the CI R2 bucket; the one URL of a
   development build serves an amd64 binary, so its clusters need amd64 plans) and by
   [ADR-0031](0031-bootstrap-in-update.md) (the follow-ups moved to M2.7 are built:
-  `update` reads the assets only in a plan that creates or waits for a node, once per architecture and once per run,
-  with its own clock for the signature; the Nomad pin is written with the completed spec before the first node,
-  so a first `update` that is cut and run again by a newer tent keeps the first run's pin; the architecture comes
-  from `cloud.Provider.Arch`; a development build needs
-  `TENT_NODE_URL` and `TENT_NODE_SHA256` for such a plan, which `cmd/tent` reads; the warning for a release build
-  shows before the first change)
+  `update` reads the assets only in a plan that creates a node or repeats the create of one, once per architecture
+  and once per run, with its own clock for the signature; the Nomad pin is written with the completed spec before the
+  first node, so a first `update` that is cut and run again by a newer tent keeps the first run's pin; the
+  architecture comes from `cloud.Provider.Arch`; a development build needs `TENT_NODE_URL` and `TENT_NODE_SHA256` for
+  such a plan, which `cmd/tent` reads; the warning for a release build shows before the first change)
 - **Date:** 2026-09-28
 - **Deciders:** ingvarch
 - **Related:** extends [ADR-0006](0006-two-binaries-and-nodeconfig.md),

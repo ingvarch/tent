@@ -14,10 +14,9 @@ clusters on cloud providers. It aims to be what [kops](https://github.com/kubern
 pitches a tent anywhere; tent pitches a Nomad cluster on any cloud.
 
 > **Status: early development (milestone M2 in progress).** `tent update cluster --yes` builds a running Nomad
-> cluster on [Vultr](https://www.vultr.com): servers with a leader, ACLs bootstrapped and clients registered. It is
-> not for production yet: the node keys, the gossip key and the clients' intro tokens stay in the machines' user data
-> until M2.7b scrubs them. Vultr is the first provider (it also hosts the E2E suite), then
-> [Hetzner Cloud](https://www.hetzner.com/cloud). AWS is planned.
+> cluster on [Vultr](https://www.vultr.com): servers with a leader, ACLs bootstrapped and clients registered, and it
+> scrubs a node's keys from its user data once the node has joined. It is not for production yet. Vultr is the first
+> provider (it also hosts the E2E suite), then [Hetzner Cloud](https://www.hetzner.com/cloud). AWS is planned.
 
 ## What works now
 
@@ -25,8 +24,9 @@ pitches a tent anywhere; tent pitches a Nomad cluster on any cloud.
   bucket. `tent create`, `get`, `edit` and `replace` manage it.
 - **Plan and apply on Vultr** with `tent update cluster [--yes]`: the VPC, the firewall groups, the SSH keys, each
   node group at its size, and Nomad on the machines: mTLS, gossip encryption, ACLs bootstrapped with a secret that
-  tent keeps in the state store, and clients that join with an introduction token. No separate state file: the cloud
-  is the source of truth.
+  tent keeps in the state store, and clients that join with an introduction token. Once a node has joined, tent
+  replaces its user data with a stub and labels its machine, and it replaces a client that never registered. No
+  separate state file: the cloud is the source of truth.
 - **Safe re-runs.** A run that stops halfway can run again. tent adopts what it created by the markers on each
   object and never creates a second machine for one node.
 - **Full teardown** with `tent delete cluster --yes`: every object with the cluster's markers, then its state.
@@ -34,12 +34,11 @@ pitches a tent anywhere; tent pitches a Nomad cluster on any cloud.
 ## What comes next
 
 - **Finish the Nomad bootstrap** (M2).
-  - M2.7b: scrub the secrets from user data, and handle nodes that never register.
   - M2.8: `tent export nomad` for the operator's access to the Nomad API, `validate cluster` and `tent ui`.
 - **Run day-2 operations with Nomad semantics** (M3).
   - Rolling updates drain clients and replace servers without losing Raft quorum.
-  - Upgrades, scaling (before M3 `update` deletes surplus machines without draining them or checking the Raft quorum)
-    and backups.
+  - Upgrades, scaling (before M3 `update` refuses to delete a node that joined, since it cannot drain a node or check
+    the Raft quorum) and backups.
 - **More providers:** Hetzner Cloud (M4), then AWS (M6).
 
 ## Quick start

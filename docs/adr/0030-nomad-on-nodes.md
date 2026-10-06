@@ -7,7 +7,9 @@
   failed after a stop (inferred: the runs had no systemd), and the unit's text is unchanged; item 17: `update`
   builds a node's config through the same node builder as `NodeConfigOf`; the M2.7 follow-ups on `update`, the
   clients after healthy servers and the wait for registration are built; the check of the peers call between
-  two VMs is part of the real-cloud check)
+  two VMs is part of the real-cloud check) and by [ADR-0032](0032-joined-label-scrub-and-delete-guard.md) (the scrub
+  that the VM check lacked is built for clusters that `update` builds; the VM of `hack/tent-node-userdata` is still not
+  scrubbed)
 - **Date:** 2026-10-02
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md) and
@@ -280,8 +282,8 @@ checks the Nomad agent. The facts that shaped it, with their sources in
     - `hack/tent-node-userdata` prints the user data of the only node of a cluster `tent-node-check`: group `nodes`,
       one `combined` node, validated with `AllowSingleServer`, client introduction `warn`, `bootstrap_expect = 1`, no
       seed and no intro token. Each run makes a throwaway CA, the node's certificate and a gossip key; the CA's key
-      never leaves the tool. The secrets sit in the user data of a VM that is deleted after the check; nothing scrubs
-      user data before M2.7. Its flags: [README](../../hack/tent-node-userdata/README.md).
+      never leaves the tool. The secrets sit in the user data of a VM that is deleted after the check; tent scrubs
+      nothing there, since no cluster owns the VM. Its flags: [README](../../hack/tent-node-userdata/README.md).
     - `hack/vultr-spike` v8 (`--only tentnode`) boots that node, reboots it and records the phases, Nomad's unit, a
       docker job across a restart of Docker (its container kept or replaced), of containerd and of Nomad and across
       the reboot, and `refresh-join`'s first mTLS call; it also records needrestart, `20auto-upgrades`,
