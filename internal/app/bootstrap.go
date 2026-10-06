@@ -28,7 +28,7 @@ const nomadTimeout = 10 * time.Minute
 // made for one run and never stored.
 const operatorCertTTL = 24 * time.Hour
 
-// errNoNomad is why an update that needs Nomad fails when the service has no way to reach it.
+// errNoNomad is why an update or a validation fails when the service has no way to reach Nomad.
 var errNoNomad = errors.New("no Nomad client is set up")
 
 // scrubTimeout is how long the scrub of one node may take.
@@ -279,7 +279,7 @@ func (a *applier) know(in cloud.Instance) {
 	} else {
 		a.known[i] = in
 	}
-	slices.SortFunc(a.known, func(x, y cloud.Instance) int { return strings.Compare(x.Name, y.Name) })
+	slices.SortFunc(a.known, compareName)
 }
 
 // nomadAPI returns the API over the known servers that have a public address, which it makes on its first call.

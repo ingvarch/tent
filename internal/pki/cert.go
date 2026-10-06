@@ -17,6 +17,9 @@ import (
 // nodeYears is how long a node certificate is valid.
 const nodeYears = 1
 
+// NodeCertificateEnd returns when the certificate of a node ends, if it was issued at created.
+func NodeCertificateEnd(created time.Time) time.Time { return created.AddDate(nodeYears, 0, 0) }
+
 // Certificate is a certificate that a CA issued and its private key, both PEM. The key never prints, as a Secret.
 type Certificate struct {
 	Cert []byte // the certificate
@@ -37,7 +40,7 @@ func (ca *CA) IssueNode(role v1alpha1.Role, region string, now time.Time) (Certi
 		DNSNames:    append(names, "localhost"),
 		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
-		NotAfter:    now.AddDate(nodeYears, 0, 0),
+		NotAfter:    NodeCertificateEnd(now),
 	}, now)
 	if err != nil {
 		return Certificate{}, fmt.Errorf("node certificate: %w", err)
