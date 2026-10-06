@@ -42,3 +42,5 @@ GetInstance <prod-workers-2>
 GetInstance <prod-workers-2>
 ListInstanceVPCs <prod-workers-2>
 nomad Nodes (prod-servers-0)
+GetInstance <prod-workers-2>
+UpdateInstance <prod-workers-2>

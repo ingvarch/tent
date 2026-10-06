@@ -99,7 +99,7 @@ func wantInstances(t *testing.T, f *vultrfake.Fake, names ...string) {
 
 // buildLines returns the progress lines of an update that builds the test cluster on an empty cloud: the
 // infrastructure's, which run in parallel and so come sorted, then the nodes' and Nomad's in order: the servers, the
-// Nomad step, and each worker with the line of its registration.
+// Nomad step, and each worker with the lines of its registration and its scrub.
 func buildLines() (infra, nodes []string) {
 	for _, k := range infraKeys {
 		infra = append(infra, "creating "+k, "created "+k)
@@ -111,7 +111,8 @@ func buildLines() (infra, nodes []string) {
 		}
 		nodes = append(nodes, "creating node "+n, fmt.Sprintf("created node %s (10.64.0.%d)", n, i+3))
 		if strings.Contains(n, "workers") {
-			nodes = append(nodes, "waiting for node "+n+" to register", "node "+n+" registered")
+			nodes = append(nodes, "waiting for node "+n+" to register", "node "+n+" registered",
+				"scrubbing the user data of node "+n, "scrubbed the user data of node "+n)
 		}
 	}
 	return infra, nodes
@@ -465,6 +466,12 @@ func TestUpdateClusterApplyJSON(t *testing.T) {
 				progressEvent{Type: "node", Step: "started", Action: "create", Name: n},
 				progressEvent{Type: "node", Step: "done", Action: "create", Name: n,
 					ID: fmt.Sprintf("instance-%d", i+1), Address: fmt.Sprintf("10.64.0.%d", i+3)})
+			if i >= 3 { // a client is scrubbed once it has registered
+				id := fmt.Sprintf("instance-%d", i+1)
+				wantNodes = append(wantNodes,
+					progressEvent{Type: "node", Step: "started", Action: "scrub", Name: n, ID: id},
+					progressEvent{Type: "node", Step: "done", Action: "scrub", Name: n, ID: id})
+			}
 		}
 		if diff := cmp.Diff(wantNodes, nodes); diff != "" {
 			t.Errorf("the nodes' events (-want +got):\n%s", diff)
@@ -582,7 +589,8 @@ func TestUpdateClusterWaits(t *testing.T) {
 		wantResult(t, runOn(t, f, update(s, "--yes")...), 0,
 			waitPlan+"\nNodes: 0 created, 1 waited for, 0 deleted.\n",
 			openAPIWarning+"waiting for node prod-workers-2\nnode prod-workers-2 (10.64.0.8) is ready\n"+
-				"waiting for node prod-workers-2 to register\nnode prod-workers-2 registered\n")
+				"waiting for node prod-workers-2 to register\nnode prod-workers-2 registered\n"+
+				"scrubbing the user data of node prod-workers-2\nscrubbed the user data of node prod-workers-2\n")
 	})
 }
 

@@ -99,6 +99,15 @@ func (w *nomadWorld) Withhold(names ...string) {
 	}
 }
 
+// Release ends the Withhold of the nodes called names: they register at the next call.
+func (w *nomadWorld) Release(names ...string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, n := range names {
+		delete(w.withheld, n)
+	}
+}
+
 // NoLeader keeps the cluster from electing a leader.
 func (w *nomadWorld) NoLeader() {
 	w.mu.Lock()
