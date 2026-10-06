@@ -61,14 +61,19 @@ func newRelease(t *testing.T, docs ...string) (*app.Service, *vultrfake.Fake, *n
 	return svc, f, withNomad(svc, f)
 }
 
-// configOf returns the NodeConfig in the user data of the instance called name.
+// configOf returns the NodeConfig in the user data that the create request of the instance called name carried; the
+// instance's current user data may be the stub.
 func configOf(t *testing.T, f *vultrfake.Fake, name string) *nodeconfig.NodeConfig {
 	t.Helper()
 	for _, in := range f.Instances() {
 		if in.Hostname != name {
 			continue
 		}
-		data, err := base64.StdEncoding.DecodeString(f.UserData(in.ID))
+		req, ok := f.CreateRequest(in.ID)
+		if !ok {
+			t.Fatalf("the fake has no create request for %s", name)
+		}
+		data, err := base64.StdEncoding.DecodeString(req.UserData)
 		if err != nil {
 			t.Fatalf("the user data of %s: %v", name, err)
 		}
@@ -219,6 +224,7 @@ func TestUpdateBuildsANomadCluster(t *testing.T) {
 			t.Error("the plan does not say it was applied")
 		}
 		wantNodes(t, f, allNodes...)
+		wantJoined(t, f)
 		if !stored {
 			t.Error("the completed spec was not stored when the first node was created")
 		}

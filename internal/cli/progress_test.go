@@ -38,6 +38,7 @@ var (
 		Zone: "ams", MachineType: "vc2-2c-4gb", Image: "ubuntu-24.04", ID: "instance-2",
 		Op: "5f0c2a9e-8d1b-4c7e-9f3a-2b6d8e1c4a70"}
 	deleteNode = app.NodeChange{Action: app.NodeDelete, Name: "prod-workers-3", ID: "instance-8", Reason: "surplus"}
+	scrubNode  = app.NodeChange{Action: app.NodeScrub, Name: "prod-workers-0", ID: "instance-4"}
 )
 
 var progressCases = []progressCase{
@@ -108,6 +109,16 @@ var progressCases = []progressCase{
 	{"node wait failed", app.Progress{Node: waitNode, Step: app.NodeFailed, Err: errBusy},
 		"failed to wait for node prod-servers-1: " + errBusy.Error(),
 		`{"type":"node","step":"failed","action":"wait","name":"prod-servers-1","id":"instance-2",` +
+			`"error":"` + errBusy.Error() + `"}`},
+	{"node scrub started", app.Progress{Node: scrubNode, Step: app.NodeStarted},
+		"scrubbing the user data of node prod-workers-0",
+		`{"type":"node","step":"started","action":"scrub","name":"prod-workers-0","id":"instance-4"}`},
+	{"node scrubbed", app.Progress{Node: scrubNode, Step: app.NodeDone},
+		"scrubbed the user data of node prod-workers-0",
+		`{"type":"node","step":"done","action":"scrub","name":"prod-workers-0","id":"instance-4"}`},
+	{"node scrub failed", app.Progress{Node: scrubNode, Step: app.NodeFailed, Err: errBusy},
+		"failed to scrub the user data of node prod-workers-0: " + errBusy.Error(),
+		`{"type":"node","step":"failed","action":"scrub","name":"prod-workers-0","id":"instance-4",` +
 			`"error":"` + errBusy.Error() + `"}`},
 	{"node delete started", app.Progress{Node: deleteNode, Step: app.NodeStarted},
 		"deleting node prod-workers-3 (ID instance-8)",

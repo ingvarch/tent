@@ -26,8 +26,8 @@ import (
 
 // cloudView returns what f holds, one line per object, sorted, without ids and with the operation ids masked: each
 // SSH key, VPC and firewall group by its marker, a group with its rules, and each instance by its hostname, with its
-// place, plan, image, state and tags and the names of its firewall group, VPCs and SSH keys. Two copies of an object
-// are two lines.
+// place, plan, image, state and tags and the names of its firewall group, VPCs and SSH keys, and whether its user data
+// is the stub. Two copies of an object are two lines.
 func cloudView(f *vultrfake.Fake) []string {
 	nm := names(f)
 	named := func(ids []string) string {
@@ -55,15 +55,25 @@ func cloudView(f *vultrfake.Fake) []string {
 	}
 	for _, in := range f.Instances() {
 		req, _ := f.CreateRequest(in.ID)
-		view = append(view, fmt.Sprintf("instance %s %s %s os %d %s/%s/%s tags %s firewall %s vpcs %s ssh keys %s",
+		view = append(view, fmt.Sprintf(
+			"instance %s %s %s os %d %s/%s/%s tags %s firewall %s vpcs %s ssh keys %s user data %s",
 			in.Hostname, in.Region, in.Plan, in.OsID, in.Status, in.PowerStatus, in.ServerStatus,
-			strings.Join(in.Tags, ","), nm[in.FirewallGroupID], named(req.AttachVPC), named(req.SSHKeys)))
+			strings.Join(in.Tags, ","), nm[in.FirewallGroupID], named(req.AttachVPC), named(req.SSHKeys),
+			userDataView(f, in.ID)))
 	}
 	for i, v := range view {
 		view[i] = specHashPattern.ReplaceAllString(callKey(v), cloud.LabelSpecHash+"=<hash>")
 	}
 	slices.Sort(view)
 	return view
+}
+
+// userDataView is "scrubbed" when the instance id in f holds the stub as its user data, and "kept" otherwise.
+func userDataView(f *vultrfake.Fake, id string) string {
+	if isScrubbed(f, id) {
+		return "scrubbed"
+	}
+	return "kept"
 }
 
 // wantView fails the test unless the cloud of f is want, as cloudView gives it.

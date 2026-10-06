@@ -13,7 +13,8 @@ import (
 	"github.com/ingvarch/tent/internal/model"
 )
 
-// NodeAction is what an update does to one node.
+// NodeAction is what an update does to one node. A plan holds NodeCreate, NodeWait and NodeDelete. NodeScrub is a step
+// of the progress only and never a change of a plan.
 type NodeAction int
 
 // Node actions.
@@ -24,9 +25,11 @@ const (
 	NodeWait
 	// NodeDelete deletes a node.
 	NodeDelete
+	// NodeScrub replaces the user data of a node that has joined its cluster and labels its machine.
+	NodeScrub
 )
 
-var nodeActionNames = [...]string{NodeCreate: "create", NodeWait: "wait", NodeDelete: "delete"}
+var nodeActionNames = [...]string{NodeCreate: "create", NodeWait: "wait", NodeDelete: "delete", NodeScrub: "scrub"}
 
 // String returns the action's name in lower case, such as create.
 func (a NodeAction) String() string {
