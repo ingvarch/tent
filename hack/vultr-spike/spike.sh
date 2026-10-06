@@ -5,14 +5,15 @@
 # It creates REAL, BILLED resources in your Vultr account (at most 3 instances at a time, 4 in total,
 # one VPC, up to three firewall groups, up to two SSH keys) and deletes them on exit unless --keep is given.
 # The tentnode check runs alone: one instance, one VPC and one SSH key. The cluster check runs alone too: it builds a
-# cluster of five instances with tent itself (see the cluster section).
+# cluster of five instances (six with --unregistered, never more than five at once) with tent itself (see the cluster
+# section).
 # Usage and details: hack/vultr-spike/README.md
 #
 # Portable bash (3.2+, macOS default), requires: curl, jq 1.6+, ssh, ssh-keygen, awk, od; tentnode also go and gzip;
 # cluster also go, mkfifo and find.
 set -euo pipefail
 
-readonly SPIKE_VERSION="9"
+readonly SPIKE_VERSION="11"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 readonly SCRIPT_DIR
 REPO_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
@@ -55,6 +56,7 @@ readonly SSH_MAX_FAILS=3
 MODE="run"      # run | preflight | dry-run
 ASSUME_YES=0
 KEEP=0
+UNREG=0         # cluster: also check a client that never registers (about 30 minutes more)
 
 # Runtime state (initialised early so the EXIT trap never trips over unset variables).
 WORK=""
@@ -134,6 +136,14 @@ CL_SECRET_NAMES="" # cluster: what those files hold, as a list
 CL_SEARCHED=0   # cluster: the run's own secret search has written its row
 KEEP_WORK=0     # the exit trap leaves the temporary directory in place
 CL_LEFT_INST="" CL_LEFT_VPC="" CL_LEFT_FW="" CL_LEFT_KEY=""
+CL_SPECS=""     # cluster: the file with the specs that tent get printed before the guard check changed them
+CL_SPECS_CHANGED=0 # cluster: the specs in the state store are not the saved ones
+CL_STOPPED=""   # cluster: the node whose Nomad the check stopped and whose joined tag it took off
+CL_SRV_IP=""    # cluster: the public address of the first server, which the Nomad API calls go to
+CL_UNREG_ID=""  # cluster, --unregistered: the id of the instance of <name>-workers-1 before tent replaces it
+CL_OLD_IP=""    # cluster, --unregistered: its private address
+CL_NEW_IP=""    # cluster, --unregistered: the private address of the instance that replaces it
+CL_BUILD_CREATE_SECS="" # cluster: the seconds that the create of the first client took in the build, or empty
 SSH_NAME_USED=""
 
 usage() {
@@ -147,6 +157,11 @@ Options:
   --dry-run          Print what would be created and exit (needs no API key).
   --yes              Do not ask for confirmation before creating billed resources.
   --keep             Do not delete resources on exit (you must delete them yourself).
+  --unregistered     With "--only cluster": also check a client that never registers. The run stops Nomad on
+                     <name>-workers-1, purges its node, takes tent/joined=true off the instance, waits until the
+                     instance is 32 minutes old (tent's limit is 31: the intro token's 30 and a minute of leeway),
+                     and checks that tent update replaces the client. About 30 minutes more; one more instance is
+                     billed for the replacement.
   --only LIST        Comma-separated subset of checks (default: all but tentnode and cluster):
                      boot,inside,metadata,network,firewall,alias,tags,markers,userdata,scrub,halt,
                      sshdup,lengths,rules,fwinuse,patchtags,vpcpending,halttwice,objstore
@@ -369,7 +384,8 @@ wait_ssh() { # wait_ssh IP TIMEOUT ; one attempt per POLL_INTERVAL
 }
 
 # ---------------------------------------------------------------------------------------------------------------
-# Preflight (public endpoints; the key is sent with /plans only, which Vultr answers with HTTP 500 without one).
+# Preflight (public endpoints; the key is sent with /plans only. Vultr answered /plans with HTTP 500 without a key on
+# 2026-10-05 and with 200 on 2026-10-06, so the row says what this run saw).
 
 # write_auth_conf: puts VULTR_API_KEY into a mode-0600 curl config and points AUTH_CONF at it; the key never goes on a
 # command line.
@@ -383,12 +399,12 @@ write_auth_conf() {
 
 # cost_text COUNT: the cost of COUNT instances for the minimum hour, for what the run says before it creates them.
 cost_text() {
-  if [ -z "$HOURLY" ]; then printf 'price unknown (/plans needs a key)'; return 0; fi
+  if [ -z "$HOURLY" ]; then printf 'price unknown (/plans did not answer without a key)'; return 0; fi
   awk -v h="$HOURLY" -v n="$1" 'BEGIN { printf "about $%.3f", h * n }'
 }
 
 preflight() {
-  local plan_type="${PLAN%%-*}" monthly="" city price conf="$AUTH_CONF"
+  local plan_type="${PLAN%%-*}" monthly="" city price conf="$AUTH_CONF" plans_note
   api GET "/regions?per_page=500"
   api_ok || die "GET /regions failed: $API_STATUS $(api_err)"
   city=$(jq -r --arg r "$REGION" '.regions[] | select(.id==$r) | .city' "$API_BODY")
@@ -402,6 +418,13 @@ preflight() {
   if [ -n "${VULTR_API_KEY:-}" ]; then write_auth_conf; fi
   api GET "/plans?per_page=500"
   AUTH_CONF="$conf"
+  if [ -n "${VULTR_API_KEY:-}" ]; then
+    plans_note="/plans read with the key"
+  elif api_ok; then
+    plans_note="/plans answered without a key"
+  else
+    plans_note="/plans answered HTTP $API_STATUS without a key"
+  fi
   if api_ok; then
     monthly=$(jq -r --arg p "$PLAN" '.plans[] | select(.id==$p) | .monthly_cost' "$API_BODY")
     [ -n "$monthly" ] || die "unknown plan: $PLAN"
@@ -423,7 +446,7 @@ preflight() {
     [ -n "$OS_NAME" ] || die "unknown os_id: $OS_ID"
   fi
   row "Preflight" "region $REGION ($city); $PLAN deployable; $price; os_id $OS_ID ($OS_NAME)" \
-    "the availability endpoint works without a key; /plans needs one"
+    "the availability endpoint works without a key; $plans_note"
 }
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -1132,7 +1155,7 @@ check_scrub() {
     sleep 5
   done
   v1json=$(ssh_x "$A_PUB" "curl -s -m 5 http://169.254.169.254/v1.json | grep -c SPIKE_SECRET_MARKER || true" 2>/dev/null || ssh_unknown "$A_PUB")
-  row "Metadata serves PATCHed user_data (/latest/user-data)" "$seen (secret marker lines before: $before)" "Nodes.ScrubUserData (ADR-0018)"
+  row "Metadata serves PATCHed user_data (/latest/user-data)" "$seen (secret marker lines before: $before)" "Nodes.MarkJoined (ADR-0018)"
   row "Secret marker still in /v1.json after scrub" "$v1json (0 = gone)" ""
 }
 
@@ -3137,10 +3160,39 @@ cl_collect_store_secrets() {
 # cl_line_time TEXT: the epoch second of the first line of the last cl_run's stderr that holds TEXT, or nothing.
 cl_line_time() { awk -v p="$1" 'index($0, p) { print $1; exit }' "$CL_ERR" 2>/dev/null || true; }
 
+# cl_span_secs FROM TO: the seconds from the first line of the last cl_run's stderr that holds FROM to the next line
+# that holds TO, or nothing.
+cl_span_secs() {
+  awk -v a="$1" -v b="$2" 'x == "" && index($0, a) { x = $1; next } x != "" && index($0, b) { print $1 - x; exit }' \
+    "$CL_ERR" 2>/dev/null || true
+}
+
+# cl_scrub_names: the nodes whose "scrubbed the user data of node NAME" line is in the last run's stderr, one per line.
+cl_scrub_names() {
+  awk '$2 == "scrubbed" && $3 == "the" && $4 == "user" && $5 == "data" && $6 == "of" && $7 == "node" { print $8 }' \
+    "$CL_ERR" 2>/dev/null | sort -u || true
+}
+
+# cl_scrub_early: the nodes whose scrub line comes before the line it must follow: a server's, the line that says the
+# servers are healthy; a client's, its own registration line. They come out as one sorted list, space-separated.
+cl_scrub_early() {
+  awk '
+    $2 == "node" && $NF == "registered" { reg[$3] = NR }
+    index($0, "Nomad servers are healthy") && healthy == "" { healthy = NR }
+    $2 == "scrubbed" && $7 == "node" { scrub[$8] = NR }
+    END {
+      for (n in scrub) {
+        after = (n in reg) ? reg[n] : healthy
+        if (after != "" && scrub[n] < after) print n
+      }
+    }' "$CL_ERR" 2>/dev/null | sort | paste -sd ' ' - || true
+}
+
 # cl_progress_row: the lines of create's progress, and the seconds from the start of create to the leader, the bootstrap
-# and the healthy servers, and from the leader line to each registration line.
+# and the healthy servers, and from the leader line to each registration line. Each node has a scrub line: a server's
+# after the healthy servers, a client's after its registration.
 cl_progress_row() {
-  local leader boot healthy regs missing="" res n=0 node t list="" text
+  local leader boot healthy regs missing="" res n=0 node t list="" text scrubs early want_nodes=$((CL_SERVERS + CL_WORKERS))
   leader=$(cl_line_time "Nomad has a leader")
   boot=$(cl_line_time "bootstrapped the ACL system")
   healthy=$(cl_line_time "Nomad servers are healthy")
@@ -3150,20 +3202,26 @@ cl_progress_row() {
   [ -n "$healthy" ] || missing="$missing${missing:+, }healthy"
   if [ -n "$regs" ]; then n=$(printf '%s\n' "$regs" | wc -l | tr -d ' '); fi
   [ "$n" = "$CL_WORKERS" ] || missing="$missing${missing:+, }$n of $CL_WORKERS registrations"
+  scrubs=$(cl_scrub_names | grep -c . || true)
+  [ "$scrubs" = "$want_nodes" ] || missing="$missing${missing:+, }$scrubs of $want_nodes scrub lines"
+  early=$(cl_scrub_early)
+  CL_BUILD_CREATE_SECS=$(cl_span_secs "creating node $CL_NAME-workers-0" "created node $CL_NAME-workers-0")
   while read -r node t; do
     [ -n "$node" ] || continue
     list="$list${list:+, }$node +$((t - ${leader:-$t}))s"
   done <<<"$regs"
-  text="Nomad had a leader at +$((${leader:-$CL_T0} - CL_T0))s of create, the ACL system was bootstrapped at +$((${boot:-$CL_T0} - CL_T0))s, the servers were healthy at +$((${healthy:-$CL_T0} - CL_T0))s; registered, after the leader line: ${list:-none}"
+  text="Nomad had a leader at +$((${leader:-$CL_T0} - CL_T0))s of create, the ACL system was bootstrapped at +$((${boot:-$CL_T0} - CL_T0))s, the servers were healthy at +$((${healthy:-$CL_T0} - CL_T0))s; registered, after the leader line: ${list:-none}; the user data of $scrubs nodes was scrubbed"
   if [ -n "$missing" ]; then
     res="UNEXPECTED: missing lines: $missing"
+  elif [ -n "$early" ]; then
+    res="UNEXPECTED: a scrub comes before the line it must follow: $early"
   elif [ "$boot" -lt "$leader" ] || [ "$healthy" -lt "$boot" ]; then
     res="UNEXPECTED: the lines are out of order: $text"
   else
     res="as expected: $text"
   fi
   row "Progress of create" "$res" \
-    "the deadlines of the waits (10 minutes) against real times; a client registers right after its create"
+    "the deadlines of the waits (10 minutes) against real times; a client registers right after its create, and every node is scrubbed once it joined"
 }
 
 # cl_instances: lists the cluster's instances by tag into cl-instances.json; fails when the API does.
@@ -3173,8 +3231,17 @@ cl_instances() {
   cp "$API_BODY" "$WORK/cl-instances.json"
 }
 
-# cl_ip LABEL: the public address of the instance with that label in cl-instances.json.
-cl_ip() { { jq -r --arg l "$1" '.instances[]? | select(.label == $l) | .main_ip' "$WORK/cl-instances.json" 2>/dev/null | head -n 1; } || true; }
+# cl_instance_field LABEL FIELD: a field of the instance with that label in cl-instances.json.
+cl_instance_field() {
+  { jq -r --arg l "$1" --arg f "$2" '.instances[]? | select(.label == $l) | .[$f]' \
+    "$WORK/cl-instances.json" 2>/dev/null | head -n 1; } || true
+}
+
+# cl_ip LABEL: the public address of the instance with that label.
+cl_ip() { cl_instance_field "$1" main_ip; }
+
+# cl_id LABEL: the id of the instance with that label.
+cl_id() { cl_instance_field "$1" id; }
 
 # cl_group_names GROUP COUNT: the names of the nodes of a node group, one per line.
 cl_group_names() {
@@ -3392,17 +3459,24 @@ cl_job() {
   row "Stop of the job $TN_JOB" "$res" "DELETE /v1/job/<id>?purge=true stops the allocation"
 }
 
-# cl_update_rows: a second run on the built cluster: the plan with --exit-code is empty, and update --yes says so.
-cl_update_rows() {
-  local res first
-  cl_run update-plan update cluster "$CL_NAME" --exit-code
+# cl_exit_code_row LABEL TITLE IMPACT: tent update cluster --exit-code must exit 0 (no changes); the row and the output
+# as details.
+cl_exit_code_row() {
+  local res
+  cl_run "$1" update cluster "$CL_NAME" --exit-code
   case "$CL_RC" in
     0) res="as expected: exit 0 in ${CL_SECS}s" ;;
     2) res="UNEXPECTED: exit 2 (the plan has changes): $(oneline 200 <"$CL_OUT")" ;;
     *) res="FAILED: exit $CL_RC: $(cl_last_line)" ;;
   esac
-  row "tent update cluster --exit-code" "$res" "a built cluster has no drift: the second run plans nothing"
-  cl_out_detail "tent update cluster --exit-code"
+  row "$2" "$res" "$3"
+  cl_out_detail "$2"
+}
+
+# cl_update_rows: a second run on the built cluster: the plan with --exit-code is empty, and update --yes says so.
+cl_update_rows() {
+  local res first
+  cl_exit_code_row update-plan "tent update cluster --exit-code" "a built cluster has no drift: the second run plans nothing"
   cl_run update-yes update cluster "$CL_NAME" --yes
   first=$(head -n 1 "$CL_OUT")
   if [ "$CL_RC" = 0 ] && [ "$first" = "cluster $CL_NAME is up to date" ]; then
@@ -3436,27 +3510,72 @@ cl_tags_row() {
   row "Instance tags tent/spec-hash" "$res" "the hash says which spec built a node: a later rollout compares it"
 }
 
-# cl_userdata_row: the user data of each instance, which holds the node's config until the scrub of a later part.
-cl_userdata_row() {
-  local ids id have=0 n=0 res
+# cl_joined_row: every instance carries tent/joined=true beside tent/spec-hash.
+cl_joined_row() {
+  local n have other res
+  cl_instances || true # a fresh list: the one from the first row may predate the last PATCH of a tag
   if ! cl_listed; then
-    row "User data after the build" "unknown: no instance list" "recorded: nothing scrubs the user data yet"
+    row "Instance tags tent/joined" "unknown: no instance list" "the label says which machines joined their cluster"
+    return 0
+  fi
+  n=$(jq -r '.instances | length' "$WORK/cl-instances.json" 2>/dev/null || echo 0)
+  have=$(jq -r '[.instances[] | select(any(.tags[]?; . == "tent/joined=true") and any(.tags[]?; startswith("tent/spec-hash=")))] | length' "$WORK/cl-instances.json" 2>/dev/null || echo 0)
+  other=$(jq -r '[.instances[] | select(any(.tags[]?; startswith("tent/joined=") and . != "tent/joined=true"))] | length' "$WORK/cl-instances.json" 2>/dev/null || echo 0)
+  if [ "$n" -gt 0 ] && [ "$have" = "$n" ] && [ "$other" = 0 ]; then
+    res="as expected: $have of $n carry tent/joined=true beside tent/spec-hash"
+  else
+    res="UNEXPECTED: $have of $n carry tent/joined=true; $other carry another value"
+  fi
+  row "Instance tags tent/joined" "$res" "the label says which machines joined their cluster: the next update plans only the others"
+}
+
+# cl_stub: the user data that tent leaves on a node that joined, byte for byte (scrubbedUserData in
+# internal/cloud/vultr/nodes.go).
+cl_stub() {
+  printf '%s\n%s\n%s\n' '#cloud-config' "# tent removed this node's user data after the node joined the cluster" '{}'
+}
+
+# cl_ud_kind ID: what the user data of instance ID is: "stub" (tent's stub, byte for byte), "config" (it holds
+# /etc/tent/node.json), "other" or "unknown" (the API did not answer). It prints no part of the user data.
+cl_ud_kind() {
+  local sum has
+  api GET "/instances/$1/user-data"
+  api_ok || { echo unknown; return 0; }
+  sum=$(jq -r '.user_data.data // empty' "$API_BODY" | b64dec | sha256)
+  has=$(jq -r '.user_data.data // empty' "$API_BODY" | b64dec | grep -Fc '/etc/tent/node.json' || true)
+  rm -f "$API_BODY" # a node's user data may hold its secrets: it stays on disk no longer than this needs
+  if [ "$has" -gt 0 ]; then
+    echo config
+  elif [ "$sum" = "$(cl_stub | sha256)" ]; then
+    echo stub
+  else
+    echo other
+  fi
+}
+
+# cl_userdata_row: the user data of each instance, read from the API, is tent's stub.
+cl_userdata_row() {
+  local ids id n=0 stub=0 config=0 other=0 unknown=0 res
+  if ! cl_listed; then
+    row "User data after the build" "unknown: no instance list" "a node's own curl to the metadata service gets no answer, so the row reads the API"
     return 0
   fi
   ids=$(jq -r '.instances[]?.id' "$WORK/cl-instances.json" 2>/dev/null || true)
   for id in $ids; do
     n=$((n + 1))
-    api GET "/instances/$id/user-data"
-    api_ok || continue
-    if [ "$(jq -r '.user_data.data // empty' "$API_BODY" | b64dec | grep -Fc '/etc/tent/node.json' || true)" -gt 0 ]; then have=$((have + 1)); fi
+    case "$(cl_ud_kind "$id")" in
+      stub) stub=$((stub + 1)) ;;
+      config) config=$((config + 1)) ;;
+      other) other=$((other + 1)) ;;
+      *) unknown=$((unknown + 1)) ;;
+    esac
   done
-  rm -f "$API_BODY" # a node's user data holds its secrets: it stays on disk no longer than this row needs
-  if [ "$n" -gt 0 ] && [ "$have" = "$n" ]; then
-    res="as expected: $have of $n still hold /etc/tent/node.json (the node's secrets stay in user data before the scrub)"
+  if [ "$n" -gt 0 ] && [ "$stub" = "$n" ]; then
+    res="as expected: $stub of $n equal the stub byte for byte; none holds /etc/tent/node.json"
   else
-    res="UNEXPECTED: $have of $n hold /etc/tent/node.json"
+    res="UNEXPECTED: $stub of $n equal the stub; $config hold /etc/tent/node.json; $other differ; $unknown could not be read"
   fi
-  row "User data after the build" "$res" "recorded: nothing scrubs the user data yet"
+  row "User data after the build" "$res" "the scrub replaced the user data of every node that joined: no secret stays in the cloud"
 }
 
 # cl_ssh_reachable NAME: sets CL_IP to the public address of NAME, notes it for the exit trap, and waits up to 2 minutes
@@ -3594,6 +3713,534 @@ cl_server_rows() {
   row "Server voters after the restart" "$res" "a stopped server stays a Raft peer, and the restarted one votes again"
 }
 
+# cl_boot_id IP: the boot id of the machine at IP, or nothing.
+cl_boot_id() { ssh_x "$1" 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || true; }
+
+# cl_node_state NAME: the Nomad nodes of that name in the last /v1/nodes answer, one "ADDRESS STATUS ELIGIBILITY" each,
+# joined with commas; empty when none is listed.
+cl_node_state() {
+  jq -r --arg n "$1" '[.[]? | select(.Name == $n) | "\(.Address) \(.Status) \(.SchedulingEligibility)"] | join(", ")' \
+    "$WORK/nm-body.json" 2>/dev/null || true
+}
+
+# cl_node_ready NAME [ADDRESS]: true when the last /v1/nodes answer lists a ready and eligible node of that name, at
+# ADDRESS when it is given.
+cl_node_ready() {
+  [ "$(jq -r --arg n "$1" --arg a "${2:-}" '[.[]? | select(.Name == $n and .Status == "ready" and
+    .SchedulingEligibility == "eligible" and ($a == "" or .Address == $a))] | length' "$WORK/nm-body.json" 2>/dev/null || echo 0)" -gt 0 ]
+}
+
+# cl_reboot_row: reboots a client over SSH after the scrub. The node must come back ready and eligible in Nomad, keep
+# /etc/tent/node.json, and cloud-init must end done, exit 0, with no recoverable error: the scrubbed user data must not
+# make a later boot degraded.
+cl_reboot_row() {
+  local name="$CL_NAME-workers-0" title ip before after sum_before sum_after t0 deadline back="" i res bad="" ci errs
+  local nomad_s="" out ext code warn
+  title="Reboot of $name after the scrub"
+  if ! cl_ssh_reachable "$name"; then
+    row "$title" "$(cl_ssh_unknown_text "$name")" "no check ran"
+    return 0
+  fi
+  ip="$CL_IP"
+  before=$(cl_boot_id "$ip")
+  sum_before=$({ ssh_x "$ip" 'sha256sum /etc/tent/node.json' 2>/dev/null || true; } | awk '{print $1}')
+  if [ -z "$before" ] || [ -z "$sum_before" ]; then
+    row "$title" "unknown: could not read the boot id and the sha256 of /etc/tent/node.json before the reboot" "no check ran"
+    return 0
+  fi
+  ssh_x "$ip" 'systemctl reboot' >/dev/null 2>&1 || true
+  ssh_close "$ip"
+  t0=$(now)
+  deadline=$((t0 + READY_TIMEOUT))
+  while [ "$(now)" -lt "$deadline" ]; do
+    sleep "$POLL_INTERVAL"
+    port_open "$ip" || continue
+    ssh_reset "$ip"
+    after=$(cl_boot_id "$ip")
+    if [ -n "$after" ] && [ "$after" != "$before" ]; then
+      back="$(($(now) - t0))"
+      break
+    fi
+    ssh_close "$ip" # the old boot still answered
+  done
+  if [ -z "$back" ]; then
+    row "$title" "UNEXPECTED: SSH did not answer on a new boot within ${READY_TIMEOUT}s" "the scrubbed user data must not stop a node from booting"
+    return 0
+  fi
+  sum_after=$({ ssh_x "$ip" 'sha256sum /etc/tent/node.json' 2>/dev/null || true; } | awk '{print $1}')
+  [ "$sum_after" = "$sum_before" ] || bad="the sha256 of /etc/tent/node.json is ${sum_after:-missing} after the reboot, was $sum_before"
+  out=$(ssh_x "$ip" 'timeout 300 cloud-init status --wait --long; echo "exit $?"' 2>/dev/null || true)
+  # --wait prints a dot for each wait before the status, on the same line: "..status: done".
+  ci=$(printf '%s\n' "$out" | sed -n 's/^\.*status: //p' | head -n 1)
+  errs=$(printf '%s\n' "$out" | sed -n 's/^errors: //p' | head -n 1)
+  ext=$(printf '%s\n' "$out" | sed -n 's/^extended_status: //p' | head -n 1)
+  code=$(printf '%s\n' "$out" | sed -n 's/^exit //p' | tail -n 1)
+  warn=$(printf '%s\n' "$out" | awk '
+    /^recoverable_errors:/ { f = 1; next }
+    f && /^[[:space:]]+- / { sub(/^[[:space:]]+- /, ""); print; exit }')
+  if [ "$ci" != "done" ] || [ "$errs" != "[]" ]; then
+    bad="$bad${bad:+; }cloud-init status ${ci:-?} (errors ${errs:-?})"
+  elif [ "${code:-?}" != 0 ] || [ -n "$warn" ] ||
+    { [ -n "$ext" ] && [ "$ext" != "done" ]; }; then
+    bad="$bad${bad:+; }cloud-init is degraded (extended status ${ext:-?}, exit ${code:-?})${warn:+: $warn}"
+  fi
+  if cl_need_api "Nodes after the reboot of $name"; then
+    for i in $(seq 1 60); do
+      cl_nm_get "$CL_SRV_IP" /v1/nodes
+      if [ "$CL_NM_STATUS" = 200 ] && cl_node_ready "$name"; then nomad_s="$(($(now) - t0))"; break; fi
+      sleep 5
+    done
+    if [ -z "$nomad_s" ]; then
+      bad="$bad${bad:+; }Nomad does not list $name ready and eligible within 300s after cloud-init ended ($(cl_node_state "$name"))"
+    fi
+  else
+    bad="$bad${bad:+; }Nomad was not asked: no operator files"
+  fi
+  if [ -n "$bad" ]; then
+    res="UNEXPECTED: $bad"
+  else
+    res="as expected: SSH answered on a new boot after ${back}s; Nomad lists the node ready and eligible ${nomad_s}s"
+    res="$res after the reboot; /etc/tent/node.json has the sha256 it had"
+    res="$res; cloud-init status done, exit 0, no recoverable error"
+  fi
+  row "$title" "$res" "tent-node up runs again on a node whose user data is the stub, and the node rejoins without a new intro token"
+  printf '%s\n' "$out" | detail "cloud-init status --wait --long ($name, after the reboot)"
+}
+
+# cl_instance_count: how many instances carry the cluster's tag, or "?".
+cl_instance_count() {
+  cl_instances || { echo '?'; return 0; }
+  jq -r '.instances | length' "$WORK/cl-instances.json"
+}
+
+# cl_unknown_rows REASON TITLE...: one unknown row for each TITLE.
+cl_unknown_rows() {
+  local why="$1" t
+  shift
+  for t in "$@"; do row "$t" "unknown: $why" "no check ran"; done
+}
+
+# cl_one_client_specs IN OUT: writes IN to OUT with the size of the group of clients set to 1.
+cl_one_client_specs() {
+  awk '
+    function flush(   i, l) {
+      for (i = 1; i <= n; i++) {
+        l = doc[i]
+        if (client && l ~ /^  size: [0-9]+$/) l = "  size: 1"
+        print l
+      }
+      n = 0
+      client = 0
+    }
+    /^---$/ { flush(); print; next }
+    { doc[++n] = $0; if ($0 == "  role: client") client = 1 }
+    END { flush() }' "$1" >"$2"
+}
+
+# cl_guard_run LABEL TITLE ARGS...: tent update cluster with ARGS, which must fail with exit 1 and the error that names
+# the surplus client, and leave all instances in place.
+cl_guard_run() {
+  local label="$1" title="$2" want=$((CL_SERVERS + CL_WORKERS)) text n line res
+  text="update would delete a node that joined Nomad: $CL_NAME-workers-1"
+  shift 2
+  cl_run "$label" update cluster "$CL_NAME" "$@"
+  n=$(cl_instance_count)
+  line=$({ grep -Fh -- "$text" "$CL_ERR" "$CL_OUT" || true; } | head -n 1 | sed 's/^[0-9]* //' | oneline 200)
+  if [ "$CL_RC" != 1 ]; then
+    res="UNEXPECTED: exit $CL_RC, want 1: ${line:-$(cl_last_line)}"
+  elif [ -z "$line" ]; then
+    res="UNEXPECTED: exit 1 without the line '$text': $(cl_last_line)"
+  else
+    res="as expected: exit 1 in ${CL_SECS}s: $line"
+  fi
+  if [ "$n" = "$want" ]; then
+    res="$res; the API lists $n instances"
+  else
+    case "$res" in "as expected"*) res="UNEXPECTED${res#as expected}" ;; esac
+    res="$res; the API lists $n instances, want $want"
+  fi
+  row "$title" "$res" "until M3 tent cannot drain a node: update refuses to delete one that joined, with and without --yes, before any write"
+  cl_out_detail "$title"
+}
+
+# cl_guard_rows: with one client in the specs, update refuses to delete the other one; with the saved specs back it
+# plans nothing. The surplus client is <cluster>-workers-1: planNodes deletes the newest machines of a group that is too
+# big, and tent creates the clients one after the other, so workers-1 is younger than workers-0.
+cl_guard_rows() {
+  local t_save="Specs saved with tent get" t_one="Specs with one client in the state store"
+  local t_plan="tent update cluster (one client in the specs)" t_yes="tent update cluster --yes (one client in the specs)"
+  local t_back="Specs restored" t_exit="tent update cluster --exit-code (specs restored)" res docs
+  CL_SPECS="$WORK/cl-specs.yaml"
+  cl_run get get "$CL_NAME"
+  docs=$(($(grep -c '^---$' "$CL_OUT" || true) + 1))
+  if [ "$CL_RC" != 0 ]; then
+    row "$t_save" "FAILED: exit $CL_RC: $(cl_last_line)" "the guard check changes the specs and puts these back"
+    cl_unknown_rows "the specs were not saved" "$t_one" "$t_plan" "$t_yes" "$t_back" "$t_exit"
+    return 0
+  fi
+  cp "$CL_OUT" "$CL_SPECS"
+  if [ "$docs" = $((1 + 2)) ]; then
+    res="as expected: $docs documents"
+  else
+    res="UNEXPECTED: $docs documents, want 3 (the cluster and two node groups)"
+  fi
+  row "$t_save" "$res" "the guard check changes the specs and puts these back"
+  cl_one_client_specs "$CL_SPECS" "$WORK/cl-specs-one.yaml"
+  if cmp -s "$CL_SPECS" "$WORK/cl-specs-one.yaml"; then
+    row "$t_one" "UNEXPECTED: the specs have no client group with a size to change" "no check ran"
+    cl_unknown_rows "no specs with one client" "$t_plan" "$t_yes" "$t_back" "$t_exit"
+    return 0
+  fi
+  CL_SPECS_CHANGED=1
+  cl_run specs-one replace -f "$WORK/cl-specs-one.yaml"
+  if [ "$CL_RC" != 0 ]; then
+    CL_SPECS_CHANGED=0
+    row "$t_one" "FAILED: exit $CL_RC: $(cl_last_line)" "tent replace -f changes the specs in the state store only"
+    cl_unknown_rows "the specs did not change" "$t_plan" "$t_yes" "$t_back" "$t_exit"
+    return 0
+  fi
+  row "$t_one" "as expected: exit 0 in ${CL_SECS}s" "tent replace -f changes the specs in the state store only"
+  cl_guard_run guard-plan "$t_plan"
+  cl_guard_run guard-yes "$t_yes" --yes
+  cl_run specs-back replace -f "$CL_SPECS"
+  if [ "$CL_RC" != 0 ]; then
+    row "$t_back" "FAILED: exit $CL_RC: $(cl_last_line)" "the saved specs go back into the state store"
+    cl_unknown_rows "the saved specs were not put back" "$t_exit"
+    return 0
+  fi
+  CL_SPECS_CHANGED=0
+  row "$t_back" "as expected: exit 0 in ${CL_SECS}s" "the saved specs go back into the state store"
+  cl_exit_code_row guard-exit "$t_exit" "the refused update changed nothing: the saved specs plan nothing"
+}
+
+# --unregistered: a client that never registers. The pieces below run in order, and a piece that fails stops the rest.
+
+# The age at which tent replaces a client that has not joined: the intro token's 30 minutes (nomadops.MaxIntroTTL) and
+# a minute of leeway that Nomad gives a token after it expired, plus a minute so that no clock difference decides.
+readonly CL_UNREG_AGE=1920
+
+# cl_unreg_title STEP: the title of the row of a step.
+cl_unreg_title() {
+  local name="$CL_NAME-workers-1"
+  case "$1" in
+    stop) printf 'Nomad stopped on %s' "$name" ;;
+    purge) printf 'Purge of %s in Nomad' "$name" ;;
+    tag) printf 'Tag tent/joined taken off %s' "$name" ;;
+    wait) printf 'Wait for %s to be 32 minutes old' "$name" ;;
+    before) printf 'nomad.service on %s before the plan' "$name" ;;
+    plan) printf 'tent update cluster (client never registered)' ;;
+    apply) printf 'tent update cluster --yes (client never registered)' ;;
+    replacement) printf 'Replacement of %s' "$name" ;;
+    node) printf 'Nomad node of %s after the replacement' "$name" ;;
+    after) printf 'tent update cluster --exit-code (after the replacement)' ;;
+  esac
+}
+
+# cl_stop_script: the script on the client that stops nomad.service and prints how it went.
+cl_stop_script() {
+  cat <<'EOF'
+systemctl stop nomad.service
+echo "rc|$?"
+echo "active|$(systemctl is-active nomad.service)"
+echo "enabled|$(systemctl is-enabled nomad.service 2>&1)"
+true
+EOF
+}
+
+# cl_unreg_stop: stops Nomad on the client. Nothing starts it again before tent replaces the machine: tent-node starts
+# nomad.service only at boot (tent-node.service runs up), the refresh-join timer never restarts it, nomad.service is not
+# enabled for boot, and its Restart=on-failure does not apply to a unit that systemctl stopped. The unit is not masked:
+# systemctl mask refuses a unit whose file is in /etc/systemd/system, and nothing starts the unit again.
+cl_unreg_stop() {
+  local name="$CL_NAME-workers-1" title out rc active
+  title=$(cl_unreg_title stop)
+  CL_UNREG_ID=$(cl_id "$name")
+  if [ -z "$CL_UNREG_ID" ]; then
+    row "$title" "unknown: the cluster has no instance $name" "no check ran"
+    return 1
+  fi
+  if ! cl_ssh_reachable "$name"; then
+    row "$title" "$(cl_ssh_unknown_text "$name")" "no check ran"
+    return 1
+  fi
+  CL_STOPPED="$name"
+  cl_stop_script >"$WORK/cl-stop.sh"
+  out=$(ssh_x "$CL_IP" 'sh -s' <"$WORK/cl-stop.sh" 2>/dev/null || true)
+  rc=$(tn_key rc "$out")
+  active=$(tn_key active "$out")
+  printf '%s\n' "$out" | detail "systemctl stop nomad.service on $name"
+  case "$rc/$active" in
+    0/inactive | 0/failed)
+      row "$title" "as expected: systemctl stop exit 0, nomad.service $active" \
+        "a client whose Nomad is stopped registers no more: to tent it is a client that never registered"
+      ;;
+    *)
+      row "$title" "UNEXPECTED: stop exit ${rc:-?}, unit ${active:-?}" "no check ran"
+      return 1
+      ;;
+  esac
+}
+
+# cl_unreg_purge: removes the client's node from Nomad through the API. A client with leave_on_terminate may have left
+# by itself at the stop, or between the list and the purge (Nomad answers a purge of a node that is gone with HTTP 500
+# "node not found"). So the row is judged by the list after the purge: no node of the name is listed.
+cl_unreg_purge() {
+  local name="$CL_NAME-workers-1" title ids nid answers="" left
+  title=$(cl_unreg_title purge)
+  cl_need_api "$title" || return 1
+  cl_nm_get "$CL_SRV_IP" /v1/nodes
+  if [ "$CL_NM_STATUS" != 200 ]; then
+    row "$title" "UNEXPECTED: $(cl_nm_error /v1/nodes)" "no check ran"
+    return 1
+  fi
+  ids=$(jq -r --arg n "$name" '.[]? | select(.Name == $n) | .ID' "$WORK/nm-body.json")
+  for nid in $ids; do
+    cl_nm "$CL_SRV_IP" POST "/v1/node/$nid/purge"
+    answers="$answers${answers:+; }the purge of $nid answered HTTP $CL_NM_STATUS"
+    if [ "$CL_NM_STATUS" != 200 ]; then answers="$answers: $(oneline 100 <"$WORK/nm-body.json")"; fi
+  done
+  cl_nm_get "$CL_SRV_IP" /v1/nodes
+  if [ "$CL_NM_STATUS" != 200 ]; then
+    row "$title" "UNEXPECTED: the list after the purge failed: $(cl_nm_error /v1/nodes)${answers:+; $answers}" \
+      "the node of a client that never registered is not in Nomad"
+    return 1
+  fi
+  left=$(cl_node_state "$name")
+  if [ -n "$left" ]; then
+    row "$title" "UNEXPECTED: the node is still listed: $left${answers:+; $answers}" \
+      "the node of a client that never registered is not in Nomad"
+    return 1
+  fi
+  if [ -z "$ids" ]; then
+    row "$title" "as expected: no node of that name was listed after the stop (the client left by itself)" \
+      "the node of a client that never registered is not in Nomad"
+  else
+    row "$title" "as expected: no node of that name is listed after the purge; $answers" \
+      "the node of a client that never registered is not in Nomad"
+  fi
+}
+
+# cl_unreg_tag: takes tent/joined=true off the instance's tags: a PATCH with the whole remaining list.
+cl_unreg_tag() {
+  local title rest now_tags want
+  title=$(cl_unreg_title tag)
+  api GET "/instances/$CL_UNREG_ID"
+  if ! api_ok; then
+    row "$title" "UNEXPECTED: GET answered $(answer)" "no check ran"
+    return 1
+  fi
+  rest=$(jq -c '[.instance.tags[]? | select(. != "tent/joined=true")]' "$API_BODY")
+  if ! jq -e --arg c "tent/cluster=$CL_NAME" 'any(.[]; . == $c)' <<<"$rest" >/dev/null; then
+    row "$title" "UNEXPECTED: the instance's tags do not hold tent/cluster=$CL_NAME: not patched" "no check ran"
+    return 1
+  fi
+  jq -n --argjson t "$rest" '{tags: $t}' >"$WORK/cl-tags.json"
+  api PATCH "/instances/$CL_UNREG_ID" "$WORK/cl-tags.json"
+  if ! api_ok; then
+    row "$title" "FAILED: PATCH answered $(answer)" "the check needs a machine that tent sees as one that has not joined"
+    return 1
+  fi
+  api GET "/instances/$CL_UNREG_ID"
+  now_tags=$(jq -c '.instance.tags | sort' "$API_BODY" 2>/dev/null || echo '?')
+  want=$(jq -c 'sort' <<<"$rest")
+  if [ "$now_tags" != "$want" ]; then
+    row "$title" "UNEXPECTED: the tags are $now_tags after the PATCH, want $want" "no check ran"
+    return 1
+  fi
+  row "$title" "as expected: PATCH with the remaining $(jq 'length' <<<"$rest") tags; the instance has $now_tags" \
+    "the check needs a machine that tent sees as one that has not joined"
+}
+
+# cl_created_epoch ID: the epoch second of the instance's creation date, or nothing.
+cl_created_epoch() {
+  api GET "/instances/$1"
+  api_ok || return 0
+  jq -r '(.instance.date_created // "") | sub("\\+00:00$"; "Z") | sub("\\.[0-9]+Z$"; "Z") | try fromdateiso8601 catch empty' \
+    "$API_BODY" 2>/dev/null || true
+}
+
+# cl_unreg_wait: waits until the instance is 32 minutes old, which tent judges to be older than its intro token.
+cl_unreg_wait() {
+  local title created target left t0
+  title=$(cl_unreg_title wait)
+  created=$(cl_created_epoch "$CL_UNREG_ID")
+  if [ -z "$created" ]; then
+    row "$title" "unknown: the Vultr API gives no creation time for the instance" "no check ran"
+    return 1
+  fi
+  target=$((created + CL_UNREG_AGE))
+  t0=$(now)
+  left=$((target - t0))
+  if [ "$left" -gt 0 ]; then log "waiting ${left}s until $CL_NAME-workers-1 is 32 minutes old"; fi
+  while [ "$(now)" -lt "$target" ]; do sleep 30; done
+  row "$title" "as expected: waited $(($(now) - t0))s; the instance is $(($(now) - created))s old (tent replaces a client that has not joined after 31 minutes)" \
+    "a client that registers within the lifetime of its intro token is waited for; after it, replaced"
+}
+
+# cl_unreg_before: Nomad must still be stopped on the client: nothing started it again.
+cl_unreg_before() {
+  local name="$CL_NAME-workers-1" title out
+  title=$(cl_unreg_title before)
+  if ! cl_ssh_reachable "$name"; then
+    row "$title" "$(cl_ssh_unknown_text "$name")" "no check ran"
+    return 1
+  fi
+  out=$(ssh_x "$CL_IP" 'systemctl is-active nomad.service || true' 2>/dev/null || true)
+  case "$out" in
+    inactive | failed) row "$title" "as expected: $out" "nothing started Nomad again before tent judged the client" ;;
+    *)
+      row "$title" "UNEXPECTED: ${out:-no answer}: something started Nomad again" "the client registers again, so tent waits for it"
+      return 1
+      ;;
+  esac
+}
+
+# cl_private_ip ID: the first private address of instance ID in its VPC, or nothing.
+cl_private_ip() {
+  api GET "/instances/$1/vpcs"
+  jq -r '[.vpcs[]? | select((.ip_address // "") != "" and .ip_address != "0.0.0.0")][0].ip_address // empty' \
+    "$API_BODY" 2>/dev/null || true
+}
+
+# cl_unreg_plan: the plan deletes the client as not registered and creates it again.
+cl_unreg_plan() {
+  local name="$CL_NAME-workers-1" title res
+  title=$(cl_unreg_title plan)
+  CL_OLD_IP=$(cl_private_ip "$CL_UNREG_ID")
+  cl_run unreg-plan update cluster "$CL_NAME"
+  cl_out_detail "$title"
+  if [ "$CL_RC" != 0 ]; then
+    row "$title" "FAILED: exit $CL_RC: $(cl_last_line)" "a client that did not register within its token's lifetime is replaced"
+    return 1
+  fi
+  if grep -Fq -- "- node $name (ID $CL_UNREG_ID, not registered)" "$CL_OUT" && grep -Fq -- "+ node $name (client" "$CL_OUT"; then
+    row "$title" "as expected: exit 0 in ${CL_SECS}s; the plan deletes $name (ID $CL_UNREG_ID, not registered) and creates it" \
+      "a client that did not register within its token's lifetime is replaced"
+    return 0
+  fi
+  res="UNEXPECTED: exit 0 in ${CL_SECS}s, but the plan has no 'not registered' delete and create of $name: $(oneline 200 <"$CL_OUT")"
+  row "$title" "$res" "a client that did not register within its token's lifetime is replaced"
+  return 1
+}
+
+# cl_line_no TEXT: the number of the first line of the last cl_run's stderr that holds TEXT, or nothing.
+cl_line_no() { awk -v p="$1" 'index($0, p) { print NR; exit }' "$CL_ERR" 2>/dev/null || true; }
+
+# cl_unreg_apply: update --yes deletes the machine, creates another of the name, waits for its registration and scrubs
+# it.
+cl_unreg_apply() {
+  local name="$CL_NAME-workers-1" title missing="" last=0 n t order=1 held build
+  title=$(cl_unreg_title apply)
+  cl_run unreg-yes update cluster "$CL_NAME" --yes
+  cl_out_detail "$title"
+  if [ "$CL_RC" != 0 ]; then
+    row "$title" "FAILED: exit $CL_RC in ${CL_SECS}s: $(cl_last_line)" "the replacement of a client that never registered"
+    return 1
+  fi
+  for t in "deleted node $name" "created node $name" "node $name registered" "scrubbed the user data of node $name"; do
+    n=$(cl_line_no "$t")
+    if [ -z "$n" ]; then
+      missing="$missing${missing:+, }'$t'"
+    else
+      if [ "$n" -lt "$last" ]; then order=0; fi
+      last="$n"
+    fi
+  done
+  if [ -n "$missing" ]; then
+    row "$title" "UNEXPECTED: exit 0 in ${CL_SECS}s, but these progress lines are missing: $missing" "the replacement of a client that never registered"
+    return 1
+  fi
+  if [ "$order" = 0 ]; then
+    row "$title" "UNEXPECTED: exit 0 in ${CL_SECS}s, but the progress lines are out of order (delete, create, registered, scrubbed)" \
+      "the replacement of a client that never registered"
+    return 1
+  fi
+  CL_STOPPED=""
+  held=$(cl_span_secs "deleted node $name" "created node $name")
+  build="a client's create took ${CL_BUILD_CREATE_SECS}s in the build"
+  [ -n "$CL_BUILD_CREATE_SECS" ] || build="how long a client's create took in the build is unknown"
+  row "$title" "as expected: exit 0 in ${CL_SECS}s; deleted, created, registered and scrubbed $name; $name was \
+created ${held}s after its delete; $build" \
+    "the replacement of a client that never registered; the two times show how long the instance limit held the create"
+}
+
+# cl_unreg_replacement: the new instance has another id, the label, the stub and a private address.
+cl_unreg_replacement() {
+  local name="$CL_NAME-workers-1" title newid n kind joined same bad=""
+  title=$(cl_unreg_title replacement)
+  if ! cl_instances; then
+    row "$title" "UNEXPECTED: $(answer)" "no check ran"
+    return 1
+  fi
+  n=$(jq -r '.instances | length' "$WORK/cl-instances.json")
+  newid=$(cl_id "$name")
+  if [ -z "$newid" ]; then
+    row "$title" "UNEXPECTED: no instance of $name is listed: $n instances" "no check ran"
+    return 1
+  fi
+  if [ "$newid" = "$CL_UNREG_ID" ]; then
+    row "$title" "UNEXPECTED: the instance of $name still has the old id $newid" "no check ran"
+    return 1
+  fi
+  [ "$n" = $((CL_SERVERS + CL_WORKERS)) ] || bad="$n instances, want $((CL_SERVERS + CL_WORKERS))"
+  joined=$(jq -r --arg i "$newid" '[.instances[] | select(.id == $i) | .tags[]? | select(. == "tent/joined=true")] | length' \
+    "$WORK/cl-instances.json")
+  [ "$joined" = 1 ] || bad="$bad${bad:+; }tent/joined=true is missing"
+  kind=$(cl_ud_kind "$newid")
+  [ "$kind" = stub ] || bad="$bad${bad:+; }the user data is not the stub ($kind)"
+  CL_NEW_IP=$(cl_private_ip "$newid")
+  [ -n "$CL_NEW_IP" ] || bad="$bad${bad:+; }the instance has no private address"
+  if [ "$CL_NEW_IP" = "$CL_OLD_IP" ]; then same=same; else same=different; fi
+  if [ -n "$bad" ]; then
+    row "$title" "UNEXPECTED: $bad" "the new machine took the node's name and joined"
+    [ -n "$CL_NEW_IP" ] || return 1
+    return 0
+  fi
+  row "$title" "as expected: new instance $newid (old $CL_UNREG_ID), tent/joined=true, the stub; private address $CL_NEW_IP (the old one was ${CL_OLD_IP:-unknown}: $same)" \
+    "the new machine took the node's name and joined; a record: whether the private address is reused"
+}
+
+# cl_unreg_node: Nomad lists a ready node of the name at the new instance's private address.
+cl_unreg_node() {
+  local name="$CL_NAME-workers-1" title i state=""
+  title=$(cl_unreg_title node)
+  cl_need_api "$title" || return 1
+  if [ -z "$CL_NEW_IP" ]; then
+    row "$title" "unknown: the new instance's private address is not known" "no check ran"
+    return 1
+  fi
+  for i in $(seq 1 12); do
+    cl_nm_get "$CL_SRV_IP" /v1/nodes
+    if [ "$CL_NM_STATUS" = 200 ] && cl_node_ready "$name" "$CL_NEW_IP"; then
+      row "$title" "as expected: ready and eligible at $CL_NEW_IP" "tent told the new machine's node by its name and address"
+      return 0
+    fi
+    sleep 5
+  done
+  state=$(cl_node_state "$name")
+  row "$title" "UNEXPECTED: no ready and eligible node of that name at $CL_NEW_IP; Nomad lists: ${state:-none}" \
+    "tent told the new machine's node by its name and address"
+  return 1
+}
+
+# cl_unreg_after: the cluster is converged again.
+cl_unreg_after() {
+  cl_exit_code_row unreg-after "$(cl_unreg_title after)" "the replacement converged: the next plan has no change"
+}
+
+# cl_unregistered_rows: stop Nomad on <name>-workers-1, purge its node, take the joined tag off, wait until the instance
+# is 32 minutes old, and check that update replaces the client.
+cl_unregistered_rows() {
+  local step ok=1
+  for step in stop purge tag wait before plan apply replacement node after; do
+    if [ "$ok" = 1 ]; then
+      "cl_unreg_$step" || ok=0
+    else
+      row "$(cl_unreg_title "$step")" "unknown: an earlier step of this check did not go on" "no check ran"
+    fi
+  done
+}
+
 # cl_redact FILE: replaces every secret line that cl_collect_secrets noted, wherever it stands in FILE, with [hidden].
 cl_redact() {
   awk 'NR == FNR { pat[NR] = $0; n = NR; next }
@@ -3706,6 +4353,7 @@ check_cluster() {
       row "$t" "$res" "no Nomad check ran"
     done
   else
+    CL_SRV_IP="$ip"
     cl_operator "$ip"
     cl_members_row "$ip"
     cl_health_row "$ip"
@@ -3714,9 +4362,21 @@ check_cluster() {
   fi
   cl_update_rows
   cl_tags_row
+  cl_joined_row
   cl_userdata_row
   cl_client_rows
   cl_server_rows
+  cl_reboot_row
+  cl_guard_rows
+  if [ "$UNREG" != 1 ]; then
+    row "Client that never registers (--unregistered)" "skipped: --unregistered not given" \
+      "the check takes about 30 minutes more: it waits until an instance is 32 minutes old"
+  elif [ "$CL_SPECS_CHANGED" = 1 ]; then
+    row "Client that never registers (--unregistered)" "skipped: the saved specs were not put back" \
+      "the check needs the specs as tent built them: with one client in the specs the plan would not create the client again"
+  else
+    cl_unregistered_rows
+  fi
   if [ "$KEEP" = 1 ]; then
     for t in "tent delete cluster --yes" "Cluster's objects in the Vultr API after the delete" "State store after the delete"; do
       row "$t" "skipped: --keep" "--keep leaves the cluster in place"
@@ -3759,6 +4419,20 @@ cl_cleanup() {
   [ "$CL_STARTED" = 1 ] || return 0
   # A run stopped during create has read none: read what the store holds before anything deletes it.
   [ "$CL_SECRETS" != 0 ] || cl_collect_store_secrets
+  if [ "$KEEP" = 1 ] && [ "$CL_SPECS_CHANGED" = 1 ]; then
+    # The guard check changed the specs and the run stopped before it put them back: tent update would refuse the
+    # kept cluster. Without --keep the delete below does not look at the specs.
+    cl_run specs-back replace -f "$CL_SPECS"
+    if [ "$CL_RC" = 0 ]; then
+      CL_SPECS_CHANGED=0
+    else
+      cp "$CL_SPECS" "$OUT_DIR/cluster-$RUN-specs.yaml" || true
+      log "--keep: could not put the saved specs back: tent replace -f $OUT_DIR/cluster-$RUN-specs.yaml"
+    fi
+  fi
+  if [ "$KEEP" = 1 ] && [ -n "$CL_STOPPED" ]; then
+    log "--keep: Nomad stopped on $CL_STOPPED and its tent/joined tag may be off: tent update cluster $CL_NAME --yes replaces it 31 minutes after its creation"
+  fi
   if [ "$KEEP" = 1 ]; then
     [ "$CL_SEARCHED" = 1 ] || cl_secrets_row "at exit"
     if mv "$CL_STATE" "$kept"; then
@@ -3766,7 +4440,7 @@ cl_cleanup() {
     else
       kept="$CL_STATE"
       KEEP_WORK=1
-      rm -rf "$AUTH_CONF" "$WORK/nomad-curl.conf" "$CL_OPDIR" "$WORK/secret-patterns.txt" "$SSH_KEY" "$SSH_KEY.pub"
+      rm -rf "$AUTH_CONF" "$WORK/nomad-curl.conf" "$CL_OPDIR" "$WORK/secret-patterns.txt" "$SSH_KEY" "$SSH_KEY.pub" "$API_BODY"
       log "--keep: could not move the state store: it stays in $kept, and so does the directory $WORK"
       log "the directory holds no API key, token or private key any more: only the store has the cluster's secrets"
     fi
@@ -3885,22 +4559,33 @@ authenticate_and_confirm() {
 # main_cluster: the cluster check: says what it creates, and on a real run builds the cluster with tent and checks it.
 # tent makes everything in the cloud itself; the run only makes a key pair and a state store in WORK.
 main_cluster() {
-  local instances=$((CL_SERVERS + CL_WORKERS)) cost end_note
+  local instances=$((CL_SERVERS + CL_WORKERS)) cost end_note duration unreg_note=""
   CL_NAME="spk-$RUN"
   CL_STATE="$WORK/state"
   CL_URL="file://$CL_STATE"
   CL_OPDIR="$WORK/operator"
+  duration="25-35 minutes"
+  if [ "$UNREG" = 1 ]; then
+    instances=$((instances + 1))
+    duration="50-70 minutes: the last check waits until an instance is 32 minutes old, about 25-35 minutes after the other checks"
+    unreg_note="
+  - --unregistered: the run stops Nomad on $CL_NAME-workers-1, purges its node, takes tent/joined=true off the
+    instance and waits until the instance is 32 minutes old (31 is tent's limit); then tent replaces the machine,
+    which bills one more instance for its 1 hour minimum"
+  fi
   cost=$(cost_text "$instances")
   end_note="the run deletes the cluster with tent delete cluster, and then removes by tag what is left"
   if [ "$KEEP" = 1 ]; then end_note="the cluster is NOT deleted: --keep given, so it stays and bills until you delete it"; fi
   cat >&2 <<EOF
 
 This run builds a cluster named $CL_NAME with tent in your Vultr account ($REGION):
-  - $instances instances of $PLAN, all created at once ($CL_SERVERS servers and $CL_WORKERS clients; the account's
-    instance limit must allow $instances), 1 hour minimum each: $cost
+  - $CL_SERVERS servers and $CL_WORKERS clients of $PLAN, all created at once (the account's instance limit must
+    allow $((CL_SERVERS + CL_WORKERS)) instances), 1 hour minimum each; $instances billed in all: $cost
   - 1 VPC, 2 firewall groups and 1 SSH key, made by tent and removed by tent delete cluster
+  - after the build: a reboot of one client, and a scale down of the clients to one in the specs, which update must
+    refuse (the specs go back afterwards)$unreg_note
   - $end_note
-Expected duration: 20-30 minutes. Report: $REPORT
+Expected duration: $duration. Report: $REPORT
 
 EOF
   [ "$MODE" = "dry-run" ] && { log "dry run: nothing created"; return 0; }
@@ -3922,6 +4607,7 @@ main() {
       --dry-run) MODE="dry-run" ;;
       --yes) ASSUME_YES=1 ;;
       --keep) KEEP=1 ;;
+      --unregistered) UNREG=1 ;;
       --only) CHECKS="$2"; shift ;;
       --region) REGION="$2"; shift ;;
       --plan) PLAN="$2"; shift ;;
@@ -3936,6 +4622,7 @@ main() {
   done
   if want tentnode && [ "$CHECKS" != tentnode ]; then die "tentnode runs alone: --only tentnode"; fi
   if want cluster && [ "$CHECKS" != cluster ]; then die "cluster runs alone: --only cluster"; fi
+  if [ "$UNREG" = 1 ] && [ "$CHECKS" != cluster ]; then die "--unregistered needs --only cluster"; fi
   # tentnode needs one VPC: it tries the first mask alone and makes no test VPCs.
   if want tentnode; then VPC_MASKS="${VPC_MASKS%% *}"; fi
 
