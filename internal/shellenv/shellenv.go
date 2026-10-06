@@ -1,4 +1,4 @@
-// Package shellenv writes the lines that set environment variables in fish or sh, for the hack tools whose output a
+// Package shellenv writes the lines that set environment variables in fish or sh, for the tools whose output a
 // shell runs.
 package shellenv
 
@@ -39,6 +39,17 @@ func ExportLine(shell, name, value string) string {
 		return "set -gx " + name + " " + Quote(shell, value)
 	}
 	return "export " + name + "=" + Quote(shell, value)
+}
+
+// FileLine returns the line that sets the environment variable name to the one line that the file holds, without its
+// line end, in the shell. The shell reads the file when it runs the line. file is an absolute path, quoted so that it
+// is read as it is.
+func FileLine(shell, name, file string) string {
+	quoted := Quote(shell, file)
+	if shell == Fish {
+		return "set -gx " + name + " (cat " + quoted + ")"
+	}
+	return "export " + name + "=\"$(cat " + quoted + ")\""
 }
 
 // shQuote puts s in single quotes for sh, where a single quote of s ends the quoted part, follows escaped by a

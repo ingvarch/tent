@@ -28,12 +28,12 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
-	"github.com/ingvarch/tent/hack/internal/shellenv/shellenvtest"
 	"github.com/ingvarch/tent/internal/assets"
 	"github.com/ingvarch/tent/internal/nodeconfig"
 	"github.com/ingvarch/tent/internal/s3url"
 	"github.com/ingvarch/tent/internal/s3url/s3urltest"
 	"github.com/ingvarch/tent/internal/secrettest"
+	"github.com/ingvarch/tent/internal/shellenv/shellenvtest"
 )
 
 // fakeBucket is the bucket that the fake S3 serves, path-style.

@@ -18,8 +18,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ingvarch/tent/hack/internal/shellenv"
 	"github.com/ingvarch/tent/internal/pki"
+	"github.com/ingvarch/tent/internal/shellenv"
 	"github.com/ingvarch/tent/internal/spec"
 	"github.com/ingvarch/tent/internal/statestore"
 )
@@ -302,11 +302,7 @@ func printLines(o options, region string, stdout, stderr io.Writer) error {
 			return err
 		}
 	}
-	token := shellenv.Quote(o.shell, filepath.Join(o.dir, tokenFile))
-	set := "export NOMAD_TOKEN=\"$(cat " + token + ")\""
-	if o.shell == shellenv.Fish {
-		set = "set -gx NOMAD_TOKEN (cat " + token + ")"
-	}
+	set := shellenv.FileLine(o.shell, "NOMAD_TOKEN", filepath.Join(o.dir, tokenFile))
 	_, err := fmt.Fprintf(stderr, "wrote %s; the certificate works for %s\nto set NOMAD_TOKEN: %s\n", o.dir, o.ttl, set)
 	return err
 }
