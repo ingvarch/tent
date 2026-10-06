@@ -122,9 +122,8 @@ func askRound(ctx context.Context, api nomadops.API) (view nomadView, unreachabl
 				cause = step.what + ": " + cause
 			}
 			return nomadView{}, &Failure{
-				Check: checkNoLeader,
-				Detail: fmt.Sprintf("Nomad has no leader, or tent cannot reach it: %s; tent reaches the servers on port %d: "+
-					"check spec.access.api", cause, model.APIPort),
+				Check:  checkNoLeader,
+				Detail: "Nomad has no leader, or tent cannot reach it: " + cause + reachHint(),
 			}, nil
 		}
 	}

@@ -596,6 +596,29 @@ func TestOwnerName(t *testing.T) {
 	}
 }
 
+// TestLocalHolder checks that LocalHolder names the same owner and host that a lease taken in this process carries,
+// so that a name built from it matches the one in the cluster lock.
+func TestLocalHolder(t *testing.T) {
+	lock, err := statestore.Acquire(t.Context(), &fakeLocker{}, "prod", statestore.AcquireOptions{Operation: "update"})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer release(t, lock)
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	owner, gotHost := statestore.LocalHolder()
+
+	if lease := lock.Lease(); owner != lease.Owner || gotHost != lease.Host {
+		t.Errorf("LocalHolder() = %q, %q; the lease names %q, %q", owner, gotHost, lease.Owner, lease.Host)
+	}
+	if want := statestore.OwnerName(user.Current, os.Getenv); owner != want || gotHost != host {
+		t.Errorf("LocalHolder() = %q, %q; want %q, %q", owner, gotHost, want, host)
+	}
+}
+
 func release(t *testing.T, lock *statestore.Lock) {
 	t.Helper()
 	if err := lock.Release(t.Context()); err != nil {

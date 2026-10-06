@@ -307,9 +307,23 @@ func (u updateRun) nomad() nomadAccess {
 	return nomadAccess{cluster: u.cluster, region: u.region, secrets: u.secrets}
 }
 
-// nomadOver returns the API over those of the servers that have a public address: one client for each, with an
-// operator certificate that it makes now and the ACL bootstrap secret as the token.
-func (s *Service) nomadOver(servers []cloud.Instance, access nomadAccess) (nomadops.API, error) {
+// apiAddress returns the address of the Nomad API of the machine in, as host:port, at its public address.
+func apiAddress(in cloud.Instance) string {
+	return net.JoinHostPort(in.PublicIP.String(), strconv.Itoa(model.APIPort))
+}
+
+// reachHint says where to look when no server answered: tent reaches the servers through spec.access.api.
+func reachHint() string {
+	return fmt.Sprintf("; tent reaches the servers on port %d: check spec.access.api", model.APIPort)
+}
+
+// withReachHint adds reachHint to err, which says that no server answered.
+func withReachHint(err error) error { return fmt.Errorf("%w%s", err, reachHint()) }
+
+// nomadOver returns the API over those of the machines in servers that have a public address, which also tells which
+// server answered last: one client for each, with an operator certificate that it makes now and the ACL bootstrap
+// secret as the token.
+func (s *Service) nomadOver(servers []cloud.Instance, access nomadAccess) (*nomadops.Servers, error) {
 	if s.Nomad == nil {
 		return nil, errNoNomad
 	}
@@ -322,7 +336,7 @@ func (s *Service) nomadOver(servers []cloud.Instance, access nomadAccess) (nomad
 		if !in.PublicIP.IsValid() {
 			continue
 		}
-		addr := net.JoinHostPort(in.PublicIP.String(), strconv.Itoa(model.APIPort))
+		addr := apiAddress(in)
 		api, err := s.Nomad(nomadops.Config{
 			Address: addr, Region: access.region, CA: access.secrets.ca.Bundle(), Cert: cert, Token: access.secrets.bootstrap,
 		})
@@ -351,7 +365,7 @@ func (a *applier) nomadStep(ctx context.Context, servers []NodeChange) error {
 		defer cancel()
 		leader, err := nomadops.WaitLeader(waitCtx, api)
 		if err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
-			err = fmt.Errorf("%w; tent reaches the servers on port %d: check spec.access.api", err, model.APIPort)
+			err = withReachHint(err)
 		}
 		return NomadEvent{Action: NomadLeader, Leader: leader}, err
 	}); err != nil {
