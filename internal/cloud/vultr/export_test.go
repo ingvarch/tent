@@ -9,7 +9,8 @@ import (
 // WithOpIDs makes the provider take its operation ids from next, for tests.
 var WithOpIDs = withOpIDs
 
-// WithPollInterval sets how long the provider waits between two reads of an instance that is not ready, for tests.
+// WithPollInterval sets how long the provider waits between two reads of an instance that is not ready, and between
+// two sends of a create that the instance limit refuses, for tests.
 var WithPollInterval = withPollInterval
 
 // Snapshot is the type of the snapshots that Inventory returns, for tests.
@@ -30,3 +31,7 @@ func (s *snapshot) FirewallGroup(k engine.Key) (govultr.FirewallGroup, bool) {
 func (s *snapshot) FirewallRules(groupID string) []govultr.FirewallRule {
 	return s.firewallRules(groupID)
 }
+
+// LimitSettle is how long after a delete the provider sends a create again that the instance limit refuses, for
+// tests.
+const LimitSettle = limitSettle
