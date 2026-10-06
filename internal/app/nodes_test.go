@@ -230,6 +230,12 @@ func TestPlanNodes(t *testing.T) {
 			want:      []NodeChange{wantCreate(w2, 2, "ams"), wantDelete(unlabelled, "not in the spec")},
 		},
 		{
+			name:      "an instance without a group label does not make a node of its name a duplicate",
+			groups:    []model.NodeGroup{w1},
+			instances: []cloud.Instance{named(unlabelled, "prod-workers-0"), member(w1, 0, "i-1", minutes(1))},
+			want:      []NodeChange{wantDelete(named(unlabelled, "prod-workers-0"), "not in the spec")},
+		},
+		{
 			name:   "duplicates by name: the oldest stays",
 			groups: []model.NodeGroup{workers(3)},
 			instances: []cloud.Instance{
@@ -241,6 +247,38 @@ func TestPlanNodes(t *testing.T) {
 				wantDelete(member(w2, 0, "i-1", minutes(2)), "duplicate"),
 				wantDelete(member(w2, 1, "i-3", time.Time{}), "duplicate"),
 				wantDelete(member(w2, 2, "i-6", minutes(1)), "duplicate"),
+			},
+		},
+		{
+			name:   "duplicates by name: a joined one stays before an older one that has not joined",
+			groups: []model.NodeGroup{w1},
+			instances: []cloud.Instance{
+				unjoined(member(w1, 0, "i-1", minutes(1))), member(w1, 0, "i-2", minutes(2)),
+			},
+			want: []NodeChange{wantDelete(member(w1, 0, "i-1", minutes(1)), "duplicate")},
+		},
+		{
+			name:   "duplicates by name: two joined ones keep the older, two that have not joined keep the older",
+			groups: []model.NodeGroup{w2},
+			instances: []cloud.Instance{
+				member(w2, 0, "i-1", minutes(1)), member(w2, 0, "i-2", minutes(2)),
+				unjoined(member(w2, 1, "i-3", minutes(3))), unjoined(member(w2, 1, "i-4", minutes(4))),
+			},
+			want: []NodeChange{
+				wantJoinWait(w2, unjoined(member(w2, 1, "i-3", minutes(3)))),
+				wantDelete(member(w2, 0, "i-2", minutes(2)), "duplicate"),
+				wantDelete(member(w2, 1, "i-4", minutes(4)), "duplicate"),
+			},
+		},
+		{
+			name:   "a surplus node is chosen by age alone, even when the oldest has not joined",
+			groups: []model.NodeGroup{w1},
+			instances: []cloud.Instance{
+				unjoined(member(w1, 0, "i-1", minutes(1))), member(w1, 1, "i-2", minutes(2)),
+			},
+			want: []NodeChange{
+				wantJoinWait(w1, unjoined(member(w1, 0, "i-1", minutes(1)))),
+				wantDelete(member(w1, 1, "i-2", minutes(2)), "surplus"),
 			},
 		},
 		{
@@ -567,6 +605,9 @@ func TestPlanNodesServers(t *testing.T) {
 		{"a duplicate goes", []model.NodeGroup{servers(1)}, []cloud.Instance{s0, changed(s0, func(in *cloud.Instance) {
 			in.ID, in.Created = "i-9", minutes(9)
 		})}, []cloud.Instance{s0}},
+		{"a joined duplicate stays before an older one", []model.NodeGroup{servers(1)}, []cloud.Instance{
+			unjoined(s0), changed(s0, func(in *cloud.Instance) { in.ID, in.Created = "i-9", minutes(9) }),
+		}, []cloud.Instance{changed(s0, func(in *cloud.Instance) { in.ID, in.Created = "i-9", minutes(9) })}},
 		{"a node of another group goes", []model.NodeGroup{servers(1)},
 			[]cloud.Instance{s0, changed(s1, func(in *cloud.Instance) { in.Group = "gone" })}, []cloud.Instance{s0}},
 		{"another cluster's node is not ours", []model.NodeGroup{servers(1)},

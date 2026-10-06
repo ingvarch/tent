@@ -78,7 +78,13 @@ func update(s state, more ...string) []string {
 // wantNoWrites fails the test unless every call that reached the fake reads.
 func wantNoWrites(t *testing.T, f *vultrfake.Fake) {
 	t.Helper()
-	for _, c := range f.Calls() {
+	wantNoWritesIn(t, f.Calls())
+}
+
+// wantNoWritesIn fails the test unless every one of the calls reads.
+func wantNoWritesIn(t *testing.T, calls []vultrfake.Call) {
+	t.Helper()
+	for _, c := range calls {
 		if !strings.HasPrefix(c.Name, "List") && !strings.HasPrefix(c.Name, "Get") && c.Name != "AvailablePlans" {
 			t.Errorf("a call that writes: %s %s", c.Name, c.Arg)
 		}
@@ -679,6 +685,28 @@ func TestUpdateClusterPrintsThePlanItApplies(t *testing.T) {
 		}
 		wantInstances(t, f, "prod-servers-0", "prod-servers-1", "prod-servers-2", "prod-workers-0", "prod-workers-1",
 			"prod-workers-2")
+	})
+}
+
+// TestUpdateClusterRefusesToDeleteAJoinedNode fails a scale down of workers that joined, with and without --yes and
+// with --exit-code, as an error with exit code 1, and changes nothing.
+func TestUpdateClusterRefusesToDeleteAJoinedNode(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, f := builtCluster(t)
+		s.put(t, workersPath, strings.Replace(workersYAML, "size: 3", "size: 2", 1))
+		before := s.objects(t)
+		calls := len(f.Calls())
+		const want = "Error: update would delete a node that joined Nomad: prod-workers-2 (ID instance-6, surplus); " +
+			"tent cannot drain a node or remove a server yet, so update deletes only nodes that never joined; " +
+			"keep this node in the specs, or delete the whole cluster with tent delete cluster\n"
+
+		for _, more := range [][]string{nil, {"--yes"}, {"--exit-code"}} {
+			wantError(t, runOn(t, f, update(s, more...)...), want)
+		}
+
+		wantNoWritesIn(t, f.Calls()[calls:])
+		wantInstances(t, f, nodeNames...)
+		s.want(t, before)
 	})
 }
 

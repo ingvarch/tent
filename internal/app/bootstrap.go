@@ -69,11 +69,11 @@ func planNomad(m *model.Cluster, changes []NodeChange, staying []cloud.Instance,
 	return nil
 }
 
-// needsNomad reports whether applying the plan calls Nomad: for the Nomad step, or for a client's intro token or its
-// registration wait.
+// needsNomad reports whether applying the plan calls Nomad: for the Nomad step, for a client's intro token or its
+// registration wait, or to ask whether a node that the plan deletes has joined.
 func (u updateRun) needsNomad() bool {
 	return u.plan.Nomad != nil ||
-		slices.ContainsFunc(u.plan.Nodes, func(c NodeChange) bool { return c.Action != NodeDelete && !isServerChange(c) })
+		slices.ContainsFunc(u.plan.Nodes, func(c NodeChange) bool { return c.Action == NodeDelete || !isServerChange(c) })
 }
 
 // prepareNodes gives each create and each wait with an operation id of the plan the spec hash of its group, and builds
@@ -183,7 +183,7 @@ func (a *applier) run(ctx context.Context) error {
 		}
 	}
 	for _, c := range deletes {
-		if err := a.s.applyNode(ctx, a.u.nodes, a.u.cluster, c); err != nil {
+		if err := a.applyDelete(ctx, c); err != nil {
 			return err
 		}
 	}
@@ -324,9 +324,9 @@ func (a *applier) nomadAPI() (nomadops.API, error) {
 }
 
 // nomadStep waits for a leader, bootstraps the ACL system when the plan says so, and waits for healthy servers that
-// all vote. Then it reads the Raft configuration once and, for each server and combined change of the plan, in its
-// order, waits for a combined node to register, checks that the machine's server votes at its address, and scrubs the
-// machine. Last it stores the mark of the bootstrap when it bootstrapped.
+// all vote. Then, when the plan has a server or combined change, it reads the Raft configuration once and, for each
+// such change in order, waits for a combined node to register, checks that the machine's server votes at its address,
+// and scrubs the machine. Last it stores the mark of the bootstrap when it bootstrapped.
 func (a *applier) nomadStep(ctx context.Context, servers []NodeChange) error {
 	api, err := a.nomadAPI()
 	if err != nil {
@@ -450,8 +450,14 @@ func (a *applier) machineOf(c NodeChange) cloud.Instance {
 	if i := slices.IndexFunc(a.known, func(k cloud.Instance) bool { return k.Name == c.Name }); i >= 0 {
 		return a.known[i]
 	}
-	if i := slices.IndexFunc(a.u.listed, func(l cloud.Instance) bool { return c.ID != "" && l.ID == c.ID }); i >= 0 {
-		return a.u.listed[i]
+	return a.listedMachine(c)
+}
+
+// listedMachine returns the machine that the cloud listed with the ID of the node change c, or a machine with its name
+// only when it listed none.
+func (a *applier) listedMachine(c NodeChange) cloud.Instance {
+	if in, ok := instanceByID(a.u.listed, c.ID); ok {
+		return in
 	}
 	return cloud.Instance{Name: c.Name}
 }

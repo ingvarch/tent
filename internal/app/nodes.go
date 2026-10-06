@@ -72,7 +72,8 @@ const (
 // Only the machines with the cluster's label count; the others are left alone.
 //
 //   - A machine whose group label names no group of m, or is empty, is deleted.
-//   - Of machines with one name, the oldest stays and the others are deleted as duplicates.
+//   - Of machines with one name, one that has joined stays before one that has not, and among equals the oldest
+//     stays; the others are deleted as duplicates.
 //   - A group with more machines than its size loses the newest ones.
 //   - A group with fewer gets new machines named <cluster>-<group>-<index> with the lowest indexes whose names no
 //     listed machine has, each in the group's zone with the fewest machines, the zone listed first on a tie.
@@ -93,18 +94,17 @@ func planNodes(m *model.Cluster, instances []cloud.Instance) (changes []NodeChan
 	owned := slices.DeleteFunc(slices.Clone(instances), func(in cloud.Instance) bool { return in.Cluster != m.Name })
 	slices.SortStableFunc(owned, compareAge)
 	taken := make(map[string]bool, len(owned)) // the names of the listed machines and of the new ones
-	kept := make(map[string]bool, len(owned))  // the names of the machines that stay
+	stays := keepers(m, owned)
 	members := make(map[string][]cloud.Instance, len(m.Groups))
 	var creates, waits, deletes []NodeChange
 	for _, in := range owned {
 		taken[in.Name] = true
 		switch {
-		case !slices.ContainsFunc(m.Groups, func(g model.NodeGroup) bool { return g.Name == in.Group }):
+		case !inSpec(m, in):
 			deletes = append(deletes, deleteNode(in, reasonNotInSpec))
-		case kept[in.Name]:
+		case stays[in.Name].ID != in.ID:
 			deletes = append(deletes, deleteNode(in, reasonDuplicate))
 		default:
-			kept[in.Name] = true
 			members[in.Group] = append(members[in.Group], in)
 		}
 	}
@@ -139,6 +139,26 @@ func planNodes(m *model.Cluster, instances []cloud.Instance) (changes []NodeChan
 	return slices.Concat(
 		waits[:waitsOfServers], creates[:createsOfServers], waits[waitsOfServers:], creates[createsOfServers:], deletes,
 	), servers
+}
+
+// inSpec reports whether the group of the machine in is one of m's.
+func inSpec(m *model.Cluster, in cloud.Instance) bool {
+	return slices.ContainsFunc(m.Groups, func(g model.NodeGroup) bool { return g.Name == in.Group })
+}
+
+// keepers returns the machine of each name that stays, of the machines owned, which are sorted oldest first: of those
+// whose group is one of m's, a joined one stays before one that has not joined, and then the oldest.
+func keepers(m *model.Cluster, owned []cloud.Instance) map[string]cloud.Instance {
+	stays := make(map[string]cloud.Instance, len(owned))
+	for _, in := range owned {
+		if !inSpec(m, in) {
+			continue
+		}
+		if cur, ok := stays[in.Name]; !ok || in.Joined && !cur.Joined {
+			stays[in.Name] = in
+		}
+	}
+	return stays
 }
 
 // serverCount returns how many of the changes, sorted by clientRank, are those of server and combined nodes.
@@ -207,6 +227,15 @@ func waitFor(g model.NodeGroup, in cloud.Instance) (NodeChange, bool) {
 		w.Op = in.Op
 	}
 	return w, true
+}
+
+// instanceByID returns the machine of instances with the ID id, and whether there is one. An empty ID names none.
+func instanceByID(instances []cloud.Instance, id string) (cloud.Instance, bool) {
+	i := slices.IndexFunc(instances, func(in cloud.Instance) bool { return id != "" && in.ID == id })
+	if i < 0 {
+		return cloud.Instance{}, false
+	}
+	return instances[i], true
 }
 
 // deleteNode returns the delete of the machine in for reason.
