@@ -3,11 +3,15 @@ package statestore_test
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/google/go-cmp/cmp"
 
 	"github.com/ingvarch/tent/internal/statestore"
 )
@@ -107,4 +111,104 @@ type capabilitiesError struct {
 
 func (s capabilitiesError) Capabilities(context.Context) (statestore.Capabilities, error) {
 	return statestore.Capabilities{}, s.err
+}
+
+// refuseWrites answers every put and delete with an error and lets reads through.
+func refuseWrites(r *http.Request, _ string, _ []byte) *fakeError {
+	if r.Method == http.MethodPut || r.Method == http.MethodDelete {
+		return &fakeError{http.StatusForbidden, "AccessDenied"}
+	}
+	return nil
+}
+
+func TestHolderOnS3SendsOneReadAndNoWrite(t *testing.T) {
+	layout := mustLayout(t, "prod")
+	for _, tc := range []struct {
+		name string
+		put  *statestore.Lease // the lease in the store, or nil for none
+		want bool              // whether Holder returns a lease
+	}{
+		{"a live lease", new(testLease("live", time.Hour)), true},
+		{"an expired lease", new(testLease("dead", -time.Minute)), false},
+		{"no lease", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeS3(t)
+			s := openS3(t, fakeURL(t, f))
+			if tc.put != nil {
+				putLease(t, s, layout, *tc.put)
+			}
+			f.set(func(f *fakeS3) { f.intercept = refuseWrites; f.requests = nil })
+			got, err := statestore.Holder(t.Context(), s, layout)
+			if err != nil {
+				t.Fatalf("Holder: %v", err)
+			}
+			switch {
+			case tc.want && (got == nil || got.ID != tc.put.ID):
+				t.Errorf("Holder = %+v, want the lease %q", got, tc.put.ID)
+			case !tc.want && got != nil:
+				t.Errorf("Holder = %+v, want nil", got)
+			}
+			if want := []string{"GET state/" + layout.Lock()}; !slices.Equal(f.log(), want) {
+				t.Errorf("requests = %q, want %q", f.log(), want)
+			}
+		})
+	}
+}
+
+func TestHolderOnS3ReportsAnUnreadableLease(t *testing.T) {
+	layout := mustLayout(t, "prod")
+	f := newFakeS3(t)
+	s := openS3(t, fakeURL(t, f))
+	mustPutS3(t, s, layout.Lock(), "not json")
+	if _, err := statestore.Holder(t.Context(), s, layout); !errors.Is(err, statestore.ErrInvalidLease) {
+		t.Errorf("Holder = %v, want ErrInvalidLease", err)
+	}
+}
+
+// noCapabilities is a store whose Capabilities fails the test. A wrapper counts as a store that is no file store.
+type noCapabilities struct {
+	t *testing.T
+	statestore.Store
+}
+
+func (s noCapabilities) Capabilities(context.Context) (statestore.Capabilities, error) {
+	s.t.Error("Capabilities was called")
+	return statestore.Capabilities{}, errors.New("not expected")
+}
+
+// TestHolderOnAWrappedStoreReadsTheLease also fails at the first Capabilities call: the s3 store answers it with a
+// probe that writes.
+func TestHolderOnAWrappedStoreReadsTheLease(t *testing.T) {
+	layout := mustLayout(t, "prod")
+	s := noCapabilities{t, openFile(t, t.TempDir())}
+	putLease(t, s, layout, testLease("live", time.Hour))
+	got, err := statestore.Holder(t.Context(), s, layout)
+	if err != nil || got == nil || got.ID != "live" {
+		t.Errorf("Holder = %+v, %v; want the lease %q", got, err, "live")
+	}
+}
+
+func TestHolderOnAFileStoreAnswersAsFlockDoes(t *testing.T) {
+	root, layout := filepath.Join(t.TempDir(), "state"), mustLayout(t, "prod")
+	s := openFile(t, root)
+	if got, err := statestore.Holder(t.Context(), s, layout); err != nil || got != nil {
+		t.Fatalf("Holder of a free lock = %+v, %v; want nil", got, err)
+	}
+	// A lease object that nobody holds under flock is no holder, however fresh it is.
+	putLease(t, s, layout, testLease("left over", time.Hour))
+	if got, err := statestore.Holder(t.Context(), s, layout); err != nil || got != nil {
+		t.Fatalf("Holder with only a left-over lease object = %+v, %v; want nil", got, err)
+	}
+	lk := newFlock(t, openFile(t, root), layout)
+	mine := testLease("mine", time.Hour)
+	if _, _, err := lk.TryLock(t.Context(), mine); err != nil {
+		t.Fatalf("TryLock: %v", err)
+	}
+	other := openFile(t, root)
+	got, err := statestore.Holder(t.Context(), other, layout)
+	want, wantErr := newFlock(t, other, layout).Holder(t.Context())
+	if !errors.Is(err, wantErr) || !cmp.Equal(got, want) {
+		t.Errorf("Holder = %+v, %v; the flock locker says %+v, %v", got, err, want, wantErr)
+	}
 }

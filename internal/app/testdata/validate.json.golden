@@ -1,0 +1,61 @@
+{
+  "cluster": "prod",
+  "valid": false,
+  "servers": 3,
+  "clients": 2,
+  "nomadVersion": "2.0.7",
+  "failures": [
+    {
+      "check": "machine-missing",
+      "node": "prod-workers-1",
+      "detail": "no machine: node group workers has 1 of its 2"
+    },
+    {
+      "check": "machine-not-running",
+      "node": "prod-workers-0",
+      "id": "instance-4",
+      "detail": "the cloud reports its machine (ID instance-4) as not running"
+    },
+    {
+      "check": "machine-surplus",
+      "node": "prod-workers-2",
+      "id": "instance-6",
+      "detail": "machine ID instance-6 is one more than the size of node group workers, 2"
+    },
+    {
+      "check": "machine-duplicate",
+      "node": "prod-workers-0",
+      "id": "instance-9",
+      "detail": "machine ID instance-9 has the name of machine ID instance-4"
+    },
+    {
+      "check": "machine-unknown",
+      "node": "prod-old-0",
+      "id": "instance-7",
+      "detail": "machine ID instance-7 is of node group old, which the specs do not have"
+    },
+    {
+      "check": "not-joined",
+      "node": "prod-servers-2",
+      "id": "instance-3",
+      "detail": "machine ID instance-3 has not joined Nomad: it carries no tent/joined label"
+    },
+    {
+      "check": "nomad-no-leader",
+      "detail": "Nomad has no leader, or tent cannot reach it: no route; tent reaches the servers on port 4646: check spec.access.api"
+    }
+  ],
+  "warnings": [
+    "spec.access.api lets the whole internet reach the Nomad API (port 4646); mTLS and ACLs protect it; narrow it with --api-access or spec.access.api",
+    "cluster prod runs in one failure domain, ams: an outage there takes the whole cluster down"
+  ],
+  "lock": {
+    "id": "other",
+    "owner": "igor",
+    "host": "laptop",
+    "pid": 4242,
+    "operation": "update",
+    "acquiredAt": "2026-10-06T10:00:00Z",
+    "expiresAt": "2026-10-06T10:02:00Z"
+  }
+}

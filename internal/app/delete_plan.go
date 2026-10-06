@@ -60,7 +60,7 @@ func (p DeletePlan) WriteText(w io.Writer) error {
 	if counts.Len() > 0 {
 		text = lines.String() + "\n" + counts.String()
 	}
-	return writePlan(w, text)
+	return writeText(w, "the plan", text)
 }
 
 // stateCount returns the line that counts the paths of the state to delete, such as "State: 5 objects to delete.".
@@ -103,7 +103,7 @@ func (p DeletePlan) WriteApplied(w io.Writer) error {
 // cloudUnknown and unsupportedProvider are left out when they are false or empty. It leaves HTML characters such as <
 // and & as they are, so the caller's encoder decides whether to escape them.
 func (p DeletePlan) MarshalJSON() ([]byte, error) {
-	return marshalPlan(struct {
+	return marshalJSON("the plan", struct {
 		Applied        bool              `json:"applied,omitempty"`
 		Nodes          []NodeChange      `json:"nodes"`
 		Infrastructure *engine.Plan      `json:"infrastructure"`

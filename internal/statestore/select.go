@@ -50,3 +50,20 @@ func fileStoreOf(s Store) (*fileStore, bool) {
 	f, ok := s.(*fileStore)
 	return f, ok
 }
+
+// Holder returns the lease of the cluster's lock without taking the lock and without choosing a lock mechanism. It
+// returns nil when the lock is free. For a file store it answers as the flock locker does. For any other store it
+// reads the lease object, and returns nil when that lease has expired: a tent that died leaves such a lease, and a
+// file store reports that state as free. It never calls Store.Capabilities and never writes, so a key that may only
+// read can use it.
+func Holder(ctx context.Context, s Store, l Layout) (*Lease, error) {
+	if f, ok := fileStoreOf(s); ok {
+		return newFlockLocker(f, l).Holder(ctx)
+	}
+	o := newLeaseObject(s, l, nil)
+	lease, err := o.Holder(ctx)
+	if err != nil || lease == nil || o.expired(*lease) {
+		return nil, err
+	}
+	return lease, nil
+}

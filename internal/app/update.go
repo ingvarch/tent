@@ -211,28 +211,48 @@ type updateRun struct {
 	builder *nodeBuilder
 }
 
-// planUpdate loads and checks a cluster's specs, as Update says, and plans the changes that bring the cloud to them.
-// The release files that it finds go into cache.
-func (s *Service) planUpdate(ctx context.Context, l statestore.Layout, cache assetCache) (updateRun, error) {
+// loadedCluster is a cluster's stored specs with their defaults, checked against the channel, with the Nomad version
+// pinned, and the model that they make.
+type loadedCluster struct {
+	objs   spec.Objects
+	ch     *channels.Channel
+	stored []byte // the stored completed spec; nil when the store has none
+	m      *model.Cluster
+}
+
+// loadCluster loads a cluster's specs from the store, fills in the defaults, validates them and checks them against
+// the cluster's channel, pins the Nomad version and makes the model, as Update says.
+func (s *Service) loadCluster(ctx context.Context, l statestore.Layout) (loadedCluster, error) {
 	objs, err := s.get(ctx, l, true)
 	if err != nil {
-		return updateRun{}, err
+		return loadedCluster{}, err
 	}
 	ch, err := checkCluster(objs.Cluster, objs.NodeGroups, s.Validate, s.channel)
 	if err != nil {
-		return updateRun{}, err
+		return loadedCluster{}, err
 	}
 	stored, err := s.readCompleted(ctx, l)
 	if err != nil {
-		return updateRun{}, err
+		return loadedCluster{}, err
 	}
 	if err := pinVersion(objs.Cluster, ch, l, stored); err != nil {
-		return updateRun{}, err
+		return loadedCluster{}, err
 	}
 	m, err := model.New(objs.Cluster, objs.NodeGroups)
 	if err != nil {
+		return loadedCluster{}, err
+	}
+	return loadedCluster{objs: objs, ch: ch, stored: stored, m: m}, nil
+}
+
+// planUpdate loads and checks a cluster's specs, as Update says, and plans the changes that bring the cloud to them.
+// The release files that it finds go into cache.
+func (s *Service) planUpdate(ctx context.Context, l statestore.Layout, cache assetCache) (updateRun, error) {
+	c, err := s.loadCluster(ctx, l)
+	if err != nil {
 		return updateRun{}, err
 	}
+	objs, ch, stored, m := c.objs, c.ch, c.stored, c.m
 	p, err := s.provider(m.Provider)
 	if err != nil {
 		return updateRun{}, err
