@@ -32,8 +32,8 @@ type Providers func(name v1alpha1.Provider, log *slog.Logger) (cloud.Provider, e
 // Option changes how Execute runs tent.
 type Option func(*globalOptions)
 
-// WithProviders gives tent the cloud providers that update cluster and delete cluster reach. Without it, those
-// commands fail: tent reaches no cloud.
+// WithProviders gives tent the cloud providers that update cluster, delete cluster and validate cluster reach.
+// Without it, those commands fail: tent reaches no cloud.
 func WithProviders(p Providers) Option {
 	return func(o *globalOptions) { o.providers = p }
 }
@@ -44,21 +44,25 @@ func WithAssets(a assets.Options) Option {
 	return func(o *globalOptions) { o.assets = a }
 }
 
-// WithNomad gives tent the way to reach one Nomad server, for update cluster.
+// WithNomad gives tent the way to reach one Nomad server, for update cluster and validate cluster.
 func WithNomad(nomad func(nomadops.Config) (nomadops.API, error)) Option {
 	return func(o *globalOptions) { o.nomad = nomad }
 }
 
-// exitChanges is tent's exit code when --exit-code finds a plan with changes.
+// exitChanges is tent's exit code when --exit-code finds a plan with changes, and when validate finds that the cluster
+// is not valid.
 const exitChanges = 2
 
 // errPlanHasChanges ends a command whose plan has changes under --exit-code: tent exits with exitChanges and prints
 // no error.
 var errPlanHasChanges = errors.New("the plan has changes")
 
+// errNotValid ends validate cluster when the cluster is not valid: tent exits with exitChanges and prints no error.
+var errNotValid = errors.New("the cluster is not valid")
+
 // Execute runs tent with args and returns the process exit code: 0 on success, 1 on an error, and 2 when --exit-code
-// finds a plan with changes. The first Ctrl-C or SIGTERM cancels the command's context; a second ends tent at once
-// with exit code 130.
+// finds a plan with changes or validate cluster finds the cluster not valid. The first Ctrl-C or SIGTERM cancels the
+// command's context; a second ends tent at once with exit code 130.
 func Execute(ctx context.Context, args []string, s Streams, opts ...Option) int {
 	sigs, stop := notifyStopSignals()
 	defer stop()
@@ -74,7 +78,7 @@ func execute(ctx context.Context, cmd *cobra.Command, args []string, stderr io.W
 	switch {
 	case err == nil:
 		return 0
-	case errors.Is(err, errPlanHasChanges):
+	case errors.Is(err, errPlanHasChanges), errors.Is(err, errNotValid):
 		return exitChanges
 	}
 	writeError(stderr, err)
@@ -120,6 +124,7 @@ func newRootCommand(s Streams, opts *globalOptions) *cobra.Command {
 	cmd.AddCommand(
 		newVersionCommand(opts), newCreateCommand(opts), newGetCommand(opts), newReplaceCommand(opts),
 		newDeleteCommand(opts), newStateCommand(opts), newEditCommand(opts), newUpdateCommand(opts),
+		newValidateCommand(opts),
 	)
 	return cmd
 }
