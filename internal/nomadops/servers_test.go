@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -62,6 +63,13 @@ func (s *stub) IntroToken(context.Context, nomadops.IntroRequest) (secret.Secret
 		return nil, err
 	}
 	return secret.Secret("token"), nil
+}
+
+func (s *stub) CreateToken(context.Context, nomadops.TokenRequest) (nomadops.Token, error) {
+	if err := s.record("CreateToken"); err != nil {
+		return nomadops.Token{}, err
+	}
+	return nomadops.Token{Accessor: "accessor", Secret: secret.Secret("token")}, nil
 }
 
 func (s *stub) Nodes(context.Context) ([]nomadops.Node, error) {
@@ -190,6 +198,10 @@ func TestServersEveryMethodMovesOn(t *testing.T) {
 			_, err := a.IntroToken(ctx, nomadops.IntroRequest{NodeName: "n", NodePool: "default", TTL: time.Minute})
 			return err
 		},
+		"CreateToken": func(ctx context.Context, a nomadops.API) error {
+			_, err := a.CreateToken(ctx, nomadops.TokenRequest{Name: "n", TTL: time.Hour})
+			return err
+		},
 		"Nodes":  func(ctx context.Context, a nomadops.API) error { _, err := a.Nodes(ctx); return err },
 		"Health": func(ctx context.Context, a nomadops.API) error { _, err := a.Health(ctx); return err },
 		"Peers":  func(ctx context.Context, a nomadops.API) error { _, err := a.Peers(ctx); return err },
@@ -264,6 +276,11 @@ func (r ctxRecorder) Bootstrap(ctx context.Context, s secret.Secret) error {
 func (r ctxRecorder) IntroToken(ctx context.Context, req nomadops.IntroRequest) (secret.Secret, error) {
 	r.record(ctx)
 	return r.API.IntroToken(ctx, req)
+}
+
+func (r ctxRecorder) CreateToken(ctx context.Context, req nomadops.TokenRequest) (nomadops.Token, error) {
+	r.record(ctx)
+	return r.API.CreateToken(ctx, req)
 }
 
 func (r ctxRecorder) Nodes(ctx context.Context) ([]nomadops.Node, error) {
@@ -452,6 +469,111 @@ func TestWaitLeaderOverServers(t *testing.T) {
 	})
 }
 
+// A token whose answer was lost is made again on the next server, and the cluster holds both tokens.
+func TestServersCreateTokenMovesOnAfterALostAnswer(t *testing.T) {
+	f := nomadfake.New()
+	f.SetLeader(leaderAddr)
+	s := fakeServers(t, f, pki.NewBootstrapSecret(), nil)
+	if err := s.Bootstrap(t.Context(), pki.NewBootstrapSecret()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	f.LoseResponse(t, "CreateToken")
+	req := nomadops.TokenRequest{Name: "tent export nomad ana@laptop", TTL: time.Hour}
+
+	got, err := s.CreateToken(t.Context(), req)
+
+	if err != nil || len(got.Secret) == 0 {
+		t.Fatalf("CreateToken: %v", err)
+	}
+	if want := []string{addr1, addr2}; !slices.Equal(callServers(f, "CreateToken"), want) {
+		t.Errorf("servers of the CreateToken calls = %v, want %v", callServers(f, "CreateToken"), want)
+	}
+	issued := f.Issued()
+	if len(issued) != 2 || issued[1].Accessor != got.Accessor || issued[0].Accessor == got.Accessor {
+		t.Errorf("issued = %+v, want the lost token and then the returned one %s", issued, got.Accessor)
+	}
+	if last := s.Last(); last != addr2 {
+		t.Errorf("Last() = %q, want %s", last, addr2)
+	}
+}
+
+// callServers returns the servers of the calls of the API method name, in order.
+func callServers(f *nomadfake.Fake, name string) []string {
+	var out []string
+	for _, c := range f.Calls() {
+		if c.Name == name {
+			out = append(out, c.Server)
+		}
+	}
+	return out
+}
+
+func TestServersLastIsTheFirstServerBeforeAnyCall(t *testing.T) {
+	s := servers(t, &stub{}, &stub{})
+
+	if got := s.Last(); got != addr1 {
+		t.Errorf("Last() = %q before any call, want %s", got, addr1)
+	}
+}
+
+func TestServersLastFollowsTheServerThatAnswered(t *testing.T) {
+	a, b := &stub{err: notReady("/p")}, &stub{}
+	s := servers(t, a, b)
+	if _, err := s.Leader(t.Context()); err != nil {
+		t.Fatalf("Leader: %v", err)
+	}
+	if got := s.Last(); got != addr2 {
+		t.Errorf("Last() = %q after the second server answered, want %s", got, addr2)
+	}
+	a.err, b.err = nil, notReady("/p")
+
+	if _, err := s.Leader(t.Context()); err != nil {
+		t.Fatalf("Leader: %v", err)
+	}
+
+	if got := s.Last(); got != addr1 {
+		t.Errorf("Last() = %q after the first server answered, want %s", got, addr1)
+	}
+}
+
+// A call that ends with an error that is not ErrNotReady leaves Last as it was, and the next call starts there.
+func TestServersLastStaysAfterAPermanentError(t *testing.T) {
+	permanent := errors.New("forbidden")
+	a, b := &stub{err: notReady("/p")}, &stub{err: permanent}
+	s := servers(t, a, b)
+
+	if _, err := s.Leader(t.Context()); !errors.Is(err, permanent) {
+		t.Fatalf("Leader() error = %v, want the permanent error", err)
+	}
+
+	if got := s.Last(); got != addr1 {
+		t.Errorf("Last() = %q after a permanent error of the second server, want %s", got, addr1)
+	}
+	a.err, b.err = nil, nil
+	if _, err := s.Leader(t.Context()); err != nil {
+		t.Fatalf("Leader: %v", err)
+	}
+	wantStubCalls(t, a, "Leader", "Leader")
+	wantStubCalls(t, b, "Leader")
+}
+
+func TestServersLastStaysWhenNoServerIsReady(t *testing.T) {
+	a, b := &stub{err: notReady("/p")}, &stub{}
+	s := servers(t, a, b)
+	if _, err := s.Leader(t.Context()); err != nil {
+		t.Fatalf("Leader: %v", err)
+	}
+	b.err = notReady("/p")
+
+	if _, err := s.Leader(t.Context()); !errors.Is(err, nomadops.ErrNotReady) {
+		t.Fatalf("Leader() error = %v, want ErrNotReady", err)
+	}
+
+	if got := s.Last(); got != addr2 {
+		t.Errorf("Last() = %q after a call that no server answered, want %s", got, addr2)
+	}
+}
+
 func TestServersConcurrentUse(t *testing.T) {
 	a, b := &stub{err: notReady("/p")}, &stub{}
 	s := servers(t, a, b)
@@ -461,6 +583,9 @@ func TestServersConcurrentUse(t *testing.T) {
 			for range 5 {
 				if _, err := s.Leader(t.Context()); err != nil {
 					t.Errorf("Leader: %v", err)
+				}
+				if got := s.Last(); got != addr1 && got != addr2 {
+					t.Errorf("Last() = %q, want one of the servers", got)
 				}
 			}
 		})
