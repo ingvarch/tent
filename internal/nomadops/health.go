@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/netip"
 
 	"github.com/hashicorp/nomad/api"
 )
@@ -15,6 +16,21 @@ const healthPath = "/v1/operator/autopilot/health"
 type Health struct {
 	Healthy bool // every server is healthy
 	Voters  int  // how many servers vote in Raft
+	// Servers are the report's servers, in the report's order, which Nomad changes between calls: find a server by
+	// its address or name.
+	Servers []ServerHealth
+}
+
+// ServerHealth is autopilot's view of one server.
+type ServerHealth struct {
+	Name string // as Nomad names it, <name>.<region>
+	// Address is the server's Raft address; invalid when Nomad gives none that parses.
+	Address netip.AddrPort
+	Serf    string // Serf's status of the server, as Nomad gives it, such as alive, left or failed
+	Healthy bool   // autopilot counts the server healthy
+	Voter   bool   // the server votes in Raft
+	Leader  bool   // the server leads
+	Version string // the Nomad version the server runs
 }
 
 // Health returns autopilot's view of the servers. An unhealthy cluster is a Health, not an error, although Nomad
@@ -36,7 +52,13 @@ func (c *Client) Health(ctx context.Context) (Health, error) {
 	if err != nil {
 		return Health{}, err
 	}
-	return Health{Healthy: reply.Healthy, Voters: len(reply.Voters)}, nil
+	h := Health{Healthy: reply.Healthy, Voters: len(reply.Voters)}
+	for _, sv := range reply.Servers {
+		addr, _ := netip.ParseAddrPort(sv.Address) // the invalid AddrPort when it does not parse
+		h.Servers = append(h.Servers, ServerHealth{Name: sv.Name, Address: addr, Serf: sv.SerfStatus,
+			Healthy: sv.Healthy, Voter: sv.Voter, Leader: sv.Leader, Version: sv.Version})
+	}
+	return h, nil
 }
 
 // isReport reports whether r is autopilot's report: it names servers, voters or a leader.

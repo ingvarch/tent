@@ -25,6 +25,9 @@ import (
 	"github.com/ingvarch/tent/internal/secrettest"
 )
 
+// equateAddrs lets cmp compare the addresses of nodes, peers and a Health.
+var equateAddrs = cmpopts.EquateComparable(netip.Addr{}, netip.AddrPort{})
+
 // leader is the RPC address of the leader of the tests' cluster.
 const leader = "10.0.0.5:4647"
 
@@ -227,7 +230,7 @@ func TestNewCluster(t *testing.T) {
 	if nodes, err := a.Nodes(t.Context()); err != nil || len(nodes) != 0 {
 		t.Errorf("Nodes() = %v, %v; want none", nodes, err)
 	}
-	if h, err := a.Health(t.Context()); err != nil || h != (nomadops.Health{}) {
+	if h, err := a.Health(t.Context()); err != nil || !cmp.Equal(h, nomadops.Health{}, equateAddrs) {
 		t.Errorf("Health() = %+v, %v; want the zero Health", h, err)
 	}
 	if peers, err := a.Peers(t.Context()); err != nil || len(peers) != 0 {
@@ -443,7 +446,7 @@ func TestNodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Nodes: %v", err)
 	}
-	if diff := cmp.Diff(want, got, cmpopts.EquateComparable(netip.Addr{})); diff != "" {
+	if diff := cmp.Diff(want, got, equateAddrs); diff != "" {
 		t.Errorf("Nodes() (-want +got):\n%s", diff)
 	}
 	got[0].Status = "down"
@@ -473,7 +476,7 @@ func TestRegisterListsOneNameAtTwoAddresses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Nodes: %v", err)
 	}
-	if diff := cmp.Diff(want, got, cmpopts.EquateComparable(netip.Addr{})); diff != "" {
+	if diff := cmp.Diff(want, got, equateAddrs); diff != "" {
 		t.Errorf("Nodes() (-want +got):\n%s", diff)
 	}
 }
@@ -497,7 +500,7 @@ func TestPeers(t *testing.T) {
 		{Name: "prod-servers-0.eu", Address: netip.MustParseAddrPort("10.64.0.3:4647"), Voter: true},
 		{Name: "prod-servers-1.eu", Address: netip.MustParseAddrPort("10.64.0.4:4647")},
 	}
-	if diff := cmp.Diff(want, got, cmpopts.EquateComparable(netip.AddrPort{}, netip.Addr{})); diff != "" {
+	if diff := cmp.Diff(want, got, equateAddrs); diff != "" {
 		t.Errorf("Peers() (-want +got):\n%s", diff)
 	}
 	got[0].Voter = false
@@ -514,15 +517,47 @@ func TestPeers(t *testing.T) {
 
 func TestHealth(t *testing.T) {
 	f, a := newBootstrappedAPI(t)
-	if got, err := a.Health(t.Context()); err != nil || got != (nomadops.Health{}) {
+	if got, err := a.Health(t.Context()); err != nil || !cmp.Equal(got, nomadops.Health{}, equateAddrs) {
 		t.Errorf("Health() of a new fake = %+v, %v; want the zero Health", got, err)
 	}
-	want := nomadops.Health{Healthy: true, Voters: 3}
+	want := nomadops.Health{Healthy: true, Voters: 3, Servers: []nomadops.ServerHealth{
+		{Name: "prod-servers-0.eu", Serf: "alive", Healthy: true, Voter: true, Leader: true, Version: "2.0.7"},
+		{Name: "prod-servers-1.eu", Serf: "left", Version: "2.0.7"}}}
 	f.SetHealth(want)
-	if got, err := a.Health(t.Context()); err != nil || got != want {
+	if got, err := a.Health(t.Context()); err != nil || !cmp.Equal(got, want, equateAddrs) {
 		t.Errorf("Health() = %+v, %v; want %+v", got, err, want)
 	}
 	wantCalls(t, f, bootstrapCall, nomadfake.Call{Name: "Health"}, nomadfake.Call{Name: "Health"})
+}
+
+// TestHealthIsCopied checks that SetHealth and Health copy the servers: changing the Health that was set or the one
+// that was returned does not change the fake.
+func TestHealthIsCopied(t *testing.T) {
+	f, a := newBootstrappedAPI(t)
+	set := nomadops.Health{Servers: []nomadops.ServerHealth{{Name: "prod-servers-0.eu", Serf: "alive"}}}
+	f.SetHealth(set)
+	set.Servers[0].Serf = "failed"
+	got, _ := a.Health(t.Context())
+	if got.Servers[0].Serf != "alive" {
+		t.Errorf("changing the Health that was set changed the fake: %+v", got.Servers)
+	}
+	got.Servers[0].Serf = "left"
+	if again, _ := a.Health(t.Context()); again.Servers[0].Serf != "alive" {
+		t.Errorf("changing a returned Health changed the fake: %+v", again.Servers)
+	}
+}
+
+// TestRegisterKeepsTheVersion checks that a node lists the Nomad version that it was registered with, and that a
+// second registration of the node replaces it.
+func TestRegisterKeepsTheVersion(t *testing.T) {
+	f, a := newBootstrappedAPI(t)
+	f.Register(nomadops.Node{Name: "prod-workers-0", Status: "ready", Version: "2.0.6"})
+	f.Register(nomadops.Node{Name: "prod-workers-1", Status: "ready", Version: "2.0.7"})
+	f.Register(nomadops.Node{Name: "prod-workers-0", Status: "ready", Version: "2.0.7"})
+	nodes, err := a.Nodes(t.Context())
+	if err != nil || len(nodes) != 2 || nodes[0].Version != "2.0.7" || nodes[1].Version != "2.0.7" {
+		t.Errorf("Nodes() = %+v, %v; want two nodes of version 2.0.7", nodes, err)
+	}
 }
 
 // TestContextEnded checks that a call whose context has ended fails as the client's does, reaches nothing and is not
