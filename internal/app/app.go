@@ -140,6 +140,12 @@ func (s *Service) change(ctx context.Context, l statestore.Layout, op string, ap
 const openAPIWarning = "spec.access.api lets the whole internet reach the Nomad API (port 4646); mTLS and ACLs " +
 	"protect it; narrow it with --api-access or spec.access.api"
 
+// combinedWarning returns the warning about the combined node group called name.
+func combinedWarning(name string) string {
+	return "node group " + name + " is combined: its nodes run the Nomad servers and the workloads together, " +
+		"which is meant for development and small clusters; workloads share them with Raft and the gossip key"
+}
+
 // warn tells OnWarning each warning, when it is set.
 func (s *Service) warn(warnings ...string) {
 	if s.OnWarning == nil {

@@ -225,17 +225,29 @@ func testAssets() assets.Options {
 // with the token of the first client that is made, which is the secret that tent holds, as that of a cluster that an
 // earlier run built. It does not follow the cloud, and the CLI tests check output, not the order of the calls.
 func staticNomad() func(nomadops.Config) (nomadops.API, error) {
+	return nomadOf("servers", "workers", 6)
+}
+
+// combinedNomad returns the Nomad factory of staticNomad for a cluster of the combined node group nodes: its three
+// servers and clients are the same machines, at 10.64.0.3 to 10.64.0.5.
+func combinedNomad() func(nomadops.Config) (nomadops.API, error) {
+	return nomadOf("nodes", "nodes", 3)
+}
+
+// nomadOf returns the Nomad factory of staticNomad for servers in the node group servers, and three clients of the
+// node group clients that have the private addresses 10.64.0.<first> and the two that follow.
+func nomadOf(servers, clients string, first byte) func(nomadops.Config) (nomadops.API, error) {
 	f := nomadfake.New()
 	f.SetLeader("10.64.0.3:4647")
 	f.SetHealth(nomadops.Health{Healthy: true, Voters: 3})
 	var peers []nomadops.Peer
 	for i := range 3 {
 		f.Register(nomadops.Node{
-			Name: fmt.Sprintf("prod-workers-%d", i), Status: "ready", Eligible: true,
-			Address: netip.AddrFrom4([4]byte{10, 64, 0, byte(6 + i)}),
+			Name: fmt.Sprintf("prod-%s-%d", clients, i), Status: "ready", Eligible: true,
+			Address: netip.AddrFrom4([4]byte{10, 64, 0, first + byte(i)}),
 		})
 		peers = append(peers, nomadops.Peer{
-			Name:    fmt.Sprintf("prod-servers-%d.global", i),
+			Name:    fmt.Sprintf("prod-%s-%d.global", servers, i),
 			Address: netip.AddrPortFrom(netip.AddrFrom4([4]byte{10, 64, 0, byte(3 + i)}), 4647), Voter: true,
 		})
 	}
@@ -345,6 +357,11 @@ func wantOK(t *testing.T, got result, out string) {
 // as the test cluster does.
 const openAPIWarning = "WARNING: spec.access.api lets the whole internet reach the Nomad API (port 4646); mTLS and " +
 	"ACLs protect it; narrow it with --api-access or spec.access.api\n"
+
+// combinedWarning is what a create warns when the cluster has the combined node group nodes that create cluster
+// --combined makes.
+const combinedWarning = "WARNING: node group nodes is combined: its nodes run the Nomad servers and the workloads " +
+	"together, which is meant for development and small clusters; workloads share them with Raft and the gossip key\n"
 
 // wantDone fails the test unless tent succeeded, wrote out, and warned that the Nomad API is open.
 func wantDone(t *testing.T, got result, out string) {

@@ -104,3 +104,101 @@ func TestUpdateWarnsWhenTheAPIIsOpen(t *testing.T) {
 		wantWarnings("an update of a cluster with a narrow API", 1)
 	})
 }
+
+// combinedWarning is the warning about the test cluster's combined node group all.
+const combinedWarning = "node group all is combined: its nodes run the Nomad servers and the workloads together, " +
+	"which is meant for development and small clusters; workloads share them with Raft and the gossip key"
+
+// TestCombinedWarning tells OnWarning when a change leaves a cluster with a combined group, and only after it
+// applies the change.
+func TestCombinedWarning(t *testing.T) {
+	narrow := edit(t, clusterYAML, "region: ams", "region: ams\n  access:\n    api: [203.0.113.0/24]")
+	var got []string
+	newCombined := func(t *testing.T) *app.Service {
+		svc, _ := newService(t)
+		svc.OnWarning = func(w string) { got = append(got, w) }
+		got = nil
+		return svc
+	}
+	wantTold := func(step string, want int) {
+		t.Helper()
+		if n := len(got); n != want {
+			t.Errorf("after %s, OnWarning was called %d times (%q), want %d", step, n, got, want)
+		}
+		for _, w := range got {
+			if w != combinedWarning {
+				t.Errorf("after %s, warning %q, want %q", step, w, combinedWarning)
+			}
+		}
+		got = nil
+	}
+
+	t.Run("create", func(t *testing.T) {
+		svc := newCombined(t)
+		if _, err := svc.Create(t.Context(), decode(t, narrow, combinedYAML), false); err != nil {
+			t.Fatalf("Create without apply: %v", err)
+		}
+		wantTold("a create without apply", 0)
+		mustCreate(t, svc, narrow, combinedYAML)
+		wantTold("a create", 1)
+	})
+	t.Run("replace", func(t *testing.T) {
+		svc := newCombined(t)
+		mustCreate(t, svc, narrow, edit(t, combinedYAML, "role: combined", "role: server"))
+		wantTold("a create without a combined group", 0)
+		if _, err := svc.Replace(t.Context(), decode(t, combinedYAML), false); err != nil {
+			t.Fatalf("Replace without apply: %v", err)
+		}
+		wantTold("a replace without apply", 0)
+		mustReplace(t, svc, combinedYAML)
+		wantTold("a replace of a node group", 1)
+	})
+	t.Run("save", func(t *testing.T) {
+		svc := newCombined(t)
+		mustCreate(t, svc, narrow, combinedYAML)
+		got = nil
+		ref := load(t, svc, v1alpha1.KindNodeGroup, "all")
+		bigger := decode(t, edit(t, combinedYAML, "size: 3", "size: 5"))
+		if _, err := svc.Save(t.Context(), ref, bigger, false); err != nil {
+			t.Fatalf("Save without apply: %v", err)
+		}
+		wantTold("a save without apply", 0)
+		if _, err := svc.Save(t.Context(), ref, bigger, true); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		wantTold("a save", 1)
+	})
+}
+
+// TestUpdateWarnsOfACombinedGroup tells OnWarning once, before the first change, when an update applies changes to a
+// cluster with a combined group, and never for a plan.
+func TestUpdateWarnsOfACombinedGroup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		svc, _, _ := newRelease(t, edit(t, keyedClusterYAML, "region: ams", "region: ams\n  access:\n"+
+			"    api: [203.0.113.0/24]"), combinedYAML)
+		var events []string
+		svc.OnWarning = func(w string) { events = append(events, "warning: "+w) }
+		svc.OnProgress = func(p app.Progress) { events = append(events, progressLine(p)) }
+
+		if _, err := svc.Update(t.Context(), "prod", false); err != nil {
+			t.Fatalf("Update without apply: %v", err)
+		}
+		if len(events) != 0 {
+			t.Fatalf("a plan told %q, want nothing", events)
+		}
+		mustUpdate(t, svc)
+		if len(events) < 2 || events[0] != "warning: "+combinedWarning {
+			t.Fatalf("the events start with %q, want the warning before the first change", events[:min(2, len(events))])
+		}
+		for _, e := range events[1:] {
+			if e == "warning: "+combinedWarning {
+				t.Errorf("the update told the combined warning more than once")
+			}
+		}
+		events = nil
+		mustUpdate(t, svc)
+		if len(events) != 0 {
+			t.Errorf("an update without changes told %q, want nothing", events)
+		}
+	})
+}

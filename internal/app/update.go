@@ -264,7 +264,7 @@ func (s *Service) planUpdate(ctx context.Context, l statestore.Layout, cache ass
 	plan.Nomad = planNomad(m, plan.Nodes, found.servers, marked)
 	u := updateRun{
 		plan: plan, cluster: m.Name, layout: l, region: objs.Cluster.Spec.Nomad.Region, nodes: p.Nodes(),
-		secrets: secrets, completed: completed, warnings: s.updateWarnings(objs.Cluster, ch),
+		secrets: secrets, completed: completed, warnings: s.updateWarnings(objs.Cluster, objs.NodeGroups, ch),
 		servers: found.servers, listed: found.listed, staleMark: marked && plan.Nomad != nil && plan.Nomad.Bootstrap,
 	}
 	if !changesNodes(plan.Nodes) {
@@ -281,8 +281,8 @@ func (s *Service) planUpdate(ctx context.Context, l statestore.Layout, cache ass
 
 // updateWarnings returns the warnings about the cluster c that an update tells before its first change: those of every
 // change, and that of development variables that a release build ignores.
-func (s *Service) updateWarnings(c *v1alpha1.Cluster, ch *channels.Channel) []string {
-	w := warnings(c, ch)
+func (s *Service) updateWarnings(c *v1alpha1.Cluster, groups []*v1alpha1.NodeGroup, ch *channels.Channel) []string {
+	w := warnings(c, groups, ch)
 	if dev := devVariablesWarning(s.Version, s.Assets); dev != "" {
 		w = append(w, dev)
 	}
