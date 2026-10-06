@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
@@ -55,10 +56,15 @@ func firewallGroupKey(cluster, role string) engine.Key {
 
 // Provider provisions a cluster's infrastructure and its machines on Vultr. It reaches Vultr only through an API.
 type Provider struct {
-	api       API
-	log       *slog.Logger
-	opID      func() string // returns a new operation id for a create
-	pollEvery time.Duration // the wait between two reads of an instance that is not ready yet
+	api  API
+	log  *slog.Logger
+	opID func() string // returns a new operation id for a create
+	// pollEvery is the wait between two reads of an instance that is not ready yet, and between two sends of a create
+	// that the instance limit refuses.
+	pollEvery time.Duration
+
+	mu        sync.Mutex // guards deletedAt
+	deletedAt time.Time  // when Vultr last accepted a delete of a machine; zero when it has not
 }
 
 var _ cloud.Provider = (*Provider)(nil)
@@ -82,11 +88,12 @@ func withOpIDs(next func() string) ProviderOption {
 	return func(p *Provider) { p.opID = next }
 }
 
-// pollInterval is how long the provider waits between two reads of an instance that is not ready yet.
+// pollInterval is how long the provider waits between two reads of an instance that is not ready yet, and between two
+// sends of a create that the instance limit refuses.
 const pollInterval = 5 * time.Second
 
-// withPollInterval makes the provider wait d between two reads of an instance that is not ready yet. The default is
-// pollInterval.
+// withPollInterval makes the provider wait d between two reads of an instance that is not ready yet, and between two
+// sends of a create that the instance limit refuses. The default is pollInterval.
 func withPollInterval(d time.Duration) ProviderOption {
 	return func(p *Provider) { p.pollEvery = d }
 }
@@ -145,4 +152,25 @@ func (p *Provider) InfraKinds() []engine.Kind {
 		kinds[i] = engine.Kind{Name: name, Deleter: deleters[name]}
 	}
 	return kinds
+}
+
+// limitSettle bounds how long after a delete Vultr may still count the deleted machine against the account's
+// instance limit, so how long the provider sends a refused create again. In one run Vultr refused a create that came
+// within 11 seconds of a delete; in another the machine that replaced a deleted one was created as fast as any
+// (2026-10-06). The bound leaves room for a delete that takes longer.
+const limitSettle = 2 * time.Minute
+
+// noteDelete records that Vultr has just accepted the delete of a machine.
+func (p *Provider) noteDelete() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.deletedAt = time.Now()
+}
+
+// limitMayBeStale reports whether less than limitSettle has passed since the last delete that Vultr accepted, so that
+// an instance limit error may come from the machine that delete removed and still counted.
+func (p *Provider) limitMayBeStale() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.deletedAt.IsZero() && time.Since(p.deletedAt) < limitSettle
 }

@@ -95,8 +95,11 @@ func (p *Provider) listedAddress(ctx context.Context, id string) (addr netip.Add
 //   - After a create without an answer (ErrUnavailable), or with an answer that holds no instance id, it searches
 //     again and adopts what it finds. When the search fails or lists nothing yet, the error matches ErrUnavailable,
 //     and a Create with the same operation id searches before it creates.
-//   - An ErrLimitReached error tells how to raise the account's limit. Any other error of the create is returned as
-//     it is.
+//   - A create that Vultr refuses with ErrLimitReached is sent again, after the poll interval, while less than 2
+//     minutes have passed since a delete that Vultr accepted on this provider, because Vultr counts a machine it has
+//     just deleted against the limit for a short time. The refused create made no instance, so sending it again is
+//     safe. A limit that holds on, or one without such a delete, is returned with a note on how to raise the
+//     account's limit. Any other error of the create is returned as it is.
 //
 // The machine joins the copies that Inventory keeps: the cluster's VPC, the servers' firewall group for a server or
 // combined node or the clients' group for a client node, and all the cluster's SSH keys. Its label and hostname are
@@ -224,7 +227,7 @@ var errNoInstanceID = errors.New("the answer holds no instance id")
 // matches ErrUnavailable. An ErrLimitReached error tells how to raise the limit.
 func (p *Provider) sendCreate(ctx context.Context, r *govultr.InstanceCreateReq, req cloud.CreateRequest,
 	labels cloud.Labels) (taggedInstance, error) {
-	in, err := p.api.CreateInstance(ctx, r)
+	in, err := p.postCreate(ctx, r)
 	switch {
 	case err == nil && (in == nil || in.ID == ""):
 		err = NewNoAnswerError(http.MethodPost, "/v2/instances", errNoInstanceID)
@@ -245,6 +248,37 @@ func (p *Provider) sendCreate(ctx context.Context, r *govultr.InstanceCreateReq,
 		return taggedInstance{}, fmt.Errorf("%w; %w", err, nerr)
 	}
 	return n, nil
+}
+
+// postCreate sends r once, and sends it again after the provider's poll interval while the instance limit refuses it
+// and less than limitSettle has passed since a delete that Vultr accepted: Vultr counts a machine it has just deleted
+// against the limit for a short time. A create that the limit refuses made no instance, so sending it again cannot make
+// a second one. Any other outcome, and a limit that holds on past the window, is returned as it is. It logs the first
+// refusal that it answers so. When ctx ends during a wait, the error matches ctx's error.
+func (p *Provider) postCreate(ctx context.Context, r *govultr.InstanceCreateReq) (*govultr.Instance, error) {
+	for first := true; ; first = false {
+		in, err := p.api.CreateInstance(ctx, r)
+		if !errors.Is(err, ErrLimitReached) || !p.limitMayBeStale() {
+			return in, err
+		}
+		if first {
+			p.log.InfoContext(ctx, "the instance limit refused a create right after a delete; sending it again",
+				"node", r.Label)
+		}
+		if err := p.pause(ctx); err != nil {
+			return nil, fmt.Errorf("wait to send the create again: %w", err)
+		}
+	}
+}
+
+// pause waits the provider's poll interval. It returns ctx's error when ctx ends first.
+func (p *Provider) pause(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(p.pollEvery):
+		return nil
+	}
 }
 
 // findByOp returns the cluster's instance whose tags carry the operation id of req, and whether there is one. Of
@@ -350,10 +384,8 @@ func (p *Provider) waitReady(ctx context.Context, n taggedInstance) (cloud.Insta
 				return n.cloudInstance(addr), nil
 			}
 		}
-		select {
-		case <-ctx.Done():
-			return cloud.Instance{}, ctx.Err()
-		case <-time.After(p.pollEvery):
+		if err := p.pause(ctx); err != nil {
+			return cloud.Instance{}, err
 		}
 	}
 }
@@ -410,7 +442,11 @@ func (p *Provider) Stop(ctx context.Context, node cloud.Instance) error {
 
 // Delete destroys the machine node at once, even while it runs. A machine that is gone counts as deleted.
 func (p *Provider) Delete(ctx context.Context, node cloud.Instance) error {
-	return nodeResult(p.api.DeleteInstance(ctx, node.ID), "delete", node)
+	err := p.api.DeleteInstance(ctx, node.ID)
+	if err == nil {
+		p.noteDelete()
+	}
+	return nodeResult(err, "delete", node)
 }
 
 // scrubbedUserData replaces a node's user data once the node has joined the cluster. It holds no secrets and no
