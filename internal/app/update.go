@@ -110,13 +110,21 @@ func (s NodeStep) String() string {
 //
 // A node that is created or waited for with an operation id boots with the NodeConfig of its group. A plan that does so
 // reads the release files that the nodes download, and fails when a node's user data does not fit what a provider
-// takes. A machine of any role that has not joined its cluster, which carries no joined label, is waited for until its
-// node joins and its user data is scrubbed; the wait repeats the create only for a machine that the cloud reports not
-// ready. A plan that deletes a machine that carries the joined label fails, with and without apply, before it changes
-// anything, and names each such machine. The Nomad step is part of the plan until the store holds the mark of the ACL
-// bootstrap, and also, with the mark, when no server or combined machine of the cluster is left: the servers that come
-// are a new Nomad, so it bootstraps again. After the bootstrap it is part of the plan when the plan creates or waits
-// for a server or combined node. Without apply, or when nothing changes, Update returns the plan and writes nothing.
+// takes. A machine of any role without the joined label counts as not joined, and is waited for until its node joins
+// and its user data is scrubbed; the wait repeats the create only for a machine that the cloud reports not ready. A
+// client that has not joined and is older than the lifetime of its intro token, 31 minutes, may never have
+// registered: when a server that stays has joined, the plan asks Nomad once, through those servers, about every such
+// client of the cluster, whatever the plan does with it. A machine for which Nomad lists no node of its name and
+// private address that is not down never registered. When its group is in the specs, a machine of its name whose group
+// is in the specs too stays before it if that machine has joined, is not among those that never registered, or is
+// older, and it then goes as a duplicate; otherwise it is deleted as not registered, does not count toward its group
+// and frees its name for a create. A plan that cannot ask fails, with and without apply, before it changes anything;
+// without a joined server it does not ask, and such a client that stays is waited for. A plan that deletes a machine
+// that carries the joined label fails, with and without apply, before it changes anything, and names each such machine.
+// The Nomad step is part of the plan until the store holds the mark of the ACL bootstrap, and also, with the mark, when
+// no server or combined machine of the cluster is left: the servers that come are a new Nomad, so it bootstraps again.
+// After the bootstrap it is part of the plan when the plan creates or waits for a server or combined node. Without
+// apply, or when nothing changes, Update returns the plan and writes nothing.
 //
 // With apply it takes the cluster's lock and plans again under it. When that plan has changes, it calls OnUpdatePlan
 // with it, then OnWarning with each warning about the cluster, such as a Nomad API that the whole internet may reach or
@@ -124,18 +132,20 @@ func (s NodeStep) String() string {
 // completed spec, and applies the plan in this order: the infrastructure's changes other than its deletes; the deletion
 // of a stale mark of the bootstrap; the waits that repeat a create, then the creates, of the server and combined nodes;
 // the Nomad step, which waits for a leader, bootstraps the ACL system with the stored secret, waits for healthy servers
-// that all vote, reads the Raft configuration, and then, for each server and combined node of the plan in order, waits
-// for a combined node to register, checks that its server votes at its private address, and replaces its user data with
-// a stub and labels its machine as joined, and last writes the mark; then the waits for client nodes and the creates of
-// the missing ones, each client booting with an intro token, registering, and then being scrubbed and labelled as a
-// server is, before the next is made; a wait for a client without an operation id asks for no token and calls no cloud
-// until the scrub; the node deletes, each after Nomad says that its machine has not joined, as a client of its name and
-// private address that is not down or as a server of the Raft configuration, else the machine is scrubbed and labelled
-// and the update fails; and the infrastructure's deletes, so that a firewall group goes only once its nodes are gone.
-// Nodes are created one at a time. A create, a wait and each wait of the Nomad step may take 10 minutes, and a scrub 5.
-// The first step that fails stops the update, and running it again finishes the job. It returns the plan it applied,
-// made under the lock, with the error; the plan says Applied once every step has succeeded, or at once when it has no
-// changes.
+// that all vote, reads the Raft configuration when the plan has a server or combined change, and then, for each server
+// and combined node of the plan in order, waits for a combined node to register, checks that its server votes at its
+// private address, and replaces its user data with a stub and labels its machine as joined, and last writes the mark;
+// then the waits for client nodes, the deletes of the clients that never registered and the creates of the missing
+// clients, each client booting with an intro token, registering, and then being scrubbed and labelled as a server is,
+// before the next is made; a wait for a client without an operation id asks for no token and calls no cloud until the
+// scrub; then the other node deletes. Each delete of a machine with a private address follows Nomad's answer that it
+// has not joined, as a client of its name and private address that is not down or as a server of the Raft
+// configuration, else the machine is scrubbed and labelled and the update fails; a machine without a private address
+// counts as not joined, and its delete asks Nomad nothing. Last come the infrastructure's deletes, so that a firewall
+// group goes only once its nodes are gone. Nodes are created one at a time. A create, a wait and each wait of the Nomad
+// step may take 10 minutes, and a scrub 5. The first step that fails stops the update, and running it again finishes
+// the job. It returns the plan it applied, made under the lock, with the error; the plan says Applied once every step
+// has succeeded, or at once when it has no changes.
 func (s *Service) Update(ctx context.Context, cluster string, apply bool) (_ UpdatePlan, err error) {
 	defer func() { err = stopped(ctx, err) }()
 	l, err := s.layout(ctx, cluster)
@@ -238,7 +248,8 @@ func (s *Service) planUpdate(ctx context.Context, l statestore.Layout, cache ass
 	if err != nil {
 		return updateRun{}, err
 	}
-	plan, found, err := planChanges(ctx, p, m)
+	access := nomadAccess{cluster: m.Name, region: objs.Cluster.Spec.Nomad.Region, secrets: secrets}
+	plan, found, err := s.planChanges(ctx, p, m, access)
 	if err != nil {
 		return updateRun{}, err
 	}
@@ -356,8 +367,10 @@ type machines struct {
 }
 
 // planChanges plans the changes that bring the cloud to the model m: those of the infrastructure, from a fresh
-// inventory, and those of the nodes, from a fresh list of the machines. It also returns the machines it planned over.
-func planChanges(ctx context.Context, p cloud.Provider, m *model.Cluster) (UpdatePlan, machines, error) {
+// inventory, and those of the nodes, from a fresh list of the machines, which it asks Nomad about when a client may
+// never have registered. It also returns the machines it planned over.
+func (s *Service) planChanges(ctx context.Context, p cloud.Provider, m *model.Cluster, access nomadAccess,
+) (UpdatePlan, machines, error) {
 	snap, err := p.Inventory(ctx, m.Name)
 	if err != nil {
 		return UpdatePlan{}, machines{}, err
@@ -374,7 +387,15 @@ func planChanges(ctx context.Context, p cloud.Provider, m *model.Cluster) (Updat
 	if err != nil {
 		return UpdatePlan{}, machines{}, err
 	}
-	changes, servers := planNodes(m, instances)
+	changes, servers := planNodes(m, instances, nil)
+	stale := staleClients(m.Name, instances, s.now())
+	gone, err := s.unregistered(ctx, access, stale, servers)
+	if err != nil {
+		return UpdatePlan{}, machines{}, err
+	}
+	if len(gone) > 0 {
+		changes, servers = planNodes(m, instances, gone)
+	}
 	return UpdatePlan{Infra: infra, Nodes: changes}, machines{servers: servers, listed: instances}, nil
 }
 

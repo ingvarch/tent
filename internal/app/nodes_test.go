@@ -565,7 +565,7 @@ func TestPlanNodes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &model.Cluster{Name: "prod", Groups: tc.groups}
 			instances := slices.Clone(tc.instances)
-			got, _ := planNodes(m, instances)
+			got, _ := planNodes(m, instances, nil)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("planNodes (-want +got):\n%s", diff)
 			}
@@ -573,7 +573,112 @@ func TestPlanNodes(t *testing.T) {
 				t.Errorf("planNodes changed the instances (-before +after):\n%s", diff)
 			}
 			slices.Reverse(instances)
-			reversed, _ := planNodes(m, instances)
+			reversed, _ := planNodes(m, instances, nil)
+			if diff := cmp.Diff(got, reversed); diff != "" {
+				t.Errorf("planNodes of the instances in reverse order (-in order +reversed):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestPlanNodesUnregistered plans the delete of the machines that never registered, with the reason not registered,
+// between the waits for clients and their creates: such a machine neither counts toward its group nor holds its name.
+func TestPlanNodesUnregistered(t *testing.T) {
+	s2, w3 := servers(2), workers(3)
+	fra := workers(2, "ams", "fra")
+	w0, w1, w2 := unjoined(member(w3, 0, "i-4", minutes(4))), unjoined(member(w3, 1, "i-5", minutes(5))),
+		unjoined(member(w3, 2, "i-6", minutes(6)))
+	s0, s1 := member(s2, 0, "i-1", minutes(1)), unjoined(member(s2, 1, "i-2", minutes(2)))
+	gone := unjoined(member(workers(1), 0, "i-9", minutes(9)))
+	gone.Group = "gone"
+	twin := changed(w1, func(in *cloud.Instance) { in.ID, in.Created = "i-7", minutes(7) })
+	for _, tc := range []struct {
+		name         string
+		groups       []model.NodeGroup
+		instances    []cloud.Instance
+		unregistered map[string]bool
+		want         []NodeChange
+	}{
+		{
+			name:         "the machine frees its name and its place",
+			groups:       []model.NodeGroup{workers(2)},
+			instances:    []cloud.Instance{member(workers(2), 0, "i-4", minutes(4)), w1},
+			unregistered: map[string]bool{"i-5": true},
+			want:         []NodeChange{wantDelete(w1, reasonNotRegistered), wantCreate(workers(2), 1, "ams")},
+		},
+		{
+			name:         "the delete follows the waits and precedes the creates, and the other deletes come last",
+			groups:       []model.NodeGroup{s2, w3},
+			instances:    []cloud.Instance{s0, s1, w0, w1, gone},
+			unregistered: map[string]bool{"i-5": true},
+			want: []NodeChange{
+				wantJoinWait(s2, s1), wantJoinWait(w3, w0), wantDelete(w1, reasonNotRegistered),
+				wantCreate(w3, 1, "ams"), wantCreate(w3, 2, "ams"), wantDelete(gone, reasonNotInSpec),
+			},
+		},
+		{
+			name:         "two machines, by name",
+			groups:       []model.NodeGroup{w3},
+			instances:    []cloud.Instance{w0, w1, w2},
+			unregistered: map[string]bool{"i-6": true, "i-4": true},
+			want: []NodeChange{
+				wantJoinWait(w3, w1), wantDelete(w0, reasonNotRegistered), wantDelete(w2, reasonNotRegistered),
+				wantCreate(w3, 0, "ams"), wantCreate(w3, 2, "ams"),
+			},
+		},
+		{
+			name:         "the zone count leaves it out",
+			groups:       []model.NodeGroup{fra},
+			instances:    []cloud.Instance{member(fra, 0, "i-4", minutes(4)), member(fra, 1, "i-5", minutes(5))},
+			unregistered: map[string]bool{"i-5": true},
+			want: []NodeChange{
+				wantDelete(member(fra, 1, "i-5", minutes(5)), reasonNotRegistered), wantCreate(fra, 1, "fra"),
+			},
+		},
+		{
+			name:         "of two machines that never registered the older goes as not registered, the younger as a duplicate",
+			groups:       []model.NodeGroup{workers(2)},
+			instances:    []cloud.Instance{member(workers(2), 0, "i-4", minutes(4)), w1, twin},
+			unregistered: map[string]bool{"i-5": true, "i-7": true},
+			want: []NodeChange{
+				wantDelete(w1, reasonNotRegistered), wantCreate(workers(2), 1, "ams"),
+				wantDelete(twin, reasonDuplicate),
+			},
+		},
+		{
+			name:         "a twin that registered stays, and the older machine that never did goes as a duplicate",
+			groups:       []model.NodeGroup{workers(2)},
+			instances:    []cloud.Instance{member(workers(2), 0, "i-4", minutes(4)), w1, twin},
+			unregistered: map[string]bool{"i-5": true},
+			want:         []NodeChange{wantJoinWait(workers(2), twin), wantDelete(w1, reasonDuplicate)},
+		},
+		{
+			name:   "a twin of a joined machine goes as a duplicate and the name stays taken",
+			groups: []model.NodeGroup{w3},
+			instances: []cloud.Instance{
+				member(w3, 0, "i-4", minutes(4)), member(w3, 1, "i-5", minutes(5)),
+				twin,
+			},
+			unregistered: map[string]bool{"i-7": true},
+			want:         []NodeChange{wantCreate(w3, 2, "ams"), wantDelete(twin, reasonDuplicate)},
+		},
+		{
+			name:         "an ID that no machine has changes nothing",
+			groups:       []model.NodeGroup{workers(2)},
+			instances:    []cloud.Instance{member(workers(2), 0, "i-4", minutes(4)), w1},
+			unregistered: map[string]bool{"i-99": true},
+			want:         []NodeChange{wantJoinWait(workers(2), w1)},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &model.Cluster{Name: "prod", Groups: tc.groups}
+			instances := slices.Clone(tc.instances)
+			got, _ := planNodes(m, instances, tc.unregistered)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("planNodes (-want +got):\n%s", diff)
+			}
+			slices.Reverse(instances)
+			reversed, _ := planNodes(m, instances, tc.unregistered)
 			if diff := cmp.Diff(got, reversed); diff != "" {
 				t.Errorf("planNodes of the instances in reverse order (-in order +reversed):\n%s", diff)
 			}
@@ -614,7 +719,7 @@ func TestPlanNodesServers(t *testing.T) {
 			[]cloud.Instance{s0, changed(s1, func(in *cloud.Instance) { in.Cluster = "dev" })}, []cloud.Instance{s0}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, got := planNodes(&model.Cluster{Name: "prod", Groups: tc.groups}, slices.Clone(tc.instances))
+			_, got := planNodes(&model.Cluster{Name: "prod", Groups: tc.groups}, slices.Clone(tc.instances), nil)
 			if diff := cmp.Diff(tc.want, got, cmpopts.EquateComparable(netip.Addr{})); diff != "" {
 				t.Errorf("the servers (-want +got):\n%s", diff)
 			}

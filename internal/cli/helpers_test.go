@@ -11,8 +11,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -25,6 +27,7 @@ import (
 	"github.com/ingvarch/tent/internal/cloud/vultr/vultrfake"
 	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/nomadops/nomadfake"
+	"github.com/ingvarch/tent/internal/secret"
 	"github.com/ingvarch/tent/internal/statestore"
 )
 
@@ -253,10 +256,47 @@ func runOn(t *testing.T, f *vultrfake.Fake, args ...string) result {
 // runProviders executes tent with args as Execute does, with the providers p.
 func runProviders(t *testing.T, p Providers, args ...string) result {
 	t.Helper()
+	return runWithNomad(t, p, staticNomad(), args...)
+}
+
+// runWithNomad executes tent with args as Execute does, with the providers p and the Nomad factory nomad.
+func runWithNomad(t *testing.T, p Providers, nomad func(nomadops.Config) (nomadops.API, error), args ...string) result {
+	t.Helper()
 	var out, errOut syncBuffer
 	code := executeTest(t.Context(), t, args, Streams{In: strings.NewReader(""), Out: &out, Err: &errOut},
-		WithProviders(p), WithAssets(testAssets()), WithNomad(staticNomad()))
+		WithProviders(p), WithAssets(testAssets()), WithNomad(nomad))
 	return result{code, out.String(), errOut.String()}
+}
+
+// lateNomad returns the Nomad factory of staticNomad, in which the node called name is listed only once a client has
+// asked for an intro token: the node of a machine that never registered, and then of the machine that replaces it.
+func lateNomad(name string) func(nomadops.Config) (nomadops.API, error) {
+	inner := staticNomad()
+	var introduced atomic.Bool
+	return func(cfg nomadops.Config) (nomadops.API, error) {
+		api, err := inner(cfg)
+		return &lateAPI{API: api, name: name, introduced: &introduced}, err
+	}
+}
+
+// lateAPI is a nomadops.API that lists the node called name only once introduced is set, which an intro token sets.
+type lateAPI struct {
+	nomadops.API
+	name       string
+	introduced *atomic.Bool
+}
+
+func (a *lateAPI) IntroToken(ctx context.Context, req nomadops.IntroRequest) (secret.Secret, error) {
+	a.introduced.Store(true)
+	return a.API.IntroToken(ctx, req)
+}
+
+func (a *lateAPI) Nodes(ctx context.Context) ([]nomadops.Node, error) {
+	nodes, err := a.API.Nodes(ctx)
+	if a.introduced.Load() {
+		return nodes, err
+	}
+	return slices.DeleteFunc(nodes, func(n nomadops.Node) bool { return n.Name == a.name }), err
 }
 
 // runOnCloud executes tent with args, its providers reaching a Vultr fake that holds nothing of the test cluster.

@@ -60,8 +60,10 @@ type nomadWorld struct {
 	hook     nomadHook
 	log      []nomadCall
 	configs  []nomadops.Config
-	withheld map[string]bool
-	noLeader bool
+	withheld map[string]bool // by node name
+	// withheldIDs keeps single machines from registering, by instance ID.
+	withheldIDs map[string]bool
+	noLeader    bool
 	// seen holds the ids of the server machines at the last call.
 	seen []string
 	// unhealthy keeps the servers from being healthy, whatever the instances show.
@@ -73,7 +75,9 @@ func withNomad(svc *app.Service, f *vultrfake.Fake) *nomadWorld { return withNom
 
 // withNomadOf gives svc the Nomad of the cluster called name, which follows f, and returns it.
 func withNomadOf(svc *app.Service, f *vultrfake.Fake, name string) *nomadWorld {
-	w := &nomadWorld{Fake: nomadfake.New(), cloud: f, svc: svc, name: name, withheld: map[string]bool{}}
+	w := &nomadWorld{
+		Fake: nomadfake.New(), cloud: f, svc: svc, name: name, withheld: map[string]bool{}, withheldIDs: map[string]bool{},
+	}
 	svc.Nomad = func(cfg nomadops.Config) (nomadops.API, error) {
 		w.mu.Lock()
 		w.configs = append(w.configs, cfg)
@@ -96,6 +100,16 @@ func (w *nomadWorld) Withhold(names ...string) {
 	defer w.mu.Unlock()
 	for _, n := range names {
 		w.withheld[n] = true
+	}
+}
+
+// WithholdInstance keeps the machines with the instance IDs ids from registering, whatever their names: a machine
+// that replaces one of them registers.
+func (w *nomadWorld) WithholdInstance(ids ...string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, id := range ids {
+		w.withheldIDs[id] = true
 	}
 }
 
@@ -234,7 +248,7 @@ func (w *nomadWorld) follow() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	for _, m := range clients {
-		if m.ready && !w.withheld[m.name] {
+		if m.ready && !w.withheld[m.name] && !w.withheldIDs[m.id] {
 			w.Register(nomadops.Node{Name: m.name, Status: "ready", Eligible: true, Address: m.private})
 		}
 	}
