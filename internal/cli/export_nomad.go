@@ -17,8 +17,11 @@ import (
 	"github.com/ingvarch/tent/internal/shellenv"
 )
 
-// exportTTL is how long the access that export nomad makes works, unless --ttl says otherwise.
-const exportTTL = 24 * time.Hour
+// accessTTL is how long the access that export nomad and ui make works; export nomad takes --ttl instead.
+const accessTTL = 24 * time.Hour
+
+// noticeTime is how a notice writes a time, which is in UTC.
+const noticeTime = "2006-01-02 15:04:05 MST"
 
 // The files that export nomad writes into its directory.
 const (
@@ -102,13 +105,13 @@ func newExportNomadCommand(opts *globalOptions) *cobra.Command {
 			exp := newNomadExport(dir, access)
 			// A notice that fails to print changes nothing.
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "wrote the Nomad access of cluster %s to %s; it works until %s "+
-				"(token accessor %s)\n", name, dir, exp.Expires.Format("2006-01-02 15:04:05 MST"), exp.TokenAccessor)
+				"(token accessor %s)\n", name, dir, exp.Expires.Format(noticeTime), exp.TokenAccessor)
 			return printObject(cmd.OutOrStdout(), opts.output, exp, func(w io.Writer) error {
 				return exp.writeLines(w, shell)
 			})
 		},
 	}
-	cmd.Flags().DurationVar(&ttl, "ttl", exportTTL, "how long the certificate and the token work")
+	cmd.Flags().DurationVar(&ttl, "ttl", accessTTL, "how long the certificate and the token work")
 	cmd.Flags().StringVar(&dir, "dir", "", "the directory for the files (default $XDG_CACHE_HOME/tent/NAME, "+
 		"else ~/.cache/tent/NAME)")
 	cmd.Flags().StringVar(&shell, "shell", "", "the shell to print lines for: sh or fish (default fish when $SHELL "+
