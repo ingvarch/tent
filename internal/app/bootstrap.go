@@ -31,10 +31,17 @@ const operatorCertTTL = 24 * time.Hour
 // errNoNomad is why an update that needs Nomad fails when the service has no way to reach it.
 var errNoNomad = errors.New("no Nomad client is set up")
 
-// changesNodes reports whether the node changes create or wait for a node.
-func changesNodes(changes []NodeChange) bool {
-	return slices.ContainsFunc(changes, func(c NodeChange) bool { return c.Action != NodeDelete })
+// scrubTimeout is how long the scrub of one node may take.
+const scrubTimeout = 5 * time.Minute
+
+// bootsMachine reports whether the change makes or finds a machine with user data: a create, or a wait that repeats a
+// create with its operation id. Other waits call no cloud and need no user data.
+func bootsMachine(c NodeChange) bool {
+	return c.Action == NodeCreate || c.Action == NodeWait && c.Op != ""
 }
+
+// changesNodes reports whether the node changes create a node or wait for one that the cloud has not made ready.
+func changesNodes(changes []NodeChange) bool { return slices.ContainsFunc(changes, bootsMachine) }
 
 // clusterServers returns how many machines the server and combined groups of the cluster have.
 func clusterServers(m *model.Cluster) int {
@@ -68,13 +75,14 @@ func (u updateRun) needsNomad() bool {
 		slices.ContainsFunc(u.plan.Nodes, func(c NodeChange) bool { return c.Action != NodeDelete && !isServerChange(c) })
 }
 
-// prepareNodes gives each create and wait of the plan the spec hash of its group, and builds the user data of each as
-// the apply will, with the longest seed and, for a client, an intro token of the size of a large real one, so that a
-// node whose user data does not fit fails the plan. The certificate that it issues for the check is not kept.
+// prepareNodes gives each create and each wait with an operation id of the plan the spec hash of its group, and builds
+// the user data of each as the apply will, with the longest seed and, for a client, an intro token of the size of a
+// large real one, so that a node whose user data does not fit fails the plan. The certificate that it issues for the
+// check is not kept.
 func (u *updateRun) prepareNodes(m *model.Cluster, now time.Time) error {
 	seed := lastAddresses(m.CIDR, u.builder.servers)
 	for i, c := range u.plan.Nodes {
-		if c.Action == NodeDelete {
+		if !bootsMachine(c) {
 			continue
 		}
 		u.plan.Nodes[i].SpecHash = u.builder.specHash(c.Group)
@@ -182,8 +190,12 @@ func (a *applier) run(ctx context.Context) error {
 }
 
 // applyServer creates the server or combined node of c, or waits for it, and adds it to the known servers. The node
-// boots with the private addresses of the other known servers as its seed.
+// boots with the private addresses of the other known servers as its seed. A wait without an operation id calls no
+// cloud and makes no user data: the machine already exists, and the Nomad step scrubs it once its node has joined.
 func (a *applier) applyServer(ctx context.Context, c NodeChange) error {
+	if !bootsMachine(c) {
+		return nil
+	}
 	in, err := a.s.applyNodeWith(ctx, a.u.nodes, a.u.cluster, c, func(context.Context) (cloud.UserData, error) {
 		seed, err := a.seed(c.Name, false)
 		if err != nil {
@@ -297,9 +309,10 @@ func (a *applier) nomadAPI() (nomadops.API, error) {
 	return a.api, nil
 }
 
-// nomadStep waits for a leader, bootstraps the ACL system when the plan says so, waits for healthy servers that all
-// vote, stores the mark of the bootstrap when it bootstrapped, and waits for each combined node of servers to
-// register.
+// nomadStep waits for a leader, bootstraps the ACL system when the plan says so, and waits for healthy servers that
+// all vote. Then it reads the Raft configuration once and, for each server and combined change of the plan, in its
+// order, waits for a combined node to register, checks that the machine's server votes at its address, and scrubs the
+// machine. Last it stores the mark of the bootstrap when it bootstrapped.
 func (a *applier) nomadStep(ctx context.Context, servers []NodeChange) error {
 	api, err := a.nomadAPI()
 	if err != nil {
@@ -323,27 +336,86 @@ func (a *applier) nomadStep(ctx context.Context, servers []NodeChange) error {
 			return fmt.Errorf("bootstrap the ACL system: %w", err)
 		}
 	}
-	want := a.u.plan.Nomad.Servers
+	want, voters := a.u.plan.Nomad.Servers, 0
 	if err := a.step(NomadEvent{Action: NomadHealthy, Voters: want}, func() (NomadEvent, error) {
 		waitCtx, cancel := context.WithTimeout(ctx, nomadTimeout)
 		defer cancel()
 		h, err := nomadops.WaitHealthy(waitCtx, api, want)
+		voters = h.Voters
 		return NomadEvent{Action: NomadHealthy, Voters: h.Voters}, err
 	}); err != nil {
 		return err
 	}
+	if err := a.scrubServers(ctx, api, servers, voters); err != nil {
+		return err
+	}
 	if a.u.plan.Nomad.Bootstrap {
-		if err := a.markBootstrapped(ctx); err != nil {
-			return err
-		}
+		return a.markBootstrapped(ctx)
+	}
+	return nil
+}
+
+// scrubServers scrubs the machine of each server and combined change in servers, in order, once its server votes at its
+// private address in the Raft configuration, which it reads once. A combined node must have registered first. voters
+// is how many servers the health wait found voting.
+func (a *applier) scrubServers(ctx context.Context, api nomadops.API, servers []NodeChange, voters int) error {
+	if len(servers) == 0 {
+		return nil
+	}
+	peers, err := api.Peers(ctx)
+	if err != nil {
+		return fmt.Errorf("read the Raft configuration: %w", err)
 	}
 	for _, c := range servers {
+		in := a.serverOf(c)
 		if c.Role == v1alpha1.RoleCombined {
-			if err := a.register(ctx, a.knownServer(c.Name)); err != nil {
+			if err := a.register(ctx, in); err != nil {
 				return err
 			}
 		}
+		if err := checkVote(peers, in, voters); err != nil {
+			return err
+		}
+		if err := a.markJoined(ctx, in); err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+// checkVote fails unless the Raft configuration lists a voter at the private address of the machine in. voters is how
+// many servers the cluster has that vote.
+func checkVote(peers []nomadops.Peer, in cloud.Instance, voters int) error {
+	if err := privateAddress(in); err != nil {
+		return err
+	}
+	if p, ok := nomadops.FindPeer(peers, in.PrivateIP); !ok || !p.Voter {
+		return fmt.Errorf("node %s: the servers are healthy with %d %s, but none votes at its address %s", in.Name,
+			voters, voterNoun(voters), in.PrivateIP)
+	}
+	return nil
+}
+
+// voterNoun returns "voter" for one and "voters" for any other count.
+func voterNoun(n int) string {
+	if n == 1 {
+		return "voter"
+	}
+	return "voters"
+}
+
+// markJoined replaces the user data of the machine in with the stub and labels the machine as joined, and reports the
+// scrub as a step. A failure stops the run with the provider's error; the next run plans the wait again.
+func (a *applier) markJoined(ctx context.Context, in cloud.Instance) error {
+	step := NodeChange{Action: NodeScrub, Name: in.Name, ID: in.ID}
+	a.s.progress(Progress{Node: step, Step: NodeStarted})
+	ctx, cancel := context.WithTimeout(ctx, scrubTimeout)
+	defer cancel()
+	if err := a.u.nodes.MarkJoined(ctx, in); err != nil {
+		a.s.progress(Progress{Node: step, Step: NodeFailed, Err: err})
+		return err
+	}
+	a.s.progress(Progress{Node: step, Step: NodeDone})
 	return nil
 }
 
@@ -357,21 +429,32 @@ func (a *applier) markBootstrapped(ctx context.Context) error {
 	return nil
 }
 
-// knownServer returns the known server called name, or a machine of that name without an address when none is known.
-func (a *applier) knownServer(name string) cloud.Instance {
-	for _, in := range a.known {
-		if in.Name == name {
-			return in
-		}
+// serverOf returns the machine of the server or combined change c: the known server of its name, which this run may
+// have made, or else the machine that the cloud listed with its ID, as a wait without an operation id names it. A
+// machine that is neither is returned with its name only.
+func (a *applier) serverOf(c NodeChange) cloud.Instance {
+	if i := slices.IndexFunc(a.known, func(k cloud.Instance) bool { return k.Name == c.Name }); i >= 0 {
+		return a.known[i]
 	}
-	return cloud.Instance{Name: name}
+	if i := slices.IndexFunc(a.u.listed, func(l cloud.Instance) bool { return c.ID != "" && l.ID == c.ID }); i >= 0 {
+		return a.u.listed[i]
+	}
+	return cloud.Instance{Name: c.Name}
+}
+
+// privateAddress fails when the cloud reports no private address for the machine in.
+func privateAddress(in cloud.Instance) error {
+	if !in.PrivateIP.IsValid() {
+		return fmt.Errorf("node %s: the cloud reports no private address for it yet; run the command again", in.Name)
+	}
+	return nil
 }
 
 // register waits until the node of the machine has registered with the servers, under the machine's name and at its
 // private address.
 func (a *applier) register(ctx context.Context, in cloud.Instance) error {
-	if !in.PrivateIP.IsValid() {
-		return fmt.Errorf("node %s: the cloud reports no private address for it yet; run the command again", in.Name)
+	if err := privateAddress(in); err != nil {
+		return err
 	}
 	api, err := a.nomadAPI()
 	if err != nil {

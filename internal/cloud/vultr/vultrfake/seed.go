@@ -109,6 +109,32 @@ func (f *Fake) AddInstance(tb testing.TB, in govultr.Instance, vpcIDs ...string)
 	return inst.view()
 }
 
+// SetInstanceTags replaces the tags of an instance without a call, as a change by hand does. It fails the test for an
+// unknown instance.
+func (f *Fake) SetInstanceTags(tb testing.TB, id string, tags ...string) {
+	tb.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if in := f.instance(id); in != nil {
+		in.Tags = slices.Clone(tags)
+	} else {
+		tb.Fatalf("vultrfake: SetInstanceTags: no instance %q", id)
+	}
+}
+
+// SetInstanceUserData replaces the user data of an instance, base64 as sent, without a call, as a change by hand does.
+// It fails the test for an unknown instance.
+func (f *Fake) SetInstanceUserData(tb testing.TB, id, userData string) {
+	tb.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if in := f.instance(id); in != nil {
+		in.userData = userData
+	} else {
+		tb.Fatalf("vultrfake: SetInstanceUserData: no instance %q", id)
+	}
+}
+
 // seedID returns the id of an object to seed: id, or a new id of kind when id is empty. It fails the test and returns
 // false when id holds more than ASCII letters, digits and "-", or is taken. method names the seeding method, for the
 // message. The caller holds the lock.

@@ -24,9 +24,11 @@ import (
 	"github.com/ingvarch/tent/internal/app"
 	"github.com/ingvarch/tent/internal/assets"
 	"github.com/ingvarch/tent/internal/assets/assetstest"
+	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/cloud/vultr/vultrfake"
 	"github.com/ingvarch/tent/internal/nodeconfig"
 	"github.com/ingvarch/tent/internal/nomadops"
+	"github.com/ingvarch/tent/internal/nomadops/nomadfake"
 	"github.com/ingvarch/tent/internal/pki"
 	"github.com/ingvarch/tent/internal/secret"
 )
@@ -178,10 +180,11 @@ func introLine(node, server string) string {
 	return "nomad IntroToken " + node + " default " + nomadops.MaxIntroTTL.String() + " (" + server + ")"
 }
 
-// onlyNomadAndNodes keeps the progress lines of node steps and of the Nomad step.
+// onlyNomadAndNodes keeps the progress lines of node steps and of the Nomad step, and the writes of the store that a
+// test adds to them.
 func onlyNomadAndNodes(lines []string) []string {
 	return slices.DeleteFunc(slices.Clone(lines), func(l string) bool {
-		return !strings.HasPrefix(l, "node ") && !strings.HasPrefix(l, "nomad ")
+		return !strings.HasPrefix(l, "node ") && !strings.HasPrefix(l, "nomad ") && !strings.HasPrefix(l, "store ")
 	})
 }
 
@@ -224,7 +227,7 @@ func TestUpdateBuildsANomadCluster(t *testing.T) {
 			t.Error("the plan does not say it was applied")
 		}
 		wantNodes(t, f, allNodes...)
-		wantJoined(t, f)
+		wantJoined(t, f, "prod-servers-0", "prod-servers-1", "prod-servers-2")
 		if !stored {
 			t.Error("the completed spec was not stored when the first node was created")
 		}
@@ -295,12 +298,20 @@ func TestUpdateBuildsANomadCluster(t *testing.T) {
 		wantCalls := []string{
 			"nomad Leader (prod-servers-0)",
 			bootstrapLine(t, svc, "prod-servers-0"),
-			"nomad Health (prod-servers-0)",
+			"nomad Health (prod-servers-0)", "nomad Peers (prod-servers-0)",
 			introLine("prod-workers-0", "prod-servers-0"), "nomad Nodes (prod-servers-0)",
 			introLine("prod-workers-1", "prod-servers-0"), "nomad Nodes (prod-servers-0)",
 		}
 		if diff := cmp.Diff(wantCalls, nomadLines(w)); diff != "" {
 			t.Errorf("the Nomad calls (-want +got):\n%s", diff)
+		}
+		wantScrubCalls := []string{
+			"GetInstance <prod-servers-0>", "UpdateInstance <prod-servers-0>",
+			"GetInstance <prod-servers-1>", "UpdateInstance <prod-servers-1>",
+			"GetInstance <prod-servers-2>", "UpdateInstance <prod-servers-2>",
+		}
+		if diff := cmp.Diff(wantScrubCalls, cloudCallsBetween(f, w, 3, 4)); diff != "" {
+			t.Errorf("the cloud calls between Peers and the first intro token (-want +got):\n%s", diff)
 		}
 		if first := w.Log()[0]; countOf(f.Calls()[:first.Cloud], "CreateInstance") != 3 {
 			t.Errorf("Nomad was called after %d creates, want the 3 servers' first", countOf(f.Calls()[:first.Cloud],
@@ -317,6 +328,8 @@ func TestUpdateBuildsANomadCluster(t *testing.T) {
 				"nomad started leader", "nomad done leader", "nomad started bootstrap", "nomad done bootstrap",
 				"nomad started healthy", "nomad done healthy",
 			},
+			nodeSteps("scrub", "prod-servers-0"), nodeSteps("scrub", "prod-servers-1"),
+			nodeSteps("scrub", "prod-servers-2"),
 			nodeSteps("create", "prod-workers-0"),
 			[]string{"nomad started register prod-workers-0", "nomad done register prod-workers-0"},
 			nodeSteps("create", "prod-workers-1"),
@@ -341,6 +354,18 @@ func TestUpdateBuildsANomadCluster(t *testing.T) {
 			}
 		}
 	})
+}
+
+// cloudCallsBetween returns the Vultr calls, as line gives them, that came after the Nomad call number from of w and
+// before the Nomad call number to, counting from 0 in the order they reached the Nomad fake.
+func cloudCallsBetween(f *vultrfake.Fake, w *nomadWorld, from, to int) []string {
+	log := w.Log()
+	var out []string
+	nm := names(f)
+	for _, c := range f.Calls()[log[from].Cloud:log[to].Cloud] {
+		out = append(out, line(c, nm))
+	}
+	return out
 }
 
 // wantNomadConfigs fails the test unless the service made one Nomad client for each server, in the order of their
@@ -438,6 +463,14 @@ func TestUpdateBuildsACombinedCluster(t *testing.T) {
 	t.Run("three nodes", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			svc, f, w := newRelease(t, keyedClusterYAML, combinedYAML)
+			rec := &writeLog{Store: svc.Store}
+			svc.Store = rec
+			progress := recordProgress(svc)
+			rec.onWrite = func(p string) {
+				if p == markPath {
+					*progress = append(*progress, "store write mark")
+				}
+			}
 
 			plan := mustUpdate(t, svc)
 
@@ -457,11 +490,26 @@ func TestUpdateBuildsACombinedCluster(t *testing.T) {
 			}
 			wantCalls := []string{
 				"nomad Leader (prod-all-0)", bootstrapLine(t, svc, "prod-all-0"), "nomad Health (prod-all-0)",
+				"nomad Peers (prod-all-0)",
 				"nomad Nodes (prod-all-0)", "nomad Nodes (prod-all-0)", "nomad Nodes (prod-all-0)",
 			}
 			if diff := cmp.Diff(wantCalls, nomadLines(w)); diff != "" {
 				t.Errorf("the Nomad calls (-want +got):\n%s", diff)
 			}
+			wantProgress := slices.Concat(
+				[]string{"nomad done healthy"},
+				registerSteps("prod-all-0"), nodeSteps("scrub", "prod-all-0"),
+				registerSteps("prod-all-1"), nodeSteps("scrub", "prod-all-1"),
+				registerSteps("prod-all-2"), nodeSteps("scrub", "prod-all-2"),
+				[]string{"store write mark"},
+			)
+			got := onlyNomadAndNodes(*progress)
+			if i := slices.Index(got, "nomad done healthy"); i < 0 {
+				t.Errorf("the progress has no healthy wait: %q", got)
+			} else if diff := cmp.Diff(wantProgress, got[i:]); diff != "" {
+				t.Errorf("the progress after the health wait (-want +got):\n%s", diff)
+			}
+			wantJoined(t, f, "prod-all-0", "prod-all-1", "prod-all-2")
 			wantConverged(t, svc)
 		})
 	})
@@ -481,6 +529,7 @@ func TestUpdateBuildsACombinedCluster(t *testing.T) {
 			if len(nc.Join.Servers) != 0 {
 				t.Errorf("the only node has the seed %v, want none", seedOf(nc))
 			}
+			wantJoined(t, f, "prod-all-0")
 			wantConverged(t, svc)
 		})
 	})
@@ -503,7 +552,7 @@ func TestUpdateMovesToTheNextServer(t *testing.T) {
 
 		wantCalls := []string{
 			"nomad Leader (prod-servers-0)", "nomad Leader (prod-servers-1)",
-			bootstrapLine(t, svc, "prod-servers-1"), "nomad Health (prod-servers-1)",
+			bootstrapLine(t, svc, "prod-servers-1"), "nomad Health (prod-servers-1)", "nomad Peers (prod-servers-1)",
 			introLine("prod-workers-0", "prod-servers-1"), "nomad Nodes (prod-servers-1)",
 			introLine("prod-workers-1", "prod-servers-1"), "nomad Nodes (prod-servers-1)",
 		}
@@ -522,6 +571,7 @@ func TestUpdateResumesAfter(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		cut   string // the call at which the run is cut
+		n     int    // the cut call is the n-th with that key; 0 for the first
 		after bool   // the call is carried out and its answer is lost; otherwise the run is cut before it
 		plan  []string
 		nomad *app.NomadStep
@@ -532,12 +582,25 @@ func TestUpdateResumesAfter(t *testing.T) {
 		progress []string
 	}{
 		{name: "the first server", cut: "CreateInstance prod-servers-1", plan: []string{
-			"create prod-servers-1", "create prod-servers-2", "create prod-workers-0", "create prod-workers-1",
+			"wait prod-servers-0", "create prod-servers-1", "create prod-servers-2", "create prod-workers-0",
+			"create prod-workers-1",
 		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 1, nodes: 2},
 		{name: "every server, before the leader", cut: leader, plan: []string{
-			"create prod-workers-0", "create prod-workers-1",
+			"wait prod-servers-0", "wait prod-servers-1", "wait prod-servers-2", "create prod-workers-0",
+			"create prod-workers-1",
 		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 1, nodes: 2},
 		{name: "the health wait, before the mark", cut: "nomad Health (prod-servers-0)", plan: []string{
+			"wait prod-servers-0", "wait prod-servers-1", "wait prod-servers-2", "create prod-workers-0",
+			"create prod-workers-1",
+		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 2, nodes: 2},
+		{name: "the health wait, before the first scrub", cut: "GetInstance <prod-servers-0>", n: 4, plan: []string{
+			"wait prod-servers-0", "wait prod-servers-1", "wait prod-servers-2", "create prod-workers-0",
+			"create prod-workers-1",
+		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 2, nodes: 2},
+		{name: "a scrub that lost its answer", cut: "UpdateInstance <prod-servers-0>", after: true, plan: []string{
+			"wait prod-servers-1", "wait prod-servers-2", "create prod-workers-0", "create prod-workers-1",
+		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 2, nodes: 2},
+		{name: "the last scrub, before the mark", cut: "UpdateInstance <prod-servers-2>", after: true, plan: []string{
 			"create prod-workers-0", "create prod-workers-1",
 		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 2, nodes: 2},
 		{name: "the mark, before the clients", cut: "nomad IntroToken prod-workers-0 default 30m0s (prod-servers-0)",
@@ -556,7 +619,8 @@ func TestUpdateResumesAfter(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				svc, f, w := newExampleFrom(t, template)
-				wrote := runCut(t, f, w, svc.Store, cutCase{key: tc.cut, n: 1, after: tc.after}, func(ctx context.Context) error {
+				cut := cutCase{key: tc.cut, n: max(tc.n, 1), after: tc.after}
+				wrote := runCut(t, f, w, svc.Store, cut, func(ctx context.Context) error {
 					_, err := svc.Update(ctx, "prod", true)
 					return err
 				})
@@ -571,6 +635,13 @@ func TestUpdateResumesAfter(t *testing.T) {
 				}
 				if diff := cmp.Diff(tc.plan, got); diff != "" {
 					t.Errorf("the node changes of the next run (-want +got):\n%s", diff)
+				}
+				for _, c := range plan.Nodes {
+					boots := c.Action == app.NodeCreate || c.Op != ""
+					if boots != (c.SpecHash != "") {
+						t.Errorf("%s %s has the spec hash %q and the operation id %q: only a create and a wait with an "+
+							"operation id have a hash", c.Action, c.Name, c.SpecHash, c.Op)
+					}
 				}
 				if diff := cmp.Diff(tc.nomad, plan.Nomad); diff != "" {
 					t.Errorf("the Nomad step of the next run (-want +got):\n%s", diff)
@@ -611,6 +682,7 @@ func TestUpdateStoresNoMarkBeforeTheServersAreHealthy(t *testing.T) {
 			t.Errorf("the failed run stored %s", markPath)
 		}
 		wantNodes(t, f, server(0), server(1), server(2))
+		wantJoined(t, f)
 		plan, err := svc.Update(t.Context(), "prod", false)
 		if err != nil {
 			t.Fatalf("Update without apply: %v", err)
@@ -624,6 +696,7 @@ func TestUpdateStoresNoMarkBeforeTheServersAreHealthy(t *testing.T) {
 
 		want := []string{
 			"nomad Leader (prod-servers-0)", bootstrapLine(t, svc, "prod-servers-0"), "nomad Health (prod-servers-0)",
+			"nomad Peers (prod-servers-0)",
 			introLine("prod-workers-0", "prod-servers-0"), "nomad Nodes (prod-servers-0)",
 			introLine("prod-workers-1", "prod-servers-0"), "nomad Nodes (prod-servers-0)",
 		}
@@ -636,6 +709,322 @@ func TestUpdateStoresNoMarkBeforeTheServersAreHealthy(t *testing.T) {
 		wantNodes(t, f, allNodes...)
 		wantConverged(t, svc)
 	})
+}
+
+// serverIDs are the ids of the three servers of a built test cluster.
+var serverIDs = []string{"instance-1", "instance-2", "instance-3"}
+
+// threeServers are the names of the three servers of the test cluster.
+var threeServers = []string{"prod-servers-0", "prod-servers-1", "prod-servers-2"}
+
+// TestUpdateRepeatsAHealthWaitThatStopped deletes a server of a built cluster and fails the health wait of the run
+// that makes it again. The next plan waits for the new server, which is ready and has not joined, and the run after it
+// waits for health, scrubs that server alone and reads no release file. The wait itself shows no node step.
+func TestUpdateRepeatsAHealthWaitThatStopped(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, w := newRelease(t)
+		mustUpdate(t, svc)
+		if err := f.DeleteInstance(t.Context(), "instance-3"); err != nil {
+			t.Fatal(err)
+		}
+		w.Fail(t, "Health", errBoom)
+		if _, err := svc.Update(t.Context(), "prod", true); !errors.Is(err, errBoom) {
+			t.Fatalf("Update = %v, want an error that matches %v", err, errBoom)
+		}
+		wantJoined(t, f, "prod-servers-0", "prod-servers-1")
+		plan, err := svc.Update(t.Context(), "prod", false)
+		if err != nil {
+			t.Fatalf("Update without apply: %v", err)
+		}
+		wait := app.NodeChange{
+			Action: app.NodeWait, Name: "prod-servers-2", Group: "servers", Role: v1alpha1.RoleServer, Zone: "ams",
+			MachineType: "vc2-2c-4gb", Image: v1alpha1.DefaultImage, ID: "instance-6",
+		}
+		wantNodeChanges(t, plan, wait)
+		if want := (&app.NomadStep{Servers: 3}); !cmp.Equal(plan.Nomad, want) {
+			t.Errorf("the plan's Nomad step is %+v, want %+v", plan.Nomad, want)
+		}
+		sites := withAssets(svc)
+		before, cloudBefore := len(w.Log()), len(f.Calls())
+		progress := recordProgress(svc)
+
+		mustUpdate(t, svc)
+
+		want := []string{"nomad Leader (prod-servers-0)", "nomad Health (prod-servers-0)", "nomad Peers (prod-servers-0)"}
+		if diff := cmp.Diff(want, nomadLines(w)[before:]); diff != "" {
+			t.Errorf("the Nomad calls of the run (-want +got):\n%s", diff)
+		}
+		wantProgress := slices.Concat(
+			[]string{"nomad started leader", "nomad done leader", "nomad started healthy", "nomad done healthy"},
+			nodeSteps("scrub", "prod-servers-2"),
+		)
+		if diff := cmp.Diff(wantProgress, onlyNomadAndNodes(*progress)); diff != "" {
+			t.Errorf("the progress of the run (-want +got):\n%s", diff)
+		}
+		if urls := sites.URLs(); len(urls) != 0 {
+			t.Errorf("the run read release files: %v", urls)
+		}
+		var writes []string
+		for _, c := range f.Calls()[cloudBefore:] {
+			if !strings.HasPrefix(c.Name, "List") && c.Name != "AvailablePlans" && c.Name != "GetInstance" {
+				writes = append(writes, line(c, names(f)))
+			}
+		}
+		if diff := cmp.Diff([]string{"UpdateInstance <prod-servers-2>"}, writes); diff != "" {
+			t.Errorf("the cloud calls that change something (-want +got):\n%s", diff)
+		}
+		wantJoined(t, f, threeServers...)
+		wantConverged(t, svc)
+	})
+}
+
+// TestUpdateLabelsServersThatLostTheLabel takes the label off the servers of a built cluster and gives them their
+// first user data again. The plan waits for the three, with the Nomad step and no bootstrap; the run creates nothing,
+// bootstraps nothing and labels the three.
+func TestUpdateLabelsServersThatLostTheLabel(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, w := newRelease(t)
+		mustUpdate(t, svc)
+		for _, id := range serverIDs {
+			unmark(t, f, id)
+		}
+		wantJoined(t, f)
+
+		plan, err := svc.Update(t.Context(), "prod", false)
+		if err != nil {
+			t.Fatalf("Update without apply: %v", err)
+		}
+		var got []string
+		for _, c := range plan.Nodes {
+			got = append(got, c.Action.String()+" "+c.Name+" "+c.Op)
+		}
+		wantWaits := []string{"wait prod-servers-0 ", "wait prod-servers-1 ", "wait prod-servers-2 "} // without an op
+		if diff := cmp.Diff(wantWaits, got); diff != "" {
+			t.Errorf("the node changes (-want +got):\n%s", diff)
+		}
+		if want := (&app.NomadStep{Servers: 3}); !cmp.Equal(plan.Nomad, want) {
+			t.Errorf("the plan's Nomad step is %+v, want %+v", plan.Nomad, want)
+		}
+		creates, bootstraps := countCalls(f, "CreateInstance"), countNomad(w, "Bootstrap")
+
+		mustUpdate(t, svc)
+
+		if n := countCalls(f, "CreateInstance"); n != creates {
+			t.Errorf("the run made %d more instances, want none", n-creates)
+		}
+		if n := countNomad(w, "Bootstrap"); n != bootstraps {
+			t.Errorf("the run called Bootstrap %d more times, want none", n-bootstraps)
+		}
+		wantJoined(t, f, threeServers...)
+		wantConverged(t, svc)
+	})
+}
+
+// relabelRole gives the instance called name of f the role label role in place of its own, without a call, and takes
+// its joined label off.
+func relabelRole(t *testing.T, f *vultrfake.Fake, name string, role v1alpha1.Role) {
+	t.Helper()
+	for _, in := range f.Instances() {
+		if in.Hostname != name {
+			continue
+		}
+		tags := slices.DeleteFunc(slices.Clone(in.Tags), func(tag string) bool {
+			return strings.HasPrefix(tag, cloud.LabelRole+"=") || strings.HasPrefix(tag, cloud.LabelJoined+"=")
+		})
+		f.SetInstanceTags(t, in.ID, append(tags, cloud.LabelRole+"="+string(role))...)
+		return
+	}
+	t.Fatalf("the fake has no instance %s", name)
+}
+
+// TestUpdateDecidesByTheMachinesRoleLabel gives a machine a role label that its group does not have. A machine
+// labelled client keeps the rule of clients, whatever its group: no wait, no Nomad step. A machine labelled server in
+// a group of clients is waited for as a server, scrubbed by its ID, and the run never panics.
+func TestUpdateDecidesByTheMachinesRoleLabel(t *testing.T) {
+	t.Run("labelled client in a group of servers", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			svc, f, _ := newRelease(t)
+			mustUpdate(t, svc)
+			relabelRole(t, f, "prod-servers-1", v1alpha1.RoleClient)
+
+			plan := mustUpdate(t, svc)
+
+			if plan.HasChanges() {
+				t.Errorf("the plan has changes:\n%s", planText(t, plan))
+			}
+			wantConverged(t, svc)
+		})
+	})
+	t.Run("labelled server in a group of clients", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			svc, f, _ := newRelease(t)
+			mustUpdate(t, svc)
+			relabelRole(t, f, "prod-workers-0", v1alpha1.RoleServer)
+
+			plan := mustUpdate(t, svc)
+
+			if len(plan.Nodes) != 1 || plan.Nodes[0].Action != app.NodeWait || plan.Nodes[0].Name != "prod-workers-0" ||
+				plan.Nodes[0].Op != "" {
+				t.Errorf("the node changes are %+v, want one wait for prod-workers-0 without an operation id", plan.Nodes)
+			}
+			wantJoined(t, f, "prod-servers-0", "prod-servers-1", "prod-servers-2", "prod-workers-0")
+			wantConverged(t, svc)
+		})
+	})
+}
+
+// TestUpdateScrubsAgainWithoutTheLabel finds a server that holds the stub and lacks the label: the plan waits for it,
+// and the run sets the label, as a scrub that lost its answer needs.
+func TestUpdateScrubsAgainWithoutTheLabel(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, _ := newRelease(t)
+		mustUpdate(t, svc)
+		dropJoinedTag(t, f, "instance-2")
+		if diff := cmp.Diff([]string{"prod-servers-1 holds the stub"}, joinedMismatches(f, []string{"prod-servers-0",
+			"prod-servers-2"})); diff != "" {
+			t.Fatalf("the joined instances (-want +got):\n%s", diff) // only prod-servers-1 lost its label
+		}
+
+		plan, err := svc.Update(t.Context(), "prod", false)
+		if err != nil {
+			t.Fatalf("Update without apply: %v", err)
+		}
+		if len(plan.Nodes) != 1 || plan.Nodes[0].Action != app.NodeWait || plan.Nodes[0].Name != "prod-servers-1" {
+			t.Errorf("the node changes are %+v, want the wait for prod-servers-1", plan.Nodes)
+		}
+
+		mustUpdate(t, svc)
+
+		wantJoined(t, f, threeServers...)
+		wantConverged(t, svc)
+	})
+}
+
+// TestUpdateStopsAtAFailedScrub fails the scrub of the first server. The run stops with the provider's error and a
+// failed step, frees the lock, makes no client and stores no mark; the next run finishes.
+func TestUpdateStopsAtAFailedScrub(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, _ := newRelease(t)
+		progress := recordProgress(svc)
+		f.Fail(t, "UpdateInstance", errBoom, 1)
+
+		_, err := svc.Update(t.Context(), "prod", true)
+
+		if !errors.Is(err, errBoom) {
+			t.Fatalf("Update = %v, want an error that matches %v", err, errBoom)
+		}
+		wantError(t, err, "scrub the user data of node prod-servers-0 (instance-1): "+errBoom.Error())
+		wantLine := "node failed scrub prod-servers-0: " + err.Error()
+		if !slices.Contains(*progress, wantLine) {
+			t.Errorf("the progress has no line %q:\n%s", wantLine, strings.Join(*progress, "\n"))
+		}
+		if slices.Contains(list(t, svc.Store, ""), markPath) {
+			t.Errorf("the failed run stored %s", markPath)
+		}
+		wantNodes(t, f, server(0), server(1), server(2))
+		wantJoined(t, f)
+		wantLockFree(t, svc.Store)
+
+		mustUpdate(t, svc)
+
+		wantNodes(t, f, allNodes...)
+		wantJoined(t, f, threeServers...)
+		wantConverged(t, svc)
+	})
+}
+
+// TestUpdateGivesAScrubFiveMinutes hangs the scrub of the first server until its context ends. The run fails after 5
+// minutes with the provider's scrub error, which matches context.DeadlineExceeded, with a failed step, no mark and a
+// free lock; the next run finishes.
+func TestUpdateGivesAScrubFiveMinutes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, _ := newRelease(t)
+		progress := recordProgress(svc)
+		var started, ended time.Time
+		f.SetHook(atCall(f, "UpdateInstance <prod-servers-0>", 1,
+			func(ctx context.Context, _ vultrfake.Call, _ func(context.Context) error) error {
+				started = time.Now()
+				<-ctx.Done()
+				ended = time.Now()
+				return ctx.Err()
+			}))
+
+		_, err := svc.Update(t.Context(), "prod", true)
+
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Update = %v, want an error that matches context.DeadlineExceeded", err)
+		}
+		wantError(t, err, "scrub the user data of node prod-servers-0 (instance-1): "+context.DeadlineExceeded.Error())
+		if took := ended.Sub(started); took != 5*time.Minute {
+			t.Errorf("the scrub ended after %v, want 5m0s", took)
+		}
+		if wantLine := "node failed scrub prod-servers-0: " + err.Error(); !slices.Contains(*progress, wantLine) {
+			t.Errorf("the progress has no line %q:\n%s", wantLine, strings.Join(*progress, "\n"))
+		}
+		if slices.Contains(list(t, svc.Store, ""), markPath) {
+			t.Errorf("the failed run stored %s", markPath)
+		}
+		wantLockFree(t, svc.Store)
+		f.SetHook(nil)
+
+		mustUpdate(t, svc)
+
+		wantJoined(t, f, threeServers...)
+		wantConverged(t, svc)
+	})
+}
+
+// TestUpdateScrubsOnlyAServerThatVotes changes the Raft configuration that the run reads, so that a server does not
+// vote at its address. The run stops with an error before it scrubs that server, after those that vote.
+func TestUpdateScrubsOnlyAServerThatVotes(t *testing.T) {
+	voting := func(voters ...bool) []nomadops.Peer {
+		var peers []nomadops.Peer
+		for i, voter := range voters {
+			peers = append(peers, nomadops.Peer{
+				Name:    fmt.Sprintf("prod-servers-%d.global", i),
+				Address: netip.AddrPortFrom(netip.MustParseAddr(fmt.Sprintf("10.64.0.%d", i+3)), 4647), Voter: voter,
+			})
+		}
+		return peers
+	}
+	for _, tc := range []struct {
+		name   string
+		peers  []nomadops.Peer
+		joined []string
+		want   string
+	}{
+		{"no server at its address", []nomadops.Peer{{
+			Name: "elsewhere.global", Address: netip.MustParseAddrPort("10.64.0.99:4647"), Voter: true,
+		}}, nil, "node prod-servers-0: the servers are healthy with 3 voters, but none votes at its address 10.64.0.3"},
+		{"a server that does not vote", voting(true, true, false), []string{"prod-servers-0", "prod-servers-1"},
+			"node prod-servers-2: the servers are healthy with 3 voters, but none votes at its address 10.64.0.5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				svc, f, w := newRelease(t)
+				w.SetHook(atNomadCall(w, "nomad Peers (prod-servers-0)", 1,
+					func(ctx context.Context, _ nomadfake.Call, next func(context.Context) error) error {
+						w.SetPeers(tc.peers)
+						return next(ctx)
+					}))
+
+				_, err := svc.Update(t.Context(), "prod", true)
+
+				wantError(t, err, tc.want)
+				wantJoined(t, f, tc.joined...)
+				if slices.Contains(list(t, svc.Store, ""), markPath) {
+					t.Errorf("the failed run stored %s", markPath)
+				}
+				wantLockFree(t, svc.Store)
+				w.SetHook(nil)
+
+				mustUpdate(t, svc)
+
+				wantJoined(t, f, threeServers...)
+				wantConverged(t, svc)
+			})
+		})
+	}
 }
 
 // TestUpdateLosesTheBootstrapAnswer loses the answer of the Bootstrap call. With three servers the next server finds
@@ -1064,10 +1453,13 @@ func TestUpdatePlansTheNomadStep(t *testing.T) {
 				t.Errorf("the plan's Nomad step is %+v, want %+v", plan.Nomad, want)
 			}
 			mustUpdate(t, svc)
-			want := []string{"nomad Leader (prod-servers-0)", "nomad Health (prod-servers-0)"}
+			want := []string{
+				"nomad Leader (prod-servers-0)", "nomad Health (prod-servers-0)", "nomad Peers (prod-servers-0)",
+			}
 			if diff := cmp.Diff(want, nomadLines(w)[before:]); diff != "" {
 				t.Errorf("the Nomad calls of the update (-want +got):\n%s", diff)
 			}
+			wantJoined(t, f, "prod-servers-0", "prod-servers-1", "prod-servers-2")
 			wantConverged(t, svc)
 		})
 	})

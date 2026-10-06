@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"net/netip"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/model"
+	"github.com/ingvarch/tent/internal/nomadops"
 )
 
 // texts returns the addresses as text.
@@ -140,5 +142,49 @@ func TestRegisterNeedsAPrivateAddress(t *testing.T) {
 	const want = "node prod-workers-1: the cloud reports no private address for it yet; run the command again"
 	if err == nil || err.Error() != want {
 		t.Errorf("register = %v, want %q", err, want)
+	}
+}
+
+// TestCheckVote accepts a machine whose address a voter holds in the Raft configuration, and fails a machine without a
+// private address, one that no peer holds and one whose peer does not vote, naming the voters of the cluster.
+func TestCheckVote(t *testing.T) {
+	peer := func(a string, voter bool) nomadops.Peer {
+		return nomadops.Peer{Address: netip.MustParseAddrPort(a + ":4647"), Voter: voter}
+	}
+	const noVote = "node prod-servers-1: the servers are healthy with %s, but none votes at its address 10.64.0.4"
+	machine := cloud.Instance{Name: "prod-servers-1", PrivateIP: netip.MustParseAddr("10.64.0.4")}
+	other, voting, idle := peer("10.64.0.3", true), peer("10.64.0.4", true), peer("10.64.0.4", false)
+	for _, tc := range []struct {
+		name    string
+		in      cloud.Instance
+		peers   []nomadops.Peer
+		voters  int
+		wantErr string
+	}{
+		{name: "a voter at its address", in: machine, peers: []nomadops.Peer{other, voting}, voters: 2},
+		{
+			name: "no private address", in: cloud.Instance{Name: "prod-servers-1"}, peers: []nomadops.Peer{voting}, voters: 1,
+			wantErr: "node prod-servers-1: the cloud reports no private address for it yet; run the command again",
+		},
+		{
+			name: "a peer that does not vote", in: machine, peers: []nomadops.Peer{other, idle}, voters: 3,
+			wantErr: fmt.Sprintf(noVote, "3 voters"),
+		},
+		{
+			name: "no peer at its address", in: machine, peers: []nomadops.Peer{other}, voters: 2,
+			wantErr: fmt.Sprintf(noVote, "2 voters"),
+		},
+		{name: "one voter", in: machine, peers: []nomadops.Peer{other}, voters: 1, wantErr: fmt.Sprintf(noVote, "1 voter")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkVote(tc.peers, tc.in, tc.voters)
+
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Errorf("checkVote = %v, want nil", err)
+			case tc.wantErr != "" && (err == nil || err.Error() != tc.wantErr):
+				t.Errorf("checkVote = %v, want %q", err, tc.wantErr)
+			}
+		})
 	}
 }

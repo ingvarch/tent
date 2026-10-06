@@ -271,6 +271,12 @@ Nodes: 1 to create, 0 to wait for, 1 to delete.
 			"- node prod-x-0 (ID i-1)\n\nNodes: 0 to create, 0 to wait for, 1 to delete.\n",
 		},
 		{
+			"a wait for a machine that is ready",
+			app.UpdatePlan{Nodes: []app.NodeChange{{Action: app.NodeWait, Name: "prod-servers-1", ID: "instance-2"}}},
+			"~ node prod-servers-1 (ID instance-2, wait until it joins, scrub its user data)\n\n" +
+				"Nodes: 0 to create, 1 to wait for, 0 to delete.\n",
+		},
+		{
 			"an unknown action",
 			app.UpdatePlan{Nodes: []app.NodeChange{{Name: "prod-x-0", ID: "i-1"}}},
 			"NodeAction(0) node prod-x-0\n\nNodes: 0 to create, 0 to wait for, 0 to delete.\n",

@@ -391,11 +391,12 @@ func holder(t *testing.T, s statestore.Store) *statestore.Lease {
 	return h
 }
 
-// writeLog records the path of every write to the store, the lock's included.
+// writeLog records the path of every write to the store, the lock's included, and tells onWrite when it is set.
 type writeLog struct {
 	statestore.Store
-	mu     sync.Mutex
-	writes []string
+	onWrite func(path string)
+	mu      sync.Mutex
+	writes  []string
 }
 
 func (w *writeLog) Put(
@@ -414,6 +415,9 @@ func (w *writeLog) record(p string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.writes = append(w.writes, p)
+	if w.onWrite != nil {
+		w.onWrite(p)
+	}
 }
 
 // wantOnlyReads fails the test unless every call that reached the fake reads.
@@ -566,6 +570,8 @@ func TestUpdate(t *testing.T) {
 				"nomad started leader", "nomad done leader", "nomad started bootstrap", "nomad done bootstrap",
 				"nomad started healthy", "nomad done healthy",
 			},
+			nodeSteps("scrub", "prod-servers-0"), nodeSteps("scrub", "prod-servers-1"),
+			nodeSteps("scrub", "prod-servers-2"),
 			nodeSteps("create", "prod-workers-0"), registerSteps("prod-workers-0"),
 			nodeSteps("create", "prod-workers-1"), registerSteps("prod-workers-1"),
 		)
@@ -783,7 +789,8 @@ func TestUpdateStopsAtAFailedCreate(t *testing.T) {
 	})
 }
 
-// TestUpdateReportsTheMachines reports the machine of each node it created: its ID and its private address.
+// TestUpdateReportsTheMachines reports the machine of each node it created: its ID and its private address. A scrub
+// step names no machine but the node's.
 func TestUpdateReportsTheMachines(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newUpdate(t)
@@ -798,11 +805,17 @@ func TestUpdateReportsTheMachines(t *testing.T) {
 
 		var got, want []string
 		for _, p := range steps {
-			got = append(got, fmt.Sprintf("%s %s %s %s", p.Step, p.Node.Name, p.Instance.ID, p.Instance.PrivateIP))
+			got = append(got, fmt.Sprintf("%s %s %s %s %s", p.Step, p.Node.Action, p.Node.Name, p.Instance.ID,
+				p.Instance.PrivateIP))
 		}
 		for i, n := range allNodes {
-			want = append(want, "started "+n.Name+"  invalid IP",
-				fmt.Sprintf("done %s instance-%d 10.64.0.%d", n.Name, i+1, i+3))
+			want = append(want, "started create "+n.Name+"  invalid IP",
+				fmt.Sprintf("done create %s instance-%d 10.64.0.%d", n.Name, i+1, i+3))
+			if i == 2 { // the servers are scrubbed once they are healthy, before the clients are made
+				for _, s := range allNodes[:3] {
+					want = append(want, "started scrub "+s.Name+"  invalid IP", "done scrub "+s.Name+"  invalid IP")
+				}
+			}
 		}
 		if diff := cmp.Diff(want, got); diff != "" {
 			t.Errorf("the node steps (-want +got):\n%s", diff)
@@ -1035,8 +1048,8 @@ func TestUpdateHoldsTheLock(t *testing.T) {
 			}
 		}
 		mustUpdate(t, svc)
-		if len(errs) != len(allNodes) {
-			t.Fatalf("%d node steps started, want %d", len(errs), len(allNodes))
+		if want := len(allNodes) + 3; len(errs) != want { // the nodes, and the scrub of each server
+			t.Fatalf("%d node steps started, want %d", len(errs), want)
 		}
 		for _, err := range errs {
 			locked, ok := errors.AsType[*statestore.LockedError](err)
@@ -1153,14 +1166,38 @@ func TestNodeStepString(t *testing.T) {
 	}
 }
 
-// markedBuild is a fake with the five instances of a first build, in which prod-servers-0 is marked as joined through
-// the provider.
+// dropJoinedTag takes the joined label off the instance id of f, as a change by hand could, and leaves its user data.
+func dropJoinedTag(t *testing.T, f *vultrfake.Fake, id string) {
+	t.Helper()
+	for _, in := range f.Instances() {
+		if in.ID == id {
+			f.SetInstanceTags(t, id, slices.DeleteFunc(in.Tags, func(tag string) bool {
+				return strings.HasPrefix(tag, cloud.LabelJoined+"=")
+			})...)
+		}
+	}
+}
+
+// unmark takes the joined label off the instance id of f and gives it the user data of its create request back.
+func unmark(t *testing.T, f *vultrfake.Fake, id string) {
+	t.Helper()
+	req, ok := f.CreateRequest(id)
+	if !ok {
+		t.Fatalf("the fake has no create request for %s", id)
+	}
+	dropJoinedTag(t, f, id)
+	f.SetInstanceUserData(t, id, req.UserData)
+}
+
+// markedBuild is a fake with the five instances of a first build, in which only prod-servers-0 is marked as joined:
+// the other two servers have lost the label and hold their first user data again.
 func markedBuild(t *testing.T) *vultrfake.Fake {
 	t.Helper()
 	svc, f, _ := newRelease(t)
 	mustUpdate(t, svc)
-	if err := vultr.New(f).MarkJoined(t.Context(), cloud.Instance{ID: f.Instances()[0].ID}); err != nil {
-		t.Fatalf("MarkJoined: %v", err)
+	wantJoined(t, f, "prod-servers-0", "prod-servers-1", "prod-servers-2")
+	for _, id := range []string{f.Instances()[1].ID, f.Instances()[2].ID} {
+		unmark(t, f, id)
 	}
 	return f
 }
