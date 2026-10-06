@@ -1,6 +1,6 @@
 // Package app runs tent's use cases: it creates, gets, replaces and edits cluster specs in the state store, removes a
-// stale cluster lock, updates a cluster's cloud objects and nodes to its specs, bootstraps Nomad on a new cluster, and
-// deletes a cluster's cloud objects and its state.
+// stale cluster lock, updates a cluster's cloud objects and nodes to its specs, bootstraps Nomad on a new cluster,
+// checks a cluster's machines against its specs, and deletes a cluster's cloud objects and its state.
 package app
 
 import (
@@ -34,13 +34,14 @@ type Service struct {
 	OnTakeover func(previous statestore.Lease)
 	// OnWarning, when set, is called with each warning about the cluster that a change goes ahead with, such as a Nomad
 	// API that the whole internet may reach: after a create, replace or save, and before an update applies its
-	// changes. One change never calls it concurrently.
+	// changes. A validation of a cluster calls it with the warnings of its result. One change never calls it
+	// concurrently.
 	OnWarning func(warning string)
 	// Channels, when set, returns the release channel called name, which a cluster's spec names; it defaults to the
 	// channels embedded in tent.
 	Channels func(name string) (*channels.Channel, error)
-	// Providers returns the cloud provider that a cluster's spec names, for an update or a delete. It fails for a
-	// provider that tent does not know or cannot reach, such as one without its credentials.
+	// Providers returns the cloud provider that a cluster's spec names, for an update, a delete or a validation. It
+	// fails for a provider that tent does not know or cannot reach, such as one without its credentials.
 	Providers func(v1alpha1.Provider) (cloud.Provider, error)
 	// Assets says where the files that nodes download are found; the zero value reads the public release sites. An
 	// update gives it its clock when Assets.Now is nil.

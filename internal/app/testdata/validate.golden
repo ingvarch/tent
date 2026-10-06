@@ -1,0 +1,10 @@
+NODE            FAILURE
+prod-workers-1  no machine: node group workers has 1 of its 2
+prod-workers-0  the cloud reports its machine (ID instance-4) as not running
+prod-workers-2  machine ID instance-6 is one more than the size of node group workers, 2
+prod-workers-0  machine ID instance-9 has the name of machine ID instance-4
+prod-old-0      machine ID instance-7 is of node group old, which the specs do not have
+prod-servers-2  machine ID instance-3 has not joined Nomad: it carries no tent/joined label
+-               Nomad has no leader, or tent cannot reach it: no route; tent reaches the servers on port 4646: check spec.access.api
+
+cluster prod is not valid: 7 failures

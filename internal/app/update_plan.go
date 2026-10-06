@@ -89,7 +89,7 @@ func (p UpdatePlan) WriteText(w io.Writer) error {
 	if text == "" {
 		text = "No changes.\n"
 	}
-	return writePlan(w, text)
+	return writeText(w, "the plan", text)
 }
 
 // planLine returns the step's line in a text plan, without its newline.
@@ -122,10 +122,10 @@ func serverNoun(n int) string {
 	return "servers"
 }
 
-// writePlan writes the text of a plan to w.
-func writePlan(w io.Writer, text string) error {
+// writeText writes text, which is what, to w.
+func writeText(w io.Writer, what, text string) error {
 	if _, err := io.WriteString(w, text); err != nil {
-		return fmt.Errorf("writing the plan: %w", err)
+		return fmt.Errorf("writing %s: %w", what, err)
 	}
 	return nil
 }
@@ -201,9 +201,9 @@ func (p UpdatePlan) WriteApplied(w io.Writer) error {
 // writeSummary writes the parts of a summary of an applied plan to w, on one line, or "No changes." for none.
 func writeSummary(w io.Writer, parts []string) error {
 	if len(parts) == 0 {
-		return writePlan(w, "No changes.\n")
+		return writeText(w, "the plan", "No changes.\n")
 	}
-	return writePlan(w, strings.Join(parts, " ")+"\n")
+	return writeText(w, "the plan", strings.Join(parts, " ")+"\n")
 }
 
 // MarshalJSON encodes the plan as {"applied": true, "infrastructure": <the engine's plan>, "nodes": [...],
@@ -213,7 +213,7 @@ func writeSummary(w io.Writer, parts []string) error {
 // left out when they are false, nil or empty. It leaves HTML characters such as < and & as they are, so the caller's
 // encoder decides whether to escape them.
 func (p UpdatePlan) MarshalJSON() ([]byte, error) {
-	return marshalPlan(struct {
+	return marshalJSON("the plan", struct {
 		Applied        bool         `json:"applied,omitempty"`
 		Infrastructure *engine.Plan `json:"infrastructure"`
 		Nodes          []NodeChange `json:"nodes"`
@@ -223,13 +223,13 @@ func (p UpdatePlan) MarshalJSON() ([]byte, error) {
 	}{p.Applied, p.Infra, orEmpty(p.Nodes), p.Nomad, p.Secrets, p.Completed})
 }
 
-// marshalPlan encodes the plan v as JSON on one line, and leaves HTML characters such as < and & as they are.
-func marshalPlan(v any) ([]byte, error) {
+// marshalJSON encodes v, which is what, as JSON on one line, and leaves HTML characters such as < and & as they are.
+func marshalJSON(what string, v any) ([]byte, error) {
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(v); err != nil {
-		return nil, fmt.Errorf("encoding the plan: %w", err)
+		return nil, fmt.Errorf("encoding %s: %w", what, err)
 	}
 	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
 }
