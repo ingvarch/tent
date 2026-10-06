@@ -4,7 +4,9 @@
   [ADR-0030](0030-nomad-on-nodes.md) (tent sets no `drain_on_shutdown`: a client that drains itself at shutdown
   comes back ineligible; tent drains a client through the Nomad API before it removes it, ADR-0017) and by
   [ADR-0031](0031-bootstrap-in-update.md) (servers and combined nodes have `leave_on_terminate = false`, so a server
-  does not leave Raft when it stops; tent removes it through the API, ADR-0017)
+  does not leave Raft when it stops; tent removes it through the API, ADR-0017) and by
+  [ADR-0032](0032-joined-label-scrub-and-delete-guard.md) (until M3, `update` refuses to delete a machine that joined
+  Nomad, and it deletes a client that never registered before it creates the replacement)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0004](0004-layered-architecture.md), [ADR-0009](0009-server-discovery-fixed-ip-slots.md),
@@ -38,7 +40,8 @@ Relevant facts:
 - **`update` and `rolling-update` are separate.** `tent update cluster` never replaces existing nodes; it reports how
   many are outdated and why. `tent rolling-update cluster` performs the replacements.
 - **Surge-first.** The replacement is created and healthy before the old node is removed. A crash therefore leaves a
-  surplus, never a deficit, and the next run completes the work.
+  surplus, never a deficit, and the next run completes the work. One exception: `update` deletes a client that never
+  registered before it creates its replacement ([ADR-0032](0032-joined-label-scrub-and-delete-guard.md)).
 - **Servers are replaced one at a time**, only while autopilot is healthy and failure tolerance is ≥ 1:
   1. Create the new server in a free IP slot.
   2. Wait until it is a voter and autopilot reports healthy.

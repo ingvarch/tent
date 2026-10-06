@@ -17,8 +17,10 @@
 
   Amended by [ADR-0023](0023-vultr-inventory-dedupe-and-images.md) (items 1, 2 and 4: the account-wide inventory, the
   image table, and which firewall groups a cluster has) and by
-  [ADR-0027](0027-nodeconfig-contract-rendering-and-spec-hash.md) (item 5: one budget of 24 KiB for the
-  whole user data on every provider, instead of the measured limit minus 25% and the 64 KiB budget).
+  [ADR-0027](0027-nodeconfig-contract-rendering-and-spec-hash.md) (item 5: one budget of 24 KiB for the whole user data
+  on every provider, instead of the measured limit minus 25% and the 64 KiB budget) and by
+  [ADR-0032](0032-joined-label-scrub-and-delete-guard.md) (item 5: `Nodes.MarkJoined` replaces `Nodes.ScrubUserData`,
+  and sets the label `tent/joined=true` in the same PATCH).
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0014](0014-vultr-first-provider-and-e2e.md), [ADR-0015](0015-idempotency-without-unique-names.md),
@@ -78,7 +80,8 @@ design are in [platform notes §3](../platform-notes.md#3-vultr).
 5. **user_data.**
    - The cloud-config sets `package_update: false` and `package_upgrade: false`.
    - `MaxUserDataBytes` is the limit the spike measures, minus a 25% margin.
-   - After a node registers in Nomad, tent PATCHes its user data to a non-secret stub (`Nodes.ScrubUserData`).
+   - Once a node has joined its cluster, tent sends one PATCH that sets its user data to a non-secret stub and adds
+     the tag `tent/joined=true` (`Nodes.MarkJoined`, [ADR-0032](0032-joined-label-scrub-and-delete-guard.md)).
      **Provisional:** this requires that the metadata service then serves the stub and that cloud-init does not re-run
      on reboot. If either fails, scrubbing is dropped and the threat model reverts to the Hetzner one.
 6. **Zones and placement.**

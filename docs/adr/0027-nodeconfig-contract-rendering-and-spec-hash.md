@@ -14,7 +14,9 @@
   ([architecture §8.3](../architecture.md#83-nodeconfig-contract))) and by [ADR-0031](0031-bootstrap-in-update.md)
   (decision 12 is built: `update` gives nodes NodeConfig through one node builder, with the spec hash as the
   `tent/spec-hash` label, and writes the completed spec before the first node; the M2.7 follow-ups are done; the
-  hash of server and combined groups moved with `leave_on_terminate = false`, and the format stays 1)
+  hash of server and combined groups moved with `leave_on_terminate = false`, and the format stays 1) and by
+  [ADR-0032](0032-joined-label-scrub-and-delete-guard.md) (the scrub of user data is built: it runs once a node has
+  joined its cluster)
 - **Date:** 2026-09-29
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0006](0006-two-binaries-and-nodeconfig.md) (the size budget, the instance id),
@@ -45,7 +47,8 @@ Building it showed where the accepted design did not fit:
 - **Who writes `05-join.hcl`.** [ADR-0016](0016-server-discovery-seed-and-refresh.md) has tent render the seed into
   the file and tent-node rewrite it on refresh. Two renderers of one file must agree on its form.
 - **Secrets on machines.** Real user data holds node keys, the gossip key and intro tokens. The Vultr scrub runs only
-  after a node registers with Nomad, and registration needs the bootstrap of M2.7.
+  after a node has joined its cluster ([ADR-0032](0032-joined-label-scrub-and-delete-guard.md)), and joining needs the
+  bootstrap of M2.7.
 - **The host firewall.** Copying `access.ssh` and `access.api` to the host would make a change of `access` change the
   configuration of every node.
 - **Values in HCL.** Nomad parses its agent configuration with HCL1

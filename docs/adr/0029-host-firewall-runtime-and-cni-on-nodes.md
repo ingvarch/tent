@@ -9,7 +9,9 @@
   unpacks, so a cache file changed after the check fails the phase; decision 13: on the M2.6b VM checks a restart of
   Docker with live-restore restarted Nomad's docker tasks in new containers
   ([platform notes §6.4](../platform-notes.md#64-restarts-of-docker-containerd-and-nomad), ADR-0030's trade-offs);
-  the M2.6b follow-ups are built, and their VM check ran on 2026-10-05)
+  the M2.6b follow-ups are built, and their VM check ran on 2026-10-05) and by
+  [ADR-0032](0032-joined-label-scrub-and-delete-guard.md) (the user data is scrubbed once a node has joined its cluster,
+  so workloads can read it only until then)
 - **Date:** 2026-09-29
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0007](0007-security-baseline.md) and [ADR-0008](0008-node-credential-delivery.md) (how
@@ -248,7 +250,7 @@ in two parts: M2.6a sets the machine up before Nomad (`hostfirewall`, `runtime` 
 
 - The block fails closed: root `curl` to the metadata service on a node, and anything else on the host that needs
   the service, gets no answer.
-- The workloads of decision 2 can set the mark and read the user data until the scrub.
+- The workloads of decision 2 can set the mark and read the user data until the node has joined and is scrubbed.
 - Drift inside the kernel's table, such as a manual `nft add rule inet tent …`, keeps the comment and stays until a
   reboot or a config change.
 - An operator who turns ufw on again gets `ufw disable` at the next boot, which resets the `FORWARD` policy to accept

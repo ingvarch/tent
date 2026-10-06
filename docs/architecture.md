@@ -228,7 +228,7 @@ This table is also the check that the abstraction survives several providers.
 | Group of nodes | `NodeGroup` | `node_pool`, `node_class`, `meta` | tagged instances | labelled servers plus a placement group | EC2 instances, later an ASG |
 | Perimeter | `access` intents | — | a servers firewall group for the server or combined group, a clients group only with a client group (public only) + host nftables | Cloud Firewalls (public only) + host nftables | Security Groups |
 | Server discovery | join strategy | `server_join` | seed list + tent-node refresh | fixed private IP slots | cloud auto-join by tags |
-| Node identity | — | mTLS plus intro token | none (secrets via user data, scrubbed after bootstrap) | none (secrets via user data) | instance identity document plus IAM role |
+| Node identity | — | mTLS plus intro token | none (secrets via user data, scrubbed once the node has joined) | none (secrets via user data) | instance identity document plus IAM role |
 | State store | `--state` | — | Object Storage (S3 API) or any S3 | Object Storage (S3 API) or any S3 | S3 |
 
 ### 3.3 API rules
@@ -337,6 +337,7 @@ This table is also the check that the abstraction survives several providers.
 | `tent/spec-hash` | 16 hex chars | semantic hash of the node configuration ([8.4](#84-nomad-configuration-rendering)) |
 | `tent/slot` | `0`–`6` | Hetzner Nomad servers only |
 | `tent/op` | UUID | operation id of the create call ([ADR-0015](adr/0015-idempotency-without-unique-names.md)) |
+| `tent/joined` | `true` | machines whose node has joined its cluster, set together with the scrub of their user data ([7.1](#71-interfaces), [9.4](#94-secrets-on-nodes-threat-model), [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)) |
 | `tent/lock-for` | cluster name | the Hetzner lock firewall only; it deliberately has no `tent/cluster` |
 | `tent/e2e`, `tent/e2e-run` | `true`, run id | resources created by E2E tests |
 
@@ -741,7 +742,7 @@ type Nodes interface {
 	Create(ctx context.Context, req CreateRequest) (Instance, error) // idempotent per req.Op; waits until ready
 	Stop(ctx context.Context, node Instance) error                  // hard where there is no graceful shutdown
 	Delete(ctx context.Context, node Instance) error                // even while the machine runs
-	ScrubUserData(ctx context.Context, node Instance) error         // replaces the user data with a stub
+	MarkJoined(ctx context.Context, node Instance) error            // labels the machine, scrubs its user data
 }
 
 // Instance is one machine of a cluster as the cloud reports it.
@@ -750,7 +751,7 @@ type Instance struct {
 	Role                     v1alpha1.Role // the Nomad role of its node group
 	Zone, SpecHash, Op       string        // SpecHash is empty when the machine carries none
 	PrivateIP, PublicIP      netip.Addr    // the invalid Addr until the cloud reports one
-	Ready                    bool          // the cloud reports it running and booted
+	Ready, Joined            bool          // Joined: it carries the label tent/joined=true
 	Created                  time.Time
 }
 
@@ -779,7 +780,11 @@ type UserData []byte
   `update cluster` makes one per node create, and waits for a listed node with the id that the node carries.
 - `Create` waits until the machine is ready and has no deadline of its own: the caller gives every call one through
   its context. `update cluster` gives each call 10 minutes ([13.2](#132-tent-update-cluster---yes)).
-- A machine that is gone counts as stopped, deleted or scrubbed.
+- `MarkJoined` sets the label `tent/joined=true` on the machine and, where the cloud lets user data change, replaces
+  the user data with a stub that holds no secrets. The core calls it once the node has joined, on every cloud. Both
+  changes go in one request on Vultr ([11.6](#116-user_data)). It is safe to repeat.
+  [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md) has the reasons. `Instance.Joined` reports the label.
+- A machine that is gone counts as stopped, deleted or marked as joined.
 - `vultr.Provider.Nodes()` returns the provider itself. Vultr's `Nodes`: [11.3](#113-creating-a-node) to
   [11.6](#116-user_data).
 - **Providers of a command.** `cmd/tent` gives the CLI a function (`cli.WithProviders`) that returns the provider a
@@ -798,8 +803,9 @@ type UserData []byte
 - `Capabilities` with the first core code that depends on one;
 - `Default` with the first provider default that `v1alpha1.SetDefaults` does not fill in.
 
-`Nodes` changes with them: `Stop` is graceful where `GracefulShutdown` is set, the core calls `ScrubUserData` only
-where `MutableUserData` is set, and `CreateRequest` gets a fixed private IP with the Hetzner provider.
+`Nodes` changes with them: `Stop` is graceful where `GracefulShutdown` is set, the provider's `MarkJoined` replaces
+the user data only where `MutableUserData` is set (the core calls it on every cloud, and a cloud with immutable user
+data sets the label alone), and `CreateRequest` gets a fixed private IP with the Hetzner provider.
 
 The sketch of the target:
 
@@ -824,7 +830,7 @@ type Capabilities struct {
 	GracefulShutdown      bool // Hetzner: ACPI shutdown. Vultr: no, halt is hard (ADR-0017)
 	FailureDomains        bool // Hetzner eu-central: 3 locations. Vultr: none
 	SpreadPlacement       bool // Hetzner: placement groups. Vultr: none
-	MutableUserData       bool // Vultr: PATCH user_data -> scrub secrets after bootstrap
+	MutableUserData       bool // Vultr: PATCH user_data -> scrub secrets once the node has joined
 	MaxUserDataBytes      int  // only below tent's 24 KiB budget, such as AWS's 16 KB (8.3)
 	CostEstimates         bool // Hetzner /pricing, Vultr /plans
 }
@@ -917,7 +923,7 @@ The model holds no Nomad settings. `internal/app` builds each group's NodeConfig
 | Node groups | tent creates each VM | tent creates each VM | EC2 directly, ASG later | `Nodes` primitives; `ManagedGroups` |
 | Server discovery | seed + refresh | fixed IP slots | cloud auto-join | `JoinStrategy` ([ADR-0016](adr/0016-server-discovery-seed-and-refresh.md)) |
 | Server removal | hard stop + Nomad API | ACPI shutdown + Nomad API | terminate + Nomad API | `GracefulShutdown` ([ADR-0017](adr/0017-api-driven-server-removal.md)) |
-| Node credentials | user data, scrubbed after bootstrap | user data | IAM role / bootstrap controller | credential delivery strategy ([9.5](#95-target-architecture-bootstrap-controller)) |
+| Node credentials | user data, scrubbed once the node has joined | user data | IAM role / bootstrap controller | credential delivery strategy ([9.5](#95-target-architecture-bootstrap-controller)) |
 | State store | Vultr Object Storage / any S3 | Hetzner Object Storage / any S3 | S3 | the same `s3://` backend |
 | Metadata | `/v1.json` | `/hetzner/v1/` | IMDSv2 | `nodeup/env.Environment` |
 
@@ -1242,7 +1248,7 @@ The golden files and a sketch: [Appendix A](#appendix-a-nomad-agent-configuratio
   signature is checked is injectable (`assets.Options.Now`).
 - **NodeConfig carries the assets** from M2.3: `internal/app` resolves them (`resolveAssets`) and converts them to
   NodeConfig's own type ([8.3](#83-nodeconfig-contract)). Since M2.7a `update` reads the release files with its own
-  clock for the signature check, but only in a plan that creates or waits for a node. Such a plan needs
+  clock for the signature check, but only in a plan that creates a node or repeats the create of one. Such a plan needs
   releases.hashicorp.com, and for a release build github.com. A plan without node changes reads no release file and
   needs no development variables ([13.2](#132-tent-update-cluster---yes),
   [ADR-0031](adr/0031-bootstrap-in-update.md)).
@@ -1397,7 +1403,8 @@ exist ([ADR-0019](adr/0019-combined-server-client-role.md)).
     refuses a token only on the `server` role.
 - **TTL.** 30 minutes at most (`nomadops.MaxIntroTTL`), the default `max_identity_ttl` of the servers. A server cuts
   a longer TTL to its maximum without a word, so nomadops refuses one before it sends the request. It refuses an
-  empty node name or pool too.
+  empty node name or pool too. A server accepts a token for one more minute after it expires
+  (`nomadops.IntroLeeway`, [platform notes §1.6](platform-notes.md#16-the-agent-on-a-node)).
 - **Node pools.** tent creates none. Nomad creates a pool when its first client registers, and an intro token may
   name a pool that does not exist yet (decision 17 of [18](#18-open-questions)).
 - **Delivery.** NodeConfig carries the token as a secret file, and tent-node writes it to
@@ -1409,7 +1416,9 @@ exist ([ADR-0019](adr/0019-combined-server-client-role.md)).
   identity.
 - **Gotchas.**
   - An expired or mismatched token is rejected even with `enforcement = "warn"`.
-  - A VM that fails to register within the TTL is replaced, which is idempotent (M2.7b).
+  - A client that has not registered 31 minutes after its machine was created (`nomadops.MaxIntroTTL` plus
+    `nomadops.IntroLeeway`) is deleted and created again with a new token ([13.4](#134-scaling),
+    [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)).
   - Client introduction does not replace mTLS.
 
 ### 9.4 Secrets on nodes: threat model
@@ -1420,7 +1429,7 @@ the VM, and by default that includes containers.
 | In user data | Risk if read | Mitigation |
 |---|---|---|
 | CA certificate | none (public) | — |
-| Node certificate and key | impersonate that node | nftables lets only tent-node's marked socket reach the metadata service (below); servers run no workloads (except combined nodes, [ADR-0019](adr/0019-combined-server-client-role.md)); **Vultr: user data is scrubbed after bootstrap** |
+| Node certificate and key | impersonate that node | nftables lets only tent-node's marked socket reach the metadata service (below); servers run no workloads (except combined nodes, [ADR-0019](adr/0019-combined-server-client-role.md)); **Vultr: user data is scrubbed once the node has joined** |
 | Gossip key (servers only, `01-gossip.hcl`, mode 0600) | join the server gossip pool | servers run no workloads (except combined nodes); Serf and RPC listen only on the private network |
 | Intro token (clients only) | register a fake client | TTL ≤ 30 min, bound to one node name and pool, used once at first registration |
 | Cloud API token | — | **never on nodes** |
@@ -1445,15 +1454,25 @@ the VM, and by default that includes containers.
 
 Scrubbing on Vultr works like this:
 - Vultr lets user data be changed after creation.
-- Once a node has registered with Nomad, tent replaces its user data with a non-secret stub (`Nodes.ScrubUserData`).
-- From then on the metadata service no longer serves the secrets.
+- Once a node has joined its cluster, tent replaces its user data with a stub that holds no secrets and labels the
+  machine `tent/joined=true`, in one call (`Nodes.MarkJoined`, [11.6](#116-user_data)). From then on the metadata
+  service no longer serves the secrets.
+- A node has joined when
+  - a server's machine has a voter at its private address in the Raft configuration, after the servers are healthy
+    and vote ([13.2](#132-tent-update-cluster---yes));
+  - a client's machine has a node of its name and private address that Nomad lists as ready and eligible;
+  - a combined node has both.
+- The label tells the next plan that a machine has joined, without a call to Nomad. tent trusts the label and never
+  reads user data back.
 
-The spike confirmed on 2026-09-25 that this works: the metadata service serves the updated value within seconds, and
+The spike confirmed on 2026-09-25 that a changed user data reaches the metadata service within seconds and that
 cloud-init does not re-run after a restart ([ADR-0018](adr/0018-vultr-provider-design.md)). Hetzner user data is
 immutable, so there it stays for the node's lifetime.
 
-The scrub needs a registered node. Since M2.7a `update` bootstraps Nomad, and nodes boot with real user data, so the
-secrets of the table stay in user data until the scrub of M2.7b (decision 12 of [18](#18-open-questions)).
+Until a node has joined, its secrets stay in its user data. A node that never joins keeps them: a server or combined
+node blocks every client change then ([13.2](#132-tent-update-cluster---yes)), and a client that has not registered
+after 31 minutes is deleted and created again ([13.4](#134-scaling)). A cluster built by M2.7a's tent has no
+labels: its first `update --yes` waits for every node, scrubs it and labels it, and creates nothing.
 
 ### 9.5 Target architecture: bootstrap controller
 
@@ -1635,7 +1654,8 @@ type Capabilities struct {
 `statestore.Layout` names these objects, and `statestore.Clusters` lists the clusters in a store: the top-level names
 that hold a `cluster.yaml`.
 
-`nomad/bootstrapped` is written after the ACL bootstrap succeeded and the servers are healthy and all vote (M2.7a,
+`nomad/bootstrapped` is written last in the Nomad step: after the ACL bootstrap succeeded, the servers are healthy and
+all vote, and the server and combined machines of the plan are scrubbed and labelled (M2.7a, M2.7b,
 [13.2](#132-tent-update-cluster---yes)). `update` deletes it and writes it again when the store holds it and no server
 or combined machine of the cluster stays. Only its existence is read; it holds the time in RFC 3339 and a newline.
 `tent delete cluster` knows it ([13.7](#137-tent-delete-cluster---yes)).
@@ -1725,7 +1745,7 @@ sets where its warnings go.
 | SSH key | `vultr.SSHKey/<cluster>-<fp>` ([3.4](#34-naming-and-ownership-markers)) | name `tent:cluster=<c>;kind=ssh-key;fp=<fp>;op=<op>` | engine | one per key of `sshKeys`; keys with the same type and data are one, whatever their comments. Two different keys with the same `fp` fail `BuildInfra`. A Vultr key with the marker but other key material fails the plan: delete it in Vultr, and tent creates the spec's key |
 | VPC | `vultr.VPC/<cluster>` | description `tent:cluster=<c>;kind=vpc;op=<op>` | engine | one per cluster, in `cloud.region`, with the CIDR of `networking.cidr` (`/16`, `/20` and `/24` verified); at most 5 VPCs per region. The region and the CIDR never change ([ADR-0023](adr/0023-vultr-inventory-dedupe-and-images.md)): moving the network would need every node replaced first, so the plan fails, for example with `the VPC of cluster prod is 10.64.0.0/16 in ams; the spec asks for 10.65.0.0/16 in ams, and tent cannot move a cluster's network` |
 | Firewall groups | `vultr.FirewallGroup/<cluster>-servers`, `vultr.FirewallGroup/<cluster>-clients` | description `tent:cluster=<c>;kind=firewall;role=server;op=<op>`, or `role=client` | engine | the servers' group for the server or combined group; the clients' group only when the cluster has a client group. An instance has exactly one group. Rules: [11.5](#115-firewall-and-host-firewall) |
-| Instances | none | label = hostname = `<cluster>-<group>-<index>`; tags = canonical labels via the codec | rollout via `Nodes` | see [11.3](#113-creating-a-node) |
+| Instances | none | label = hostname = `<cluster>-<group>-<index>`; tags = canonical labels via the codec, with `tent/joined=true` once the node has joined | rollout via `Nodes` | see [11.3](#113-creating-a-node) |
 | Load balancer (optional) | later | label `tent:cluster=<c>;kind=lb;name=api` | engine + rollout | always public; targets are instance IDs, so rollout updates membership on replacement; LB firewall rules narrow the sources |
 | NAT gateway (private topology, later) | later | tag | engine | one per VPC, $0.03/hour |
 
@@ -1838,6 +1858,13 @@ create that may have been carried out is never sent again.
    ([11.7](#117-zones-placement-and-availability)). The label and the hostname are the node's name. The tags are the
    canonical labels: cluster, node group, role, `op`, and the spec hash when there is one. The user data goes in
    base64.
+   - **The instance limit.** Vultr counted a machine it had just deleted against the account's instance limit in one
+     run ([platform notes §3.14](platform-notes.md#314-account-limits-terms-and-operations-)). A POST that
+     fails with `ErrLimitReached` made no instance, so it is sent again every poll interval (5 s) while less than 2
+     minutes (`limitSettle`) have passed since a delete that Vultr accepted on this provider value. A delete that
+     answers 404 opens no window. The first refusal is logged at info level. A limit that holds on returns the error
+     with its hint ([ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md) has the basis of the bound). Only the
+     node create retries. When the context ends during a wait, the error matches the context's error.
 4. **Lost answer.** govultr's own retries are off ([11.8](#118-api-client-rate-limits-cost)). After a create without
    an answer (`ErrUnavailable`), or with an answer that holds no instance id, it searches by the `op` tag once more
    and adopts what it finds. When that search fails or lists nothing yet, the error matches `ErrUnavailable`, and a
@@ -1864,7 +1891,8 @@ create that may have been carried out is never sent again.
 - **Root password.** The create answer holds the instance's root password (`default_password`), and no other answer
   does. tent keeps only the id from it.
 - **Listing.** `Nodes.List` lists the instances with the tag `tent/cluster=<cluster>`, sorted by name, then by id,
-  and reads each one's address in its VPC with `GET /v2/instances/{id}/vpcs`.
+  and reads each one's address in its VPC with `GET /v2/instances/{id}/vpcs`. `Instance.Joined` is true when the
+  tags hold `tent/joined=true`.
   - A node's name is its hostname, which only a reinstall changes and which Nomad uses as the node name, or its label
     when it has no hostname. The label can be changed in the Vultr console.
   - It skips, with a warning, an instance whose tent tags do not decode, such as one with a tag in upper case, which
@@ -1898,6 +1926,10 @@ create that may have been carried out is never sent again.
   - `Nodes.Delete` sends `DELETE /v2/instances/{id}`, which destroys the instance at once, even while it runs.
   - An instance that is gone (404) counts as stopped or deleted. Other errors name the node, such as
     `stop node prod-servers-0 (<id>): …`.
+- **Until M3, `update` deletes only nodes that never joined.** It refuses to delete a machine that carries
+  `tent/joined=true`, and checks with Nomad before each delete ([13.4](#134-scaling),
+  [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)). The paths below are the target; `delete cluster`
+  destroys every machine as before.
 - **Servers** follow the Nomad-API removal path of [ADR-0017](adr/0017-api-driven-server-removal.md):
   1. surge;
   2. transfer leadership if needed;
@@ -2003,19 +2035,29 @@ create that may have been carried out is never sent again.
   entry, and the tent-node download. The M2.5 VM check found node.json intact from the gz+b64 payload on Vultr's
   Ubuntu 24.04 and 26.04 images on 2026-09-29
   ([platform notes §3.4](platform-notes.md#34-user_data-metadata-and-identity)). Since M2.7a `update` gives every
-  node this user data, and its size is checked at plan time ([13.2](#132-tent-update-cluster---yes)). No scrub runs
-  before M2.7b.
-- **Scrubbing.** Once the node has joined the cluster, the core calls `Nodes.ScrubUserData`. It PATCHes the user
-  data to a stub that holds no secrets and no modules:
+  node this user data, and its size is checked at plan time ([13.2](#132-tent-update-cluster---yes)). Once the node
+  has joined, the user data is scrubbed (below).
+- **Scrubbing.** Once the node has joined the cluster, the core calls `Nodes.MarkJoined`. It reads the instance with
+  `GET /v2/instances/{id}`, then sends one `PATCH` with the instance's tags, in their order, with `tent/joined=true`
+  added at the end, and the user data set to a stub that holds no secrets and no modules:
 
   ```
   #cloud-config
   # tent removed this node's user data after the node joined the cluster
+  {}
   ```
 
-  - The PATCH changes nothing else. govultr sends `"tags": null` with it, and Vultr keeps the tags (spike 2026-09-27,
-    [platform notes §3.3](platform-notes.md#33-instances)).
-  - An instance that is gone counts as scrubbed. The PATCH is idempotent, so after an error that matches
+  The empty mapping on the last line is needed: cloud-init refuses a cloud-config that loads to nothing and then
+  reports a degraded status ([platform notes §6.5](platform-notes.md#65-cloud-init-and-the-stub)).
+
+  - Vultr replaces the whole tag set when the PATCH sets `tags`, so the PATCH sends every tag the instance has, the
+    operator's own too ([platform notes §3.3](platform-notes.md#33-instances)). A `tent/joined` tag with another
+    value is replaced, since two tags of one key make the codec fail and `List` would drop the machine.
+  - Vultr has no call that adds one tag. A tag that an operator changes between the read and the PATCH, about a
+    second, is lost.
+  - The PATCH changes nothing else. The spike of 2026-09-27 saw tags alone, and user data with `"tags": null`, work.
+    Vultr applies both fields of one PATCH ([platform notes §3.3](platform-notes.md#33-instances)).
+  - An instance that is gone counts as marked. The call is idempotent, so after an error that matches
     `ErrUnavailable` the caller may send it again.
   - Verified 2026-09-25: the metadata service serves the stub 4 s after the PATCH, and after a restart cloud-init
     neither re-runs `runcmd` nor changes the instance-id. Per-boot modules would run from the stub, so the stub
@@ -2050,7 +2092,8 @@ create that may have been carried out is never sent again.
   |---|---|---|
   | `ubuntu-24.04` | 2284 | Ubuntu 24.04 LTS x64 |
   | `ubuntu-26.04` | 2760 | Ubuntu 26.04 LTS x64 |
-- **Limits.** Vultr refuses a create that would pass a limit. tent shows Vultr's message and does not retry.
+- **Limits.** Vultr refuses a create that would pass a limit. tent shows Vultr's message and does not retry, except
+  for a node create right after a delete ([11.3](#113-creating-a-node)).
   - Account limits, such as the most instances, are opaque and not exposed by the API. Their errors end with
     `(an account limit can be raised in the Vultr console under Billing, Limits)`.
   - Vultr does not raise the limit of 5 VPCs per region or the most rules a firewall group holds, so their errors
@@ -2236,7 +2279,8 @@ Nomad API, or through autopilot's cleanup when that is first. Clients still leav
 - `create cluster --yes` and `create -f FILE --yes` then build the cluster in the cloud, as `update cluster --yes`
   does ([13.2](#132-tent-update-cluster---yes)). `create -f` with node groups only builds the cluster they belong
   to.
-  - Since M2.7a that build includes the Nomad cluster: the servers, the ACL bootstrap and the clients.
+  - Since M2.7a that build includes the Nomad cluster: the servers, the ACL bootstrap and the clients. Since M2.7b it
+    also scrubs the user data of each node that has joined.
   - With `-o table` tent prints the lines of the create, such as `cluster prod created`, then what
     `update cluster --yes` prints.
   - With `-o json` or `-o yaml` it prints one document: `{"changes": [...], "update": <the plan it applied>}`.
@@ -2249,36 +2293,44 @@ Nomad API, or through autopilot's cleanup when that is first. Clients still leav
 
 ### 13.2 `tent update cluster [--yes]`
 
-**Built in M1 and M2.7a.** `update cluster` brings the cluster's infrastructure and the sizes of its node groups to the
-specs. Since M2.7a it also builds the Nomad cluster on them: servers with real user data, a leader, the ACL system
-bootstrapped with the stored secret, healthy servers that all vote, and clients with intro tokens that register
-([ADR-0031](adr/0031-bootstrap-in-update.md)). Before M2.7a the nodes were empty machines that booted a placeholder
-cloud-config without secrets.
+**Built in M1, M2.7a and M2.7b.** `update cluster` brings the cluster's infrastructure and the sizes of its node
+groups to the specs. Since M2.7a it also builds the Nomad cluster on them: servers with real user data, a leader, the
+ACL system bootstrapped with the stored secret, healthy servers that all vote, and clients with intro tokens that
+register ([ADR-0031](adr/0031-bootstrap-in-update.md)). Before M2.7a the nodes were empty machines that booted a
+placeholder cloud-config without secrets. Since M2.7b it scrubs the user data of each node that has joined and labels
+its machine, replaces a client that never registered, and refuses to delete a node that joined
+([ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)).
 
 ```
  1. load specs → defaults → validate → the channel and the Nomad version (M2.2) → provider.Validate (region, plans,
     images)
- 2. plan: inventory → provider.BuildInfra → engine plan; Nodes.List → node changes (13.4); the completed spec;
-    the missing secrets (M2.1); the Nomad step; for a plan that creates or waits for a node, the assets, a node
+ 2. plan: inventory → provider.BuildInfra → engine plan; Nodes.List → node changes (13.4), which asks Nomad when
+    a client may never have registered; the refusal to delete a node that joined; the completed spec; the missing
+    secrets (M2.1); the Nomad step; for a plan that creates a node or repeats the create of one, the assets, a node
     config per group and the size of each node's user data
  3. without --yes: print the plan and stop
  4. lock → check the tent version → steps 1 and 2 again; the plan made under the lock is the one applied
  5. raise the tent version → write the missing secrets → write the completed spec when the plan says so
  6. the infrastructure's task changes (Plan.ApplyTaskChanges); then, when the plan bootstraps and the store holds a
     stale mark, the delete of the mark
- 7. server and combined nodes: waits for listed nodes that are not ready yet, by name; then the creates, one at a
-    time, by group and index, each seeded with the servers that exist and with a new operation id (cloud.NewOpID)
+ 7. server and combined nodes: the waits that repeat a create, by name; then the creates, one at a time, by group
+    and index, each seeded with the servers that exist and with a new operation id (cloud.NewOpID)
  8. the Nomad step: wait for a leader → bootstrap the ACL system → wait until the servers are healthy and all vote
-    → write the mark → wait until each combined node that this run created or waited for has registered
- 9. client nodes: waits, then creates, one at a time, by group and index; each wait and create after an intro token
-    and followed by the wait until the node has registered
-10. node deletes, one at a time, by name: duplicates, surplus nodes, nodes of groups not in the spec
+    → read the Raft configuration → for each server and combined node of the plan, in order: for a combined node,
+    wait until it has registered; check that a voter sits at its address; scrub its user data and label its machine
+    → write the mark
+ 9. client nodes: the waits; then the deletes of clients that never registered; then the creates, one at a time, by
+    group and index. A create, and a wait that repeats one, boots the machine with an intro token. Each client is
+    waited for until it has registered, then scrubbed and labelled, before the next change
+10. node deletes, one at a time, by name: duplicates, surplus nodes, nodes of groups not in the spec; each after
+    Nomad's answer that its machine has not joined
 11. the infrastructure's deletes: prune and duplicates (Plan.ApplyDeletes) → unlock
 ```
 
 - **Failures.** The first step that fails stops the run, and the next run finishes the job. A run cut after a
   create's POST leaves an instance with its operation id. The next run counts it, and while it is not ready yet,
-  plans `~ node prod-workers-1 (ID <id>, wait until it is ready)` and waits for it. No second instance is created.
+  plans `~ node prod-workers-1 (ID <id>, wait until it joins, scrub its user data)` and waits for it: while the cloud
+  reports it not ready, the wait repeats the create with its operation id. No second instance is created.
 - **Completed spec.** `cluster.completed.yaml` holds the specs with every default filled in
   ([3.3](#33-api-rules)). It counts as a change when the stored one is missing or differs, so the first run writes
   it, and so does a run after a spec change that changes nothing in the cloud. It is written before the first node,
@@ -2289,8 +2341,9 @@ cloud-config without secrets.
   nodes use and the engine does not retry that ([11.5](#115-firewall-and-host-firewall)), so a delete in step 6
   would stop the run before step 10. The deletes therefore wait for step 11.
 - **Deadlines.** `Nodes.Create` has no deadline of its own ([11.3](#113-creating-a-node)), so `update` gives each
-  create and each wait 10 minutes. The leader wait, the health wait and each registration wait of the Nomad step
-  get 10 minutes each. The engine gives each infrastructure change 5 minutes ([6](#6-reconciliation-engine)).
+  create and each wait that repeats a create 10 minutes. The leader wait, the health wait and each registration wait
+  get 10 minutes each, and each scrub 5. The engine gives each infrastructure change 5 minutes
+  ([6](#6-reconciliation-engine)).
 - **Single server.** `update` validates the specs, so a cluster with one server needs `--allow-single-server` on
   every run, as every command that validates specs does.
 - **Output.**
@@ -2306,7 +2359,7 @@ cloud-config without secrets.
     (`internal/app/testdata/update_plan.golden`, its infrastructure lines left out):
 
     ```
-    ~ node prod-servers-1 (ID instance-2, wait until it is ready)
+    ~ node prod-servers-1 (ID instance-2, wait until it joins, scrub its user data)
     + node prod-servers-2 (server, vc2-2c-4gb, ams)
     + node prod-workers-1 (client, vc2-4c-8gb, ams)
     - node prod-old-0 (ID instance-7, not in the spec)
@@ -2331,8 +2384,9 @@ cloud-config without secrets.
     state store print no progress lines. A cluster without changes prints `cluster prod is up to date`.
   - `-o json` and `-o yaml` print the plan as data: `{"infrastructure": <the engine's plan>, "nodes": [...],
     "nomad": {"bootstrap": true, "servers": 3}, "secrets": ["pki/private/ca.key", ...], "completedSpec": true}`,
-    the node changes in the order they run and the secrets in the order they are written. A create and a wait
-    carry `"specHash"`, the hash of the group's node configuration. `nomad` is left out when the plan has no Nomad
+    the node changes in the order they run and the secrets in the order they are written. A create, and a wait
+    that repeats a create, carry `"specHash"`, the hash of the group's node configuration; a wait without an
+    operation id has neither `op` nor `specHash`. `nomad` is left out when the plan has no Nomad
     step, and `secrets` when the store holds them all. With `--yes` they print only the plan that was applied, with
     `"applied": true`.
 - **`--exit-code`.** Without `--yes`, a plan with changes makes tent exit with 2 and print no error, for drift
@@ -2379,7 +2433,7 @@ in the completed spec ([ADR-0026](adr/0026-channels-and-release-assets.md)).
   `update --yes` warns before it applies changes ([14](#14-cli)). A plan without `--yes`, or a run without changes,
   does not warn.
 - **Downloads.** NodeConfig carries the assets from M2.3, and `update` reads their release files since M2.7a, in a plan
-  that creates or waits for a node ([8.5](#85-artifacts-and-verification)).
+  that creates a node or repeats the create of one ([8.5](#85-artifacts-and-verification)).
 
 **Built in M2.3, used since M2.7a.** NodeConfig, the rendering of the Nomad configuration, the spec hash and the user
 data exist ([8.3](#83-nodeconfig-contract), [8.4](#84-nomad-configuration-rendering),
@@ -2389,7 +2443,7 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
 **Built in M2.4, used since M2.7a.** `internal/nomadops` holds the calls that the Nomad step and the clients need, and
 `nomadfake` stands in for Nomad in the app's tests ([15](#15-testing)).
 - **Calls.** `nomadops.API` has `Leader`, `Bootstrap` ([9.2](#92-acl-and-tokens)), `IntroToken`
-  ([9.3](#93-client-introduction)), `Nodes` and `Health`. A `Client` talks to one server
+  ([9.3](#93-client-introduction)), `Nodes`, `Peers` (M2.7b) and `Health`. A `Client` talks to one server
   ([9.7](#97-operator-access)); the caller moves to the next server when a call fails with `ErrNotReady`. Make one
   client per server and reuse it: its idle connections stay open for 90 seconds, and a server takes at most 100 HTTP
   connections from one address.
@@ -2401,11 +2455,19 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
 - **Answers.** `Leader` takes an empty leader as no leader. `Health` takes the 429 of an unhealthy cluster as a
   report, not an error, and returns whether the servers are healthy and how many vote. `Nodes` reads `/v1/nodes`
   itself, skips `null` elements and keeps the server's order: the API module's `Nodes().List` panics on a `null`.
-  A name can appear twice, for a node that went down and its replacement.
+  A name can appear twice, for a node that went down and its replacement. Each node carries its address, the host of
+  the HTTP address that the client advertises: with tent's configuration, the node's private address
+  ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)). `Node.Is(name, addr)` tells a node by both.
+  `Peers` (`GET /v1/operator/raft/configuration`) returns each server of the Raft configuration with its name, its
+  Raft address and whether it votes. Nomad answers it only to a management token, and names a server `(unknown)`
+  when no Serf member has its Raft address ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)).
+  Unlike the autopilot report, which `Health` reads, the configuration has no lag.
 - **Waits.** `WaitLeader`, `WaitNode` and `WaitHealthy` wait 2 seconds after each call and try again only after
   `ErrNotReady`. When the context ends, the error says what they waited for and the last cause, and does not match
-  `ErrNotReady`. `WaitNode` ends when a node of the name is ready and eligible; a `down` node of the same name does
-  not end it. `WaitHealthy` needs healthy servers and at least the given number of voters.
+  `ErrNotReady`. `WaitNode` takes a name and an address and ends when a node of that name that advertises that
+  address is ready and eligible; a node of the name at another address, such as a twin or the node of an earlier
+  machine, and a `down` node do not end it. An invalid address matches no node. `WaitHealthy` needs healthy servers
+  and at least the given number of voters.
 - **Servers** (M2.7a, `nomadops.NewServers`). It makes the servers of a cluster one `API`.
   - A call goes to the server that answered last, the first one at the start. After an error that matches
     `ErrNotReady` it goes to the next server, each server once per call, wrapping around the list. Any other error is
@@ -2419,19 +2481,22 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
   - `NewServers` fails with `nomad: no servers` or `nomad: server <address> has no API`. It is safe for concurrent
     use, and printing it with any verb shows the addresses alone.
 - **`nomadfake`** logs the server that each call reached (`Call.Server`, the `Address` of the `Config` that made the
-  client), so a test can show that the app moved to the next server.
+  client), so a test can show that the app moved to the next server. It lists nodes with an address, serves the peers
+  that a test sets (`SetPeers`), and fails `Peers` before the bootstrap as Nomad's 403 does.
 
 **Built in M2.7a.** The flow of `update` with Nomad ([ADR-0031](adr/0031-bootstrap-in-update.md)). It is in
 `internal/app` and reaches Nomad only through `internal/nomadops`.
 - **The order of node changes.** The waits for server and combined nodes run first, by name; then their creates, by
-  group, then index; then the waits and creates of client nodes in the same order; the deletes come last, by name,
-  then ID. A wait is ranked by the machine's own role label: every role other than client, an empty one included,
-  counts with the servers. The reason for the order is in [11.2](#112-server-discovery-seed-and-refresh).
-- **Node configs.** A plan that creates or waits for a node asks the provider for the architecture of each distinct
-  machine type of the groups (`Provider.Arch`, [8.6](#86-operating-systems)) and makes one node builder
+  group, then index; then the waits of client nodes, the deletes of clients that never registered (M2.7b), and the
+  creates of client nodes, in the same order; the other deletes come last, by name, then ID. A wait is ranked by the
+  machine's own role label: every role other than client, an empty one included, counts with the servers. The reason
+  for the order is in [11.2](#112-server-discovery-seed-and-refresh).
+- **Node configs.** A plan that creates a node, or waits for one with an operation id, asks the provider for the
+  architecture of each distinct machine type of the groups (`Provider.Arch`, [8.6](#86-operating-systems)) and makes
+  one node builder
   ([8.3](#83-nodeconfig-contract)) with the run's asset cache, so both plans of one `update --yes` read Nomad's
-  release files once. Each create and wait carries the spec hash of its group, which becomes the `tent/spec-hash`
-  label. A plan without a create or a wait reads no release file.
+  release files once. Each such change carries the spec hash of its group, which becomes the `tent/spec-hash`
+  label. Any other plan reads no release file.
 - **The size check.** The plan builds every planned node's config with a certificate issued for the check, a seed as
   long as the server and combined groups (the last addresses of the cluster CIDR, the longest text) and, for a client,
   a stand-in intro token of 2048 bytes that gzip shrinks no more than a real one (base64 text of random bytes; a real
@@ -2468,20 +2533,24 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
     When the plan bootstraps and the store holds a stale mark, the apply deletes it after the infrastructure's task
     changes and before the first node change, so a run cut anywhere in the rebuild is finished by the next run with
     the bootstrap. Neither the delete nor the put of the mark sends a progress event.
-  - **No Nomad client.** The service's Nomad factory must be set when the plan has a Nomad step or a client create or
-    wait. Without it the apply fails at its start with `no Nomad client is set up`, before it raises the tent version
-    or writes anything. A plan without `--yes` does not fail.
+  - **No Nomad client.** The service's Nomad factory must be set when the plan has a Nomad step, a client create or
+    wait, or a node delete. Without it the apply fails at its start with `no Nomad client is set up`, before it raises
+    the tent version or writes anything. A plan without `--yes` fails only when it must ask Nomad about a client that
+    may never have registered ([13.4](#134-scaling)).
   - **The calls.** One `nomadops` client per known server with a public address, at `<public IP>:4646`, with the
     region, the CA bundle, the operator certificate and the bootstrap secret as the token, over `nomadops.Servers`. A
     cluster with no such server fails with `cluster prod: no server has a public address`. Then `WaitLeader`; with the
-    bootstrap, `Bootstrap`; `WaitHealthy` for the servers; with the bootstrap, the put of the mark; `WaitNode` for
-    each combined node that the plan created or waited for, one by one. Each wait and the bootstrap send progress
-    events ([14](#14-cli)); the put of the mark sends none.
+    bootstrap, `Bootstrap`; `WaitHealthy` for the servers; the scrubs of the servers (the block of M2.7b below); with
+    the bootstrap, the put of the mark. Each wait and the bootstrap send progress events ([14](#14-cli)); the put of
+    the mark sends none.
   - **Errors and cuts.** The texts are `bootstrap the ACL system: <error>`, for the put of the mark `write <path>:
     <error>`, such as `write prod/nomad/bootstrapped: <error>`, and for the delete of a stale mark `delete <path>:
-    <error>`, which stops the run before any node is created; the next run tries again. The mark comes after the servers
-    are healthy, so a run cut before that is finished by the next run with the leader wait, the bootstrap (safe to
-    repeat) and the health wait. A lost `Bootstrap` answer ends with the cluster bootstrapped, and the next server finds
+    <error>`, which stops the run before any node is created; the next run tries again. The mark comes last in the Nomad
+    step, so a run cut before it is finished by the next run with the leader wait, the bootstrap (safe to repeat) and
+    the health wait; the labels that the cut run set stay, and a server without one is waited for and scrubbed. A
+    cut between the last label and the mark leaves a run that repeats the leader wait, the bootstrap and the health
+    wait, scrubs nothing and writes the mark. A lost `Bootstrap`
+    answer ends with the cluster bootstrapped, and the next server finds
     it done ([9.2](#92-acl-and-tokens)); with one server the call fails with `ErrNotReady` and the next run bootstraps
     again, finds it done and writes the mark. A cut after the put goes straight to the clients.
   - **Deadlines and tries.** `Bootstrap` and `IntroToken` are tried once on each server and not repeated in a loop.
@@ -2489,28 +2558,54 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
     spec.access.api`, since an operator outside `access.api` gets no answer.
 - **Clients.** For each client change, in plan order: `IntroToken` for the node's name, its group's pool and
   `nomadops.MaxIntroTTL`, a failure being `intro token for node prod-workers-0: <error>`; the config from the builder
-  with the token and a seed of every known server; `Nodes.Create` as for a server; then `WaitNode` until Nomad lists the
-  node ready and eligible. A client registered 21 to 24 s after a fresh server's leadership on the M2.6b VM checks (an
-  inference from one combined node). A lost answer of `IntroToken` is harmless: the run finishes, and the node's user
-  data holds a token for its name.
+  with the token and a seed of every known server; `Nodes.Create` as for a server; then `WaitNode` until Nomad lists a
+  node of its name at its private address, ready and eligible, and then the scrub (M2.7b below). A client registered 21
+  to 24 s after a fresh server's leadership on the M2.6b VM checks (an inference from one combined node). A lost answer
+  of `IntroToken` is harmless: the run finishes, and the node's user data holds a token for its name.
 - **What M2.7a leaves.**
-  - **The scrub.** Nodes keep their user data, with the node key, the gossip key and an intro token, until M2.7b
-    ([9.4](#94-secrets-on-nodes-threat-model)).
-  - **A ready machine that has not registered.** The plan waits only for machines that the cloud reports as not ready.
-    After a cut between a client's create and its registration, the next run plans nothing and does not check the
-    registration. The same holds for a combined node: the mark is written before the registration waits, so after a
-    cut between the put and a combined node's registration the next run plans nothing. A client that never registers
-    fails its own wait after 10 minutes with the node named, and the next run plans nothing. M2.7b handles these.
-  - **A health wait that stops.** On a cluster with the mark and servers that stay, a run that creates or waits for a
-    server and stops in the health wait is not followed by a health wait once that server is ready: the next plan has
-    no server change, so no Nomad step. Only the bootstrap case repeats the wait, since its mark is missing.
   - **A renamed server group.** The machines of the server or combined group that stay are counted ready or not. A
     group renamed in the specs has none that stay, so `update` deletes the mark, builds the new group as a new Nomad
-    with its own bootstrap and deletes the old machines last.
-  - **Deleting a node that registered.** `update` still deletes surplus nodes, servers included, without a quorum
-    check. M2.7b refuses until M3 to delete a node that registered or a Raft peer.
+    with its own bootstrap and deletes the old machines last. Since M2.7b that works only for machines that carry no
+    joined label; once they do, `update` refuses the delete ([13.4](#134-scaling)).
   - **Clusters built by an older tent** have placeholder nodes and no mark: the plan shows the Nomad step, and `--yes`
     fails after 10 minutes without a leader. Delete such a cluster and create it again.
+
+**Built in M2.7b.** The scrub, the replacement of a client that never registered and the delete guard
+([ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)). They are in `internal/app` and `internal/cloud`.
+- **The joined label.** `tent/joined=true` ([3.4](#34-naming-and-ownership-markers)) says that a machine's node has
+  joined and its user data is scrubbed. `Nodes.MarkJoined` sets it ([7.1](#71-interfaces), [11.6](#116-user_data)).
+  `Nodes.List` reports it as `Instance.Joined`, so a plan sees which machines still have to join without a call to
+  Nomad.
+- **Who is scrubbed, and when.**
+  - **Servers**, in the Nomad step, after the servers are healthy and vote. `update` reads the Raft configuration once,
+    and then, for each server or combined change of the plan in order, checks that a voter sits at the private
+    address of the machine, and scrubs it. A combined node must have registered first. A plan with no server or
+    combined change reads no configuration.
+  - **Clients**, one by one, after the wait until the node has registered.
+  - A machine's node is told by its name and its private address together
+    ([ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)).
+  - The bootstrap mark is written after the last scrub.
+- **The scrub's deadline** is 5 minutes for the read and the update. A failure stops the run with the provider's
+  error. The next plan waits for the machine again, since it has no label.
+- **Waits.** A plan waits for every machine that stays and carries no joined label, whatever its role. The wait keeps
+  its operation id only when the cloud reports the machine not ready and the id is valid; the apply then repeats the
+  create, with the node's user data. A wait without an operation id has neither `op` nor `specHash` in the JSON plan,
+  calls no cloud before the scrub, asks for no intro token and reads no release file.
+  - So a plan whose only node change is the wait of a client needs the Nomad factory, and `update --exit-code` exits
+    with 2 until every machine carries the label.
+  - A cluster built by M2.7a's tent has no labels. Its first `update --yes` waits for every node, scrubs it and labels
+    it, and creates nothing.
+  - A client that the cloud reports ready and that never registers is waited for 10 minutes in every run, until the
+    plan replaces it ([13.4](#134-scaling)).
+- **Errors.**
+  - `node <name>: the servers are healthy with <n> voters, but none votes at its address <ip>` (`1 voter` for one);
+  - `read the Raft configuration: <cause>`;
+  - `node <name>: the cloud reports no private address for it yet; run the command again`, when a registration wait
+    or a vote check meets a machine without an address.
+- **Calls.** On the fakes, a build of three servers and two clients makes one `Peers` call, then one `GetInstance` and
+  one `UpdateInstance` per server; each client's `Nodes` wait is followed by its own pair
+  (`internal/app/testdata/flow_build.calls.golden`). A second `update --yes` plans nothing, makes no Nomad call and
+  only reads the cloud.
 
 **Target, with Nomad.** The whole flow:
 
@@ -2524,15 +2619,16 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
  5. wait for a leader → ACL bootstrap with the pre-generated secret
  6. day-1 over the API: cluster settings; no node pools, which Nomad creates when their first client registers
  7. clients: for each missing node → intro token → Nodes.Create (seeded with current server IPs) → wait ready
- 8. Vultr: scrub user data of nodes that registered (Nodes.ScrubUserData)
+ 8. scrub the user data of nodes that joined and label them (Nodes.MarkJoined)
  9. scale down surplus nodes: drain → stop/delete → purge
 10. apply the plan's deletes, the prune and the duplicates (a second engine pass)
 11. validate → write the history → unlock
 12. report: "N nodes are out of date (reason: config diff) → run tent rolling-update cluster"
 ```
 
-- Steps 2, 4, 5 and 7 are built (M2.1 and M2.7a, above), as the flow above runs them: the mark is written after the
-  servers are healthy. The scrub (step 8) comes in M2.7b. The day-1 configuration (step 6, without node pools: decision
+- Steps 2, 4, 5, 7 and 8 are built (M2.1, M2.7a and M2.7b, above), as the flow above runs them: the servers are
+  scrubbed after they are healthy and before the mark is written, and each client is scrubbed right after it
+  registers. The day-1 configuration (step 6, without node pools: decision
   17 of [18](#18-open-questions)) is not built.
 - The drain and the purge (step 9), `validate` and the history (step 11) and the report of outdated nodes (step 12)
   are not built yet.
@@ -2585,16 +2681,83 @@ planner is in `internal/app`, and it moves to `internal/rollout` with the drain 
   instance of the cluster has, whatever its group. It goes into the group's zone with the fewest nodes, the zone
   listed first on a tie.
 - **Scale down.** A group with more nodes than its size loses the newest ones, by creation time, then by id. Until
-  M3 there is no drain: `update` deletes the machines, servers included, without a quorum check. M2.7b makes it
-  refuse to delete a node that registered or a Raft peer until then.
+  M3 there is no drain, so `update` deletes only machines that never joined: a delete of a machine that carries the
+  joined label fails the plan ([the guard](#the-delete-guard) below).
 - **Zones.** A node in a zone that its group no longer lists counts toward the group's size and stays. New nodes go
   only into the listed zones.
-- **Duplicates.** Of instances with one name, the oldest stays and the others are deleted as `duplicate`.
+- **Duplicates.** Of instances with one name, one that carries the joined label stays before one that does not, then
+  one that is not a client that never registered (below) before one that is, then the oldest. The others are deleted
+  as `duplicate`. A twin that registered, which carries no label yet, is labelled by the guard and stays at the next
+  plan.
 - **Groups not in the spec.** An instance whose group label names no group of the spec, or is empty, is deleted as
   `not in the spec`.
-- **Nodes that are not ready.** A node that is not ready yet, left by an interrupted run, counts, and `update` waits
-  for it by calling `Create` with its operation id. A node without a valid operation id counts, and nothing waits
-  for it.
+- **Nodes that have not joined.** A machine that stays and carries no joined label, left by an interrupted run,
+  counts, and `update` waits for it ([13.2](#132-tent-update-cluster---yes)). When the cloud reports it not ready and
+  its operation id is valid, the wait calls `Create` with that id. A machine that is ready, or has no valid operation
+  id, is waited for until its node joins, and the wait calls no cloud until the scrub.
+
+#### A client that never registered
+
+A client that has not registered before its intro token expires is deleted and created again, with a new token
+([ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md), decision 28 of [18](#18-open-questions)). It never ran a
+workload, so nothing is drained.
+- **Which machines.** The plan judges every machine of the cluster whose role label says client, that carries no
+  joined label and is older than 31 minutes by the cloud's creation time: the token's 30 minutes (`MaxIntroTTL`) and
+  the minute that a server still accepts it after that (`IntroLeeway`,
+  [9.3](#93-client-introduction)). A machine without a creation time is never old.
+- **The question.** The plan asks Nomad once, with one `Nodes` call through the servers that stay and carry the joined
+  label. It asks only when such a server exists. Without one the cluster is still bootstrapping or was built by M2.7a's
+  tent, and the clients are waited for. A machine whose name and private address Nomad lists as a node that is not
+  `down` has registered. The others have not: after 31 minutes this holds also for a client that the cloud still
+  reports not ready and for one without a private address.
+- **The plan.** A machine that never registered and would stay under its name is deleted with the reason
+  `not registered`. It does not count toward its group and frees its name, so a create takes the name unless the group
+  is then full: with a group scaled from 2 to 1, two such clients are both deleted as `not registered` and one is
+  created. The delete comes before the create, which departs from the rule that a replacement is created before the
+  old node is removed: the old machine never served, a second machine of its name would be a duplicate that the next
+  plan has to sort out, and a cut after the delete leaves a plain create. The waits of the clients come before the
+  delete, so a run that fails at a wait does not reach it. On Vultr the create follows the delete within seconds, and
+  the account's instance limit may still count the deleted machine, so the provider sends a refused create again
+  ([11.3](#113-creating-a-node)).
+  ```
+  - node prod-workers-1 (ID instance-5, not registered)
+  + node prod-workers-1 (client, vc2-2c-4gb, ams)
+
+  Nodes: 1 to create, 0 to wait for, 1 to delete.
+  ```
+- **A plan that cannot ask fails**, with and without `--yes` and with `--exit-code`, before it changes anything. It
+  needs the Nomad factory, the servers' public addresses and a reachable API, so `access.api` must let the operator
+  in. The error names each machine with its ID, since a machine of the same name may have joined: `node prod-workers-1
+  (ID instance-5) did not join within 31 minutes of its creation, and tent could not ask Nomad whether it
+  registered: <cause>`, and for several `nodes prod-workers-0 (ID instance-4) and prod-workers-1 (ID instance-5) did
+  not join within 31 minutes of their creation, and tent could not ask Nomad whether they registered: <cause>`.
+- **The clock.** The age is the local clock against the cloud's creation time. The delete asks Nomad again.
+- **Calls.** The apply of a plan that replaces one client makes these Nomad calls: `Nodes` (the plan), `Nodes` (the
+  plan under the lock), `Nodes` and `Peers` (the guard), `IntroToken`, and `Nodes` (the registration wait).
+
+#### The delete guard
+
+Until M3 `update` deletes only nodes that never joined (decision 27 of [18](#18-open-questions)).
+- **The plan refuses.** A plan that deletes a machine that carries the joined label fails with one error that names
+  each such machine, its ID and the reason of its delete: `not in the spec`, `surplus` or `duplicate of ID <id>`, the
+  machine of that name that the plan does not delete as a duplicate or as not in the spec. It fails with and without
+  `--yes` and with `--exit-code`, before any change, with exit code 1:
+  `update would delete a node that joined Nomad: prod-workers-2 (ID instance-6, surplus); tent cannot drain a node or
+  remove a server yet, so update deletes only nodes that never joined; keep this node in the specs, or delete the
+  whole cluster with tent delete cluster`. With several, the text reads `nodes that joined Nomad: A, B and C`
+  and `keep these nodes in the specs`. For a duplicate it says `remove one of the two machines called <name> from
+  Nomad and delete it in the cloud`, and for several duplicates `of the machines that share a name, remove one from
+  Nomad and delete it in the cloud`. Advice for different reasons is joined with `, and `.
+- **The apply asks Nomad** before each delete, whatever its reason, since a machine may have joined without a label:
+  - a client of the machine's name and private address that is not `down` (`Nodes`), or
+  - a server of the Raft configuration at that address, voter or not (`Peers`).
+
+  A machine that the cloud lists without a private address counts as not joined, and no call is made. A machine found
+  joined is scrubbed and labelled, and the step fails with `delete node <name> (<id>): the node has joined Nomad (a
+  registered client at <ip>)` or `(a server at <ip>:4647)`, followed by `; tent cannot drain a node or remove a server
+  yet, so update deletes only nodes that never joined`. The next plan then refuses the delete with the plan's error.
+  When Nomad cannot be asked, nothing is deleted: `delete node <name> (<id>): ask Nomad whether the node joined:
+  <error>`. A delete, then, needs the Nomad factory.
 
 **Target, with Nomad.**
 - **Scale up** is part of `update`.
@@ -2690,6 +2853,8 @@ cni:
   tent tags do not decode, still blocks the delete of its firewall group, and `delete cluster` stops there and names
   it. The engine deletes the firewall groups, the VPC, then the SSH keys. The VPC delete fails with
   `400 The following servers are attached…` for 14–20 s after its instances are gone, so it is retried.
+- **Nodes that joined.** `delete cluster` deletes machines that carry the joined label as it deletes the others. The
+  guard of `update` ([13.4](#134-scaling)) does not apply, and the command calls no Nomad.
 - **State.** The state is `tent-version`, the specs, the completed spec, since M2.1 the four secrets: the CA's key and
   bundle, the gossip key and the ACL bootstrap secret, and since M2.7a the bootstrap mark `nomad/bootstrapped`
   ([10.2](#102-layout)). The mark goes with the first objects, after the node group specs and before the secrets.
@@ -2763,7 +2928,7 @@ The last column names the milestone that built the command. The spec commands of
 | `tent edit cluster [NAME]`, `tent edit nodegroup NAME` | `edit` | an editor, with validation and a diff before saving | M0 |
 | `tent replace -f FILE` | `replace` | GitOps: replace stored specs with those of a file | M0 |
 | `tent apply -f FILE` | — | `replace` + `update` | — |
-| `tent update cluster [NAME] [--yes] [--exit-code]` | `update cluster` | infrastructure, node counts, the Nomad cluster: servers, ACL bootstrap, clients ([13.2](#132-tent-update-cluster---yes)) | M1; Nomad in M2.7a |
+| `tent update cluster [NAME] [--yes] [--exit-code]` | `update cluster` | infrastructure, node counts, the Nomad cluster: servers, ACL bootstrap, clients, the scrub of user data, the delete guard ([13.2](#132-tent-update-cluster---yes)) | M1; Nomad in M2.7a; scrub and guard in M2.7b |
 | `tent rolling-update cluster [--yes] [--nodegroups a,b] [--force]` | `rolling-update cluster` | Nomad-aware replacement | — |
 | `tent upgrade cluster [--yes]` | `upgrade cluster` | version bumps from the channel | — |
 | `tent validate cluster [--wait 10m]` | `validate cluster` | cloud and Nomad health | — |
@@ -2820,6 +2985,11 @@ The last column names the milestone that built the command. The spec commands of
     `skipped deleting vultr.VPC/prod (ID <id>): an earlier change failed`, `failed to create node prod-servers-0:
     <error>`, and `waiting for 3 nodes to go` once when a delete waits for the cloud to stop listing the nodes it
     deleted.
+  - Scrub lines (`update`), for each node that has joined: `scrubbing the user data of node prod-workers-0`,
+    `scrubbed the user data of node prod-workers-0` and `failed to scrub the user data of node prod-workers-0:
+    <error>`. They show on every cloud, also on one that cannot change user data. The line names the node and not the
+    machine's ID. A delete that the guard stops shows a scrub started and done, then `deleting node prod-workers-2
+    (ID instance-6)` and `failed to delete node prod-workers-2 (ID instance-6): <error>`.
   - Nomad lines (`update`), for each step started, done and failed: `waiting for a Nomad leader`, `Nomad has a leader
     (10.64.0.3:4647)`, `failed to wait for a Nomad leader: <error>`; `bootstrapping the ACL system`, `bootstrapped the
     ACL system`, `failed to bootstrap the ACL system: <error>`; `waiting for 3 healthy Nomad servers`, `3 Nomad
@@ -2829,7 +2999,8 @@ The last column names the milestone that built the command. The spec commands of
   - JSON: `{"type":"infrastructure","event":"started","kind":"vultr.VPC","name":"prod","action":"create"}` with
     `id`, `wait`, `cause` and `error` when they apply,
     `{"type":"node","step":"done","action":"create","name":"prod-servers-0","id":"<id>","address":"10.64.0.3"}` with
-    `error` for a failed step, `{"type":"wait","nodes":3}` for the wait of a delete, and
+    `error` for a failed step, `{"type":"node","step":"done","action":"scrub","name":"prod-workers-0","id":"<id>"}`
+    for a scrub, which has no `address`, `{"type":"wait","nodes":3}` for the wait of a delete, and
     `{"type":"nomad","step":"done","action":"leader","leader":"10.64.0.3:4647"}` for the Nomad step. Its `action` is
     `leader`, `bootstrap`, `healthy` or `register`; `name` names the node of a `register`, `voters` the servers of a
     `healthy` (the number waited for when it starts, the number that vote when it is done), and `error` a failed
@@ -2896,7 +3067,11 @@ The last column names the milestone that built the command. The spec commands of
     stable tests 2.0.7`. `create`, `replace` and `edit` check the version that the spec sets, and `update` also a
     pinned one ([13.2](#132-tent-update-cluster---yes)).
 - An error goes to stderr after `Error: `. An invalid spec prints `Error: invalid spec:` and then one indented line
-  per problem, with the field path ([3.3](#33-api-rules)).
+  per problem, with the field path ([3.3](#33-api-rules)). An `update cluster` that would delete a node that joined
+  prints the one error of [13.4](#134-scaling) and exits with 1, with and without `--yes` and with `--exit-code`.
+- The long help of `update cluster` says that tent replaces the user data of a node that has joined with a stub, that
+  a client that did not register within 31 minutes of its creation is deleted and created again, and that an update
+  that would delete a node that joined fails.
 - Exit codes: 0 success, 1 error, 2 when `update cluster --exit-code` finds a plan with changes, and 130 when a
   second Ctrl-C or SIGTERM ends tent. Exit code 2 prints no error.
 
@@ -2958,7 +3133,7 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
      - A test sets the leader, registers nodes and sets the health, and reads the calls that reached the fake and
        the tokens its clients got.
      - Without a leader every call fails with `ErrNotReady`, as Nomad answers `No cluster leader`. With a leader,
-       `Nodes`, `Health` and `IntroToken` fail before the first bootstrap with `nomadfake: <method>: permission
+       `Nodes`, `Health`, `IntroToken` and `Peers` fail before the first bootstrap with `nomadfake: <method>: permission
        denied`, which does not match `ErrNotReady`, as Nomad with ACLs refuses them. The first
        bootstrap stores its secret; the same secret again succeeds, and another one fails with
        `ErrBootstrapMismatch`. Intro tokens are unsigned JWTs that carry the node's name and pool.
@@ -2966,7 +3141,7 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
        lost bootstrap leaves the ACL system bootstrapped.
      - `NewCluster` makes the cluster a new one, without leader, nodes, bootstrap or health, and keeps the calls, tokens
        and faults; `SetBootstrapped` makes it bootstrapped with a copy of a secret, without a call.
-     - It is simpler than Nomad: it checks no ACL token, and it lists one node per name.
+     - It is simpler than Nomad: it checks no ACL token.
    - Golden files hold the plan and the sequence of operations.
    - Interruption tests cut a flow at every step and check that the next run converges.
    - Runs on every PR.
@@ -3027,17 +3202,46 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
      - **Checks of tests.** A test of the plan: an `extraConfig` of 30 KiB fails the plan with the size error without
        `--yes`; a development build without the variables fails a plan that creates nodes and passes one that does
        not; `update --yes` reads Nomad's release files once.
+   - **Built in M2.7b** ([ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)): the same flows with the scrub,
+     the guard and the replacement of a client, in `testing/synctest` bubbles.
+     - **The fakes.** `nomadfake` lists each node with an address and serves the Raft peers (`SetPeers`); its `Peers`
+       fails before the bootstrap as Nomad's 403 does. The Nomad of the flow tests sets the peers before each call:
+       every ready server and combined machine is a voter named `<hostname>.global` at `<private address>:4647`. It
+       registers a client or combined node at the first VPC address of its instance, which it reads with
+       `vultrfake.InstanceVPCs`, and only while the cluster has a leader. `vultrfake.SetInstanceTags` and
+       `SetInstanceUserData` change an instance without a call.
+     - **Golden files.** `flow_build.calls.golden` holds the `Peers` call and the `GetInstance` and
+       `UpdateInstance` of each scrub; `flow_scale.calls.golden` holds the pair of the new client's scrub and no
+       `Peers` call. `flow_unregistered.plan.golden` and
+       `flow_unregistered.calls.golden` hold the replacement of a client.
+     - **The flows.** A fresh cluster of three servers and two clients, a combined cluster of three and a cluster of
+       one node end with the label and the stub on every instance, as the golden files show; a second `update --yes`
+       plans nothing, makes no Nomad call and only reads the cloud. A client that never registers is waited for while
+       it is younger than 31 minutes; after that the plan shows its delete as `not registered` and a create of the
+       same name, which the apply carries out with a new token. A plan that would delete a node that joined fails with
+       the error of [13.4](#134-scaling), with and without `--yes`; a machine without the label that registered is not
+       deleted. `delete cluster` deletes a cluster of labelled nodes as before.
+     - **Cuts.** The context of a run ends before and after each cloud call and each Nomad call of a build and
+       of a rebuild, and each state write fails before and after it. The replacement of a client is cut before and
+       after the delete of its machine. The next run ends
+       with one instance per node, each labelled and scrubbed, and a plan without changes. Named points have their
+       own cases: after the health wait and before the first server's scrub; between two servers' scrubs; a scrub
+       whose answer is lost; user data scrubbed by hand without the label; after a client registered and before its
+       scrub; after the delete of an unregistered client and before its create. Every test of a step that changes
+       the cloud or the store ends with a plan that has no changes (`wantConverged`).
    - `hack/tent-operator` gives the real-cloud check its access to the Nomad API until `tent export nomad` exists
      (M2.8, [9.7](#97-operator-access)): it reads the CA and the bootstrap secret from the state store, issues an
      operator certificate and writes `ca.pem`, `cli.pem`, `cli-key.pem` and `token` (0600) into a new directory
      ([README](../hack/tent-operator/README.md)).
-   - `hack/vultr-spike/spike.sh --only cluster` (spike v9) checks the flow on a real Vultr account: tent builds a
+   - `hack/vultr-spike/spike.sh --only cluster` (spike v11) checks the flow on a real Vultr account: tent builds a
      cluster of three servers and two clients with `create cluster --yes` on a temporary `file://` state store and a
      development tent-node, five instances at once. It records the time to the leader, the bootstrap, healthy servers
      and each registration. Through `hack/tent-operator` and curl it checks the members, autopilot and the nodes, and it
      runs a docker job on a client. It checks that `update` has nothing left to do, each instance's `tent/spec-hash`,
      the first peers call between two machines, a restart of `nomad.service` on a server, and `delete cluster --yes`
-     leaving nothing in the cloud or the store ([README](../hack/vultr-spike/README.md)).
+     leaving nothing in the cloud or the store ([README](../hack/vultr-spike/README.md)). Since M2.7b it also checks
+     each node's scrub line, its `tent/joined=true` tag and its user data against the stub, a reboot of a client, the
+     refusal to delete a joined node, and with `--unregistered` the replacement of a client that never registered.
 4. **tent-node tests.** Phases run with an abstracted filesystem and exec. Occasionally they run in a
    systemd-enabled container or a VM.
    - **Built in M2.5.** `internal/nodeup/nodeuptest` holds the fakes: an in-memory filesystem that behaves as
@@ -3213,6 +3417,7 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
 | Vultr single failure domain, no anti-affinity | a data-center outage takes the whole cluster down | documented; `validate` warns; multi-region federation later |
 | Vultr API churn (VPC 2.0 removed in 2026; the Terraform provider broke) | runtime breakage | pin govultr, Renovate, nightly E2E |
 | Undocumented Vultr behaviour (user_data limit, tag syntax, firewall scope, halt semantics) | wrong assumptions in code | `hack/vultr-spike` settled all of these on 2026-09-25 except Object Storage conditional writes; re-run it when Vultr changes something relevant |
+| Vultr counted a deleted machine against the account's instance limit, so the create of a replacement was refused (seen 2026-10-06, run `rugw2m`) | the replacement of a client that never registered fails in an account at its limit | the Vultr provider sends a refused node create again for up to 2 minutes after a delete that it made ([11.3](#113-creating-a-node)); a limit that still holds then returns the limit error with its hint, and so does a rerun of tent right after a run that deleted, since the window does not outlive the process |
 | Hetzner capacity and account limits (5 servers, creation restrictions since June 2026) | Hetzner provider cannot be E2E-tested | Vultr first (ADR-0014); Hetzner E2E in M4 |
 | Nomad 2.x version skew rules not yet restated | broken upgrades | channels allow one major version from a minimum, and tent warns about versions they have not tested; servers before clients |
 | HashiCorp's embedded release key expires on 2030-03-01, or is rotated or revoked | tent cannot verify Nomad downloads, or trusts a revoked key | a weekly CI job fails 180 days before the expiry; a tent release embeds the new key ([8.5](#85-artifacts-and-verification)) |
@@ -3221,11 +3426,13 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
 | A reboot of a client kills its tasks without a migration, since clients do not drain themselves at shutdown | the tasks are down until the client restarts them, if it is back first, or the scheduler replaces them after the missed heartbeats | a self-drain would leave the node ineligible after every reboot or restart (hashicorp/nomad#17093); tent drains a client through the API before it removes it ([ADR-0017](adr/0017-api-driven-server-removal.md), [ADR-0030](adr/0030-nomad-on-nodes.md)) |
 | A client's servers are not up within `verify`'s 2 minutes | `up` fails on the client, and on the first boot `install` and cloud-init, though Nomad joins later | `update` creates clients after the servers are healthy and judges a client by its registration in Nomad (M2.7a) |
 | tent-node restarts Docker, after a hand edit of `daemon.json` and an `up` by hand, or dockerd crashes | the node's docker tasks restart after the restart policy's delay (17-20 s seen): Nomad's docker driver stops the containers that live-restore kept ([platform notes §6.4](platform-notes.md#64-restarts-of-docker-containerd-and-nomad)) | accepted on 2026-10-05 ([ADR-0030](adr/0030-nomad-on-nodes.md)); tent-node restarts Docker only for its own `daemon.json` |
-| nomadops relies on two Nomad answers read in the v1.11.3 source, not in 2.0.7: 403 from `token/self` for an unknown secret, and the report in the 429 of an unhealthy cluster (the text `ACL bootstrap already done` was seen on 2.0.7 on 2026-10-05, [platform notes §1.6](platform-notes.md#16-the-agent-on-a-node)) | a repeated bootstrap fails, or a health wait runs out | nomadops matches status codes and one message prefix; E2E runs real Nomad from M2.9 ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)) |
+| nomadops relies on one Nomad answer read in the v1.11.3 source, not in 2.0.7: 403 from `token/self` for an unknown secret (the report in the 429 of an unhealthy cluster was seen on 2.0.7 on 2026-10-05, [platform notes §1.2](platform-notes.md#12-features-tent-relies-on); the text `ACL bootstrap already done` on 2026-10-05, [§1.6](platform-notes.md#16-the-agent-on-a-node)) | a repeated bootstrap fails | nomadops matches status codes and one message prefix; E2E runs real Nomad from M2.9 ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)) |
 | `extraConfig` overrides tent's settings, such as `data_dir`, the TLS paths, the dynamic ports or Nomad's bridge subnet (`bridge_network_subnet`) | a node cannot find its files, a client is refused, or the host firewall blocks workloads | documented as unsupported ([3.3](#33-api-rules), [8.4](#84-nomad-configuration-rendering)) |
 | A unit ordering between cloud-init, tent-node and Nomad hangs the boot, or `up` hangs | the node never comes up; cloud-init never finishes | `install` waits for `up`, and no unit is ordered on cloud-init, `multi-user.target` or `nomad.service`, nor `nomad.service` on `tent-node.service` (a unit test checks); `nomad.service` is never enabled; finite start timeouts (45 minutes for `up`); `status.json` on every run; the M2.5 VM check boots and reboots a node ([8.1](#81-bootstrap-chain)) |
-| Secrets in user data | node impersonation if metadata leaks | mitigations in [9.4](#94-secrets-on-nodes-threat-model), including scrubbing on Vultr, which M2.7b builds: until then nodes keep their user data; bootstrap controller in v2 |
-| A client whose machine is ready never registers, or a run is cut between a client's create and its registration | the next run plans nothing and does not look at the registration; the client's intro token expires after 30 minutes | M2.7a fails the registration wait after 10 minutes and names the node; M2.7b handles nodes that never registered ([13.2](#132-tent-update-cluster---yes), [ADR-0031](adr/0031-bootstrap-in-update.md)) |
+| Secrets in user data | node impersonation if metadata leaks | mitigations in [9.4](#94-secrets-on-nodes-threat-model), including the scrub on Vultr once a node has joined (M2.7b); a node that never joins keeps them; bootstrap controller in v2 |
+| A client whose machine is ready never registers, or a run is cut between a client's create and its registration | the client's intro token expires after 30 minutes and is refused a minute later, and the node never joins | the registration wait fails after 10 minutes and names the node; a client without the joined label that is older than 31 minutes and that Nomad does not list is deleted and created again ([13.4](#134-scaling), [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)) |
+| A scrub reaches a machine before cloud-init has read its user data (Vultr reported an instance ready 7 s before its kernel started, [platform notes §3.3](platform-notes.md#33-instances)) | the node boots without its config and never joins | tent scrubs a machine only after it saw a node of the machine's own name and private address; a stale node of an earlier machine at that name and address can read `ready` for up to 30 s after the machine died, 300 s after a leader change; a create takes longer than 30 s on Vultr; the node meta `tent_instance_id` would be exact ([ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)) |
+| An operator changes a tag of a machine between the read and the update of `MarkJoined` | the change is lost | see [11.6](#116-user_data) |
 | `nomad.service` should end as failed after every stop of a server or combined node, since servers run with `leave_on_terminate = false` (seen on a real server on 2026-10-05, [platform notes §3.16](platform-notes.md#316-spike-runs)) | an operator or a monitor sees a failed unit after a stop or restart that worked | accepted: `SuccessExitStatus=1` would hide real failures (decision 26 of [18](#18-open-questions), [ADR-0031](adr/0031-bootstrap-in-update.md)) |
 | Hetzner rate limit (3600/h per project) | slow or failing large rollouts | snapshots, batched waits, adaptive throttling, targeted rollouts, one project per cluster |
 
@@ -3253,7 +3460,8 @@ Decided on 2026-09-28:
 8. **CA validity:** 10 years, until CA rotation exists ([9.1](#91-pki)).
 9. **Nomad's sha256s:** checked at run time. The CLI downloads `nomad_<v>_SHA256SUMS` and its detached signature and
    verifies them with HashiCorp's release key, which tent embeds ([8.5](#85-artifacts-and-verification),
-   [ADR-0026](adr/0026-channels-and-release-assets.md)). So a plan that creates or waits for a node needs
+   [ADR-0026](adr/0026-channels-and-release-assets.md)). So a plan that creates a node or repeats the create of one
+   needs
    releases.hashicorp.com (M2.7a).
 10. **The Nomad version of a spec without one:** the first `update` records the channel's recommended version in
     `cluster.completed.yaml`, and later runs keep it. A newer tent does not move nodes to another version by itself;
@@ -3268,7 +3476,8 @@ Decided on 2026-09-28:
     ([13.2](#132-tent-update-cluster---yes),
     [ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md),
     [ADR-0031](adr/0031-bootstrap-in-update.md)). Nodes get real user data, which holds node keys and the gossip key,
-    and the scrub runs only after registration, so nodes keep that user data until M2.7b builds the scrub.
+    and the scrub runs only after the node has joined. M2.7b built it ([9.4](#94-secrets-on-nodes-threat-model),
+    [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)).
 13. **The instance id:** NodeConfig carries the node's name, not a cloud instance id. tent-node reads the id from the
     metadata service and writes `tent_instance_id` into its own `11-instance.hcl` on client and combined nodes.
     Preflight compares the hostname with the name ([8.2](#82-tent-node-phases)).
@@ -3320,7 +3529,8 @@ Decided on 2026-09-30:
     ([16](#16-technology-stack-and-releases)).
 24. **The secrets of the tent-node VM check:** `hack/tent-node-userdata` makes a throwaway CA, the node's certificate
     and a gossip key on each run, for one combined node with `enforcement = "warn"` and no intro token. They sit in the
-    user data of a VM that is deleted after the check; there is no scrub before M2.7b ([15](#15-testing)).
+    user data of a VM that is deleted after the check; tent scrubs nothing there, since no cluster owns the VM
+    ([15](#15-testing)).
 
 Decided on 2026-10-05:
 
@@ -3332,13 +3542,23 @@ Decided on 2026-10-05:
     peer, and clients keep `true`. tent removes a server from Raft through the Nomad API, on every provider
     ([8.4](#84-nomad-configuration-rendering), [ADR-0017](adr/0017-api-driven-server-removal.md),
     [ADR-0031](adr/0031-bootstrap-in-update.md)).
-27. **Deleting nodes that joined:** until M3, `update` refuses to delete a node that registered in Nomad or a server of
-    the Raft peer set; `delete cluster` works as before. M2.7b builds it; until then `update` deletes such
-    nodes without a check ([13.2](#132-tent-update-cluster---yes), [ADR-0031](adr/0031-bootstrap-in-update.md)).
+27. **Deleting nodes that joined** (decided on 2026-10-05, built in M2.7b): until M3, `update` refuses to delete a
+    node that joined Nomad: a machine that carries the joined label, a registered client, or a server of the Raft
+    configuration. A Nomad node that is `down` does not count as registered (confirmed on 2026-10-06).
+    `delete cluster` works as before ([13.4](#134-scaling),
+    [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)).
+
+Decided on 2026-10-06:
+
+28. **A client that never registered:** `update` deletes a client that did not register before
+    its intro token expired and creates it again, shown as `not registered`. It never ran a workload, so nothing is
+    drained. The delete comes before the create, an exception to creating the replacement before removing the old node
+    (confirmed on 2026-10-06; [13.4](#134-scaling), [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)).
 
 Decisions 18 to 20 are recorded in [ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md), decision 21 in
 [ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md), decisions 22 to 25 in
-[ADR-0030](adr/0030-nomad-on-nodes.md), and decisions 26 and 27 in [ADR-0031](adr/0031-bootstrap-in-update.md).
+[ADR-0030](adr/0030-nomad-on-nodes.md), decision 26 in [ADR-0031](adr/0031-bootstrap-in-update.md), and decisions 27
+and 28 in [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md).
 
 ---
 
@@ -3594,4 +3814,4 @@ WantedBy=multi-user.target
 - **`tent-node-join.timer`:** `OnBootSec` and `OnUnitActiveSec` set to NodeConfig's `join.refreshInterval` (60 s),
   `AccuracySec=1s`, `WantedBy=timers.target`.
 
-On Vultr, tent replaces this user data with a non-secret stub once the node has registered (§9.4).
+On Vultr, tent replaces this user data with a non-secret stub once the node has joined its cluster (§9.4).

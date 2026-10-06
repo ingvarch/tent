@@ -40,7 +40,8 @@ Providers, in order:
     and rules between nodes, the NodeConfig types and strict codec, the Nomad agent configuration with golden files,
     the spec hash and the cloud-config within 24 KiB.
   - M2.4 added nomadops (`internal/nomadops`, `nomadfake`): the mTLS client of a server's HTTP API, the ACL
-    bootstrap that is safe to repeat, intro tokens, the leader, the nodes, autopilot health and waits over them.
+    bootstrap that is safe to repeat, intro tokens, the leader, the nodes with their addresses, the servers of the Raft
+    configuration (`Peers`, M2.7b), autopilot health and waits over them.
     `nomad/api` is pinned at the commit of Nomad v2.0.7 and moved by hand.
   - M2.5 added tent-node (`cmd/tent-node`, `internal/nodeup`, ADR-0028): `install`, `up`, `version` and a stub
     `refresh-join`; the phase runner over a filesystem and exec, with fakes in `nodeuptest`; the Vultr metadata
@@ -68,10 +69,16 @@ Providers, in order:
     servers, the mark `nomad/bootstrapped`), then clients with intro tokens until Nomad lists them. `cmd/tent` reads
     `TENT_NODE_URL` and `TENT_NODE_SHA256`. Maintainer decision 26: `leave_on_terminate` is false on server and
     combined agents, so `nomad.service` ends as failed after a stop of a server (seen on a real server on 2026-10-05).
-    The real-cloud check of the whole flow passed on Vultr (spike v9, run `qypvsk`). Nodes keep their user data until
-    M2.7b.
-  - Next: M2.7b: the scrub of user data, nodes that never registered, and the guard against deleting a node that
-    registered or a Raft peer (decision 27).
+    The real-cloud check of the whole flow passed on Vultr (spike v9, run `qypvsk`).
+  - M2.7b added the scrub and the delete guard (`internal/app`, `internal/cloud`, `internal/nomadops`, ADR-0032): once a
+    node has joined, `update` replaces its user data with a stub and labels its machine `tent/joined=true`
+    (`Nodes.MarkJoined`, one PATCH on Vultr); a machine without the label is waited for; a client without it that is
+    older than 31 minutes and that Nomad does not list is deleted and created again (decision 28); and `update` refuses
+    to delete a node that joined (decision 27). A node is told by its name and private address. The real-cloud check
+    ran on Vultr on 2026-10-06 (spike v10 run `rugw2m`, v11 runs `sv3vwb` and `rgfckj`). It found that cloud-init
+    read the stub as degraded and that the account's instance limit refused the replacement's create right after
+    the delete; both are fixed in the code (a line `{}` in the stub, a retry in the Vultr provider).
+  - Next: M2.8: `tent export nomad`, `validate cluster` and `tent ui`.
 
 ## Read before changing anything
 
@@ -79,8 +86,8 @@ Providers, in order:
 2. `docs/adr/`: accepted decisions. Do not diverge silently. If an implementation must deviate, write a superseding
    ADR first (see `docs/adr/README.md`).
 3. `docs/platform-notes.md`: verified Nomad, Hetzner and Vultr API facts and quirks as of 2026-09-25, facts about
-   Ubuntu on nodes as of 2026-09-29 (restarts of Docker, containerd and Nomad as of 2026-10-05), and about the Nomad
-   agent on a node as of 2026-10-05.
+   Ubuntu on nodes as of 2026-09-29 (restarts of Docker, containerd and Nomad as of 2026-10-05, cloud-init and the
+   stub as of 2026-10-06), and about the Nomad agent on a node as of 2026-10-05.
    - Re-verify items marked ⏳ (prices, availability, versions) before relying on them.
    - Items marked 🔬 are unverified until `hack/vultr-spike` has run.
 4. `docs/roadmap.md`: milestone goals and exit criteria. The work items are GitHub issues in milestones M0–M6
@@ -132,7 +139,8 @@ Providers, in order:
   - Deterministic names.
   - Adopt a resource only when its ownership markers match.
   - Operation ids where names are not unique; never let an SDK blindly retry a create.
-  - Create the replacement before removing the old node.
+  - Create the replacement before removing the old node. The one exception is a client that never registered: it is
+    deleted before its replacement is created (decision 28, ADR-0032).
 - **Tests.**
   - Unit tests sit next to the code, with golden files under `testdata/`.
   - Every engine task needs an "apply → re-plan → no-op" test.

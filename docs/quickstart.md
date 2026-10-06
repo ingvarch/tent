@@ -5,11 +5,10 @@ few cents.
 
 > tent is at milestone M2 ([roadmap](roadmap.md)). `update cluster --yes` builds the network, the firewalls, the
 > machines and a running, secured Nomad cluster: a leader, ACLs bootstrapped with the secret in the state store, and
-> registered nodes. Not done yet:
-> - The node keys, the gossip key and the clients' intro tokens stay in the machines' user data until M2.7b builds the
->   scrub. Do not use the cluster for production.
-> - tent cannot scale a running cluster down safely before M3: `update` deletes surplus machines without draining
->   them or checking the Raft quorum.
+> registered nodes. Once a node has joined, tent replaces its user data, which holds its keys, with a stub. Not done
+> yet:
+> - tent cannot scale a running cluster down before M3: `update` refuses to delete a node that joined Nomad, since it
+>   cannot drain a node or check the Raft quorum yet. `delete cluster` still deletes everything.
 > - `tent export nomad`, which gives you the Nomad API's certificate and token, comes with M2.8, so this guide does
 >   not run a job.
 
@@ -140,10 +139,16 @@ waiting for 3 healthy Nomad servers
 3 Nomad servers are healthy
 waiting for node demo-nodes-0 to register
 node demo-nodes-0 registered
+scrubbing the user data of node demo-nodes-0
+scrubbed the user data of node demo-nodes-0
 waiting for node demo-nodes-1 to register
 node demo-nodes-1 registered
+scrubbing the user data of node demo-nodes-1
+scrubbed the user data of node demo-nodes-1
 waiting for node demo-nodes-2 to register
 node demo-nodes-2 registered
+scrubbing the user data of node demo-nodes-2
+scrubbed the user data of node demo-nodes-2
 
 Applied: 3 created, 0 updated, 0 replaced, 0 deleted. Nodes: 3 created, 0 waited for, 0 deleted. Nomad: bootstrapped the ACL system; 3 servers are healthy. Wrote pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token, cluster.completed.yaml and nomad/bootstrapped.
 ```
@@ -153,16 +158,18 @@ Applied: 3 created, 0 updated, 0 replaced, 0 deleted. Nodes: 3 created, 0 waited
   into a running Nomad agent. The first server has no peers to join; every later server and every client is given the
   servers that exist.
 - Once the servers have a leader, tent bootstraps the ACL system with the secret in the state store, then waits until
-  the servers are healthy and every combined node has registered. With separate clients it creates them after that,
-  each with an intro token, and waits for each to register. Each of these waits takes at most 10 minutes.
+  the servers are healthy. Then, for each combined node, it waits until the node has registered, replaces the node's
+  user data with a stub and labels the machine `tent/joined=true`. With separate clients it creates them after that,
+  each with an intro token, waits for each to register and scrubs it. Each of these waits takes at most 10 minutes.
 - `cluster.completed.yaml` in the state store holds the specs with every default that tent applied, among them the
   Nomad version. The first build also writes the cluster's CA, gossip key and ACL bootstrap secret there, and
   `nomad/bootstrapped`, the mark that the ACL system is bootstrapped.
 - If the run stops halfway, because of Ctrl-C or a lost connection, run the same command again. tent finds what the
   earlier run created by the markers it put on each object, and each machine by the operation id of its create call. It
-  never creates a second machine for one node, and it repeats the leader wait, the bootstrap and the health wait until
-  the mark is written, but not a registration wait (M2.7b). The release files of Nomad (releases.hashicorp.com) are read
-  only by a run that creates machines or waits for them.
+  never creates a second machine for one node. It repeats the leader wait, the bootstrap and the health wait until the
+  mark is written, and it waits for every machine whose node has not joined yet, which is a machine without the label.
+  A client that has not registered 31 minutes after its machine was created is deleted and created again. The release
+  files of Nomad (releases.hashicorp.com) are read only by a run that creates a machine or repeats the create of one.
 
 ## 6. Check it
 
@@ -181,9 +188,10 @@ tent does not list the machines yet; `tent get nodes` comes later. The Vultr con
 SSH key.
 
 To add machines, edit the group's `size` with `tent edit nodegroup nodes --name demo` and run
-`tent update cluster demo --yes` again. tent creates the missing machines and they join the cluster. Do not make a
-running group smaller: before M3 tent would delete machines without draining them or checking the Raft quorum. A
-combined group, like a server group, has 1, 3 or 5 machines, and 1 needs `--allow-single-server` on each command.
+`tent update cluster demo --yes` again. tent creates the missing machines and they join the cluster. A running
+group cannot be made smaller yet: before M3 `update` refuses to delete a node that joined Nomad, and fails with an
+error that names the node. A combined group, like a server group, has 1, 3 or 5 machines, and 1
+needs `--allow-single-server` on each command.
 
 ## 7. Delete the cluster
 
