@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -32,8 +33,8 @@ type Providers func(name v1alpha1.Provider, log *slog.Logger) (cloud.Provider, e
 // Option changes how Execute runs tent.
 type Option func(*globalOptions)
 
-// WithProviders gives tent the cloud providers that update cluster, delete cluster, validate cluster and export
-// nomad reach. Without it, those commands fail: tent reaches no cloud.
+// WithProviders gives tent the cloud providers that update cluster, delete cluster, validate cluster, export nomad
+// and ui reach. Without it, those commands fail: tent reaches no cloud.
 func WithProviders(p Providers) Option {
 	return func(o *globalOptions) { o.providers = p }
 }
@@ -44,9 +45,16 @@ func WithAssets(a assets.Options) Option {
 	return func(o *globalOptions) { o.assets = a }
 }
 
-// WithNomad gives tent the way to reach one Nomad server, for update cluster, validate cluster and export nomad.
+// WithNomad gives tent the way to reach one Nomad server, for update cluster, validate cluster, export nomad and
+// ui.
 func WithNomad(nomad func(nomadops.Config) (nomadops.API, error)) Option {
 	return func(o *globalOptions) { o.nomad = nomad }
+}
+
+// WithNomadProxy gives tent the way to make the handler that tent ui serves, which passes requests to the cluster's
+// servers over mutual TLS. Without it, tent ui fails.
+func WithNomadProxy(proxy func(nomadops.ProxyConfig) (http.Handler, error)) Option {
+	return func(o *globalOptions) { o.nomadProxy = proxy }
 }
 
 // exitChanges is tent's exit code when --exit-code finds a plan with changes, and when validate finds that the cluster
@@ -124,7 +132,7 @@ func newRootCommand(s Streams, opts *globalOptions) *cobra.Command {
 	cmd.AddCommand(
 		newVersionCommand(opts), newCreateCommand(opts), newGetCommand(opts), newReplaceCommand(opts),
 		newDeleteCommand(opts), newStateCommand(opts), newEditCommand(opts), newUpdateCommand(opts),
-		newValidateCommand(opts), newExportCommand(opts),
+		newValidateCommand(opts), newExportCommand(opts), newUICommand(opts),
 	)
 	return cmd
 }

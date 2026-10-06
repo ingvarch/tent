@@ -105,11 +105,17 @@ func TestDeleteClusterOnAnUnsupportedProvider(t *testing.T) {
 func builtCluster(t *testing.T) (state, *vultrfake.Fake) {
 	t.Helper()
 	s := withCluster(t)
+	return s, buildCluster(t, s)
+}
+
+// buildCluster runs update --yes for the test cluster of s on a new Vultr fake, which it returns.
+func buildCluster(t *testing.T, s state) *vultrfake.Fake {
+	t.Helper()
 	f := vultrfake.New()
 	if got := runOn(t, f, update(s, "--yes")...); got.code != 0 {
 		t.Fatalf("update --yes: exit code %d\n%s", got.code, got.errOut)
 	}
-	return s, f
+	return f
 }
 
 // firewallID returns the id of the fake's firewall group for role, server or client.

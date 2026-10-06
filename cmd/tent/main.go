@@ -20,7 +20,8 @@ import (
 // main runs tent; cli.Execute handles Ctrl-C and SIGTERM.
 func main() {
 	os.Exit(cli.Execute(context.Background(), os.Args[1:], cli.Streams{In: os.Stdin, Out: os.Stdout, Err: os.Stderr},
-		cli.WithProviders(providers(os.Getenv)), cli.WithAssets(nodeAssets(os.Getenv)), cli.WithNomad(nomadServer)))
+		cli.WithProviders(providers(os.Getenv)), cli.WithAssets(nodeAssets(os.Getenv)), cli.WithNomad(nomadServer),
+		cli.WithNomadProxy(nomadops.NewProxy)))
 }
 
 // nodeAssets returns where nodes find the tent-node of a development build: TENT_NODE_URL and its sha256 in

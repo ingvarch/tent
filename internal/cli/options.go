@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"time"
 
@@ -56,6 +57,10 @@ type globalOptions struct {
 	assets assets.Options
 	// nomad returns the API of one Nomad server; nil when tent reaches no Nomad.
 	nomad func(nomadops.Config) (nomadops.API, error)
+	// nomadProxy returns the handler that serves a cluster's Nomad API over mutual TLS; nil when tent has none.
+	nomadProxy func(nomadops.ProxyConfig) (http.Handler, error)
+	// ui holds what tests replace in tent ui.
+	ui uiSettings
 	// channels returns the release channel called name; the channels embedded in tent when nil.
 	channels func(name string) (*channels.Channel, error)
 }
