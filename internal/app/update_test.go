@@ -681,74 +681,125 @@ func TestUpdateRepairsANode(t *testing.T) {
 	})
 }
 
+// joinedRefusal is the error of a plan that deletes the nodes of names, which joined Nomad: each name is
+// "<node> (ID <id>, <reason>)".
+func joinedRefusal(names ...string) string {
+	const tail = "; tent cannot drain a node or remove a server yet, so update deletes only nodes that never joined; "
+	if len(names) == 1 {
+		return "update would delete a node that joined Nomad: " + names[0] + tail +
+			"keep this node in the specs, or delete the whole cluster with tent delete cluster"
+	}
+	return "update would delete nodes that joined Nomad: " + strings.Join(names[:len(names)-1], ", ") + " and " +
+		names[len(names)-1] + tail + "keep these nodes in the specs, or delete the whole cluster with tent delete cluster"
+}
+
+// duplicateRefusal is the error of a plan that deletes the machine id of the node name, a duplicate of the machine
+// stayer, which joined Nomad.
+func duplicateRefusal(name, id, stayer string) string {
+	return "update would delete a node that joined Nomad: " + name + " (ID " + id + ", duplicate of ID " + stayer + "); " +
+		"tent cannot drain a node or remove a server yet, so update deletes only nodes that never joined; remove one of " +
+		"the two machines called " + name + " from Nomad and delete it in the cloud, or delete the whole cluster with " +
+		"tent delete cluster"
+}
+
+// wantRefused fails the test unless the update of the test cluster, with and without apply, fails with the error
+// want and leaves the cloud and the store as they are.
+func wantRefused(t *testing.T, svc *app.Service, f *vultrfake.Fake, want string) {
+	t.Helper()
+	cloudBefore, storeBefore := cloudView(f), snapshot(t, svc.Store)
+	calls := len(f.Calls())
+	for _, apply := range []bool{false, true} {
+		_, err := svc.Update(t.Context(), "prod", apply)
+		wantError(t, err, want)
+	}
+	wantNoWrites(t, f.Calls()[calls:])
+	if diff := cmp.Diff(cloudBefore, cloudView(f)); diff != "" {
+		t.Errorf("the cloud changed (-before +after):\n%s", diff)
+	}
+	wantSnapshot(t, svc.Store, storeBefore)
+}
+
 func TestUpdateScales(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newUpdate(t)
 		mustUpdate(t, svc)
 
-		// Down: the newest worker goes.
+		// Down: the newest worker joined, so the plan refuses to delete it.
 		mustReplace(t, svc, edit(t, workersYAML, "size: 2", "size: 1"))
-		plan := mustUpdate(t, svc)
-		wantInfraChanges(t, plan)
-		wantNodeChanges(t, plan, deleteOf("prod-workers-1", "instance-5", "surplus"))
-		wantNodes(t, f, server(0), server(1), server(2), worker(0))
-		wantConverged(t, svc)
+		wantRefused(t, svc, f, joinedRefusal("prod-workers-1 (ID instance-5, surplus)"))
+		wantNodes(t, f, allNodes...)
 
-		// Up: the lowest free index comes back.
+		// Up: the new node takes the next index.
 		mustReplace(t, svc, edit(t, workersYAML, "size: 2", "size: 3"))
-		plan = mustUpdate(t, svc)
-		wantNodeChanges(t, plan, createOf("workers", v1alpha1.RoleClient, 1), createOf("workers", v1alpha1.RoleClient, 2))
+		plan := mustUpdate(t, svc)
+		wantNodeChanges(t, plan, createOf("workers", v1alpha1.RoleClient, 2))
 		wantNodes(t, f, server(0), server(1), server(2), worker(0), worker(1), worker(2))
 		wantStored(t, svc.Store, completedPath, fullSpec(t, svc))
 		wantConverged(t, svc)
 	})
 }
 
-// TestUpdateRemovesTheLastClientGroup removes the only client group: one update deletes its nodes, then the clients'
-// firewall group, which Vultr's guard keeps while nodes use it.
+// TestUpdateRemovesTheLastClientGroup removes the only client group. One update deletes a worker that never joined,
+// then the clients' firewall group, which Vultr's guard keeps while nodes use it. When the workers joined, the plan
+// refuses.
 func TestUpdateRemovesTheLastClientGroup(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		svc, f := newUpdate(t)
-		mustUpdate(t, svc)
-		clients := firewallGroupID(t, f, "client")
-		if err := svc.Store.Delete(t.Context(), workersPath); err != nil {
-			t.Fatal(err)
-		}
-		before := len(f.Calls())
-		progress := recordProgress(svc)
-
-		plan := mustUpdate(t, svc)
-
-		wantInfraChanges(t, plan, "delete "+kindFirewall+"/prod-clients")
-		wantNodeChanges(t, plan,
-			deleteOf("prod-workers-0", "instance-4", "not in the spec"),
-			deleteOf("prod-workers-1", "instance-5", "not in the spec"))
-		want := slices.Concat(nodeSteps("delete", "prod-workers-0"), nodeSteps("delete", "prod-workers-1"), []string{
-			"infra started " + kindFirewall + "/prod-clients delete",
-			"infra succeeded " + kindFirewall + "/prod-clients delete",
-		})
-		if diff := cmp.Diff(want, *progress); diff != "" {
-			t.Errorf("the progress (-want +got):\n%s", diff)
-		}
-		var deletes []vultrfake.Call
-		for _, c := range f.Calls()[before:] {
-			if strings.HasPrefix(c.Name, "Delete") {
-				deletes = append(deletes, c)
+	t.Run("a worker that never joined", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			svc, f, w := newRelease(t)
+			w.Withhold("prod-workers-0") // the build stops at its registration
+			if _, err := svc.Update(t.Context(), "prod", true); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("the build: %v, want a deadline", err)
 			}
-		}
-		wantDeletes := []vultrfake.Call{
-			{Name: "DeleteInstance", Arg: "instance-4"}, {Name: "DeleteInstance", Arg: "instance-5"},
-			{Name: "DeleteFirewallGroup", Arg: clients},
-		}
-		if diff := cmp.Diff(wantDeletes, deletes); diff != "" {
-			t.Errorf("the deletes (-want +got):\n%s", diff)
-		}
-		wantNodes(t, f, server(0), server(1), server(2))
-		if groups := f.FirewallGroups(); len(groups) != 1 || groups[0].ID == clients {
-			t.Errorf("the firewall groups are %+v, want the servers' alone", groups)
-		}
-		wantStored(t, svc.Store, completedPath, fullSpec(t, svc))
-		wantConverged(t, svc)
+			clients := firewallGroupID(t, f, "client")
+			if err := svc.Store.Delete(t.Context(), workersPath); err != nil {
+				t.Fatal(err)
+			}
+			before, asked := len(f.Calls()), len(w.Log())
+			progress := recordProgress(svc)
+
+			plan := mustUpdate(t, svc)
+
+			wantInfraChanges(t, plan, "delete "+kindFirewall+"/prod-clients")
+			wantNodeChanges(t, plan, deleteOf("prod-workers-0", "instance-4", "not in the spec"))
+			wantLines(t, *progress, slices.Concat(nodeSteps("delete", "prod-workers-0"), []string{
+				"infra started " + kindFirewall + "/prod-clients delete",
+				"infra succeeded " + kindFirewall + "/prod-clients delete",
+			}))
+			if diff := cmp.Diff([]string{"Nodes", "Peers"}, nomadNames(w, asked)); diff != "" {
+				t.Errorf("the Nomad calls before the delete (-want +got):\n%s", diff)
+			}
+			var deletes []vultrfake.Call
+			for _, c := range f.Calls()[before:] {
+				if strings.HasPrefix(c.Name, "Delete") {
+					deletes = append(deletes, c)
+				}
+			}
+			wantDeletes := []vultrfake.Call{
+				{Name: "DeleteInstance", Arg: "instance-4"}, {Name: "DeleteFirewallGroup", Arg: clients},
+			}
+			if diff := cmp.Diff(wantDeletes, deletes); diff != "" {
+				t.Errorf("the deletes (-want +got):\n%s", diff)
+			}
+			wantNodes(t, f, server(0), server(1), server(2))
+			if groups := f.FirewallGroups(); len(groups) != 1 || groups[0].ID == clients {
+				t.Errorf("the firewall groups are %+v, want the servers' alone", groups)
+			}
+			wantStored(t, svc.Store, completedPath, fullSpec(t, svc))
+			wantConverged(t, svc)
+		})
+	})
+	t.Run("workers that joined", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			svc, f := newUpdate(t)
+			mustUpdate(t, svc)
+			if err := svc.Store.Delete(t.Context(), workersPath); err != nil {
+				t.Fatal(err)
+			}
+
+			wantRefused(t, svc, f, joinedRefusal(
+				"prod-workers-0 (ID instance-4, not in the spec)", "prod-workers-1 (ID instance-5, not in the spec)"))
+			wantNodes(t, f, allNodes...)
+		})
 	})
 }
 
