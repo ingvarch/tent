@@ -1,5 +1,6 @@
 // Package nomadops calls the HTTP API of a Nomad cluster's servers over mutual TLS: the leader, the ACL bootstrap,
 // client introduction tokens, management tokens that expire, the client nodes, the autopilot health and the Raft peers.
+// It also makes the reverse proxy that serves a cluster's API on a local port, with the mutual TLS and the token added.
 package nomadops
 
 import (
@@ -76,31 +77,15 @@ type Client struct {
 // token is empty or has a control character. Its errors never show the key or the token.
 func New(cfg Config) (*Client, error) {
 	u, err := serverURL(cfg.Address)
-	switch {
-	case err != nil:
+	if err != nil {
 		return nil, err
-	case cfg.Region == "":
-		return nil, errors.New("nomad: no region")
-	case !x509.NewCertPool().AppendCertsFromPEM(cfg.CA):
-		return nil, errors.New("nomad: the CA bundle holds no certificate")
 	}
-	if _, err := tls.X509KeyPair(cfg.Cert.Cert, cfg.Cert.Key); err != nil {
-		return nil, fmt.Errorf("nomad: the operator certificate: %w", err)
+	if err := checkCluster(cfg.Region, cfg.CA, cfg.Cert, cfg.Token); err != nil {
+		return nil, err
 	}
-	switch {
-	case len(cfg.Token) == 0:
-		return nil, errors.New("nomad: no ACL token")
-	case strings.ContainsFunc(string(cfg.Token), unicode.IsControl):
-		return nil, errors.New("nomad: the ACL token has a control character")
-	}
-	hc := newHTTPClient()
-	if err := api.ConfigureTLS(hc, &api.TLSConfig{
-		CACertPEM:     cfg.CA,
-		ClientCertPEM: cfg.Cert.Cert,
-		ClientKeyPEM:  cfg.Cert.Key,
-		TLSServerName: "server." + cfg.Region + ".nomad",
-	}); err != nil {
-		return nil, fmt.Errorf("nomad: %w", err)
+	hc, err := clusterHTTPClient(cfg.Region, cfg.CA, cfg.Cert)
+	if err != nil {
+		return nil, err
 	}
 	// Built by hand, never from api.DefaultConfig, which takes the NOMAD_* variables; NewClient reads them too but
 	// uses only the address, which is always set here.
@@ -109,6 +94,42 @@ func New(cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("nomad: %w", err)
 	}
 	return &Client{api: c, url: u, timeout: callTimeout}, nil
+}
+
+// checkCluster fails unless the region, the CA bundle, the operator certificate and the token are fit for a client of
+// the cluster's servers. Its errors never show the key or the token.
+func checkCluster(region string, ca []byte, cert pki.Certificate, token secret.Secret) error {
+	switch {
+	case region == "":
+		return errors.New("nomad: no region")
+	case !x509.NewCertPool().AppendCertsFromPEM(ca):
+		return errors.New("nomad: the CA bundle holds no certificate")
+	}
+	if _, err := tls.X509KeyPair(cert.Cert, cert.Key); err != nil {
+		return fmt.Errorf("nomad: the operator certificate: %w", err)
+	}
+	switch {
+	case len(token) == 0:
+		return errors.New("nomad: no ACL token")
+	case strings.ContainsFunc(string(token), unicode.IsControl):
+		return errors.New("nomad: the ACL token has a control character")
+	}
+	return nil
+}
+
+// clusterHTTPClient returns the HTTP client that speaks to the cluster's servers: the cluster's CA is the only root,
+// the operator certificate is shown to the server, and the server must show a certificate for server.<region>.nomad.
+func clusterHTTPClient(region string, ca []byte, cert pki.Certificate) (*http.Client, error) {
+	hc := newHTTPClient()
+	if err := api.ConfigureTLS(hc, &api.TLSConfig{
+		CACertPEM:     ca,
+		ClientCertPEM: cert.Cert,
+		ClientKeyPEM:  cert.Key,
+		TLSServerName: "server." + region + ".nomad",
+	}); err != nil {
+		return nil, fmt.Errorf("nomad: %w", err)
+	}
+	return hc, nil
 }
 
 // newHTTPClient returns the HTTP client that the Nomad API module would make for itself, but one that never follows
@@ -129,13 +150,22 @@ func (c Client) Format(f fmt.State, _ rune) { _, _ = fmt.Fprintf(f, "nomadops.Cl
 
 // serverURL returns the https URL of a server's address, which must be host:port.
 func serverURL(addr string) (string, error) {
+	u, ok := hostPortURL(addr)
+	if !ok {
+		return "", fmt.Errorf("nomad: address %q is not host:port", addr)
+	}
+	return u.String(), nil
+}
+
+// hostPortURL returns the https URL of addr, which must be host:port with a host and a port from 1 to 65535.
+func hostPortURL(addr string) (*url.URL, bool) {
 	host, port, err := net.SplitHostPort(addr)
 	n, portErr := strconv.Atoi(port)
 	u, urlErr := url.Parse("https://" + addr)
 	if err != nil || host == "" || portErr != nil || n < 1 || n > 65535 || urlErr != nil || u.Host != addr {
-		return "", fmt.Errorf("nomad: address %q is not host:port", addr)
+		return nil, false
 	}
-	return u.String(), nil
+	return u, true
 }
 
 // call runs do with a context that ends after the client's timeout, and turns its failure into a *callError.
