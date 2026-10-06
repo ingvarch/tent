@@ -120,7 +120,8 @@ func TestCreateClusterNamedByFlag(t *testing.T) {
 
 func TestCreateClusterCombined(t *testing.T) {
 	s := newState(t)
-	wantDone(t, runIn(t, "", createProd(s, "--combined")...), "cluster prod created\nnode group nodes created\n")
+	wantResult(t, runIn(t, "", createProd(s, "--combined")...), 0, "cluster prod created\nnode group nodes created\n",
+		openAPIWarning+combinedWarning)
 	s.want(t, map[string]string{clusterPath: clusterYAML, "prod/nodegroups/nodes.yaml": `apiVersion: tent/v1alpha1
 kind: NodeGroup
 metadata:
@@ -418,6 +419,21 @@ func untestedChannel(t *testing.T) func(string) (*channels.Channel, error) {
 		c.Nomad.Tested = []string{"2.0.6"}
 		return c, nil
 	}
+}
+
+// TestCreateClusterCombinedYesWarnsOnce prints the warning about a combined group once, after the open API's and
+// before the first line of the build.
+func TestCreateClusterCombinedYesWarnsOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := newState(t)
+
+		got := runWithNomad(t, onVultr(vultrfake.New()), combinedNomad(), createProd(s, "--combined", "--yes")...)
+
+		if got.code != 0 {
+			t.Fatalf("exit code = %d\n%s", got.code, got.errOut)
+		}
+		wantWarningsFirst(t, got.errOut, openAPIWarning+combinedWarning)
+	})
 }
 
 // TestCreateClusterYesWarnsOfAnUntestedNomad warns once of a Nomad version that the channel allows but has not

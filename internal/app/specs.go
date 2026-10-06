@@ -267,12 +267,18 @@ func (s *Service) write(ctx context.Context, objs spec.Objects, m mode, ref Ref,
 	return changes, err
 }
 
-// warnings returns the warnings about the cluster c, which has its defaults and the channel ch: a Nomad API that the
-// whole internet may reach, and a Nomad version that the channel allows but has not tested.
-func warnings(c *v1alpha1.Cluster, ch *channels.Channel) []string {
+// warnings returns the warnings about the cluster c, which has its defaults, its node groups and the channel ch: a
+// Nomad API that the whole internet may reach, a combined node group, and a Nomad version that the channel allows but
+// has not tested.
+func warnings(c *v1alpha1.Cluster, groups []*v1alpha1.NodeGroup, ch *channels.Channel) []string {
 	var warnings []string
 	if openAPI(c) {
 		warnings = append(warnings, openAPIWarning)
+	}
+	for _, g := range groups {
+		if g != nil && g.Spec.Role == v1alpha1.RoleCombined {
+			warnings = append(warnings, combinedWarning(g.Metadata.Name))
+		}
 	}
 	if v := c.Spec.Nomad.Version; v != "" && !ch.Tested(v) {
 		warnings = append(warnings, fmt.Sprintf("Nomad %s is not tested by this tent; channel %s tests %s", v,
@@ -654,7 +660,7 @@ func check(objs spec.Objects, opts v1alpha1.ValidateOptions, lookup channelLooku
 	if err != nil {
 		return nil, err
 	}
-	return warnings(c, ch), nil
+	return warnings(c, groups, ch), nil
 }
 
 // checkCluster checks a cluster and its node groups, all with their defaults, as v1alpha1.Validate does, and the

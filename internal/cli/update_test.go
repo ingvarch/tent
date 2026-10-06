@@ -412,6 +412,53 @@ func decodeProgress(t *testing.T, errOut string) []progressEvent {
 	return events
 }
 
+// wantWarningsFirst fails the test unless stderr starts with the warnings, which are WARNING lines, goes on with the
+// lines of the build, and carries no other WARNING line.
+func wantWarningsFirst(t *testing.T, errOut, warnings string) {
+	t.Helper()
+	if !strings.HasPrefix(errOut, warnings) {
+		t.Errorf("stderr starts with\n%s\nwant\n%s", errOut, warnings)
+		return
+	}
+	switch rest := strings.TrimPrefix(errOut, warnings); {
+	case rest == "":
+		t.Error("stderr holds the warnings and no line of the build after them")
+	case strings.Contains(rest, "WARNING:"):
+		t.Errorf("stderr warns again after the build began:\n%s", rest)
+	}
+}
+
+// withCombinedCluster returns a state that holds the test cluster with the combined node group nodes.
+func withCombinedCluster(t *testing.T) state {
+	t.Helper()
+	s := newState(t)
+	s.put(t, clusterPath, clusterYAML)
+	nodes := strings.NewReplacer("name: servers", "name: nodes", "role: server", "role: combined")
+	s.put(t, "prod/nodegroups/nodes.yaml", nodes.Replace(serversYAML))
+	return s
+}
+
+// TestUpdateClusterCombined warns about a combined group once, before the first change, when it applies the plan,
+// and not at all for a plan.
+func TestUpdateClusterCombined(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := withCombinedCluster(t)
+		f := vultrfake.New()
+
+		plan := runWithNomad(t, onVultr(f), combinedNomad(), update(s)...)
+		if plan.code != 0 || strings.Contains(plan.errOut, "WARNING:") {
+			t.Errorf("a plan exits with %d and writes\n%s\nwant 0 and no warning", plan.code, plan.errOut)
+		}
+
+		got := runWithNomad(t, onVultr(f), combinedNomad(), update(s, "--yes")...)
+
+		if got.code != 0 {
+			t.Fatalf("exit code = %d\n%s", got.code, got.errOut)
+		}
+		wantWarningsFirst(t, got.errOut, openAPIWarning+combinedWarning)
+	})
+}
+
 func TestUpdateClusterApplyJSON(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := withCluster(t)
