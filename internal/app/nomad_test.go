@@ -11,6 +11,7 @@ import (
 	"github.com/ingvarch/tent/internal/app"
 	"github.com/ingvarch/tent/internal/assets"
 	"github.com/ingvarch/tent/internal/assets/assetstest"
+	"github.com/ingvarch/tent/internal/channels"
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/cloud/vultr/vultrfake"
 	"github.com/ingvarch/tent/internal/nomadops"
@@ -45,11 +46,12 @@ type nomadCall struct {
 // nomadWorld is the Nomad cluster of one cluster of the test service, which follows a Vultr fake: before each call it
 // sets the fake's leader, health, Raft peers and nodes from the cluster's instances there. The cluster has a leader
 // once as many servers are ready as its specs give, and its servers are healthy when every listed one is ready. The
-// ready servers are the voting peers, named <hostname>.global at <private address>:4647, so the peers and
-// Health.Voters stay in step. Once the cluster has a leader, each ready client or combined instance registers at its
-// private address (the first VPC of the instance on the Vultr fake), unless it is withheld. A cluster whose servers
-// are all gone is a new, unbootstrapped Nomad when new ones come. The fake's own methods, such as Fail and
-// LoseResponse, are the world's.
+// ready servers are the voting peers, named <hostname>.global at <private address>:4647, so the peers, the servers of
+// the autopilot report and Health.Voters stay in step; each runs the world's Nomad version, as each node does. Once the
+// cluster has a leader, each ready client or combined instance registers at its private address (the first VPC of the
+// instance on the Vultr fake), unless it is withheld. A cluster whose servers are all gone is a new, unbootstrapped
+// Nomad when new ones come. The fake's own methods, such as Fail and LoseResponse, are the world's. A test changes what
+// the world answers with ChangeServer, DropServer, ChangePeers, ChangeNode and DropNode.
 type nomadWorld struct {
 	*nomadfake.Fake
 	cloud *vultrfake.Fake
@@ -68,6 +70,15 @@ type nomadWorld struct {
 	seen []string
 	// unhealthy keeps the servers from being healthy, whatever the instances show.
 	unhealthy bool
+	// version is the Nomad version that every server and node reports; empty for the one of the stable channel.
+	version string
+	// What a test changed in the answers, by the name of the machine's node.
+	serverEdits  map[string]func(*nomadops.ServerHealth)
+	droppedNodes map[string]bool
+	nodeEdits    map[string]func(*nomadops.Node)
+	peerEdit     func([]nomadops.Peer) []nomadops.Peer
+	// droppedServers are the servers that the autopilot report leaves out.
+	droppedServers map[string]bool
 }
 
 // withNomad gives svc the Nomad of the test cluster prod, which follows f, and returns it.
@@ -77,6 +88,8 @@ func withNomad(svc *app.Service, f *vultrfake.Fake) *nomadWorld { return withNom
 func withNomadOf(svc *app.Service, f *vultrfake.Fake, name string) *nomadWorld {
 	w := &nomadWorld{
 		Fake: nomadfake.New(), cloud: f, svc: svc, name: name, withheld: map[string]bool{}, withheldIDs: map[string]bool{},
+		serverEdits:  map[string]func(*nomadops.ServerHealth){},
+		droppedNodes: map[string]bool{}, nodeEdits: map[string]func(*nomadops.Node){}, droppedServers: map[string]bool{},
 	}
 	svc.Nomad = func(cfg nomadops.Config) (nomadops.API, error) {
 		w.mu.Lock()
@@ -85,6 +98,62 @@ func withNomadOf(svc *app.Service, f *vultrfake.Fake, name string) *nomadWorld {
 		return &worldClient{w: w, inner: w.Client(cfg), server: cfg.Address}, nil
 	}
 	return w
+}
+
+// pinned returns the Nomad version that every server and node reports: the one that SetVersion made, or else the one
+// that the embedded stable channel recommends, which a cluster is pinned to. The caller holds w.mu.
+func (w *nomadWorld) pinned() string {
+	if w.version != "" {
+		return w.version
+	}
+	ch, err := channels.Load("stable")
+	if err != nil {
+		return ""
+	}
+	return ch.Nomad.Recommended
+}
+
+// SetVersion makes v the Nomad version that every server and node reports from now on.
+func (w *nomadWorld) SetVersion(v string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.version = v
+}
+
+// ChangeServer changes the entry of the autopilot report for the server machine called name by change, in every
+// answer from now on.
+func (w *nomadWorld) ChangeServer(name string, change func(*nomadops.ServerHealth)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.serverEdits[name] = change
+}
+
+// DropServer leaves the server machine called name out of the autopilot report from now on.
+func (w *nomadWorld) DropServer(name string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.droppedServers[name] = true
+}
+
+// ChangePeers makes change the edit of the Raft configuration in every answer from now on.
+func (w *nomadWorld) ChangePeers(change func([]nomadops.Peer) []nomadops.Peer) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.peerEdit = change
+}
+
+// ChangeNode changes the node of the machine called name by change, in every answer from now on.
+func (w *nomadWorld) ChangeNode(name string, change func(*nomadops.Node)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.nodeEdits[name] = change
+}
+
+// DropNode leaves the node of the machine called name out of the list of nodes from now on, as if it never registered.
+func (w *nomadWorld) DropNode(name string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.droppedNodes[name] = true
 }
 
 // SetHook makes every later call go through hook; nil removes it.
@@ -240,6 +309,7 @@ func (w *nomadWorld) follow() {
 	w.SetLeader(leader)
 	w.SetHealth(nomadops.Health{
 		Healthy: !unhealthy && len(servers) > 0 && len(readyServers) == len(servers), Voters: len(readyServers),
+		Servers: w.report(readyServers),
 	})
 	w.SetPeers(raftPeers(readyServers))
 	if leader == "" {
@@ -249,9 +319,26 @@ func (w *nomadWorld) follow() {
 	defer w.mu.Unlock()
 	for _, m := range clients {
 		if m.ready && !w.withheld[m.name] && !w.withheldIDs[m.id] {
-			w.Register(nomadops.Node{Name: m.name, Status: "ready", Eligible: true, Address: m.private})
+			w.Register(nomadops.Node{
+				Name: m.name, Status: "ready", Eligible: true, Address: m.private, Version: w.pinned(),
+			})
 		}
 	}
+}
+
+// report returns autopilot's entries for the ready servers m: alive, healthy and voting, the first one leading. The
+// entries come in the reverse order of the machines, as Nomad does not keep one.
+func (w *nomadWorld) report(m []machine) []nomadops.ServerHealth {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var out []nomadops.ServerHealth
+	for i := len(m) - 1; i >= 0; i-- {
+		out = append(out, nomadops.ServerHealth{
+			Name: m[i].name + ".global", Address: netip.AddrPortFrom(m[i].private, 4647), Serf: "alive", Healthy: true,
+			Voter: true, Leader: i == 0, Version: w.pinned(),
+		})
+	}
+	return out
 }
 
 // raftPeers returns the servers m as the voting peers of the Raft configuration, at their private addresses.
@@ -346,7 +433,7 @@ func (c *worldClient) Nodes(ctx context.Context) (v []nomadops.Node, err error) 
 	if err != nil {
 		return nil, err
 	}
-	return v, nil
+	return c.w.shapeNodes(v), nil
 }
 
 func (c *worldClient) Peers(ctx context.Context) (v []nomadops.Peer, err error) {
@@ -357,7 +444,7 @@ func (c *worldClient) Peers(ctx context.Context) (v []nomadops.Peer, err error) 
 	if err != nil {
 		return nil, err
 	}
-	return v, nil
+	return c.w.shapePeers(v), nil
 }
 
 func (c *worldClient) Health(ctx context.Context) (v nomadops.Health, err error) {
@@ -368,5 +455,51 @@ func (c *worldClient) Health(ctx context.Context) (v nomadops.Health, err error)
 	if err != nil {
 		return nomadops.Health{}, err
 	}
-	return v, nil
+	return c.w.shapeHealth(v), nil
+}
+
+// shapeNodes returns the nodes without those that a test dropped, and with the edits of the test.
+func (w *nomadWorld) shapeNodes(nodes []nomadops.Node) []nomadops.Node {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var out []nomadops.Node
+	for _, n := range nodes {
+		if w.droppedNodes[n.Name] {
+			continue
+		}
+		if edit := w.nodeEdits[n.Name]; edit != nil {
+			edit(&n)
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// shapePeers returns the peers as the test's edit leaves them.
+func (w *nomadWorld) shapePeers(peers []nomadops.Peer) []nomadops.Peer {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.peerEdit == nil {
+		return peers
+	}
+	return w.peerEdit(slices.Clone(peers))
+}
+
+// shapeHealth returns the report without the servers that a test dropped, and with the edits of the test.
+func (w *nomadWorld) shapeHealth(h nomadops.Health) nomadops.Health {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var servers []nomadops.ServerHealth
+	for _, sv := range h.Servers {
+		name := strings.TrimSuffix(sv.Name, ".global")
+		if w.droppedServers[name] {
+			continue
+		}
+		if edit := w.serverEdits[name]; edit != nil {
+			edit(&sv)
+		}
+		servers = append(servers, sv)
+	}
+	h.Servers = servers
+	return h
 }

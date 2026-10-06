@@ -41,13 +41,68 @@
       "detail": "machine ID instance-3 has not joined Nomad: it carries no tent/joined label"
     },
     {
+      "check": "nomad-not-set-up",
+      "detail": "no server has a public address"
+    },
+    {
       "check": "nomad-no-leader",
       "detail": "Nomad has no leader, or tent cannot reach it: no route; tent reaches the servers on port 4646: check spec.access.api"
+    },
+    {
+      "check": "server-no-vote",
+      "node": "prod-servers-1",
+      "id": "instance-2",
+      "detail": "no server votes at its address 10.64.0.4"
+    },
+    {
+      "check": "server-unknown",
+      "detail": "the Raft configuration lists a server at 10.64.0.9:4647 (prod-servers-9.global) that is no server machine of the cluster"
+    },
+    {
+      "check": "autopilot-unhealthy",
+      "detail": "autopilot reports the servers unhealthy"
+    },
+    {
+      "check": "server-not-alive",
+      "node": "prod-servers-2",
+      "id": "instance-3",
+      "detail": "Serf reports its server as left"
+    },
+    {
+      "check": "server-unhealthy",
+      "node": "prod-servers-2",
+      "id": "instance-3",
+      "detail": "autopilot reports its server unhealthy"
+    },
+    {
+      "check": "client-not-registered",
+      "node": "prod-workers-1",
+      "id": "instance-5",
+      "detail": "Nomad lists no client of its name at 10.64.0.7"
+    },
+    {
+      "check": "client-not-ready",
+      "node": "prod-workers-0",
+      "id": "instance-4",
+      "detail": "its Nomad client is down"
+    },
+    {
+      "check": "nomad-version",
+      "node": "prod-workers-0",
+      "id": "instance-4",
+      "detail": "its client runs Nomad 2.0.6; the cluster is pinned to 2.0.7"
+    },
+    {
+      "check": "certificate-expired",
+      "node": "prod-servers-0",
+      "id": "instance-1",
+      "detail": "its node certificate ended about 2027-10-05"
     }
   ],
   "warnings": [
     "spec.access.api lets the whole internet reach the Nomad API (port 4646); mTLS and ACLs protect it; narrow it with --api-access or spec.access.api",
-    "cluster prod runs in one failure domain, ams: an outage there takes the whole cluster down"
+    "cluster prod runs in one failure domain, ams: an outage there takes the whole cluster down",
+    "the certificate of node prod-workers-0 ends about 2026-11-01, in 26 days; node certificates last one year, and a node gets a new one when it is replaced"
   ],
   "lock": {
     "id": "other",

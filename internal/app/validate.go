@@ -22,12 +22,26 @@ const (
 	checkMachineDuplicate  = "machine-duplicate"
 	checkMachineUnknown    = "machine-unknown"
 	checkNotJoined         = "not-joined"
+
+	checkNomadNotSetUp       = "nomad-not-set-up"
+	checkNoLeader            = "nomad-no-leader"
+	checkServerNoVote        = "server-no-vote"
+	checkServerUnknown       = "server-unknown"
+	checkAutopilotUnhealthy  = "autopilot-unhealthy"
+	checkServerNotAlive      = "server-not-alive"
+	checkServerUnhealthy     = "server-unhealthy"
+	checkClientNotRegistered = "client-not-registered"
+	checkClientNotReady      = "client-not-ready"
+	checkNomadVersion        = "nomad-version"
+	checkCertificateExpired  = "certificate-expired"
 )
 
 // checkOrder lists the checks in the order that a failure list shows them.
 var checkOrder = []string{
 	checkMachineMissing, checkMachineNotRunning, checkMachineSurplus, checkMachineDuplicate, checkMachineUnknown,
-	checkNotJoined,
+	checkNotJoined, checkNomadNotSetUp, checkNoLeader, checkServerNoVote, checkServerUnknown, checkAutopilotUnhealthy,
+	checkServerNotAlive, checkServerUnhealthy, checkClientNotRegistered, checkClientNotReady, checkNomadVersion,
+	checkCertificateExpired,
 }
 
 // Failure is one way in which a cluster differs from its specs. Check names what was compared, such as
@@ -119,16 +133,17 @@ func (v Validation) MarshalJSON() ([]byte, error) {
 	})
 }
 
-// ValidateCluster checks a cluster's machines against its specs, in one round. It loads the specs from the store as an
-// update does and fails for the same reasons: the specs must be valid, and the channel must allow the Nomad version
-// that the cluster is pinned to. It lists the cluster's machines in the cloud, and counts as a failure each change
-// that an update would make to the nodes, and each machine that stays and that the cloud does not report as running.
-// It reads the store and the cloud and writes nothing, takes no lock and reads who holds it: Lock is that holder.
-// A lock whose lease cannot be read is a warning, not a failure.
+// ValidateCluster checks a cluster against its specs, in one round. It loads the specs from the store as an update does
+// and fails for the same reasons: the specs must be valid, and the channel must allow the Nomad version that the
+// cluster is pinned to. It lists the cluster's machines in the cloud, and counts as a failure each change that an
+// update would make to the nodes, and each machine that stays and that the cloud does not report as running. Then it
+// checks Nomad and the certificates: see checkNomad. It reads the store, the cloud and Nomad and writes nothing, takes
+// no lock and reads who holds it: Lock is that holder. A lock whose lease cannot be read is a warning, not a failure. A
+// service without a Nomad client fails with an error.
 //
-// The warnings are those that every change of the cluster gives, the one about a cluster that runs in a single
-// failure domain, and the one about a lock that cannot be read. They are returned, and told to OnWarning. They never
-// make the cluster invalid.
+// The warnings are those that every change of the cluster gives, the one about a cluster that runs in a single failure
+// domain, those about certificates that end within 30 days, and the one about a lock that cannot be read. They are
+// returned, and told to OnWarning. They never make the cluster invalid.
 func (s *Service) ValidateCluster(ctx context.Context, cluster string) (_ Validation, err error) {
 	defer func() { err = stopped(ctx, err) }()
 	l, err := s.layout(ctx, cluster)
@@ -143,6 +158,9 @@ func (s *Service) ValidateCluster(ctx context.Context, cluster string) (_ Valida
 	if err != nil {
 		return Validation{}, err
 	}
+	if s.Nomad == nil {
+		return Validation{}, errNoNomad
+	}
 	instances, err := p.Nodes().List(ctx, c.m.Name)
 	if err != nil {
 		return Validation{}, err
@@ -152,15 +170,22 @@ func (s *Service) ValidateCluster(ctx context.Context, cluster string) (_ Valida
 		return Validation{}, err
 	}
 	set := planMachines(c.m, instances)
+	found, err := s.checkNomad(ctx, l, c, set, s.now())
+	if err != nil {
+		return Validation{}, err
+	}
 	v := Validation{
 		Cluster: c.m.Name, NomadVersion: c.objs.Cluster.Spec.Nomad.Version, Failures: set.failures(c.m),
 		Warnings: warnings(c.objs.Cluster, c.objs.NodeGroups, c.ch), Lock: lease,
 	}
+	v.Failures = append(v.Failures, found.failures...)
+	sortFailures(v.Failures)
 	v.Servers, v.Clients = set.counts(c.m)
 	if len(c.m.Zones) == 1 {
 		v.Warnings = append(v.Warnings, "cluster "+c.m.Name+" runs in one failure domain, "+c.m.Zones[0]+
 			": an outage there takes the whole cluster down")
 	}
+	v.Warnings = append(v.Warnings, found.warnings...)
 	if lockWarning != "" {
 		v.Warnings = append(v.Warnings, lockWarning)
 	}
@@ -217,19 +242,7 @@ func planMachines(m *model.Cluster, instances []cloud.Instance) machineSet {
 // counts returns the numbers of servers and clients among the machines that stay, by the role of each machine's node
 // group in m: a machine of a combined group counts as both.
 func (set machineSet) counts(m *model.Cluster) (servers, clients int) {
-	for _, in := range set.stays {
-		i := slices.IndexFunc(m.Groups, func(g model.NodeGroup) bool { return g.Name == in.Group })
-		if i < 0 {
-			continue
-		}
-		if m.Groups[i].Role.RunsServer() {
-			servers++
-		}
-		if m.Groups[i].Role.RunsClient() {
-			clients++
-		}
-	}
-	return servers, clients
+	return len(set.servers(m)), len(set.clients(m))
 }
 
 // failures returns the failures of the set, which is of the cluster m: the node changes that an update would make, and
@@ -267,11 +280,16 @@ func (set machineSet) failures(m *model.Cluster) []Failure {
 			})
 		}
 	}
+	sortFailures(fs)
+	return fs
+}
+
+// sortFailures puts the failures in the order of checkOrder, then by node name, then by ID.
+func sortFailures(fs []Failure) {
 	slices.SortStableFunc(fs, func(a, b Failure) int {
 		return cmp.Or(cmp.Compare(slices.Index(checkOrder, a.Check), slices.Index(checkOrder, b.Check)),
 			strings.Compare(a.Node, b.Node), strings.Compare(a.ID, b.ID))
 	})
-	return fs
 }
 
 // deleteFailure returns the failure of the delete c of the machine in. keeper is the machine that keeps the name, for a
@@ -298,9 +316,15 @@ func deleteFailure(m *model.Cluster, c NodeChange, in, keeper cloud.Instance) Fa
 
 // groupSize returns the size of the node group called name in m; 0 for a group that m does not have.
 func groupSize(m *model.Cluster, name string) int {
+	g, _ := findGroup(m, name)
+	return g.Size
+}
+
+// findGroup returns the node group of m called name, and false when m has none.
+func findGroup(m *model.Cluster, name string) (model.NodeGroup, bool) {
 	i := slices.IndexFunc(m.Groups, func(g model.NodeGroup) bool { return g.Name == name })
 	if i < 0 {
-		return 0
+		return model.NodeGroup{}, false
 	}
-	return m.Groups[i].Size
+	return m.Groups[i], true
 }

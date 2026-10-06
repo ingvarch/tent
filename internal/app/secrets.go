@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/ingvarch/tent/internal/english"
 	"github.com/ingvarch/tent/internal/pki"
 	"github.com/ingvarch/tent/internal/statestore"
 )
@@ -110,6 +111,25 @@ func relativePaths(l statestore.Layout, writes []secretWrite) []string {
 		paths = append(paths, strings.TrimPrefix(w.path, l.Prefix()))
 	}
 	return paths
+}
+
+// missingSecretsError says which of a cluster's secrets the store lacks.
+type missingSecretsError struct{ paths []string }
+
+func (e *missingSecretsError) Error() string { return "the state store lacks " + english.And(e.paths) }
+
+// storedSecrets returns the secrets of the cluster of the layout l as the store holds them. It writes nothing: when the
+// store lacks any secret it fails with a *missingSecretsError that names the paths relative to the cluster, and a
+// stored secret that does not load is an error as planSecrets says.
+func (s *Service) storedSecrets(ctx context.Context, l statestore.Layout) (clusterSecrets, error) {
+	secrets, err := s.planSecrets(ctx, l)
+	if err != nil {
+		return clusterSecrets{}, err
+	}
+	if len(secrets.writes) > 0 {
+		return clusterSecrets{}, &missingSecretsError{paths: relativePaths(l, secrets.writes)}
+	}
+	return secrets, nil
 }
 
 // writeSecrets writes the secrets in order. On a store that can create an object only when it does not exist yet,

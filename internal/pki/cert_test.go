@@ -74,6 +74,21 @@ func TestIssueOperator(t *testing.T) {
 	}
 }
 
+// TestNodeCertificateEnd checks that NodeCertificateEnd gives the end of the certificate that IssueNode makes at the
+// same time, also for a time whose date a year later does not exist.
+func TestNodeCertificateEnd(t *testing.T) {
+	ca := newCA(t, now)
+	for _, at := range []time.Time{now.Add(time.Hour), time.Date(2028, 2, 29, 12, 30, 15, 0, time.UTC)} {
+		c, err := ca.IssueNode(v1alpha1.RoleServer, "europe", at)
+		if err != nil {
+			t.Fatalf("IssueNode: %v", err)
+		}
+		if got, want := pki.NodeCertificateEnd(at), parseCert(t, c.Cert).NotAfter; !got.Equal(want) {
+			t.Errorf("NodeCertificateEnd(%s) = %s, want the end of the issued certificate, %s", at, got, want)
+		}
+	}
+}
+
 // TestIssueEndsWithTheCA checks that no certificate outlives the CA that issues it.
 func TestIssueEndsWithTheCA(t *testing.T) {
 	ca := newCA(t, now)

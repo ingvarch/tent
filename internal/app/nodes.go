@@ -149,7 +149,7 @@ func planNodes(m *model.Cluster, instances []cloud.Instance, unregistered map[st
 	})
 	slices.SortFunc(unregisteredDeletes, compareNameID)
 	slices.SortFunc(deletes, compareNameID)
-	slices.SortFunc(servers, func(a, b cloud.Instance) int { return strings.Compare(a.Name, b.Name) })
+	slices.SortFunc(servers, compareName)
 	// Both are sorted by rank, so the server and combined changes are a prefix of each.
 	waitsOfServers, createsOfServers := serverCount(waits), serverCount(creates)
 	return slices.Concat(
@@ -297,6 +297,9 @@ func compareCreated(a, b time.Time) int {
 		return -1
 	}
 }
+
+// compareName orders machines by name alone.
+func compareName(a, b cloud.Instance) int { return strings.Compare(a.Name, b.Name) }
 
 // compareNameID orders changes by name, then ID.
 func compareNameID(a, b NodeChange) int {

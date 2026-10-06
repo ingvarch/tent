@@ -1,6 +1,7 @@
 // Package app runs tent's use cases: it creates, gets, replaces and edits cluster specs in the state store, removes a
 // stale cluster lock, updates a cluster's cloud objects and nodes to its specs, bootstraps Nomad on a new cluster,
-// checks a cluster's machines against its specs, and deletes a cluster's cloud objects and its state.
+// checks a cluster's machines, Nomad and certificates against its specs, and deletes a cluster's cloud objects and its
+// state.
 package app
 
 import (
@@ -59,8 +60,8 @@ type Service struct {
 	// delete applies it. When it returns an error, the delete stops before it changes anything and returns that error.
 	OnDeletePlan func(DeletePlan) error
 	// Now, when set, returns the current time for new CA, node and operator certificates, for the mark of the Nomad
-	// bootstrap, for the age of a client's machine that has not joined and, unless Assets.Now is set, for the signature
-	// check of the downloaded files; it defaults to time.Now.
+	// bootstrap, for the age of a client's machine that has not joined, for the certificate checks of a validation and,
+	// unless Assets.Now is set, for the signature check of the downloaded files; it defaults to time.Now.
 	Now func() time.Time
 }
 
