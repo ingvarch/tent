@@ -20,15 +20,29 @@ type fileConfig struct {
 // configPath returns where the config file is: $XDG_CONFIG_HOME/tent/config.yaml, else ~/.config/tent/config.yaml on
 // every operating system. The error says why there is no home directory.
 func configPath() (string, error) {
-	dir := os.Getenv("XDG_CONFIG_HOME")
+	dir, err := xdgDir("XDG_CONFIG_HOME", ".config")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "config.yaml"), nil
+}
+
+// cachePath returns tent's cache directory: $XDG_CACHE_HOME/tent, else ~/.cache/tent on every operating system. The
+// error says why there is no home directory.
+func cachePath() (string, error) { return xdgDir("XDG_CACHE_HOME", ".cache") }
+
+// xdgDir returns tent's directory in the XDG directory that the variable env names, else in fallback under the home
+// directory.
+func xdgDir(env, fallback string) (string, error) {
+	dir := os.Getenv(env)
 	if !filepath.IsAbs(dir) { // unset or relative, which the XDG spec says to ignore
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", err
 		}
-		dir = filepath.Join(home, ".config")
+		dir = filepath.Join(home, fallback)
 	}
-	return filepath.Join(dir, "tent", "config.yaml"), nil
+	return filepath.Join(dir, "tent"), nil
 }
 
 // readConfig reads the config file at path. A missing file sets nothing.

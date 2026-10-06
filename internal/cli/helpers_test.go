@@ -238,6 +238,13 @@ func combinedNomad() func(nomadops.Config) (nomadops.API, error) {
 // nomadOf returns the Nomad factory of staticNomad for servers in the node group servers, and three clients of the
 // node group clients that have the private addresses 10.64.0.<first> and the two that follow.
 func nomadOf(servers, clients string, first byte) func(nomadops.Config) (nomadops.API, error) {
+	_, factory := nomadWorld(servers, clients, first)
+	return factory
+}
+
+// nomadWorld returns the fake behind the Nomad factory of nomadOf, which tells what the commands asked of Nomad, and
+// the factory itself.
+func nomadWorld(servers, clients string, first byte) (*nomadfake.Fake, func(nomadops.Config) (nomadops.API, error)) {
 	f := nomadfake.New()
 	f.SetLeader("10.64.0.3:4647")
 	health := nomadops.Health{Healthy: true, Voters: 3}
@@ -258,7 +265,7 @@ func nomadOf(servers, clients string, first byte) func(nomadops.Config) (nomadop
 	f.SetHealth(health)
 	f.SetPeers(peers)
 	var once sync.Once
-	return func(cfg nomadops.Config) (nomadops.API, error) {
+	return f, func(cfg nomadops.Config) (nomadops.API, error) {
 		once.Do(func() { f.SetBootstrapped(cfg.Token) })
 		return f.Client(cfg), nil
 	}
