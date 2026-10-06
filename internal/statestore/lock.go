@@ -158,17 +158,23 @@ func stoppedWaiting(named, changed, why error) error {
 
 // newLease returns a lease with a new ID for this process, without its times.
 func newLease(operation string) Lease {
-	host, err := os.Hostname()
-	if err != nil {
-		host = "unknown"
-	}
+	owner, host := LocalHolder()
 	return Lease{
 		ID:        rand.Text(),
-		Owner:     ownerName(user.Current, os.Getenv),
+		Owner:     owner,
 		Host:      host,
 		PID:       os.Getpid(),
 		Operation: operation,
 	}
+}
+
+// LocalHolder returns the owner and the host that a lease taken by this process names: the OS user and the host name.
+func LocalHolder() (owner, host string) {
+	host, err := os.Hostname()
+	if err != nil {
+		host = "unknown"
+	}
+	return ownerName(user.Current, os.Getenv), host
 }
 
 // ownerName returns the OS user's name, else $USER or $USERNAME, else "unknown".

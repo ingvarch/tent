@@ -1,7 +1,8 @@
 // Package app runs tent's use cases: it creates, gets, replaces and edits cluster specs in the state store, removes a
 // stale cluster lock, updates a cluster's cloud objects and nodes to its specs, bootstraps Nomad on a new cluster,
 // checks a cluster's machines, Nomad and certificates against its specs, and deletes a cluster's cloud objects and its
-// state.
+// state. It also issues an operator's access to a cluster's Nomad API: a certificate and a management token that
+// expire.
 package app
 
 import (
@@ -41,8 +42,9 @@ type Service struct {
 	// Channels, when set, returns the release channel called name, which a cluster's spec names; it defaults to the
 	// channels embedded in tent.
 	Channels func(name string) (*channels.Channel, error)
-	// Providers returns the cloud provider that a cluster's spec names, for an update, a delete or a validation. It
-	// fails for a provider that tent does not know or cannot reach, such as one without its credentials.
+	// Providers returns the cloud provider that a cluster's spec names, for an update, a delete, a validation or an
+	// operator's access to the Nomad API. It fails for a provider that tent does not know or cannot reach, such as one
+	// without its credentials.
 	Providers func(v1alpha1.Provider) (cloud.Provider, error)
 	// Assets says where the files that nodes download are found; the zero value reads the public release sites. An
 	// update gives it its clock when Assets.Now is nil.
