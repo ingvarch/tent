@@ -220,8 +220,9 @@ func testAssets() assets.Options {
 }
 
 // staticNomad returns the Nomad factory of a cluster that has a leader, three healthy servers that vote, and the three
-// workers of the test cluster registered at 10.64.0.6 to 10.64.0.8. Its Raft peers are the servers at 10.64.0.3 to
-// 10.64.0.5, the addresses that the test cluster's machines get on the fake. Its ACL system counts as bootstrapped
+// workers of the test cluster registered at 10.64.0.6 to 10.64.0.8. Its Raft peers and the servers that autopilot
+// reports are the servers at 10.64.0.3 to 10.64.0.5, the addresses that the test cluster's machines get on the fake;
+// they and the workers run the Nomad version that the test assets pin. Its ACL system counts as bootstrapped
 // with the token of the first client that is made, which is the secret that tent holds, as that of a cluster that an
 // earlier run built. It does not follow the cloud, and the CLI tests check output, not the order of the calls.
 func staticNomad() func(nomadops.Config) (nomadops.API, error) {
@@ -239,18 +240,22 @@ func combinedNomad() func(nomadops.Config) (nomadops.API, error) {
 func nomadOf(servers, clients string, first byte) func(nomadops.Config) (nomadops.API, error) {
 	f := nomadfake.New()
 	f.SetLeader("10.64.0.3:4647")
-	f.SetHealth(nomadops.Health{Healthy: true, Voters: 3})
+	health := nomadops.Health{Healthy: true, Voters: 3}
 	var peers []nomadops.Peer
 	for i := range 3 {
 		f.Register(nomadops.Node{
 			Name: fmt.Sprintf("prod-%s-%d", clients, i), Status: "ready", Eligible: true,
-			Address: netip.AddrFrom4([4]byte{10, 64, 0, first + byte(i)}),
+			Address: netip.AddrFrom4([4]byte{10, 64, 0, first + byte(i)}), Version: assetstest.NomadVersion,
 		})
-		peers = append(peers, nomadops.Peer{
-			Name:    fmt.Sprintf("prod-%s-%d.global", servers, i),
-			Address: netip.AddrPortFrom(netip.AddrFrom4([4]byte{10, 64, 0, byte(3 + i)}), 4647), Voter: true,
+		name := fmt.Sprintf("prod-%s-%d.global", servers, i)
+		addr := netip.AddrPortFrom(netip.AddrFrom4([4]byte{10, 64, 0, byte(3 + i)}), 4647)
+		peers = append(peers, nomadops.Peer{Name: name, Address: addr, Voter: true})
+		health.Servers = append(health.Servers, nomadops.ServerHealth{
+			Name: name, Address: addr, Serf: "alive", Healthy: true, Voter: true, Leader: i == 0,
+			Version: assetstest.NomadVersion,
 		})
 	}
+	f.SetHealth(health)
 	f.SetPeers(peers)
 	var once sync.Once
 	return func(cfg nomadops.Config) (nomadops.API, error) {
