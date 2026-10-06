@@ -1,5 +1,5 @@
 // Package nomadops calls the HTTP API of a Nomad cluster's servers over mutual TLS: the leader, the ACL bootstrap,
-// client introduction tokens, the client nodes, the autopilot health and the Raft peers.
+// client introduction tokens, management tokens that expire, the client nodes, the autopilot health and the Raft peers.
 package nomadops
 
 import (
@@ -50,6 +50,8 @@ type API interface {
 	Bootstrap(ctx context.Context, bootstrapSecret secret.Secret) error
 	// IntroToken returns a new client introduction token for the node and pool of req.
 	IntroToken(ctx context.Context, req IntroRequest) (secret.Secret, error)
+	// CreateToken makes a management token that expires after req.TTL.
+	CreateToken(ctx context.Context, req TokenRequest) (Token, error)
 	// Nodes returns the client nodes that registered with the cluster.
 	Nodes(ctx context.Context) ([]Node, error)
 	// Health returns autopilot's view of the servers.

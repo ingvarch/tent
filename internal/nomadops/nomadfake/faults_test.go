@@ -45,7 +45,7 @@ func TestFaultedCallsReturnNoValue(t *testing.T) {
 		func(call string) { f.Fail(t, call, errBoom) },
 		func(call string) { f.LoseResponse(t, call) },
 	} {
-		for _, call := range []string{"Leader", "IntroToken", "Nodes", "Health"} {
+		for _, call := range []string{"Leader", "IntroToken", "CreateToken", "Nodes", "Health"} {
 			fault(call)
 		}
 		if got, err := a.Leader(ctx); err == nil || got != "" {
@@ -53,6 +53,9 @@ func TestFaultedCallsReturnNoValue(t *testing.T) {
 		}
 		if got, err := a.IntroToken(ctx, introRequest); err == nil || got != nil {
 			t.Errorf("IntroToken() gave %d bytes and the error %v; want an error and no token", len(got), err)
+		}
+		if got, err := a.CreateToken(ctx, tokenRequest); err == nil || got.Secret != nil || got.Accessor != "" {
+			t.Errorf("CreateToken() = %+v, %v; want an error and no token", got, err)
 		}
 		if got, err := a.Nodes(ctx); err == nil || got != nil {
 			t.Errorf("Nodes() = %v, %v; want an error and no list", got, err)

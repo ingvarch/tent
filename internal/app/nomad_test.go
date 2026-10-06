@@ -425,6 +425,18 @@ func (c *worldClient) IntroToken(ctx context.Context, req nomadops.IntroRequest)
 	return v, nil
 }
 
+func (c *worldClient) CreateToken(ctx context.Context, req nomadops.TokenRequest) (v nomadops.Token, err error) {
+	arg := req.Name + " " + req.TTL.String()
+	err = c.do(ctx, nomadfake.Call{Name: "CreateToken", Arg: arg}, func(ctx context.Context) (err error) {
+		v, err = c.inner.CreateToken(ctx, req)
+		return
+	})
+	if err != nil {
+		return nomadops.Token{}, err
+	}
+	return v, nil
+}
+
 func (c *worldClient) Nodes(ctx context.Context) (v []nomadops.Node, err error) {
 	err = c.do(ctx, nomadfake.Call{Name: "Nodes"}, func(ctx context.Context) (err error) {
 		v, err = c.inner.Nodes(ctx)

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -23,6 +24,7 @@ import (
 	"github.com/ingvarch/tent/internal/pki"
 	"github.com/ingvarch/tent/internal/secret"
 	"github.com/ingvarch/tent/internal/secrettest"
+	"github.com/ingvarch/tent/internal/uuid"
 )
 
 // equateAddrs lets cmp compare the addresses of nodes, peers and a Health.
@@ -39,6 +41,9 @@ var bootstrapSecret = pki.NewBootstrapSecret()
 
 // introRequest asks for an introduction token for prod-workers-1 in the pool default, for 30 minutes.
 var introRequest = nomadops.IntroRequest{NodeName: "prod-workers-1", NodePool: "default", TTL: 30 * time.Minute}
+
+// tokenRequest asks for a token named "tent export nomad ana@laptop" for 24 hours.
+var tokenRequest = nomadops.TokenRequest{Name: "tent export nomad ana@laptop", TTL: 24 * time.Hour}
 
 // newAPI returns a fake that has a leader, and a client of it with a new token.
 func newAPI() (*nomadfake.Fake, nomadops.API) {
@@ -97,6 +102,10 @@ var apiCalls = []apiCall{
 	{"Bootstrap", func(ctx context.Context, a nomadops.API) error { return a.Bootstrap(ctx, bootstrapSecret) }},
 	{"IntroToken", func(ctx context.Context, a nomadops.API) error {
 		_, err := a.IntroToken(ctx, introRequest)
+		return err
+	}},
+	{"CreateToken", func(ctx context.Context, a nomadops.API) error {
+		_, err := a.CreateToken(ctx, tokenRequest)
 		return err
 	}},
 	{"Nodes", func(ctx context.Context, a nomadops.API) error {
@@ -171,14 +180,17 @@ func argOf(name string) string {
 		return redacted
 	case "IntroToken":
 		return "prod-workers-1 default 30m0s"
+	case "CreateToken":
+		return "tent export nomad ana@laptop 24h0m0s"
 	}
 	return ""
 }
 
-// TestACLCallsNeedTheBootstrap checks that, before the ACL system is bootstrapped, Nodes, Health, Peers and IntroToken
-// fail for good as Nomad's 403 does, while Leader and Bootstrap work; and that they work after the bootstrap.
+// TestACLCallsNeedTheBootstrap checks that, before the ACL system is bootstrapped, Nodes, Health, Peers, IntroToken
+// and CreateToken fail for good as Nomad's 403 does, while Leader and Bootstrap work; and that they work after the
+// bootstrap.
 func TestACLCallsNeedTheBootstrap(t *testing.T) {
-	for _, name := range []string{"IntroToken", "Nodes", "Health", "Peers"} {
+	for _, name := range []string{"IntroToken", "CreateToken", "Nodes", "Health", "Peers"} {
 		t.Run(name, func(t *testing.T) {
 			f, a := newAPI()
 			var call apiCall
@@ -403,6 +415,153 @@ func TestIntroToken(t *testing.T) {
 	)
 }
 
+// TestCreateToken checks that CreateToken makes a new accessor and secret for each call, ends each token at the clock
+// plus its TTL, and that Issued lists the name, TTL and accessor of each token and never a secret.
+func TestCreateToken(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f, a := newBootstrappedAPI(t)
+		start := time.Now()
+		first, err := a.CreateToken(t.Context(), tokenRequest)
+		if err != nil {
+			t.Fatalf("CreateToken: %v", err)
+		}
+		time.Sleep(time.Hour)
+		short := nomadops.TokenRequest{Name: "tent ui", TTL: time.Minute}
+		second, err := a.CreateToken(t.Context(), short)
+		if err != nil {
+			t.Fatalf("CreateToken: %v", err)
+		}
+
+		for _, tok := range []nomadops.Token{first, second} {
+			if !uuid.Valid(tok.Accessor) || !uuid.Valid(string(tok.Secret)) {
+				t.Errorf("accessor %q or the secret of %d bytes is not a UUID", tok.Accessor, len(tok.Secret))
+			}
+		}
+		if first.Accessor == second.Accessor || bytes.Equal(first.Secret, second.Secret) {
+			t.Error("two calls gave the same accessor or secret")
+		}
+		if bytes.Equal(first.Secret, bootstrapSecret) {
+			t.Error("the token has the bootstrap secret")
+		}
+		if want := start.Add(24 * time.Hour); !first.Expires.Equal(want) {
+			t.Errorf("first token ends at %v, want %v", first.Expires, want)
+		}
+		if want := time.Now().Add(time.Minute); !second.Expires.Equal(want) {
+			t.Errorf("second token ends at %v, want %v", second.Expires, want)
+		}
+		wantIssued := []nomadfake.IssuedToken{
+			{Name: tokenRequest.Name, TTL: 24 * time.Hour, Accessor: first.Accessor},
+			{Name: "tent ui", TTL: time.Minute, Accessor: second.Accessor},
+		}
+		if diff := cmp.Diff(wantIssued, f.Issued()); diff != "" {
+			t.Errorf("Issued() (-want +got):\n%s", diff)
+		}
+		wantCalls(t, f, bootstrapCall,
+			nomadfake.Call{Name: "CreateToken", Arg: "tent export nomad ana@laptop 24h0m0s"},
+			nomadfake.Call{Name: "CreateToken", Arg: "tent ui 1m0s"},
+		)
+	})
+}
+
+// TestIssuedKeepsTheTokensOfALostAnswerAndIsACopy checks that a token whose answer was lost is in Issued, that a
+// call that fails issues nothing, that NewCluster keeps the list, and that changing the result changes nothing.
+func TestIssuedKeepsTheTokensOfALostAnswerAndIsACopy(t *testing.T) {
+	f, a := newBootstrappedAPI(t)
+	f.LoseResponse(t, "CreateToken")
+	f.Fail(t, "CreateToken", errBoom)
+	lost, err := a.CreateToken(t.Context(), tokenRequest)
+	checkErr(t, err, "nomadfake: CreateToken: the answer was lost", true)
+	if lost.Secret != nil || lost.Accessor != "" {
+		t.Error("CreateToken gave a token with the lost answer")
+	}
+	if _, err := a.CreateToken(t.Context(), tokenRequest); !errors.Is(err, errBoom) {
+		t.Fatalf("CreateToken = %v, want the fault", err)
+	}
+
+	issued := f.Issued()
+	if len(issued) != 1 || issued[0].Name != tokenRequest.Name {
+		t.Fatalf("Issued() = %+v, want the token of the lost answer", issued)
+	}
+	issued[0].Name = "changed"
+	f.NewCluster()
+
+	if got := f.Issued(); len(got) != 1 || got[0].Name != tokenRequest.Name {
+		t.Errorf("Issued() = %+v after a change of the copy and NewCluster, want the token as it was", got)
+	}
+}
+
+// TestCreateTokenLimits checks Nomad's limits for the TTL of a token and its texts, which are permanent errors that
+// issue nothing, and that the limits themselves are allowed.
+func TestCreateTokenLimits(t *testing.T) {
+	cases := []struct {
+		ttl  time.Duration
+		want string // "" when the TTL is allowed
+	}{
+		{30 * time.Second, "expiration time cannot be less than 1m0s in the future (was 30s)"},
+		{time.Minute - time.Nanosecond, "expiration time cannot be less than 1m0s in the future (was 59.999999999s)"},
+		{time.Minute, ""},
+		{24 * time.Hour, ""},
+		{24*time.Hour + time.Nanosecond, "expiration time cannot be more than 24h0m0s in the future " +
+			"(was 24h0m0.000000001s)"},
+		{24*time.Hour + time.Minute, "expiration time cannot be more than 24h0m0s in the future (was 24h1m0s)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.ttl.String(), func(t *testing.T) {
+			f, a := newBootstrappedAPI(t)
+
+			_, err := a.CreateToken(t.Context(), nomadops.TokenRequest{Name: "n", TTL: tc.ttl})
+
+			if tc.want == "" {
+				if err != nil || len(f.Issued()) != 1 {
+					t.Errorf("CreateToken = %v with %d issued, want a token", err, len(f.Issued()))
+				}
+				return
+			}
+			checkErr(t, err, "nomadfake: CreateToken: token 0 invalid: 1 error occurred: * "+tc.want, false)
+			if n := len(f.Issued()); n != 0 {
+				t.Errorf("%d tokens issued with the error, want none", n)
+			}
+		})
+	}
+}
+
+// TestCreateTokenChecksTheBootstrapBeforeTheTTL checks that, before the bootstrap, a TTL that Nomad refuses fails as
+// Nomad's 403 does.
+func TestCreateTokenChecksTheBootstrapBeforeTheTTL(t *testing.T) {
+	f, a := newAPI()
+
+	_, err := a.CreateToken(t.Context(), nomadops.TokenRequest{Name: "n", TTL: time.Second})
+
+	checkErr(t, err, "nomadfake: CreateToken: permission denied", false)
+	if n := len(f.Issued()); n != 0 {
+		t.Errorf("%d tokens issued, want none", n)
+	}
+}
+
+// TestCreateTokenRefusesABadRequest checks that the fake checks the request before any call, as the client does.
+func TestCreateTokenRefusesABadRequest(t *testing.T) {
+	for _, tc := range []struct {
+		req  nomadops.TokenRequest
+		want string
+	}{
+		{nomadops.TokenRequest{TTL: time.Hour}, "nomadfake: CreateToken: ACL token: no name"},
+		{nomadops.TokenRequest{Name: "n"}, "nomadfake: CreateToken: ACL token: TTL 0s is not above zero"},
+		{nomadops.TokenRequest{Name: "n", TTL: -time.Hour},
+			"nomadfake: CreateToken: ACL token: TTL -1h0m0s is not above zero"},
+	} {
+		f, a := newBootstrappedAPI(t)
+		got, err := a.CreateToken(t.Context(), tc.req)
+		checkErr(t, err, tc.want, false)
+		if got.Secret != nil || got.Accessor != "" {
+			t.Errorf("CreateToken(%+v) gave a token with the error", tc.req)
+		}
+		wantCalls(t, f, bootstrapCall)
+		if n := len(f.Issued()); n != 0 {
+			t.Errorf("CreateToken(%+v) issued %d tokens", tc.req, n)
+		}
+	}
+}
+
 // TestIntroTokenRefusesABadRequest checks that the fake checks the request before any call, as the client does.
 func TestIntroTokenRefusesABadRequest(t *testing.T) {
 	f, a := newAPI()
@@ -621,7 +780,7 @@ func TestTokens(t *testing.T) {
 }
 
 // TestCallsHideSecrets checks that the log of calls shows no secret: neither a client's token, nor a bootstrap
-// secret, nor a JWT.
+// secret, nor a JWT, nor the secret of a management token.
 func TestCallsHideSecrets(t *testing.T) {
 	f := nomadfake.New()
 	f.SetLeader(leader)
@@ -634,12 +793,20 @@ func TestCallsHideSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IntroToken: %v", err)
 	}
+	created, err := a.CreateToken(t.Context(), tokenRequest)
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
 	wantCalls(t, f,
 		nomadfake.Call{Name: "Bootstrap", Arg: redacted},
 		nomadfake.Call{Name: "IntroToken", Arg: "prod-workers-1 default 30m0s"},
+		nomadfake.Call{Name: "CreateToken", Arg: argOf("CreateToken")},
 	)
-	secrettest.CheckHidden(t, secrettest.Printed(t, f.Calls()),
-		map[string][]byte{"the token": token, "the bootstrap secret": s, "the JWT": jwt}, "")
+	secrets := map[string][]byte{"the token": token, "the bootstrap secret": s, "the JWT": jwt,
+		"the management token": created.Secret}
+	secrettest.CheckHidden(t, secrettest.Printed(t, f.Calls()), secrets, "")
+	secrettest.CheckHidden(t, secrettest.Printed(t, f.Issued()), secrets, "")
+	secrettest.CheckHidden(t, secrettest.Printed(t, f), secrets, "")
 }
 
 func TestConcurrentUse(t *testing.T) {

@@ -21,7 +21,8 @@ type Server struct {
 // answers or every server was tried once. Any other error is returned as it is and no other server is tried: it is
 // permanent, or the caller's context ended.
 //
-// Writes move on too. Bootstrap is safe to repeat, and a second IntroToken makes a token that nothing uses.
+// Writes move on too. Bootstrap is safe to repeat, and an IntroToken or CreateToken whose answer was lost leaves a
+// token that nothing uses.
 //
 // When no server answers, the error matches ErrNotReady and names each server with its cause, so the waits go on
 // polling over Servers and show the last causes when they end. Servers is safe for concurrent use.
@@ -91,6 +92,10 @@ func try[T any](ctx context.Context, s *Servers, call func(API) (T, error)) (T, 
 	return zero, &noServerReady{causes: causes}
 }
 
+// Last returns the address of the server that answered the last call that returned no error: the server that the next
+// call asks first. Before any such call it is the first server's address.
+func (s *Servers) Last() string { return s.servers[s.last.Load()].Address }
+
 // Leader returns the RPC address of the cluster's leader, such as 10.0.0.5:4647.
 func (s *Servers) Leader(ctx context.Context) (string, error) {
 	return try(ctx, s, func(a API) (string, error) { return a.Leader(ctx) })
@@ -105,6 +110,12 @@ func (s *Servers) Bootstrap(ctx context.Context, bootstrapSecret secret.Secret) 
 // IntroToken returns a new client introduction token for the node and pool of req.
 func (s *Servers) IntroToken(ctx context.Context, req IntroRequest) (secret.Secret, error) {
 	return try(ctx, s, func(a API) (secret.Secret, error) { return a.IntroToken(ctx, req) })
+}
+
+// CreateToken makes a management token that expires after req.TTL. After an answer that was lost, the next server
+// makes another token; the lost one stays in Nomad until it expires, and nobody holds its secret.
+func (s *Servers) CreateToken(ctx context.Context, req TokenRequest) (Token, error) {
+	return try(ctx, s, func(a API) (Token, error) { return a.CreateToken(ctx, req) })
 }
 
 // Nodes returns the client nodes that registered with the cluster.

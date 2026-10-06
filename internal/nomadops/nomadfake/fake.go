@@ -13,10 +13,12 @@ import (
 	"io"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/pki"
 	"github.com/ingvarch/tent/internal/secret"
+	"github.com/ingvarch/tent/internal/uuid"
 )
 
 // Fake is an in-memory Nomad cluster. It is safe for concurrent use.
@@ -30,9 +32,9 @@ import (
 //
 // The fake is simpler than Nomad in these ways:
 //   - It checks no ACL token: each call succeeds whatever token its client holds. Tokens tells which tokens the
-//     clients got. Only before the bootstrap does a call fail: Nodes, Health, Peers and IntroToken fail for good, as
-//     Nomad's 403, until a Bootstrap succeeds; Leader and Bootstrap work. Peers fails so, since Nomad answers the
-//     Raft configuration to a management token alone.
+//     clients got. Only before the bootstrap does a call fail: Nodes, Health, Peers, IntroToken and CreateToken fail
+//     for good, as Nomad's 403, until a Bootstrap succeeds; Leader and Bootstrap work. Peers fails so, since Nomad
+//     answers the Raft configuration to a management token alone.
 //
 // Faults change the outcome of the next call of a nomadops.API method, named as in the interface, such as Bootstrap:
 // see Fail and LoseResponse. A call takes the first fault set for its method, and each fault applies to one call.
@@ -44,6 +46,7 @@ type Fake struct {
 	health       nomadops.Health
 	peers        []nomadops.Peer
 	tokens       []secret.Secret // the tokens of the clients, in the order Client made them
+	issued       []IssuedToken   // the management tokens that CreateToken made, in order
 	faults       []fault         // in the order they were set
 	calls        []Call
 }
@@ -73,7 +76,7 @@ func (f *Fake) SetLeader(addr string) {
 }
 
 // NewCluster makes the cluster a new one, as New returns it: without a leader, nodes, peers or bootstrap, and with the
-// zero Health. The log of calls, the clients' tokens and the faults stay.
+// zero Health. The log of calls, the clients' tokens, the issued tokens and the faults stay.
 func (f *Fake) NewCluster() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -130,14 +133,28 @@ func (f *Fake) Tokens() []secret.Secret {
 	return out
 }
 
+// IssuedToken is a management token that CreateToken made. It holds no secret.
+type IssuedToken struct {
+	Name     string
+	TTL      time.Duration
+	Accessor string
+}
+
+// Issued returns the management tokens that CreateToken made, in order, also those whose answer was lost.
+func (f *Fake) Issued() []IssuedToken {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.issued)
+}
+
 // Call is a call that reached the cluster.
 type Call struct {
 	Name string // the nomadops.API method, such as Bootstrap
 	// Server is the Address of the Config of the client that made the call.
 	Server string
 	// Arg is the call's argument without a secret: the size of the secret for Bootstrap, such as [secret, 36 bytes];
-	// the node's name, the pool and the TTL for IntroToken, such as "prod-workers-1 default 30m0s"; empty for the
-	// others.
+	// the node's name, the pool and the TTL for IntroToken, such as "prod-workers-1 default 30m0s"; the name and the TTL
+	// for CreateToken, such as "tent export nomad ana@laptop 24h0m0s"; empty for the others.
 	Arg string
 }
 
@@ -258,6 +275,41 @@ func (c client) IntroToken(ctx context.Context, req nomadops.IntroRequest) (secr
 		return nil
 	})
 	return result(jwt, err)
+}
+
+// Nomad's limits for the TTL of a token, its defaults.
+const (
+	minTokenTTL = time.Minute
+	maxTokenTTL = 24 * time.Hour
+)
+
+// tokenInvalid starts Nomad's 400 for a token that it refuses, on one line as the client prints it.
+const tokenInvalid = "token 0 invalid: 1 error occurred: * "
+
+// CreateToken makes a token with a new accessor and secret, which ends at time.Now plus req.TTL, and lists it for
+// Issued without its secret. It refuses a TTL below a minute or above a day with Nomad's text, before it makes
+// anything.
+func (c client) CreateToken(ctx context.Context, req nomadops.TokenRequest) (nomadops.Token, error) {
+	if err := req.Check(); err != nil {
+		return nomadops.Token{}, &callError{name: "CreateToken", cause: err}
+	}
+	var tok nomadops.Token
+	err := c.f.call(ctx, c.server, "CreateToken", req.Name+" "+req.TTL.String(), func() error {
+		switch {
+		case c.f.bootstrapped == nil:
+			return errDenied
+		case req.TTL < minTokenTTL:
+			return fmt.Errorf(tokenInvalid+"expiration time cannot be less than %s in the future (was %s)",
+				minTokenTTL, req.TTL)
+		case req.TTL > maxTokenTTL:
+			return fmt.Errorf(tokenInvalid+"expiration time cannot be more than %s in the future (was %s)",
+				maxTokenTTL, req.TTL)
+		}
+		tok = nomadops.Token{Accessor: uuid.New(), Secret: secret.Secret(uuid.New()), Expires: time.Now().Add(req.TTL)}
+		c.f.issued = append(c.f.issued, IssuedToken{Name: req.Name, TTL: req.TTL, Accessor: tok.Accessor})
+		return nil
+	})
+	return result(tok, err)
 }
 
 func (c client) Nodes(ctx context.Context) ([]nomadops.Node, error) {
