@@ -3,6 +3,7 @@ package app_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -99,18 +100,83 @@ func wantConverged(t *testing.T, svc *app.Service) {
 // specHashTag is the tag of a node's spec hash as the tests see it, with the hash masked.
 const specHashTag = cloud.LabelSpecHash + "=<hash>"
 
+// scrubbedStub is the user data that a joined node keeps, as the Vultr provider leaves it.
+const scrubbedStub = "#cloud-config\n# tent removed this node's user data after the node joined the cluster\n{}\n"
+
+// isScrubbed reports whether the user data of the instance id in f is the stub.
+func isScrubbed(f *vultrfake.Fake, id string) bool {
+	return f.UserData(id) == base64.StdEncoding.EncodeToString([]byte(scrubbedStub))
+}
+
+// isJoined reports whether the tags carry the joined label with the value true.
+func isJoined(tags []string) bool { return tagOf(tags, cloud.LabelJoined) == "true" }
+
+// unscrubbedJoined returns the names of the instances of f that carry the joined label and hold other user data than
+// the stub.
+func unscrubbedJoined(f *vultrfake.Fake) []string {
+	var out []string
+	for _, in := range f.Instances() {
+		if isJoined(in.Tags) && !isScrubbed(f, in.ID) {
+			out = append(out, in.Hostname)
+		}
+	}
+	return out
+}
+
+// joinedMismatches returns what differs from the state in which exactly the instances called names carry the joined
+// label and the stub, in the order of the instances.
+func joinedMismatches(f *vultrfake.Fake, names []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, in := range f.Instances() {
+		want := slices.Contains(names, in.Hostname)
+		seen[in.Hostname] = true
+		joined, scrubbed := isJoined(in.Tags), isScrubbed(f, in.ID)
+		switch {
+		case want && !joined:
+			out = append(out, in.Hostname+" lacks "+cloud.LabelJoined)
+		case !want && joined:
+			out = append(out, in.Hostname+" carries "+cloud.LabelJoined)
+		}
+		switch {
+		case want && !scrubbed:
+			out = append(out, in.Hostname+" holds user data other than the stub")
+		case !want && scrubbed:
+			out = append(out, in.Hostname+" holds the stub")
+		}
+	}
+	for _, name := range names {
+		if !seen[name] {
+			out = append(out, "no instance "+name)
+		}
+	}
+	return out
+}
+
+// wantJoined fails the test unless exactly the instances called names carry the joined label and the stub.
+func wantJoined(t *testing.T, f *vultrfake.Fake, names ...string) {
+	t.Helper()
+	if got := joinedMismatches(f, names); len(got) > 0 {
+		t.Errorf("the joined instances differ from %q:\n%s", names, strings.Join(got, "\n"))
+	}
+}
+
 // node is an instance of the fake as the tests see it: its name, its region and its tent tags without the operation
-// id, the spec hash masked.
+// id and the joined tag, the spec hash masked.
 type node struct {
 	Name, Zone string
 	Tags       []string
 }
 
-// nodes returns the fake's instances in creation order. It fails the test unless each carries an operation id of its
-// own, and a spec hash of 16 hex digits that is the same in its node group.
+// nodes returns the fake's instances in creation order, without the joined tag. It fails the test for an instance that
+// carries that tag and still holds other user data than the stub, and unless each carries an operation id of its own
+// and a spec hash of 16 hex digits that is the same in its node group.
 func nodes(t *testing.T, f *vultrfake.Fake) []node {
 	t.Helper()
 	var out []node
+	for _, name := range unscrubbedJoined(f) {
+		t.Errorf("instance %s carries %s and still holds its user data", name, cloud.LabelJoined)
+	}
 	ops := map[string]bool{}
 	hashes := map[string]string{} // by node group
 	for _, in := range f.Instances() {
@@ -119,7 +185,7 @@ func nodes(t *testing.T, f *vultrfake.Fake) []node {
 		group := tagOf(in.Tags, cloud.LabelNodeGroup)
 		for _, tag := range in.Tags {
 			switch {
-			case strings.HasPrefix(tag, cloud.LabelOp+"="):
+			case strings.HasPrefix(tag, cloud.LabelOp+"="), strings.HasPrefix(tag, cloud.LabelJoined+"="):
 			case strings.HasPrefix(tag, cloud.LabelSpecHash+"="):
 				hash := strings.TrimPrefix(tag, cloud.LabelSpecHash+"=")
 				if !specHashPattern.MatchString(tag) {
@@ -1084,5 +1150,96 @@ func TestNodeStepString(t *testing.T) {
 		if got := tc.step.String(); got != tc.want {
 			t.Errorf("NodeStep(%d).String() = %q, want %q", int(tc.step), got, tc.want)
 		}
+	}
+}
+
+// markedBuild is a fake with the five instances of a first build, in which prod-servers-0 is marked as joined through
+// the provider.
+func markedBuild(t *testing.T) *vultrfake.Fake {
+	t.Helper()
+	svc, f, _ := newRelease(t)
+	mustUpdate(t, svc)
+	if err := vultr.New(f).MarkJoined(t.Context(), cloud.Instance{ID: f.Instances()[0].ID}); err != nil {
+		t.Fatalf("MarkJoined: %v", err)
+	}
+	return f
+}
+
+// joinedFixture is markedBuild with one more instance, no-stub, a seeded instance that carries the joined label and
+// has no stub (its user data is empty).
+func joinedFixture(t *testing.T) *vultrfake.Fake {
+	t.Helper()
+	f := markedBuild(t)
+	in := f.Instances()[0] // prod-servers-0, whose tags hold the joined label
+	in.ID, in.Hostname = "", "no-stub"
+	f.AddInstance(t, in)
+	return f
+}
+
+func TestJoinedMismatches(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := joinedFixture(t)
+		for _, tc := range []struct {
+			name  string
+			names []string
+			want  []string
+		}{
+			{"the marked one", []string{"prod-servers-0", "no-stub"}, []string{
+				"no-stub holds user data other than the stub"}},
+			{"none expected", nil, []string{"prod-servers-0 carries tent/joined", "prod-servers-0 holds the stub",
+				"no-stub carries tent/joined"}},
+			{"a node that is not marked", []string{"prod-servers-0", "prod-servers-1"}, []string{
+				"prod-servers-1 lacks tent/joined", "prod-servers-1 holds user data other than the stub",
+				"no-stub carries tent/joined"}},
+			{"an unknown node", []string{"prod-servers-0", "x"}, []string{"no-stub carries tent/joined",
+				"no instance x"}},
+		} {
+			if diff := cmp.Diff(tc.want, joinedMismatches(f, tc.names)); diff != "" {
+				t.Errorf("%s: the mismatches (-want +got):\n%s", tc.name, diff)
+			}
+		}
+	})
+}
+
+func TestJoinedTagStaysOutOfTheNodeView(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := markedBuild(t)
+		wantNodes(t, f, allNodes...)
+		wantJoined(t, f, "prod-servers-0")
+		if nc := configOf(t, f, "prod-servers-0"); nc.Name != "prod-servers-0" {
+			t.Errorf("the NodeConfig is of %q, want prod-servers-0", nc.Name)
+		}
+	})
+}
+
+func TestUnscrubbedJoined(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		if diff := cmp.Diff([]string{"no-stub"}, unscrubbedJoined(joinedFixture(t))); diff != "" {
+			t.Errorf("the joined instances without the stub (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestCloudViewShowsTheUserData(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) { testCloudViewShowsTheUserData(t, joinedFixture(t)) })
+}
+
+func testCloudViewShowsTheUserData(t *testing.T, f *vultrfake.Fake) {
+	got := map[string]string{}
+	for _, line := range cloudView(f) {
+		if fields := strings.Fields(line); fields[0] == "instance" {
+			i := strings.LastIndex(line, "user data")
+			if i < 0 {
+				t.Errorf("the line %q does not tell the user data", line)
+				continue
+			}
+			got[fields[1]] = line[i:]
+		}
+	}
+	want := map[string]string{"prod-servers-0": "user data scrubbed", "prod-servers-1": "user data kept",
+		"prod-servers-2": "user data kept", "prod-workers-0": "user data kept", "prod-workers-1": "user data kept",
+		"no-stub": "user data kept"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("the user data of the instance lines (-want +got):\n%s", diff)
 	}
 }

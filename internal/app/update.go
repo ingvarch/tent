@@ -23,7 +23,8 @@ const nodeTimeout = 10 * time.Minute
 // Progress is one thing that happened while an update or a delete applied its plan. When Infra is set, it is an event
 // of an infrastructure change. When Nomad is set, it is a step of the Nomad step of an update, and Step and Err say how
 // far it got and why it failed. When Going is set, a delete starts to wait until the cloud stops listing that many
-// nodes that it deleted. Otherwise it is a step of the node change Node. Err says why a failed step failed. Instance
+// nodes that it deleted. Otherwise it is a step of the node change Node; for NodeScrub, which no plan holds, Node
+// has only the action, the name and the machine's ID, and Instance is zero. Err says why a failed step failed. Instance
 // is the machine of a create or a wait that is done, as the provider reports it, with its ID and its private address
 // when the cloud gave one; it is the zero Instance for the other steps.
 type Progress struct {

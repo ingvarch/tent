@@ -447,8 +447,9 @@ func TestNodeActionString(t *testing.T) {
 		{NodeCreate, "create"},
 		{NodeWait, "wait"},
 		{NodeDelete, "delete"},
+		{NodeScrub, "scrub"},
 		{0, "NodeAction(0)"},
-		{NodeDelete + 1, "NodeAction(4)"},
+		{NodeScrub + 1, "NodeAction(5)"},
 	} {
 		if got := tc.action.String(); got != tc.want {
 			t.Errorf("NodeAction(%d).String() = %q, want %q", int(tc.action), got, tc.want)

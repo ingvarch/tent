@@ -40,6 +40,9 @@ var nodeLines = map[app.NodeAction][3]string{
 	app.NodeCreate: {"creating %s", "created %s", "failed to create %s"},
 	app.NodeWait:   {"waiting for %s", "%s is ready", "failed to wait for %s"},
 	app.NodeDelete: {"deleting %s", "deleted %s", "failed to delete %s"},
+	app.NodeScrub: {
+		"scrubbing the user data of %s", "scrubbed the user data of %s", "failed to scrub the user data of %s",
+	},
 }
 
 // progressText returns the line of text of the step p, which says what happens to which object, such as
