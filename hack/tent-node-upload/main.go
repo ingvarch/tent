@@ -18,8 +18,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ingvarch/tent/hack/internal/shellenv"
 	"github.com/ingvarch/tent/internal/assets"
+	"github.com/ingvarch/tent/internal/shellenv"
 )
 
 // Exit codes of the tool.

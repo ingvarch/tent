@@ -1,11 +1,13 @@
 package shellenv_test
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/ingvarch/tent/hack/internal/shellenv"
-	"github.com/ingvarch/tent/hack/internal/shellenv/shellenvtest"
+	"github.com/ingvarch/tent/internal/shellenv"
+	"github.com/ingvarch/tent/internal/shellenv/shellenvtest"
 )
 
 func TestExportLineQuotes(t *testing.T) {
@@ -65,5 +67,35 @@ func TestQuoteReadsBackAsItIs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFileLineReadsTheFile(t *testing.T) {
+	for _, shell := range shellenvtest.Shells {
+		t.Run(shell, func(t *testing.T) {
+			for _, content := range []string{"s3cret-token", "s3cret-token\n", "s3cret token\n"} {
+				dir := filepath.Join(t.TempDir(), "it's a dir")
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(dir, "my token")
+				if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				script := shellenv.FileLine(shell, "A_VAR", path) + "\n" + shellenvtest.Print(shell, "A_VAR")
+				if got, want := shellenvtest.Run(t, shell, script), strings.TrimSuffix(content, "\n")+"\n"; got != want {
+					t.Errorf("%s reads the file %q as %q, want %q", shell, content, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestFileLineForms(t *testing.T) {
+	if got, want := shellenv.FileLine(shellenv.Fish, "A", "/a b"), `set -gx A (cat '/a b')`; got != want {
+		t.Errorf("fish line = %q, want %q", got, want)
+	}
+	if got, want := shellenv.FileLine(shellenv.Sh, "A", "/a b"), `export A="$(cat '/a b')"`; got != want {
+		t.Errorf("sh line = %q, want %q", got, want)
 	}
 }

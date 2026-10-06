@@ -102,7 +102,7 @@ linters:
               desc: s3urltest is for tests only
             - pkg: github.com/ingvarch/tent/internal/assets/assetstest
               desc: assetstest is for tests only
-            - pkg: github.com/ingvarch/tent/hack/internal/shellenv/shellenvtest
+            - pkg: github.com/ingvarch/tent/internal/shellenv/shellenvtest
               desc: shellenvtest is for tests only
         # Tests read the rendered Nomad configuration back with HCL1; no code that tent runs parses HCL.
         hcl-only-in-tests:

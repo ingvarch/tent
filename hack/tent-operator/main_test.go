@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
-	"github.com/ingvarch/tent/hack/internal/shellenv/shellenvtest"
 	"github.com/ingvarch/tent/internal/pki"
 	"github.com/ingvarch/tent/internal/secrettest"
+	"github.com/ingvarch/tent/internal/shellenv/shellenvtest"
 	"github.com/ingvarch/tent/internal/spec"
 	"github.com/ingvarch/tent/internal/statestore"
 )
