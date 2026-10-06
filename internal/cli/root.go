@@ -32,8 +32,8 @@ type Providers func(name v1alpha1.Provider, log *slog.Logger) (cloud.Provider, e
 // Option changes how Execute runs tent.
 type Option func(*globalOptions)
 
-// WithProviders gives tent the cloud providers that update cluster, delete cluster and validate cluster reach.
-// Without it, those commands fail: tent reaches no cloud.
+// WithProviders gives tent the cloud providers that update cluster, delete cluster, validate cluster and export
+// nomad reach. Without it, those commands fail: tent reaches no cloud.
 func WithProviders(p Providers) Option {
 	return func(o *globalOptions) { o.providers = p }
 }
@@ -44,7 +44,7 @@ func WithAssets(a assets.Options) Option {
 	return func(o *globalOptions) { o.assets = a }
 }
 
-// WithNomad gives tent the way to reach one Nomad server, for update cluster and validate cluster.
+// WithNomad gives tent the way to reach one Nomad server, for update cluster, validate cluster and export nomad.
 func WithNomad(nomad func(nomadops.Config) (nomadops.API, error)) Option {
 	return func(o *globalOptions) { o.nomad = nomad }
 }
@@ -124,7 +124,7 @@ func newRootCommand(s Streams, opts *globalOptions) *cobra.Command {
 	cmd.AddCommand(
 		newVersionCommand(opts), newCreateCommand(opts), newGetCommand(opts), newReplaceCommand(opts),
 		newDeleteCommand(opts), newStateCommand(opts), newEditCommand(opts), newUpdateCommand(opts),
-		newValidateCommand(opts),
+		newValidateCommand(opts), newExportCommand(opts),
 	)
 	return cmd
 }

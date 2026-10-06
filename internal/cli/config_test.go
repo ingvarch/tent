@@ -169,3 +169,31 @@ func TestRelativeXDGConfigHomeIsIgnored(t *testing.T) {
 		t.Errorf("cluster = %q, want from-home from the config file under the home directory", opts.cluster)
 	}
 }
+
+// TestCachePath is $XDG_CACHE_HOME/tent when that is absolute, else tent under .cache in the home directory, and an
+// error without a home directory; a relative XDG_CACHE_HOME is ignored, as XDG_CONFIG_HOME is.
+func TestCachePath(t *testing.T) {
+	home, xdg := t.TempDir(), t.TempDir()
+	for _, tc := range []struct{ name, home, xdg, want string }{
+		{"XDG_CACHE_HOME", home, xdg, filepath.Join(xdg, "tent")},
+		{"the home directory", home, "", filepath.Join(home, ".cache", "tent")},
+		{"a relative XDG_CACHE_HOME", home, "relative", filepath.Join(home, ".cache", "tent")},
+		{"XDG_CACHE_HOME without a home", "", xdg, filepath.Join(xdg, "tent")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setHome(t, tc.home, "")
+			t.Setenv("XDG_CACHE_HOME", tc.xdg)
+			got, err := cachePath()
+			if err != nil || got != tc.want {
+				t.Errorf("cachePath() = %q, %v, want %q", got, err, tc.want)
+			}
+		})
+	}
+	t.Run("no home and no XDG_CACHE_HOME", func(t *testing.T) {
+		setHome(t, "", "")
+		t.Setenv("XDG_CACHE_HOME", "")
+		if got, err := cachePath(); err == nil {
+			t.Errorf("cachePath() = %q, want an error", got)
+		}
+	})
+}
