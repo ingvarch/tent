@@ -153,18 +153,15 @@ type applier struct {
 	api   nomadops.API // over the known servers; nil until a step needs it
 }
 
-// run carries out the node changes in the order of the plan: the server and combined nodes, the Nomad step, the clients
-// and the deletes.
+// run carries out the node changes in the order of the plan: the creates and waits of the server and combined nodes,
+// the Nomad step, then the other changes, which are the clients' waits and creates and the deletes.
 func (a *applier) run(ctx context.Context) error {
-	var servers, clients, deletes []NodeChange
+	var servers, rest []NodeChange
 	for _, c := range a.u.plan.Nodes {
-		switch {
-		case c.Action == NodeDelete:
-			deletes = append(deletes, c)
-		case isServerChange(c):
+		if c.Action != NodeDelete && isServerChange(c) {
 			servers = append(servers, c)
-		default:
-			clients = append(clients, c)
+		} else {
+			rest = append(rest, c)
 		}
 	}
 	for _, c := range servers {
@@ -177,13 +174,12 @@ func (a *applier) run(ctx context.Context) error {
 			return err
 		}
 	}
-	for _, c := range clients {
-		if err := a.applyClient(ctx, c); err != nil {
-			return err
+	for _, c := range rest {
+		apply := a.applyClient
+		if c.Action == NodeDelete {
+			apply = a.applyDelete
 		}
-	}
-	for _, c := range deletes {
-		if err := a.applyDelete(ctx, c); err != nil {
+		if err := apply(ctx, c); err != nil {
 			return err
 		}
 	}
@@ -286,41 +282,59 @@ func (a *applier) know(in cloud.Instance) {
 	slices.SortFunc(a.known, func(x, y cloud.Instance) int { return strings.Compare(x.Name, y.Name) })
 }
 
-// nomadAPI returns the API over the known servers that have a public address, which it makes on its first call: one
-// client for each, with an operator certificate of the run and the ACL bootstrap secret as the token.
+// nomadAPI returns the API over the known servers that have a public address, which it makes on its first call.
 func (a *applier) nomadAPI() (nomadops.API, error) {
 	if a.api != nil {
 		return a.api, nil
 	}
-	if a.s.Nomad == nil {
-		return nil, errNoNomad
-	}
-	u := a.u
-	cert, err := u.secrets.ca.IssueOperator(u.region, operatorCertTTL, a.s.now())
+	api, err := a.s.nomadOver(a.known, a.u.nomad())
 	if err != nil {
 		return nil, err
 	}
-	var servers []nomadops.Server
-	for _, in := range a.known {
+	a.api = api
+	return api, nil
+}
+
+// nomadAccess is what tent needs to call the servers of a cluster.
+type nomadAccess struct {
+	cluster string
+	region  string // the Nomad region
+	secrets clusterSecrets
+}
+
+// nomad returns what the run needs to call the cluster's servers.
+func (u updateRun) nomad() nomadAccess {
+	return nomadAccess{cluster: u.cluster, region: u.region, secrets: u.secrets}
+}
+
+// nomadOver returns the API over those of the servers that have a public address: one client for each, with an
+// operator certificate that it makes now and the ACL bootstrap secret as the token.
+func (s *Service) nomadOver(servers []cloud.Instance, access nomadAccess) (nomadops.API, error) {
+	if s.Nomad == nil {
+		return nil, errNoNomad
+	}
+	cert, err := access.secrets.ca.IssueOperator(access.region, operatorCertTTL, s.now())
+	if err != nil {
+		return nil, err
+	}
+	var over []nomadops.Server
+	for _, in := range servers {
 		if !in.PublicIP.IsValid() {
 			continue
 		}
 		addr := net.JoinHostPort(in.PublicIP.String(), strconv.Itoa(model.APIPort))
-		api, err := a.s.Nomad(nomadops.Config{
-			Address: addr, Region: u.region, CA: u.secrets.ca.Bundle(), Cert: cert, Token: u.secrets.bootstrap,
+		api, err := s.Nomad(nomadops.Config{
+			Address: addr, Region: access.region, CA: access.secrets.ca.Bundle(), Cert: cert, Token: access.secrets.bootstrap,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("reach server %s: %w", in.Name, err)
 		}
-		servers = append(servers, nomadops.Server{Address: addr, API: api})
+		over = append(over, nomadops.Server{Address: addr, API: api})
 	}
-	if len(servers) == 0 {
-		return nil, fmt.Errorf("%s: no server has a public address", clusterLabel(u.cluster))
+	if len(over) == 0 {
+		return nil, fmt.Errorf("%s: no server has a public address", clusterLabel(access.cluster))
 	}
-	if a.api, err = nomadops.NewServers(servers...); err != nil {
-		return nil, err
-	}
-	return a.api, nil
+	return nomadops.NewServers(over...)
 }
 
 // nomadStep waits for a leader, bootstraps the ACL system when the plan says so, and waits for healthy servers that

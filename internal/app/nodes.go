@@ -63,17 +63,19 @@ type NodeChange struct {
 
 // Reasons of node deletes.
 const (
-	reasonDuplicate = "duplicate"
-	reasonSurplus   = "surplus"
-	reasonNotInSpec = "not in the spec"
+	reasonDuplicate     = "duplicate"
+	reasonSurplus       = "surplus"
+	reasonNotInSpec     = "not in the spec"
+	reasonNotRegistered = "not registered"
 )
 
 // planNodes returns the changes that bring the cluster's machines, as the cloud lists them, to the node groups of m.
 // Only the machines with the cluster's label count; the others are left alone.
 //
 //   - A machine whose group label names no group of m, or is empty, is deleted.
-//   - Of machines with one name, one that has joined stays before one that has not, and among equals the oldest
-//     stays; the others are deleted as duplicates.
+//   - Of machines with one name, one that has joined stays before one that has not, then one that is not among the
+//     unregistered machines before one that is, and among equals the oldest stays; the others are deleted as
+//     duplicates.
 //   - A group with more machines than its size loses the newest ones.
 //   - A group with fewer gets new machines named <cluster>-<group>-<index> with the lowest indexes whose names no
 //     listed machine has, each in the group's zone with the fewest machines, the zone listed first on a tie.
@@ -84,22 +86,35 @@ const (
 //     that made it, with its id; otherwise the wait has no operation id and calls no cloud. A machine that joined is
 //     never waited for.
 //
+// The unregistered machines are those that the caller says never registered, by ID. Only one that would stay under
+// its name is deleted with the reason not registered; it does not count toward its group and does not hold its name,
+// so that a create takes the name again. A machine of the set that would not stay is deleted as not in the spec or as
+// a duplicate, like any other.
+//
 // The waits and creates of server and combined nodes come first: the waits by name, then the creates by group, then
 // index. A server's seed holds the private addresses of the servers that exist, and a server that is not ready has
-// none until its wait returns, so the waits run before the creates. The waits and creates of client nodes follow in
-// the same order; the deletes come last, by name, then ID.
+// none until its wait returns, so the waits run before the creates. The waits of client nodes follow in the same
+// order, then the deletes of the unregistered machines by name, then ID, then the creates of client nodes in the same
+// order as before; the other deletes come last, by name, then ID.
 //
 // It also returns the machines of the server and combined groups that stay, by name: the servers the cluster has.
-func planNodes(m *model.Cluster, instances []cloud.Instance) (changes []NodeChange, servers []cloud.Instance) {
+func planNodes(m *model.Cluster, instances []cloud.Instance, unregistered map[string]bool,
+) (changes []NodeChange, servers []cloud.Instance) {
 	owned := slices.DeleteFunc(slices.Clone(instances), func(in cloud.Instance) bool { return in.Cluster != m.Name })
 	slices.SortStableFunc(owned, compareAge)
-	taken := make(map[string]bool, len(owned)) // the names of the listed machines and of the new ones
-	stays := keepers(m, owned)
-	members := make(map[string][]cloud.Instance, len(m.Groups))
-	var creates, waits, deletes []NodeChange
+	stays := keepers(m, owned, unregistered)
+	// taken holds the names that a create cannot take: those of the listed machines, except one whose machine never
+	// registered, and of the new ones.
+	taken := make(map[string]bool, len(owned))
 	for _, in := range owned {
-		taken[in.Name] = true
+		taken[in.Name] = !unregistered[stays[in.Name].ID]
+	}
+	members := make(map[string][]cloud.Instance, len(m.Groups))
+	var creates, waits, deletes, unregisteredDeletes []NodeChange
+	for _, in := range owned {
 		switch {
+		case unregistered[in.ID] && stays[in.Name].ID == in.ID:
+			unregisteredDeletes = append(unregisteredDeletes, deleteNode(in, reasonNotRegistered))
 		case !inSpec(m, in):
 			deletes = append(deletes, deleteNode(in, reasonNotInSpec))
 		case stays[in.Name].ID != in.ID:
@@ -132,12 +147,14 @@ func planNodes(m *model.Cluster, instances []cloud.Instance) (changes []NodeChan
 	slices.SortFunc(waits, func(a, b NodeChange) int {
 		return cmp.Or(cmp.Compare(clientRank(a), clientRank(b)), compareNameID(a, b))
 	})
+	slices.SortFunc(unregisteredDeletes, compareNameID)
 	slices.SortFunc(deletes, compareNameID)
 	slices.SortFunc(servers, func(a, b cloud.Instance) int { return strings.Compare(a.Name, b.Name) })
 	// Both are sorted by rank, so the server and combined changes are a prefix of each.
 	waitsOfServers, createsOfServers := serverCount(waits), serverCount(creates)
 	return slices.Concat(
-		waits[:waitsOfServers], creates[:createsOfServers], waits[waitsOfServers:], creates[createsOfServers:], deletes,
+		waits[:waitsOfServers], creates[:createsOfServers], waits[waitsOfServers:], unregisteredDeletes,
+		creates[createsOfServers:], deletes,
 	), servers
 }
 
@@ -147,18 +164,27 @@ func inSpec(m *model.Cluster, in cloud.Instance) bool {
 }
 
 // keepers returns the machine of each name that stays, of the machines owned, which are sorted oldest first: of those
-// whose group is one of m's, a joined one stays before one that has not joined, and then the oldest.
-func keepers(m *model.Cluster, owned []cloud.Instance) map[string]cloud.Instance {
+// whose group is one of m's, a joined one stays before one that has not joined, then one that is not among the
+// unregistered machines before one that is, and then the oldest.
+func keepers(m *model.Cluster, owned []cloud.Instance, unregistered map[string]bool) map[string]cloud.Instance {
 	stays := make(map[string]cloud.Instance, len(owned))
 	for _, in := range owned {
 		if !inSpec(m, in) {
 			continue
 		}
-		if cur, ok := stays[in.Name]; !ok || in.Joined && !cur.Joined {
+		if cur, ok := stays[in.Name]; !ok || keepsBefore(in, cur, unregistered) {
 			stays[in.Name] = in
 		}
 	}
 	return stays
+}
+
+// keepsBefore reports whether the machine in stays before cur of the same name, when in is not older than cur.
+func keepsBefore(in, cur cloud.Instance, unregistered map[string]bool) bool {
+	if in.Joined != cur.Joined {
+		return in.Joined
+	}
+	return !unregistered[in.ID] && unregistered[cur.ID]
 }
 
 // serverCount returns how many of the changes, sorted by clientRank, are those of server and combined nodes.

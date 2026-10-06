@@ -58,8 +58,8 @@ type Service struct {
 	// delete applies it. When it returns an error, the delete stops before it changes anything and returns that error.
 	OnDeletePlan func(DeletePlan) error
 	// Now, when set, returns the current time for new CA, node and operator certificates, for the mark of the Nomad
-	// bootstrap and, unless Assets.Now is set, for the signature check of the downloaded files; it defaults to
-	// time.Now.
+	// bootstrap, for the age of a client's machine that has not joined and, unless Assets.Now is set, for the signature
+	// check of the downloaded files; it defaults to time.Now.
 	Now func() time.Time
 }
 

@@ -1,0 +1,4 @@
+- node prod-workers-1 (ID instance-5, not registered)
++ node prod-workers-1 (client, vc2-2c-4gb, ams)
+
+Nodes: 1 to create, 0 to wait for, 1 to delete.

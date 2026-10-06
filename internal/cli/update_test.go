@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 
@@ -710,6 +711,53 @@ func TestUpdateClusterRefusesToDeleteAJoinedNode(t *testing.T) {
 	})
 }
 
+// neverRegisteredWorker leaves the built test cluster with its worker prod-workers-2, instance-6, without the joined
+// label and older than the lifetime of its intro token. Run it with lateNomad("prod-workers-2"), which lists no node
+// for it.
+func neverRegisteredWorker(t *testing.T, f *vultrfake.Fake) {
+	t.Helper()
+	var tags []string
+	for _, in := range f.Instances() {
+		if in.ID == "instance-6" {
+			tags = slices.DeleteFunc(slices.Clone(in.Tags), func(tag string) bool {
+				return strings.HasPrefix(tag, cloud.LabelJoined+"=")
+			})
+		}
+	}
+	f.SetInstanceTags(t, "instance-6", tags...)
+	time.Sleep(40 * time.Minute)
+}
+
+// replacePlan is the plan of an update that replaces the worker of neverRegisteredWorker.
+const replacePlan = "- node prod-workers-2 (ID instance-6, not registered)\n" +
+	"+ node prod-workers-2 (client, vc2-2c-4gb, ams)\n" +
+	"\n" +
+	"Nodes: 1 to create, 0 to wait for, 1 to delete.\n"
+
+// TestUpdateClusterReplacesAClientThatNeverRegistered prints the delete of a client that did not register within 31
+// minutes of its creation before the create of its name, and applies both.
+func TestUpdateClusterReplacesAClientThatNeverRegistered(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, f := builtCluster(t)
+		neverRegisteredWorker(t, f)
+		before := len(f.Calls())
+
+		wantResult(t, runWithNomad(t, onVultr(f), lateNomad("prod-workers-2"), update(s)...), 0,
+			replacePlan, "run with --yes to apply the changes\n")
+		wantNoWritesIn(t, f.Calls()[before:])
+
+		wantResult(t, runWithNomad(t, onVultr(f), lateNomad("prod-workers-2"), update(s, "--yes")...), 0,
+			replacePlan+"\nNodes: 1 created, 0 waited for, 1 deleted.\n",
+			openAPIWarning+"deleting node prod-workers-2 (ID instance-6)\ndeleted node prod-workers-2 (ID instance-6)\n"+
+				"creating node prod-workers-2\ncreated node prod-workers-2 (10.64.0.8)\n"+
+				"waiting for node prod-workers-2 to register\nnode prod-workers-2 registered\n"+
+				"scrubbing the user data of node prod-workers-2\nscrubbed the user data of node prod-workers-2\n")
+		wantInstances(t, f, "prod-servers-0", "prod-servers-1", "prod-servers-2", "prod-workers-0", "prod-workers-1",
+			"prod-workers-2")
+		wantOK(t, runOn(t, f, update(s, "--exit-code")...), "No changes.\n")
+	})
+}
+
 // lockLost is the error of a change that was saved although its lock was lost at the end.
 const lockLost = "Error: the change is saved, but the lock of cluster prod was lost before tent released it"
 
@@ -906,6 +954,9 @@ func TestUpdateClusterHelp(t *testing.T) {
 		"It starts Nomad on the nodes, bootstraps its ACL system and waits for the servers to be healthy and the " +
 			"clients to register.",
 		"TENT_NODE_URL and TENT_NODE_SHA256",
+		"Once a node has joined its cluster, tent replaces its user data with a stub.",
+		"A client that did not register within 31 minutes of its creation is deleted and created again.",
+		"An update that would delete a node that joined fails.",
 	} {
 		if got.code != 0 || !strings.Contains(got.out, want) {
 			t.Errorf("exit code = %d, stdout\n%s\nwant 0 and it to hold %q", got.code, got.out, want)

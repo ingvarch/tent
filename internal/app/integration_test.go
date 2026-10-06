@@ -349,8 +349,8 @@ func callsText(lines []string) string {
 }
 
 // TestFlowGoldens builds the example cluster on an empty cloud, scales the workers of the built cluster from 2 to 3,
-// and deletes the built cluster. The plans of the two updates and the calls that each of the three runs makes to
-// Vultr and Nomad match golden files.
+// replaces a worker that never registered, and deletes the built cluster. The plans of the three updates and the calls
+// that each of the four runs makes to Vultr and Nomad match golden files.
 func TestFlowGoldens(t *testing.T) {
 	plan, calls, _ := buildExample(t)
 	checkGolden(t, "flow_build.plan.golden", planText(t, plan))
@@ -363,6 +363,15 @@ func TestFlowGoldens(t *testing.T) {
 		plan, calls := updateFlow(t, svc, f, w)
 		checkGolden(t, "flow_scale.plan.golden", planText(t, plan))
 		checkGolden(t, "flow_scale.calls.golden", callsText(calls))
+	})
+
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, w := newExample(t)
+		stopAtWorker1(t, svc, f, w)
+		sleepUntilAge(t, f, "instance-5", oldClient)
+		plan, calls := updateFlow(t, svc, f, w)
+		checkGolden(t, "flow_unregistered.plan.golden", planText(t, plan))
+		checkGolden(t, "flow_unregistered.calls.golden", callsText(calls))
 	})
 
 	checkGolden(t, "flow_delete.calls.golden", callsText(deleteExample(t)))

@@ -54,6 +54,10 @@ func (c *Client) Bootstrap(ctx context.Context, bootstrapSecret secret.Secret) e
 // longer TTL without a word.
 const MaxIntroTTL = 30 * time.Minute
 
+// IntroLeeway is how long after its expiry a server still accepts an introduction token: the default leeway of the
+// library that checks its claims is one minute.
+const IntroLeeway = time.Minute
+
 // IntroRequest asks for a client introduction token.
 type IntroRequest struct {
 	NodeName string        // the name of the node that the token introduces

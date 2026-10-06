@@ -1,0 +1,51 @@
+AvailablePlans ams
+ListPlans
+ListOS
+ListSSHKeys
+ListVPCs
+ListFirewallGroups
+ListInstances tent/cluster=prod
+ListFirewallRules <vultr.FirewallGroup/prod-clients>
+ListFirewallRules <vultr.FirewallGroup/prod-servers>
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-servers-0>
+ListInstanceVPCs <prod-servers-1>
+ListInstanceVPCs <prod-servers-2>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+nomad Nodes (prod-servers-0)
+AvailablePlans ams
+ListPlans
+ListOS
+ListSSHKeys
+ListVPCs
+ListFirewallGroups
+ListInstances tent/cluster=prod
+ListFirewallRules <vultr.FirewallGroup/prod-clients>
+ListFirewallRules <vultr.FirewallGroup/prod-servers>
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-servers-0>
+ListInstanceVPCs <prod-servers-1>
+ListInstanceVPCs <prod-servers-2>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+nomad Nodes (prod-servers-0)
+nomad Nodes (prod-servers-0)
+nomad Peers (prod-servers-0)
+DeleteInstance <prod-workers-1>
+nomad IntroToken prod-workers-1 default 30m0s (prod-servers-0)
+ListInstances tent/op=<op1>
+ListSSHKeys
+ListVPCs
+ListFirewallGroups
+ListInstances tent/cluster=prod
+ListFirewallRules <vultr.FirewallGroup/prod-clients>
+ListFirewallRules <vultr.FirewallGroup/prod-servers>
+CreateInstance prod-workers-1
+GetInstance <prod-workers-1>
+GetInstance <prod-workers-1>
+GetInstance <prod-workers-1>
+ListInstanceVPCs <prod-workers-1>
+nomad Nodes (prod-servers-0)
+GetInstance <prod-workers-1>
+UpdateInstance <prod-workers-1>

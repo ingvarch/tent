@@ -123,10 +123,8 @@ func (a *applier) hasJoined(ctx context.Context, in cloud.Instance) (string, err
 	if err != nil {
 		return "", err
 	}
-	for _, n := range nodes {
-		if n.Is(in.Name, in.PrivateIP) && n.Status != "down" {
-			return "a registered client at " + in.PrivateIP.String(), nil
-		}
+	if registered(nodes, in) {
+		return "a registered client at " + in.PrivateIP.String(), nil
 	}
 	peers, err := api.Peers(ctx)
 	if err != nil {
