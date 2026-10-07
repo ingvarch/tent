@@ -57,19 +57,6 @@ func TestValid(t *testing.T) {
 	}
 }
 
-func TestQuoteReadsBackAsItIs(t *testing.T) {
-	for _, shell := range shellenvtest.Shells {
-		t.Run(shell, func(t *testing.T) {
-			for _, v := range []string{"/tmp/it's a dir", `/tmp/$HOME`, `a\b`} {
-				script := "printf '%s\\n' " + shellenv.Quote(shell, v)
-				if got := shellenvtest.Run(t, shell, script); got != v+"\n" {
-					t.Errorf("%s reads %q back as %q", shell, v, got)
-				}
-			}
-		})
-	}
-}
-
 func TestFileLineReadsTheFile(t *testing.T) {
 	for _, shell := range shellenvtest.Shells {
 		t.Run(shell, func(t *testing.T) {

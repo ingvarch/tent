@@ -24,8 +24,8 @@ func Login(login string) string {
 	return Sh
 }
 
-// Quote returns s in single quotes for the shell, so that the shell reads it as it is.
-func Quote(shell, s string) string {
+// quote returns s in single quotes for the shell, so that the shell reads it as it is.
+func quote(shell, s string) string {
 	if shell == Fish {
 		return fishQuote(s)
 	}
@@ -36,16 +36,16 @@ func Quote(shell, s string) string {
 // shell reads the value as it is.
 func ExportLine(shell, name, value string) string {
 	if shell == Fish {
-		return "set -gx " + name + " " + Quote(shell, value)
+		return "set -gx " + name + " " + quote(shell, value)
 	}
-	return "export " + name + "=" + Quote(shell, value)
+	return "export " + name + "=" + quote(shell, value)
 }
 
 // FileLine returns the line that sets the environment variable name to the one line that the file holds, without its
 // line end, in the shell. The shell reads the file when it runs the line. file is an absolute path, quoted so that it
 // is read as it is.
 func FileLine(shell, name, file string) string {
-	quoted := Quote(shell, file)
+	quoted := quote(shell, file)
 	if shell == Fish {
 		return "set -gx " + name + " (cat " + quoted + ")"
 	}
