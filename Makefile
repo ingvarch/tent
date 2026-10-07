@@ -13,7 +13,7 @@ GOLANGCI_LINT_VERSION := 2.14.0
 
 .DEFAULT_GOAL := check
 
-.PHONY: check build test lint fmt licenses notices generate dist clean golangci-lint-version dev-upload
+.PHONY: check build test lint fmt licenses notices generate dist clean golangci-lint-version dev-upload e2e
 
 check: fmt lint licenses test build
 
@@ -33,6 +33,12 @@ dev-upload:
 
 test:
 	go test -race ./...
+
+# e2e runs the E2E suite on Vultr from this machine (test/e2e/README.md). It runs dev-upload, which needs the R2 keys
+# and TENT_DEV_S3_URL, so the nodes get the tent-node of the same build as bin/tent, and it needs VULTR_API_KEY.
+e2e:
+	@lines="$$(SHELL=/bin/sh $(MAKE) -s --no-print-directory dev-upload)" && eval "$$lines" && \
+		E2E_TENT="$(CURDIR)/bin/tent" go test -tags e2e -count=1 -v -timeout 90m ./test/e2e
 
 golangci-lint-version:
 	@command -v golangci-lint >/dev/null 2>&1 || { \

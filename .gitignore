@@ -1,3 +1,4 @@
 /bin/
 /dist/
 /THIRD_PARTY_NOTICES
+/test/e2e/results/
