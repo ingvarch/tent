@@ -62,7 +62,7 @@ func tentEnv(environ []string, dir string) []string {
 // that the log was not written; the result is filled in the last case. A context that ends kills tent, and the code
 // is then -1.
 func (r tentRunner) run(ctx context.Context, cluster, step string, args ...string) (tentResult, error) {
-	full := append(slices.Clone(args), "--state", stateURL(filepath.Join(r.Dir, "state-"+cluster)))
+	full := append(slices.Clone(args), "--state", r.storeURL(cluster))
 	cmd := exec.CommandContext(ctx, r.Bin, full...)
 	cmd.Env = tentEnv(os.Environ(), r.Dir)
 	cmd.WaitDelay = killGrace
@@ -81,7 +81,7 @@ func (r tentRunner) run(ctx context.Context, cluster, step string, args ...strin
 	}
 	log := fmt.Sprintf("args: %q\nexit code: %d\ntook: %s\n--- stdout ---\n%s--- stderr ---\n%s",
 		full, res.Code, res.Took, res.Stdout, res.Stderr)
-	path := filepath.Join(r.Dir, cluster+"-"+step+".log")
+	path := r.logPath(cluster, step)
 	if err := os.WriteFile(path, []byte(log), 0o600); err != nil {
 		return res, fmt.Errorf("write the log of tent: %w", err)
 	}
