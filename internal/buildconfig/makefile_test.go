@@ -257,6 +257,42 @@ func TestMakeDevUploadPrintsOnlyTheToolsLines(t *testing.T) {
 	}
 }
 
+func TestMakeE2ERunsTheSuiteWithTheTentOfTheUpload(t *testing.T) {
+	// make e2e uploads the tent-node of a fresh build, as make dev-upload does, and runs the suite with the tent of
+	// that build: nodes run only the tent-node of their tent's version.
+	fakeGo := "#!/bin/sh\ncase \"$1\" in\n" +
+		"  build) echo \"built $*\" ;;\n" +
+		"  run) echo \"export TENT_NODE_URL='https://u'\"; echo \"export TENT_NODE_SHA256='abc'\"; " +
+		"echo \"shell=$SHELL\" >&2 ;;\n" +
+		"  test) echo \"tested $* url=$TENT_NODE_URL sha=$TENT_NODE_SHA256 tent=$E2E_TENT\" ;;\n" +
+		"esac\n"
+	// make's CURDIR is the physical path, so the expected one has its symlinks resolved: on macOS /var is one.
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root, err = filepath.EvalSymlinks(root); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := runMake(t, map[string]string{"go": fakeGo}, "e2e")
+	want := "tested test -tags e2e -count=1 -v -timeout 90m ./test/e2e url=https://u sha=abc tent=" +
+		filepath.Join(root, "bin", "tent") + "\n"
+	if err != nil || stdout != want {
+		t.Errorf("make e2e: err %v, stdout %q, want %q\nstderr:\n%s", err, stdout, want, stderr)
+	}
+	if !strings.Contains(stderr, "built build") || !strings.Contains(stderr, "shell=/bin/sh") {
+		t.Errorf("make e2e: stderr lacks the build or the upload for sh:\n%s", stderr)
+	}
+}
+
+func TestMakeE2EStopsWhenTheUploadFails(t *testing.T) {
+	fakeGo := "#!/bin/sh\ncase \"$1\" in\n  run) exit 1 ;;\n  test) echo tested ;;\nesac\n"
+	stdout, _, err := runMake(t, map[string]string{"go": fakeGo}, "e2e")
+	if err == nil || strings.Contains(stdout, "tested") {
+		t.Errorf("make e2e after a failed upload: err %v, stdout %q, want a failure before the suite", err, stdout)
+	}
+}
+
 func TestMakeCleanRemovesWhatTheBuildWrites(t *testing.T) {
 	removed := strings.Fields(oneCommand(t, "clean"))
 	for _, generated := range []string{"bin", "dist", noticesFile} {
