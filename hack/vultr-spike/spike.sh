@@ -10,10 +10,10 @@
 # Usage and details: hack/vultr-spike/README.md
 #
 # Portable bash (3.2+, macOS default), requires: curl, jq 1.6+, ssh, ssh-keygen, awk, od; tentnode also go and gzip;
-# cluster also go, mkfifo and find.
+# cluster also openssl, mkfifo and find (and nomad, which only adds a row).
 set -euo pipefail
 
-readonly SPIKE_VERSION="11"
+readonly SPIKE_VERSION="12"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 readonly SCRIPT_DIR
 REPO_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
@@ -115,11 +115,10 @@ CL_NAME=""      # cluster: the name of the cluster that tent builds
 CL_STATE=""     # cluster: the directory of its file:// state store
 CL_URL=""       # cluster: the URL of that store
 CL_TENT=""      # cluster: the tent under test (bin/tent)
-CL_OPERATOR=""  # cluster: hack/tent-operator, built for this run
-CL_OPDIR=""     # cluster: the directory tent-operator makes
+CL_OPDIR=""     # cluster: the directory tent export nomad writes the operator's files to
 CL_VERSION=""   # cluster: the version of bin/tent
 CL_RUNNER=""    # cluster: the address that tent opens SSH to
-CL_NOMAD_NAME="server.global.nomad" # cluster: the TLS server name of the Nomad API, as tent-operator prints it
+CL_NOMAD_NAME="server.global.nomad" # cluster: the TLS server name of the Nomad API, as tent export nomad prints it
 CL_CONF=""      # cluster: the curl config file that holds the ACL token
 CL_NM_STATUS="" # cluster: the HTTP status of the last Nomad API call
 CL_RC=0         # cluster: the exit code of the last tent run
@@ -140,6 +139,13 @@ CL_SPECS=""     # cluster: the file with the specs that tent get printed before 
 CL_SPECS_CHANGED=0 # cluster: the specs in the state store are not the saved ones
 CL_STOPPED=""   # cluster: the node whose Nomad the check stopped and whose joined tag it took off
 CL_SRV_IP=""    # cluster: the public address of the first server, which the Nomad API calls go to
+CL_TOKEN_END="" # cluster: the end of the token of tent export nomad, an epoch second
+CL_DOWN=""      # cluster: the client whose Nomad the validate check stopped and has not started again
+CL_UI_PID=""    # cluster: the process of tent ui while it runs
+CL_UI_STATUS="" # cluster: the HTTP status of the last request to tent ui
+CL_UI_RC=0      # cluster: curl's exit code of that request, or the exit code of tent ui
+CL_UI_ENDED=0   # cluster: the seconds that tent ui took to end after SIGINT
+CL_UI_BAD=""    # cluster: what the tent ui check found wrong, one text after the other
 CL_UNREG_ID=""  # cluster, --unregistered: the id of the instance of <name>-workers-1 before tent replaces it
 CL_OLD_IP=""    # cluster, --unregistered: its private address
 CL_NEW_IP=""    # cluster, --unregistered: the private address of the instance that replaces it
@@ -3041,10 +3047,11 @@ check_tentnode() {
 
 # ---------------------------------------------------------------------------------------------------------------
 # cluster: a cluster of three servers and two clients that tent builds itself with `tent create cluster --yes`, checked
-# from outside (the Vultr API, the Nomad API with an operator certificate from hack/tent-operator) and over SSH. tent
+# from outside (the Vultr API, the Nomad API with the operator certificate of tent export nomad) and over SSH. tent
 # makes the VPC, the firewall groups, the SSH key and the instances; the script makes only a key pair and a state store
-# in a temporary directory. The ACL bootstrap token reaches curl only through a mode-0600 config file, and no secret
-# goes to the terminal or the report: the end of the run looks for the cluster's secrets in everything it recorded.
+# in a temporary directory. The token of tent export nomad reaches curl only through a mode-0600 config file, the ACL
+# bootstrap token is read only to compare sha256 sums, and no secret goes to the terminal or the report: the end of the
+# run looks for the cluster's secrets in everything it recorded.
 
 readonly CL_SERVERS=3
 readonly CL_WORKERS=2
@@ -3061,8 +3068,7 @@ cl_runner_addr() {
   [[ $CL_RUNNER =~ $re ]] || die "cannot find the address of this machine: set RUNNER_ADDR to its public IPv4 address"
 }
 
-# prepare_cluster: checks the tent under test, builds the operator tool into WORK, finds the address of this machine
-# and writes the first row.
+# prepare_cluster: checks the tent under test, finds the address of this machine and writes the first row.
 prepare_cluster() {
   local bin="$REPO_DIR/bin/tent-node_linux_amd64" sum
   [ -n "${TENT_NODE_URL:-}" ] && [ -n "${TENT_NODE_SHA256:-}" ] ||
@@ -3073,8 +3079,6 @@ prepare_cluster() {
   [ "$sum" = "$TENT_NODE_SHA256" ] ||
     die "bin/tent-node_linux_amd64 is not the tent-node with TENT_NODE_SHA256: run make dev-upload again"
   CL_VERSION=$("$CL_TENT" version -o json | jq -r .version) || die "bin/tent version failed"
-  CL_OPERATOR="$WORK/tent-operator"
-  (cd "$REPO_DIR" && go build -o "$CL_OPERATOR" ./hack/tent-operator) || die "go build ./hack/tent-operator failed"
   cl_runner_addr
   row "tent under test" "version $CL_VERSION, tent-node sha256 $TENT_NODE_SHA256; cluster $CL_NAME: $CL_SERVERS servers and $CL_WORKERS clients of $PLAN in $REGION; SSH from $CL_RUNNER/32" \
     "bin/tent builds the cluster with the development tent-node; the Nomad API takes the default access (mTLS and an ACL token from anywhere)"
@@ -3132,6 +3136,8 @@ cl_collect_secrets() {
       */ca.key) f="CA key" ;;
       */gossip.key) f="gossip key" ;;
       */acl-bootstrap-token) f="ACL bootstrap token" ;;
+      */token) f="operator token" ;;
+      */ui-token) f="ui token" ;;
       *) f="operator key" ;;
     esac
     CL_SECRET_NAMES="$CL_SECRET_NAMES${CL_SECRET_NAMES:+, }$f"
@@ -3279,33 +3285,141 @@ cl_instances_row() {
 # cl_file_mode PATH: the octal mode of a file (GNU stat, then BSD stat).
 cl_file_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null || echo '?'; }
 
-# cl_operator IP: hack/tent-operator makes the operator's files and the Nomad variables; sets CL_NOMAD_NAME and, when it
-# worked, CL_CONF (the curl config that holds the token).
-cl_operator() {
-  local out rc=0 f bad="" res
-  out=$("$CL_OPERATOR" -state "$CL_URL" -name "$CL_NAME" -dir "$CL_OPDIR" -addr "https://$1:4646" -shell sh 2>"$WORK/cl-operator.err" </dev/null) || rc=$?
-  if [ "$rc" != 0 ]; then
-    res="FAILED: exit $rc: $(oneline 200 <"$WORK/cl-operator.err")"
-  else
-    CL_NOMAD_NAME=$(printf '%s\n' "$out" | sed -n "s/^export NOMAD_TLS_SERVER_NAME='\\(.*\\)'\$/\\1/p")
-    for f in ca.pem cli.pem cli-key.pem token; do
-      [ "$(cl_file_mode "$CL_OPDIR/$f")" = 600 ] || bad="$bad${bad:+, }$f has mode $(cl_file_mode "$CL_OPDIR/$f")"
-    done
-    [ "$(cl_file_mode "$CL_OPDIR")" = 700 ] || bad="$bad${bad:+, }the directory has mode $(cl_file_mode "$CL_OPDIR")"
-    [ -n "$CL_NOMAD_NAME" ] || bad="$bad${bad:+, }no NOMAD_TLS_SERVER_NAME line"
-    if [ -n "$bad" ]; then res="UNEXPECTED: $bad"; else res="as expected: exit 0; ca.pem, cli.pem, cli-key.pem and token with mode 600 in a directory with mode 700; TLS server name $CL_NOMAD_NAME"; fi
-    # The token goes into a config file that only this user reads: curl never gets it on a command line.
-    (umask 077; printf 'header = "X-Nomad-Token: %s"\n' "$(cat "$CL_OPDIR/token")" >"$WORK/nomad-curl.conf")
-    CL_CONF="$WORK/nomad-curl.conf"
-    cl_collect_secrets "$CL_OPDIR/cli-key.pem"
+# The slack, in seconds, of the checks of the token's end: against the 24 hours it was asked for, and against the end of
+# the certificate, which tent makes a moment before it asks Nomad for the token.
+readonly CL_END_SLACK=300 CL_CERT_SLACK=30
+
+# cl_token_sha FILE: the sha256 of the token that FILE holds, without its line end. A secret is compared by this alone.
+cl_token_sha() { tr -d '\r\n' <"$1" | sha256; }
+
+# cl_export_lines HOST: the six lines that tent export nomad --shell sh prints when NOMAD_ADDR is the server at HOST.
+cl_export_lines() {
+  local dir
+  dir=$(printf '%s' "$CL_OPDIR" | tr -s /) # tent prints the cleaned path; TMPDIR may end with a slash
+  printf "export NOMAD_ADDR='https://%s:4646'\n" "$1"
+  printf "export NOMAD_CACERT='%s/ca.pem'\n" "$dir"
+  printf "export NOMAD_CLIENT_CERT='%s/cli.pem'\n" "$dir"
+  printf "export NOMAD_CLIENT_KEY='%s/cli-key.pem'\n" "$dir"
+  printf "export NOMAD_TLS_SERVER_NAME='%s'\n" "$CL_NOMAD_NAME"
+  # shellcheck disable=SC2016 # the shell that runs the line expands $(cat ...), not this script
+  printf 'export NOMAD_TOKEN="$(cat '"'%s/token'"')"\n' "$dir"
+}
+
+# cl_cert_check CERT CN [END]: what is wrong with the client certificate at CERT, one text per line, or nothing: its
+# subject must be CN alone, its extended key usage client authentication alone, and, when END (an epoch second) is
+# given, it must end within CL_CERT_SLACK seconds of END. openssl's -checkend asks whether a certificate is still valid
+# after some seconds, which both openssl and LibreSSL answer, where their dates and -ext differ.
+cl_cert_check() {
+  local cert="$1" cn="$2" end="${3:-}" text subject eku left
+  if ! text=$(openssl x509 -in "$cert" -noout -text 2>&1); then
+    printf 'openssl could not read %s\n' "$(basename "$cert")"
+    return 0
   fi
-  row "tent-operator" "$res" "the operator's access to the Nomad API until tent export nomad: a certificate for cli.<region>.nomad and the bootstrap token"
+  subject=$(printf '%s\n' "$text" | awk '/^[[:space:]]*Subject:/ { sub(/^[[:space:]]*Subject:[[:space:]]*/, ""); gsub(/ /, ""); print; exit }')
+  [ "$subject" = "CN=$cn" ] || printf '%s has the subject %s, want CN=%s\n' "$(basename "$cert")" "${subject:-none}" "$cn"
+  eku=$(printf '%s\n' "$text" | awk '/Extended Key Usage/ { getline; sub(/^[[:space:]]*/, ""); print; exit }')
+  [ "$eku" = "TLS Web Client Authentication" ] ||
+    printf 'its extended key usage is %s, want TLS Web Client Authentication only\n' "${eku:-none}"
+  [ -z "$end" ] && return 0
+  left=$((end - $(now)))
+  if ! openssl x509 -in "$cert" -noout -checkend $((left - CL_CERT_SLACK)) >/dev/null 2>&1 ||
+    openssl x509 -in "$cert" -noout -checkend $((left + CL_CERT_SLACK)) >/dev/null 2>&1; then
+    printf '%s does not end with the token (within %ss)\n' "$(basename "$cert")" "$CL_CERT_SLACK"
+  fi
+}
+
+# cl_export_token_problems: what the token of tent export nomad has wrong in Nomad's answer to GET /v1/acl/token/self
+# (called with that answer in nm-body.json), one text per line: its type, the start of its name and its end, which is
+# 24 hours after the export. It sets CL_TOKEN_END to the token's end when the answer has one.
+cl_export_token_problems() {
+  local type name
+  CL_TOKEN_END=""
+  type=$(jq -r '.Type // ""' "$WORK/nm-body.json")
+  name=$(jq -r '.Name // ""' "$WORK/nm-body.json")
+  [ "$type" = management ] || printf 'the token is a %s token, not a management token\n' "${type:-?}"
+  case "$name" in "tent export nomad"*) ;; *) printf 'its name does not start with tent export nomad\n' ;; esac
+  CL_TOKEN_END=$(jq -r '(.ExpirationTime // empty) | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601' "$WORK/nm-body.json" 2>/dev/null || true)
+  if [ -z "$CL_TOKEN_END" ]; then
+    printf 'the token has no end\n'
+  elif [ "$CL_TOKEN_END" -lt $((CL_T0 + 86400 - CL_END_SLACK)) ] || [ "$CL_TOKEN_END" -gt $((CL_T0 + CL_SECS + 86400 + CL_END_SLACK)) ]; then
+    printf 'the token ends %ss after the export, want 86400s (24 hours)\n' "$((CL_TOKEN_END - CL_T0))"
+  fi
+}
+
+# cl_export_checks IP: what is wrong with a successful tent export nomad (its output is in CL_OUT and CL_ERR), one text
+# per line: the modes of the directory and the files, NOMAD_ADDR and the six lines, the token (not the bootstrap token,
+# in neither stream) and, from Nomad's answer for it through the server at IP, its type, name and end, and the
+# certificate. It needs CL_NOMAD_NAME and, for the token file, CL_CONF. Its last line is "checked": the checks run in a
+# subshell, where a command that fails would end them without a trace.
+cl_export_checks() {
+  local ip="$1" f addr host s i known="" streams=""
+  for f in ca.pem cli.pem cli-key.pem token; do
+    [ "$(cl_file_mode "$CL_OPDIR/$f")" = 600 ] || printf '%s has mode %s\n' "$f" "$(cl_file_mode "$CL_OPDIR/$f")"
+  done
+  [ "$(cl_file_mode "$CL_OPDIR")" = 700 ] || printf 'the directory has mode %s\n' "$(cl_file_mode "$CL_OPDIR")"
+  [ -n "$CL_NOMAD_NAME" ] || printf 'no NOMAD_TLS_SERVER_NAME line\n'
+  addr=$(sed -n "s/^export NOMAD_ADDR='\\(.*\\)'\$/\\1/p" "$CL_OUT")
+  for i in $(seq 0 $((CL_SERVERS - 1))); do
+    s=$(cl_ip "$CL_NAME-servers-$i")
+    if [ -n "$s" ] && [ "$addr" = "https://$s:4646" ]; then known=$s; fi
+  done
+  [ -n "$known" ] || printf 'NOMAD_ADDR %s is not the public address of a server\n' "${addr:-missing}"
+  host=${addr#https://}
+  host=${host%:4646}
+  cl_export_lines "$host" | cmp -s - "$CL_OUT" || printf 'stdout is not the six lines of the sh form for %s\n' "$CL_OPDIR"
+  if [ ! -s "$CL_OPDIR/token" ]; then
+    printf 'token is missing or empty\nchecked\n'
+    return 0
+  fi
+  [ "$(cl_token_sha "$CL_OPDIR/token")" != "$(cl_token_sha "$CL_STATE/$CL_NAME/secrets/acl-bootstrap-token")" ] ||
+    printf 'the token is the bootstrap token\n'
+  if grep -Fq -f "$CL_OPDIR/token" "$CL_OUT"; then streams="stdout"; fi
+  if grep -Fq -f "$CL_OPDIR/token" "$CL_ERR"; then streams="$streams${streams:+, }stderr"; fi
+  [ -z "$streams" ] || printf 'the token is in %s\n' "$streams"
+  cl_nm_get "$ip" /v1/acl/token/self
+  if [ "$CL_NM_STATUS" != 200 ]; then
+    printf 'GET %s\n' "$(cl_nm_error /v1/acl/token/self)"
+  else
+    cl_export_token_problems
+    rm -f "$WORK/nm-body.json" # it holds the token's secret
+  fi
+  cl_cert_check "$CL_OPDIR/cli.pem" "cli.${CL_NOMAD_NAME#server.}" "${CL_TOKEN_END:-}"
+  printf 'checked\n'
+}
+
+# cl_export IP: tent export nomad makes the operator's files and the Nomad variables, which the Nomad rows then use
+# through the server at IP.
+cl_export() {
+  local bad="" res p checked=0
+  cl_run export export nomad "$CL_NAME" --dir "$CL_OPDIR" --shell sh
+  cl_out_detail "tent export nomad (stdout: paths only)"
+  if [ "$CL_RC" != 0 ]; then
+    res="FAILED: exit $CL_RC in ${CL_SECS}s: $(cl_last_line)"
+  else
+    CL_NOMAD_NAME=$(sed -n "s/^export NOMAD_TLS_SERVER_NAME='\\(.*\\)'\$/\\1/p" "$CL_OUT")
+    if [ -s "$CL_OPDIR/token" ]; then
+      # The token goes into a config file that only this user reads: curl never gets it on a command line.
+      (umask 077; printf 'header = "X-Nomad-Token: %s"\n' "$(cat "$CL_OPDIR/token")" >"$WORK/nomad-curl.conf")
+      CL_CONF="$WORK/nomad-curl.conf"
+    fi
+    while IFS= read -r p; do
+      if [ "$p" = checked ]; then checked=1; else bad="$bad${bad:+; }$p"; fi
+    done < <(cl_export_checks "$1")
+    [ "$checked" = 1 ] || bad="$bad${bad:+; }the checks did not finish"
+    cl_collect_secrets "$CL_OPDIR/cli-key.pem" "$CL_OPDIR/token"
+    if [ -n "$bad" ]; then
+      res="UNEXPECTED: $bad"
+    else
+      res="as expected: exit 0 in ${CL_SECS}s; directory 700, four files 600; six lines with NOMAD_ADDR $(sed -n "s/^export NOMAD_ADDR='\\(.*\\)'\$/\\1/p" "$CL_OUT"); the token is not the bootstrap token and is in neither stream; management token named tent export nomad ..., ends 24 hours after the export; cli.pem: CN cli.${CL_NOMAD_NAME#server.}, client authentication only, ends with the token"
+    fi
+  fi
+  row "tent export nomad" "$res" "the operator's access to the Nomad API: a certificate for cli.<region>.nomad and a management token that ends in 24 hours"
 }
 
 # cl_need_api TITLE: true when the operator's files exist; else writes the row of TITLE as unknown and fails.
 cl_need_api() {
   [ -n "$CL_CONF" ] && return 0
-  row "$1" "unknown: no operator files" "tent-operator failed"
+  row "$1" "unknown: no operator files" "tent export nomad failed"
   return 1
 }
 
@@ -3457,6 +3571,284 @@ cl_job() {
     res="UNEXPECTED: an allocation still runs $(($(now) - t0))s after the purge"
   fi
   row "Stop of the job $TN_JOB" "$res" "DELETE /v1/job/<id>?purge=true stops the allocation"
+}
+
+# The title of the nomad CLI row, which check_cluster also writes when no Nomad check ran.
+readonly CL_CLI_TITLE="nomad server members (nomad CLI)"
+
+# cl_down_title STEP: the title of the row of a step of the check of a client whose Nomad stops.
+cl_down_title() {
+  case "$1" in
+    stop) printf 'Nomad stopped on %s-workers-1 (for validate)' "$CL_NAME" ;;
+    down) printf 'tent validate cluster (client down)' ;;
+    back) printf 'tent validate cluster --wait 5m (client back)' ;;
+  esac
+}
+
+# cl_nomad_cli_row: the nomad CLI, pointed at the cluster by the six lines of tent export nomad, lists the servers. The
+# table is the CLI's stdout alone: on stderr the CLI of Nomad 2.0.7 adds a hint with the URL of the UI.
+cl_nomad_cli_row() {
+  local title="$CL_CLI_TITLE" out rc=0 alive total names res err="$WORK/cl-nomad-cli.err"
+  if ! command -v nomad >/dev/null 2>&1; then
+    row "$title" "skipped: no nomad binary on the PATH" "the six lines of tent export nomad are what a person runs"
+    return 0
+  fi
+  cl_need_api "$title" || return 0
+  : >"$err"
+  out=$(
+    unset NOMAD_REGION NOMAD_NAMESPACE NOMAD_SKIP_VERIFY NOMAD_CAPATH NOMAD_HTTP_AUTH
+    # shellcheck source=/dev/null
+    . "$WORK/cl-export.out"
+    nomad server members 2>"$err"
+  ) || rc=$?
+  { printf 'stdout:\n%s\n\nstderr:\n' "$out"; cat "$err"; } | detail "$title"
+  if [ "$rc" != 0 ]; then
+    res="FAILED: exit $rc: $(oneline 150 <"$err")"
+  else
+    alive=$(printf '%s\n' "$out" | awk 'NR > 1 && $4 == "alive"' | wc -l | tr -d ' ')
+    total=$(printf '%s\n' "$out" | awk 'NR > 1 && NF' | wc -l | tr -d ' ')
+    names=$(printf '%s\n' "$out" | awk 'NR > 1 && $4 == "alive" { print $1 }' | sort | paste -sd , -)
+    if [ "$alive" = "$CL_SERVERS" ] && [ "$total" = "$CL_SERVERS" ]; then
+      res="as expected: $alive alive servers: $names"
+    else
+      res="UNEXPECTED: $alive alive of $total: $names"
+    fi
+  fi
+  row "$title" "$res" "after eval of the six lines, the nomad CLI works with the exported files"
+}
+
+# cl_validate_row: tent validate cluster on the cluster as it was built: exit 0, the valid line and the two warnings
+# that a cluster of tent's defaults gets.
+cl_validate_row() {
+  local title="tent validate cluster" want="cluster $CL_NAME is valid: $CL_SERVERS servers and $CL_WORKERS clients" bad="" res
+  cl_run validate validate cluster "$CL_NAME"
+  cl_out_detail "$title"
+  case "$CL_RC" in
+    0)
+      grep -Fq -- "$want" "$CL_OUT" || bad="stdout lacks the line \"$want\""
+      grep -Fq -- "spec.access.api lets the whole internet" "$CL_ERR" ||
+        bad="$bad${bad:+; }stderr lacks the warning about spec.access.api"
+      grep -Fq -- "runs in one failure domain" "$CL_ERR" ||
+        bad="$bad${bad:+; }stderr lacks the warning about one failure domain"
+      if [ -n "$bad" ]; then
+        res="UNEXPECTED: exit 0 in ${CL_SECS}s but $bad"
+      else
+        res="as expected: exit 0 in ${CL_SECS}s: $(oneline 120 <"$CL_OUT"); warnings: open spec.access.api and one failure domain"
+      fi
+      ;;
+    2) res="UNEXPECTED: exit 2 in ${CL_SECS}s: $(oneline 250 <"$CL_OUT")" ;;
+    *) res="FAILED: exit $CL_RC in ${CL_SECS}s: $(cl_last_line)" ;;
+  esac
+  row "$title" "$res" "a cluster that tent built is valid; its open access.api and its one failure domain are warnings"
+}
+
+# cl_ui_get URL [CURL_ARG...]: one request to tent ui; sets CL_UI_STATUS and CL_UI_RC and leaves the body in
+# ui-body.json.
+cl_ui_get() {
+  local url="$1"
+  shift
+  CL_UI_RC=0
+  CL_UI_STATUS=$(curl -sS -o "$WORK/ui-body.json" -w '%{http_code}' --max-time 20 "$@" "$url" 2>>"$WORK/curl-errors.log") || CL_UI_RC=$?
+}
+
+cl_ui_note() { CL_UI_BAD="$CL_UI_BAD${CL_UI_BAD:+; }$1"; } # cl_ui_note TEXT: adds what the tent ui check found wrong
+
+# cl_ui_wait: waits for tent ui, which has ended or has been killed, and sets CL_UI_RC to its exit code.
+cl_ui_wait() {
+  CL_UI_RC=0
+  wait "$CL_UI_PID" 2>/dev/null || CL_UI_RC=$?
+  CL_UI_PID=""
+}
+
+# cl_ui_kill: ends tent ui when it still runs; for the exit trap and for a tent ui that does not answer.
+cl_ui_kill() {
+  [ -n "$CL_UI_PID" ] || return 0
+  kill -KILL "$CL_UI_PID" 2>/dev/null || true
+  cl_ui_wait
+}
+
+# cl_ui_token: judges the token that the proxy used, from GET /v1/acl/token/self through tent ui: a management
+# token named tent ui..., not the bootstrap token, in ui-body.json. It reads the secret only to compare its sha256
+# and to hide it in the report, and deletes the answer.
+cl_ui_token() {
+  local type name
+  type=$(jq -r '.Type // ""' "$WORK/ui-body.json")
+  name=$(jq -r '.Name // ""' "$WORK/ui-body.json")
+  (umask 077; jq -j '.SecretID // empty' "$WORK/ui-body.json" >"$WORK/ui-token")
+  rm -f "$WORK/ui-body.json"
+  [ -s "$WORK/ui-token" ] || cl_ui_note "the answer holds no SecretID"
+  [ "$type" = management ] || cl_ui_note "the token is a ${type:-?} token, not a management token"
+  case "$name" in "tent ui"*) ;; *) cl_ui_note "its name does not start with tent ui" ;; esac
+  if [ "$(cl_token_sha "$WORK/ui-token")" = "$(cl_token_sha "$CL_STATE/$CL_NAME/secrets/acl-bootstrap-token")" ]; then
+    cl_ui_note "the proxy used the bootstrap token"
+  fi
+  cl_collect_secrets "$WORK/ui-token"
+  rm -f "$WORK/ui-token"
+}
+
+# cl_ui_probe BASE: four requests through tent ui at BASE, which needs no certificate and no token: the leader, the
+# token the proxy uses, the UI page, and a request with another Host, which the proxy refuses.
+cl_ui_probe() {
+  local base="$1"
+  cl_ui_get "$base/v1/status/leader"
+  [ "$CL_UI_STATUS" = 200 ] || cl_ui_note "GET /v1/status/leader answered HTTP $CL_UI_STATUS"
+  cl_ui_get "$base/v1/acl/token/self"
+  if [ "$CL_UI_STATUS" = 200 ]; then cl_ui_token; else cl_ui_note "GET /v1/acl/token/self answered HTTP $CL_UI_STATUS"; fi
+  rm -f "$WORK/ui-body.json"
+  cl_ui_get "$base/ui/"
+  [ "$CL_UI_STATUS" = 200 ] || cl_ui_note "GET /ui/ answered HTTP $CL_UI_STATUS"
+  cl_ui_get "$base/v1/status/leader" -H 'Host: example.com'
+  [ "$CL_UI_STATUS" = 403 ] || cl_ui_note "Host example.com was not refused: HTTP $CL_UI_STATUS"
+}
+
+# cl_ui_end BASE: sends SIGINT to tent ui, waits up to 15 seconds for it to end, kills it when it does not, and notes
+# whether it exited with 0 and whether its port refuses connections; a tent ui that ended before the signal is noted
+# with its exit code. It sets CL_UI_ENDED to the seconds it took.
+cl_ui_end() {
+  local t0 deadline killed=0
+  t0=$(now)
+  deadline=$((t0 + 15))
+  if ! kill -INT "$CL_UI_PID" 2>/dev/null; then
+    cl_ui_wait
+    cl_ui_note "it ended by itself with exit $CL_UI_RC before SIGINT"
+  else
+    while kill -0 "$CL_UI_PID" 2>/dev/null && [ "$(now)" -lt "$deadline" ]; do sleep 1; done
+    CL_UI_ENDED=$(($(now) - t0))
+    if kill -0 "$CL_UI_PID" 2>/dev/null; then
+      killed=1
+      kill -KILL "$CL_UI_PID" 2>/dev/null || true
+    fi
+    cl_ui_wait
+    if [ "$killed" = 1 ]; then
+      cl_ui_note "it still ran 15s after SIGINT and was killed"
+    elif [ "$CL_UI_RC" != 0 ]; then
+      cl_ui_note "SIGINT ended it with exit $CL_UI_RC"
+    fi
+  fi
+  cl_ui_get "$1/v1/status/leader"
+  [ "$CL_UI_RC" = 7 ] || cl_ui_note "the port still answers after the exit (curl exit $CL_UI_RC, HTTP $CL_UI_STATUS)"
+}
+
+# cl_ui_row: tent ui on a free loopback port, in the background: it prints its address, answers without a certificate
+# or a token, refuses another Host, and ends with exit 0 on SIGINT and closes its port. A tent ui that does not end is
+# killed.
+cl_ui_row() {
+  local title="tent ui" out="$WORK/cl-ui.out" err="$WORK/cl-ui.err" url="" deadline res
+  CL_UI_BAD=""
+  CL_UI_ENDED=0
+  : >"$out"
+  : >"$err"
+  "$CL_TENT" ui "$CL_NAME" --listen 127.0.0.1:0 --state "$CL_URL" >"$out" 2>"$err" </dev/null &
+  CL_UI_PID=$!
+  deadline=$(($(now) + 60))
+  while [ "$(now)" -lt "$deadline" ]; do
+    url=$(sed -n "s|^Nomad UI of cluster $CL_NAME: \\(http://127\\.0\\.0\\.1:[0-9]*/ui/\\)\$|\\1|p" "$out" | head -n 1)
+    [ -z "$url" ] || break
+    kill -0 "$CL_UI_PID" 2>/dev/null || break
+    sleep 1
+  done
+  if [ -z "$url" ]; then
+    if kill -0 "$CL_UI_PID" 2>/dev/null; then
+      res="FAILED: tent ui printed no address within 60s"
+    else
+      cl_ui_wait
+      res="FAILED: tent ui exited $CL_UI_RC before it printed its address: $(oneline 200 <"$err")"
+    fi
+    cl_ui_kill
+  else
+    cl_ui_probe "${url%/ui/}"
+    cl_ui_end "${url%/ui/}"
+    if [ -n "$CL_UI_BAD" ]; then
+      res="UNEXPECTED: $CL_UI_BAD"
+    else
+      res="as expected: GET /v1/status/leader 200; GET /v1/acl/token/self: a management token named tent ui..., not the bootstrap token; GET /ui/ 200; Host example.com 403; SIGINT ended it with exit 0 after ${CL_UI_ENDED}s and the port refuses connections"
+    fi
+  fi
+  { printf 'stdout:\n'; cat "$out"; printf '\nstderr:\n'; cat "$err"; } | hide_url | detail "tent ui"
+  row "$title" "$res" "the Nomad UI and API on a loopback port, with a token that only tent knows; the port closes with the process"
+}
+
+# cl_down_rows: stops Nomad on a client, waits until Nomad lists its node down, and checks that tent validate cluster
+# exits 2 and names the node; then starts Nomad again and checks that validate --wait 5m exits 0.
+cl_down_rows() {
+  local name="$CL_NAME-workers-1" t_stop t_down t_back out rc active t0 deadline st="" res
+  t_stop=$(cl_down_title stop)
+  t_down=$(cl_down_title down)
+  t_back=$(cl_down_title back)
+  if ! cl_need_api "$t_stop"; then
+    row "$t_down" "unknown: Nomad was not stopped" "no check ran"
+    row "$t_back" "unknown: Nomad was not stopped" "no check ran"
+    return 0
+  fi
+  if ! cl_ssh_reachable "$name"; then
+    row "$t_stop" "$(cl_ssh_unknown_text "$name")" "no check ran"
+    row "$t_down" "unknown: Nomad was not stopped" "no check ran"
+    row "$t_back" "unknown: Nomad was not stopped" "no check ran"
+    return 0
+  fi
+  cl_unit_script stop >"$WORK/cl-unit.sh"
+  out=$(ssh_x "$CL_IP" 'sh -s' <"$WORK/cl-unit.sh" 2>/dev/null || true)
+  rc=$(tn_key rc "$out")
+  active=$(tn_key active "$out")
+  printf '%s\n' "$out" | detail "systemctl stop nomad.service on $name (for validate)"
+  case "$rc/$active" in
+    0/inactive | 0/failed) ;;
+    *)
+      row "$t_stop" "UNEXPECTED: stop exit ${rc:-?}, unit ${active:-?}" "no check ran"
+      row "$t_down" "unknown: Nomad was not stopped" "no check ran"
+      row "$t_back" "unknown: Nomad was not stopped" "no check ran"
+      return 0
+      ;;
+  esac
+  CL_DOWN="$name"
+  t0=$(now)
+  deadline=$((t0 + 300))
+  while [ "$(now)" -lt "$deadline" ]; do
+    cl_nm_get "$CL_SRV_IP" /v1/nodes
+    st=$(jq -r --arg n "$name" '[.[]? | select(.Name == $n) | .Status][0] // ""' "$WORK/nm-body.json" 2>/dev/null || true)
+    [ "$st" != down ] || break
+    sleep 5
+  done
+  if [ "$st" = down ]; then
+    row "$t_stop" "as expected: systemctl stop exit 0, nomad.service $active; Nomad listed the node down after $(($(now) - t0))s" \
+      "a client whose Nomad stops is listed down once its heartbeat lapses"
+    cl_run validate-down validate cluster "$CL_NAME"
+    cl_out_detail "$t_down"
+    case "$CL_RC" in
+      2)
+        if grep -Eq -- "^$name +its Nomad client is down\$" "$CL_OUT"; then
+          res="as expected: exit 2 in ${CL_SECS}s, $name: its Nomad client is down"
+        else
+          res="UNEXPECTED: exit 2 in ${CL_SECS}s but no failure names $name with \"its Nomad client is down\": $(oneline 200 <"$CL_OUT")"
+        fi
+        ;;
+      0) res="UNEXPECTED: exit 0 in ${CL_SECS}s: validate calls the cluster valid with Nomad stopped on $name" ;;
+      *) res="FAILED: exit $CL_RC in ${CL_SECS}s: $(cl_last_line)" ;;
+    esac
+    row "$t_down" "$res" "validate exits 2 and names the node whose Nomad client is down"
+  else
+    row "$t_stop" "UNEXPECTED: Nomad did not list the node down within 300s (status ${st:-none})" \
+      "a client whose Nomad stops is listed down once its heartbeat lapses"
+    row "$t_down" "unknown: Nomad did not list the node down" "no check ran"
+  fi
+  cl_unit_script start >"$WORK/cl-unit.sh"
+  out=$(ssh_x "$CL_IP" 'sh -s' <"$WORK/cl-unit.sh" 2>/dev/null || true)
+  rc=$(tn_key rc "$out")
+  active=$(tn_key active "$out")
+  printf '%s\n' "$out" | detail "systemctl start nomad.service on $name"
+  if [ "$rc/$active" != 0/active ]; then
+    row "$t_back" "unknown: systemctl start nomad.service exit ${rc:-?}, unit ${active:-?}" "no check ran"
+    return 0
+  fi
+  CL_DOWN=""
+  cl_run validate-back validate cluster "$CL_NAME" --wait 5m
+  cl_out_detail "$t_back"
+  case "$CL_RC" in
+    0) res="as expected: exit 0 in ${CL_SECS}s after systemctl start nomad.service" ;;
+    2) res="UNEXPECTED: exit 2 in ${CL_SECS}s: $(oneline 200 <"$CL_OUT")" ;;
+    *) res="FAILED: exit $CL_RC in ${CL_SECS}s: $(cl_last_line)" ;;
+  esac
+  row "$t_back" "$res" "once Nomad runs again the node registers and the cluster is valid"
 }
 
 # cl_exit_code_row LABEL TITLE IMPACT: tent update cluster --exit-code must exit 0 (no changes); the row and the output
@@ -3936,13 +4328,13 @@ cl_unreg_title() {
   esac
 }
 
-# cl_stop_script: the script on the client that stops nomad.service and prints how it went.
-cl_stop_script() {
-  cat <<'EOF'
-systemctl stop nomad.service
-echo "rc|$?"
-echo "active|$(systemctl is-active nomad.service)"
-echo "enabled|$(systemctl is-enabled nomad.service 2>&1)"
+# cl_unit_script VERB: the script on the client that runs systemctl VERB on nomad.service and prints how it went.
+cl_unit_script() {
+  cat <<EOF
+systemctl $1 nomad.service
+echo "rc|\$?"
+echo "active|\$(systemctl is-active nomad.service)"
+echo "enabled|\$(systemctl is-enabled nomad.service 2>&1)"
 true
 EOF
 }
@@ -3964,7 +4356,7 @@ cl_unreg_stop() {
     return 1
   fi
   CL_STOPPED="$name"
-  cl_stop_script >"$WORK/cl-stop.sh"
+  cl_unit_script stop >"$WORK/cl-stop.sh"
   out=$(ssh_x "$CL_IP" 'sh -s' <"$WORK/cl-stop.sh" 2>/dev/null || true)
   rc=$(tn_key rc "$out")
   active=$(tn_key active "$out")
@@ -4348,17 +4740,22 @@ check_cluster() {
   if [ -z "$ip" ]; then
     res="unknown: no instance list"
     if cl_listed; then res="unknown: the Vultr API has no public address for $CL_NAME-servers-0"; fi
-    for t in "tent-operator" "Nomad servers (agent/members)" "Autopilot health" "Nomad clients (nodes)" "The job $TN_JOB" \
-      "Stop of the job $TN_JOB"; do
+    for t in "tent export nomad" "Nomad servers (agent/members)" "Autopilot health" "Nomad clients (nodes)" "The job $TN_JOB" \
+      "Stop of the job $TN_JOB" "$CL_CLI_TITLE" "tent validate cluster" "tent ui" "$(cl_down_title stop)" \
+      "$(cl_down_title down)" "$(cl_down_title back)"; do
       row "$t" "$res" "no Nomad check ran"
     done
   else
     CL_SRV_IP="$ip"
-    cl_operator "$ip"
+    cl_export "$ip"
     cl_members_row "$ip"
     cl_health_row "$ip"
     cl_nodes_row "$ip"
     cl_job "$ip"
+    cl_nomad_cli_row
+    cl_validate_row
+    cl_ui_row
+    cl_down_rows
   fi
   cl_update_rows
   cl_tags_row
@@ -4416,6 +4813,7 @@ cl_remove_leftovers() {
 # for the cluster goes by tag and marker.
 cl_cleanup() {
   local kept="$OUT_DIR/cluster-$RUN-state"
+  cl_ui_kill
   [ "$CL_STARTED" = 1 ] || return 0
   # A run stopped during create has read none: read what the store holds before anything deletes it.
   [ "$CL_SECRETS" != 0 ] || cl_collect_store_secrets
@@ -4433,6 +4831,9 @@ cl_cleanup() {
   if [ "$KEEP" = 1 ] && [ -n "$CL_STOPPED" ]; then
     log "--keep: Nomad stopped on $CL_STOPPED and its tent/joined tag may be off: tent update cluster $CL_NAME --yes replaces it 31 minutes after its creation"
   fi
+  if [ "$KEEP" = 1 ] && [ -n "$CL_DOWN" ]; then
+    log "--keep: Nomad is stopped on $CL_DOWN: run systemctl start nomad.service on it; tent update does not replace a node that joined"
+  fi
   if [ "$KEEP" = 1 ]; then
     [ "$CL_SEARCHED" = 1 ] || cl_secrets_row "at exit"
     if mv "$CL_STATE" "$kept"; then
@@ -4440,7 +4841,8 @@ cl_cleanup() {
     else
       kept="$CL_STATE"
       KEEP_WORK=1
-      rm -rf "$AUTH_CONF" "$WORK/nomad-curl.conf" "$CL_OPDIR" "$WORK/secret-patterns.txt" "$SSH_KEY" "$SSH_KEY.pub" "$API_BODY"
+      rm -rf "$AUTH_CONF" "$WORK/nomad-curl.conf" "$CL_OPDIR" "$WORK/secret-patterns.txt" "$SSH_KEY" "$SSH_KEY.pub" "$API_BODY" \
+        "$WORK/nm-body.json" "$WORK/ui-body.json" "$WORK/ui-token"
       log "--keep: could not move the state store: it stays in $kept, and so does the directory $WORK"
       log "the directory holds no API key, token or private key any more: only the store has the cluster's secrets"
     fi
@@ -4582,8 +4984,11 @@ This run builds a cluster named $CL_NAME with tent in your Vultr account ($REGIO
   - $CL_SERVERS servers and $CL_WORKERS clients of $PLAN, all created at once (the account's instance limit must
     allow $((CL_SERVERS + CL_WORKERS)) instances), 1 hour minimum each; $instances billed in all: $cost
   - 1 VPC, 2 firewall groups and 1 SSH key, made by tent and removed by tent delete cluster
-  - after the build: a reboot of one client, and a scale down of the clients to one in the specs, which update must
-    refuse (the specs go back afterwards)$unreg_note
+  - after the build: tent export nomad (a certificate and a management token for 24 hours), the nomad CLI when it is
+    installed, tent validate cluster, tent ui on a free loopback port (another management token for 24 hours; both
+    tokens stay in Nomad until they expire), then Nomad stopped on $CL_NAME-workers-1 until validate sees the node
+    down and started again; a reboot of one client, and a scale down of the clients to one in the specs, which
+    update must refuse (the specs go back afterwards)$unreg_note
   - $end_note
 Expected duration: $duration. Report: $REPORT
 
@@ -4629,7 +5034,7 @@ main() {
   for c in curl jq awk base64 tr od; do need_cmd "$c"; done
   if [ "$MODE" = "run" ] && want tentnode; then need_cmd go; need_cmd gzip; fi
   if [ "$MODE" = "run" ] && want cluster; then
-    for c in go ssh ssh-keygen mkfifo find; do need_cmd "$c"; done
+    for c in openssl ssh ssh-keygen mkfifo find; do need_cmd "$c"; done
   fi
   # needs_api: the run creates resources (SSH key, VPC); needs_instances: it also creates instance A.
   local needs_api=0 needs_instances=0
