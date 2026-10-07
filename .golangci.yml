@@ -187,6 +187,13 @@ linters:
           deny:
             - pkg: github.com/hashicorp/nomad
               desc: nomadfake uses the types of internal/nomadops, not the Nomad modules
+        # The E2E suite and its janitor drive tent from outside and read the clouds themselves, so they import none
+        # of tent's internal packages (ADR-0034).
+        e2e-black-box:
+          files: ["${base-path}/test/e2e/**", "${base-path}/hack/e2e-janitor/**"]
+          deny:
+            - pkg: github.com/ingvarch/tent/internal
+              desc: the E2E suite and its janitor drive tent from outside and read the clouds themselves (ADR-0034)
         # The JSON Schema libraries only generate and test the schema (ADR-0022).
         jsonschema-only-in-apischema:
           files: ["$all", "!${base-path}/internal/apischema/**"]
