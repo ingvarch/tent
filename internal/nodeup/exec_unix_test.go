@@ -16,9 +16,9 @@ import (
 	"github.com/ingvarch/tent/internal/nodeup"
 )
 
-// writePIDs ends a script that has started a child: it writes the script's PID and the child's to the file $1, whole
-// through a rename, and waits for the child.
-const writePIDs = `echo $$ $! > "$1.tmp" && mv "$1.tmp" "$1"; wait`
+// writePIDs is for a script that has started a child: it writes the script's PID and the child's to the file $1, whole
+// through a rename. The script then waits for the child or sleeps.
+const writePIDs = `echo $$ $! > "$1.tmp" && mv "$1.tmp" "$1"; `
 
 // startScript runs the shell script with r in the background, with the path of a file as $1. It returns the path, the
 // cancel of Run's context and a channel that gets Run's error.
@@ -95,9 +95,11 @@ func waitGone(t *testing.T, pids ...int) {
 }
 
 func TestExecRunnerStopsTheProcessGroup(t *testing.T) {
-	// The program records the SIGTERM before it exits; its child gets the signal too.
+	// The program records the SIGTERM before it exits; its child gets the signal too. It loops over short sleeps and
+	// never calls wait: bash 3.2, the sh of macOS, crashes when a trapped signal arrives as wait starts. A sleep that
+	// is starting misses the signal, and the trap runs once that sleep ends.
 	file, cancel, result := startScript(t, nodeup.ExecRunner{},
-		`trap 'echo TERM > "$1.term"; exit 1' TERM; sleep 30 & `+writePIDs)
+		`trap 'echo TERM > "$1.term"; exit 1' TERM; sleep 30 & `+writePIDs+`while :; do sleep 0.1; done`)
 	pids := readPIDs(t, file, result)
 	took, err := stop(t, cancel, result)
 	if !errors.Is(err, context.Canceled) {
@@ -115,7 +117,7 @@ func TestExecRunnerStopsTheProcessGroup(t *testing.T) {
 
 func TestExecRunnerKillsAProcessGroupThatIgnoresSIGTERM(t *testing.T) {
 	const delay = time.Second
-	file, cancel, result := startScript(t, nodeup.ExecRunner{WaitDelay: delay}, `trap '' TERM; sleep 30 & `+writePIDs)
+	file, cancel, result := startScript(t, nodeup.ExecRunner{WaitDelay: delay}, `trap '' TERM; sleep 30 & `+writePIDs+`wait`)
 	pids := readPIDs(t, file, result)
 	took, err := stop(t, cancel, result)
 	if !errors.Is(err, context.Canceled) {
@@ -132,7 +134,7 @@ func TestExecRunnerKillsTheGroupOnceTheProgramHasExited(t *testing.T) {
 	// The child ignores SIGTERM from its fork on and does not hold the output, so the program exits alone. The delay
 	// would outlast the child's sleep.
 	file, cancel, result := startScript(t, nodeup.ExecRunner{WaitDelay: time.Minute},
-		`trap '' TERM; sleep 30 >/dev/null 2>&1 & trap - TERM; `+writePIDs)
+		`trap '' TERM; sleep 30 >/dev/null 2>&1 & trap - TERM; `+writePIDs+`wait`)
 	pids := readPIDs(t, file, result)
 	took, err := stop(t, cancel, result)
 	if !errors.Is(err, context.Canceled) {
