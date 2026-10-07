@@ -13,18 +13,18 @@ steps run in order, and the first that fails stops the cluster's steps:
 
 1. **create:** `tent create cluster ... --yes` with the run's SSH key and the runner's address as the only address in
    `--ssh-access` and `--api-access`.
-2. **validate:** `tent validate cluster --wait 5m` exits 0.
+2. **validate:** `tent validate cluster --wait 5m --allow-single-server` exits 0.
 3. **export:** `tent export nomad`; the suite builds its Nomad client from the files it writes.
 4. **service:** the job `e2e-web` runs, its check reports `success` and Nomad lists its service (a docker job with a
    service runs).
 5. **metadata:** the batch job `e2e-metadata` has a task in each of three networks: Nomad's bridge, Docker's bridge and
    the host. Each task first reaches one of `deb.debian.org`, `detectportal.firefox.com` and `captive.apple.com`, so
    the network works, then times out on `169.254.169.254` (containers cannot reach the metadata endpoint). Three
-   control sites of three owners, since `archive.ubuntu.com` did not answer at all during a run on 2026-10-07.
+   control sites of three owners, since `archive.ubuntu.com` did not answer over IPv4 during a run on 2026-10-07.
 6. **intro token:** over SSH, a second Nomad agent, `e2e-rogue`, starts on the client with no intro token. The server
    logs the rejection, the agent logs `Permission denied`, and `/v1/nodes` never lists it (a client without an intro
    token is rejected).
-7. **validate again:** `tent validate cluster --wait 5m` exits 0.
+7. **validate again:** `tent validate cluster --wait 5m --allow-single-server` exits 0.
 8. **delete:** `tent delete cluster --yes` exits 0, then the Vultr API lists no object of the cluster and
    `tent get clusters` prints `no clusters in` (`delete` leaves nothing behind).
 
@@ -56,7 +56,10 @@ dev-upload`), sets `TENT_NODE_URL`, `TENT_NODE_SHA256` and `E2E_TENT` (the absol
 so the suite stops at once when `TENT_NODE_SHA256` is not the sha256 of the tent-node next to `E2E_TENT`. Run the suite
 with `make e2e` for that reason.
 
-The timeout is 90 minutes, since a `go test` that times out runs no cleanup.
+The timeout is 90 minutes, since a `go test` that times out runs no cleanup. Ctrl-C or SIGTERM ends the running step
+within seconds; the suite prints `e2e: interrupted; deleting the clusters of this run` and its cleanups delete the
+clusters (unless `E2E_KEEP` is set) and the exported files. Ctrl-C reaches the test process through the terminal; send
+SIGTERM to the `e2e.test` process itself, since `make` and `go test` do not pass it on.
 
 ### Optional variables
 
@@ -76,9 +79,11 @@ deletes:
 - `<cluster>-<step>.log`: one file for each tent command, with the arguments, stdout, stderr, the exit code and the
   time it took (steps `create`, `validate`, `export`, `validate-again`, `delete`, `get-clusters`, `cleanup-delete`);
 - `<cluster>-intro-token.txt`: the record of the intro-token step;
-- `state-<cluster>/`: the cluster's `file://` state store; it is empty after a delete;
+- `state-<cluster>/`: the cluster's `file://` state store; after a delete it holds no cluster, only tent's lock
+  files;
 - `ssh/`: the run's SSH key pair, with the private key at mode 0600;
-- `xdg/`: the config and cache directories that tent used, so no config file of yours is read.
+- `xdg/`: tent's `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` point at `xdg/config` and `xdg/cache`, so no config file of
+  yours is read; the directory exists only if tent writes there.
 
 The Nomad files of `tent export nomad` are in `export-<cluster>/` while a cluster's steps run, and the suite removes the
 directory when they end.
@@ -100,7 +105,7 @@ A kept cluster that nobody deletes goes when the janitor finds it older than 3 h
 
 The janitor deletes the objects of clusters whose name starts with `e2e-` and whose oldest object is older than 3 hours:
 all the cluster's objects, instances first, then firewall groups, VPCs and SSH keys. It finds them by tent's tags and
-markers. Objects that carry no tent marker, such as the account's own VPCs and SSH key, stay.
+markers. Objects that carry no tent marker, such as the account's own SSH key `main`, stay.
 
 Without `--yes` it lists what it would delete and deletes nothing:
 
@@ -114,6 +119,7 @@ run in progress.
 
 ## Cost and time
 
-A run makes 4 machines of `vc2-1c-1gb`, and Vultr bills a machine for at least one hour. A green run took about 7
-minutes on 2026-10-07: `create` 4.5 to 6.5 minutes, `delete` about 20 s, every other step seconds
+A run makes 4 machines of `vc2-1c-1gb`, and Vultr bills a machine for at least one hour. A green run took 6 to 7
+minutes on 2026-10-07: `create` 4 to 6.5 minutes, `delete` about 20 s, the leak check up to 2 minutes on the cluster
+whose check runs while the other is still being built, every other step seconds
 ([platform notes §3.16](../../docs/platform-notes.md#316-spike-runs)).

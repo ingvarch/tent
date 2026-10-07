@@ -1,6 +1,6 @@
 # Roadmap
 
-> **Current status (2026-10-07):** M0 Foundation and M1 Vultr infrastructure are complete, and M2 is in progress.
+> **Current status (2026-10-07):** M0 Foundation, M1 Vultr infrastructure and M2 Nomad bootstrap are complete.
 >
 > M0 built the Go module, `tent version`, the Makefile, the import rules in golangci-lint, CI on Linux, macOS and
 > Windows, the release pipeline for `tent`, the API types with defaults and validation, the spec reader and writer,
@@ -19,7 +19,7 @@
 > - Vultr is the first provider and the E2E platform ([ADR-0014](adr/0014-vultr-first-provider-and-e2e.md)).
 > - Hetzner Cloud is second.
 >
-> M2 is in progress (2026-10-07). M2.1 to M2.6b built the PKI and secrets, the channels and assets, NodeConfig, the
+> M2 is complete (2026-10-07). M2.1 to M2.6b built the PKI and secrets, the channels and assets, NodeConfig, the
 > Nomad client, tent-node and its phases. M2.7a made `tent update cluster --yes` build a Nomad cluster: servers,
 > the ACL bootstrap and clients with intro tokens ([ADR-0031](adr/0031-bootstrap-in-update.md)). M2.7b scrubs the user
 > data of each node that has joined and labels its machine, replaces a client that never registered, and refuses to
@@ -29,7 +29,9 @@
 > token and prints the lines that point the `nomad` CLI at them, `tent ui` serves the Nomad UI and API on a loopback
 > port, `tent validate cluster` compares the machines and Nomad with the specs and exits with 2 while they differ, and
 > a combined cluster gets a warning. `hack/tent-operator` is gone. Its real-cloud check ran on Vultr on 2026-10-07.
-> M2.9, the E2E `smoke`, is next.
+> M2.9 added the E2E suite on Vultr ([ADR-0034](adr/0034-e2e-suite-on-vultr.md)), which `make e2e` runs from the
+> maintainer's machine. Its runs found four faults, all fixed, and on 2026-10-07 `smoke` passed on ubuntu-24.04 and
+> ubuntu-26.04: M2 is done. M3 is next.
 >
 > **Work items live in GitHub:** each milestone below links to its GitHub milestone, and the
 > [tent roadmap project][project] shows the open issues. This file keeps the goals and exit criteria; close issues as
@@ -136,6 +138,16 @@ it: [`hack/vultr-spike/README.md`](../hack/vultr-spike/README.md).
 - Containers cannot reach the metadata endpoint.
 - A client without an intro token is rejected.
 
+**Status:** done. The E2E `smoke` ([ADR-0034](adr/0034-e2e-suite-on-vultr.md),
+[architecture §15](architecture.md#15-testing)) passed on Vultr on 2026-10-07 on ubuntu-24.04 and ubuntu-26.04, in runs
+`r7l48w`, `58sglh` and `g57k85` ([platform notes §3.16](platform-notes.md#316-spike-runs)):
+- a docker job with a service ran, and its Nomad health check passed;
+- after `tent delete cluster --yes` the Vultr API listed nothing of the cluster, and its state store held no cluster;
+- containers on Nomad's bridge, on Docker's bridge and on the host network got no answer from `169.254.169.254`, while
+  a control site answered;
+- the servers refused a second client agent that had no intro token, and logged `node registration without
+  introduction token: enforcement_level=strict`.
+
 ## M3 Day-2 operations
 
 [Issues](https://github.com/ingvarch/tent/milestone/4)
@@ -204,6 +216,12 @@ Work after M6 or not scheduled yet: [issues with the `later` label][later].
   real-cloud check ran on Vultr the same day (spike v12, run `9pxbqn`,
   [platform notes §3.16](platform-notes.md#316-spike-runs)): the three commands worked against a cluster that tent
   built, and the one unexpected row was the script's own fault. Closes #94 and #98.
+- 2026-10-07: M2.9 is built and M2 is complete. `make e2e` runs the E2E suite on Vultr from the maintainer's machine;
+  a janitor deletes what earlier runs left ([ADR-0034](adr/0034-e2e-suite-on-vultr.md)). The runs found four faults,
+  all fixed: a node refuses a tent-node of another version, the Nomad step did not wait for Nomad's keyring before the
+  first intro token, the suite's `validate` lacked `--allow-single-server`, and the metadata probe depended on one
+  control site. `smoke` then passed three times on both
+  images (runs `r7l48w`, `58sglh` and `g57k85`). Closes #96, #97 and #64.
 
 [project]: https://github.com/users/ingvarch/projects/2
 [later]: https://github.com/ingvarch/tent/issues?q=is%3Aissue%20label%3Alater

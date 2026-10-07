@@ -12,7 +12,8 @@ Providers, in order:
 2. **Hetzner Cloud** is second.
 3. **AWS** comes later. It must remain possible without changes to the core.
 
-**Status:** M0 Foundation (2026-09-27) and M1 Vultr infrastructure (2026-09-28) are complete.
+**Status:** M0 Foundation (2026-09-27), M1 Vultr infrastructure (2026-09-28) and M2 Nomad bootstrap (2026-10-07) are
+complete.
 - The skeleton is in place: Go module, `tent version`, Makefile, lint rules, CI on Linux, macOS and Windows, and a
   GoReleaser release pipeline. The repository is public, the release secrets are set, and the archives and packages
   ship third-party licence notices (ADR-0020). Renovate updates the Go modules and GitHub Actions.
@@ -30,7 +31,7 @@ Providers, in order:
   `docs/architecture.md` §13). Until M2.7a the nodes were empty machines without Nomad. The
   exit criteria were met in the integration tests (`internal/app/integration_test.go`, `interrupt_test.go`) and on a
   real Vultr account.
-- M2 Nomad bootstrap is in progress, in parts M2.1 to M2.9 (`docs/roadmap.md`).
+- M2 Nomad bootstrap was built in parts M2.1 to M2.9 (`docs/roadmap.md`).
   - M2.1 added the cluster PKI and secrets (`internal/pki`, ADR-0024): `update` makes the CA, the gossip key and the
     ACL bootstrap secret once and keeps them in the state store; `delete` removes them.
   - M2.2 added the release channels and assets (`internal/channels`, `internal/assets`, ADR-0026): the embedded
@@ -82,8 +83,16 @@ Providers, in order:
     `internal/nomadops`, `internal/shellenv`, ADR-0033; maintainer decisions 29 to 32), a warning about combined
     clusters, and removed `hack/tent-operator`. The three commands need `VULTR_API_KEY`. The real-cloud check ran on
     Vultr on 2026-10-07 (spike v12, run `9pxbqn`); its one unexpected row was a fault of the script, which is fixed.
-  - Next: M2.9: the E2E `smoke` on Vultr, which can reach Nomad through `tent export nomad` and end with `tent validate
-    cluster --wait`.
+  - M2.9 added the E2E suite on Vultr (`test/e2e`, `test/e2e/vultrapi`, `test/e2e/janitor`, `hack/e2e-janitor`,
+    ADR-0034): the scenario `smoke` builds a cluster per image (ubuntu-24.04 and ubuntu-26.04) and is built to check
+    the four exit criteria of M2, and a janitor deletes the objects of `e2e-` clusters that are older than 3 hours.
+    `make e2e` runs it from the maintainer's machine, not in CI. The labels `tent/e2e` and `tent/e2e-run` are removed.
+    The runs of 2026-10-07 found four faults, all fixed: a node refuses a tent-node of another version than its
+    tent's (`make e2e` builds both with one version); `update` asked for an intro token before Nomad's keyring had a
+    key (the Nomad step now waits for it); the suite's `validate` lacked `--allow-single-server`; and the probe's one
+    control site, `archive.ubuntu.com`, did not answer over IPv4 (it tries three now). The next three runs passed on
+    both images (`r7l48w`, `58sglh`, `g57k85`): that is the exit of M2.
+- Next: M3 Day-2 operations (`docs/roadmap.md`).
 
 ## Read before changing anything
 
@@ -119,14 +128,16 @@ Providers, in order:
   - Only `internal/nomadops` imports `github.com/hashicorp/nomad/api`; `internal/nomadops/nomadfake`, tests
     included, imports no Nomad module.
   - Never import the root module `github.com/hashicorp/nomad`; it is BUSL-licensed.
+  - `test/e2e` and `hack/e2e-janitor`, tests included, import nothing under `github.com/ingvarch/tent/internal`: the
+    suite drives tent from outside and reads the clouds with its own clients (`e2e-black-box`, ADR-0034).
   - `internal/pki` imports only the standard library, `internal/uuid`, `internal/secret` and `api/v1alpha1`;
     `internal/uuid`, `internal/secret`, `internal/english`, `internal/secrettest` and `internal/assets/assetstest`
     import only the standard library. Their tests are exempt (ADR-0025, ADR-0027, ADR-0031).
   - `internal/nodeconfig` imports only the standard library, `internal/secret` and `api/v1alpha1`; its tests are
     exempt (ADR-0027).
   - Only tests import `internal/secrettest`, `internal/nomadops/nomadfake`, `internal/nodeup/nodeuptest`,
-    `internal/s3url/s3urltest`, `internal/assets/assetstest`, `internal/shellenv/shellenvtest` and
-    `github.com/hashicorp/hcl`.
+    `internal/s3url/s3urltest`, `internal/assets/assetstest`, `internal/shellenv/shellenvtest`,
+    `test/e2e/janitor/janitortest` and `github.com/hashicorp/hcl`.
   - Only `internal/assets` imports `github.com/ProtonMail/go-crypto`, tests included (ADR-0026).
   - `internal/nodeup`, `internal/nodeconfig` and `cmd/tent-node`, tests included, import neither `internal/assets`
     nor `internal/channels`; tent-node gets its assets in NodeConfig (ADR-0026).
@@ -135,7 +146,8 @@ Providers, in order:
   - `internal/s3url`, which the s3 state store and `hack/tent-node-upload` share, imports only the standard library,
     aws-sdk-go-v2's `aws`, `config` and `service/s3`, and `github.com/aws/smithy-go/logging`; its tests are exempt
     (ADR-0028).
-- **Visibility.** Everything is under `internal/` except the public API types in `api/`.
+- **Visibility.** Everything is under `internal/` except the public API types in `api/` and the E2E suite's own packages
+  under `test/e2e/` (ADR-0034).
 - **Weakest primitives.** Core mechanisms assume the weakest cloud primitives: non-unique names, no fixed IPs, no
   graceful shutdown. Richer primitives are optimizations behind `Capabilities` (ADR-0015 to ADR-0017).
 - **Credentials.** Cloud credentials (`VULTR_API_KEY`, `HCLOUD_TOKEN`) never go into specs, the state store, logs or
@@ -149,7 +161,8 @@ Providers, in order:
 - **Tests.**
   - Unit tests sit next to the code, with golden files under `testdata/`.
   - Every engine task needs an "apply → re-plan → no-op" test.
-  - E2E tests use the `e2e` build tag and never run by default.
+  - E2E tests use the `e2e` build tag and never run by default. `make e2e` runs them from the maintainer's machine
+    and needs `VULTR_API_KEY`, the R2 keys and `TENT_DEV_S3_URL` (`test/e2e/README.md`).
 - **Checks.** `make check` runs fmt, lint, licenses, test and build; `make fmt` and `make lint` need golangci-lint at
   the version pinned in the Makefile. Releases follow ADR-0020.
 

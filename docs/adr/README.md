@@ -33,16 +33,16 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0009](0009-server-discovery-fixed-ip-slots.md) | Nomad server discovery on Hetzner through fixed private IP slots | Accepted (Hetzner-specific; generic strategy in 0016) |
 | [0010](0010-state-store-and-locking.md) | State store backends, layout and locking | Accepted; see 0015 |
 | [0011](0011-nomad-only-scope-and-licensing.md) | Nomad-only scope for v1 and licensing boundaries | Accepted; extended by 0026 |
-| [0012](0012-testing-strategy.md) | Testing strategy: fakes, golden integration tests, E2E on Hetzner | Accepted; E2E platform amended by 0014 |
+| [0012](0012-testing-strategy.md) | Testing strategy: fakes, golden integration tests, E2E on Hetzner | Accepted; E2E platform amended by 0014; E2E running and marking amended by 0034 |
 | [0013](0013-technology-stack.md) | Technology stack and release engineering | Accepted; govultr added by 0018; extended by 0020; JSON Schema generator and spec decoding libraries added by 0022 |
-| [0014](0014-vultr-first-provider-and-e2e.md) | Implement Vultr first and run the E2E suite on Vultr | Accepted |
+| [0014](0014-vultr-first-provider-and-e2e.md) | Implement Vultr first and run the E2E suite on Vultr | Accepted; E2E rules amended by 0034 |
 | [0015](0015-idempotency-without-unique-names.md) | Idempotent creation on clouds without unique names | Accepted; amended by 0023 and 0032 |
 | [0016](0016-server-discovery-seed-and-refresh.md) | Nomad server discovery with a seed list and tent-node refresh | Accepted; amended by 0027, 0030 and 0031 |
 | [0017](0017-api-driven-server-removal.md) | Remove Nomad servers through the Nomad API; ACPI shutdown is an optimization | Accepted; amended by 0030 and 0031 |
-| [0018](0018-vultr-provider-design.md) | Vultr provider design | Accepted (item 11 still provisional); amended by 0023, 0027, 0032 and 0033 |
+| [0018](0018-vultr-provider-design.md) | Vultr provider design | Accepted (item 11 still provisional); amended by 0023, 0027, 0032, 0033 and 0034 |
 | [0019](0019-combined-server-client-role.md) | A combined server+client role for dev and small clusters | Accepted; amended by 0031, 0032 and 0033 |
 | [0020](0020-release-channels-and-ci-conventions.md) | Release channels and CI conventions | Accepted; amended by 0028 |
-| [0021](0021-import-rules.md) | Import rules that list the allowed importers | Accepted; extended by 0025, 0026, 0027, 0028, 0031 and 0033 |
+| [0021](0021-import-rules.md) | Import rules that list the allowed importers | Accepted; extended by 0025, 0026, 0027, 0028, 0031, 0033 and 0034 |
 | [0022](0022-json-schema-from-go-types.md) | Generate the JSON Schema from the Go types | Accepted |
 | [0023](0023-vultr-inventory-dedupe-and-images.md) | Vultr inventory, dedupe, images and firewall groups | Accepted |
 | [0024](0024-cluster-pki-storage-and-certificates.md) | Cluster PKI storage and certificate details | Accepted; amended by 0031 and 0033 |
@@ -52,6 +52,7 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0028](0028-tent-node-agent-units-and-delivery.md) | tent-node agent, units and delivery | Accepted; amended by 0029 and 0030 |
 | [0029](0029-host-firewall-runtime-and-cni-on-nodes.md) | Host firewall, container runtime and CNI plugins on nodes | Accepted; amended by 0030 and 0032 |
 | [0030](0030-nomad-on-nodes.md) | Nomad on nodes | Accepted; amended by 0031, 0032 and 0033 |
-| [0031](0031-bootstrap-in-update.md) | Bootstrap in `update` | Accepted; amended by 0032 and 0033 |
+| [0031](0031-bootstrap-in-update.md) | Bootstrap in `update` | Accepted; amended by 0032, 0033 and 0034 |
 | [0032](0032-joined-label-scrub-and-delete-guard.md) | The joined label, the scrub and the delete guard | Accepted; amended by 0033 |
 | [0033](0033-operator-commands.md) | Operator commands: validate, export nomad and ui | Accepted |
+| [0034](0034-e2e-suite-on-vultr.md) | The E2E suite on Vultr | Accepted |

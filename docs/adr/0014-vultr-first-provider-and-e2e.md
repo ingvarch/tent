@@ -1,6 +1,7 @@
 # ADR-0014: Implement Vultr first and run the E2E suite on Vultr
 
-- **Status:** Accepted
+- **Status:** Accepted; the E2E rules (the janitor, the fallback region, the service user, the 60-minute run, serialized
+  runs, CI) amended by [ADR-0034](0034-e2e-suite-on-vultr.md)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0004](0004-layered-architecture.md), [ADR-0012](0012-testing-strategy.md) (E2E platform

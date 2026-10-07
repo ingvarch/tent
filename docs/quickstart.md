@@ -143,6 +143,8 @@ bootstrapping the ACL system
 bootstrapped the ACL system
 waiting for 3 healthy Nomad servers
 3 Nomad servers are healthy
+waiting for Nomad's keyring
+Nomad's keyring is ready
 waiting for node demo-nodes-0 to register
 node demo-nodes-0 registered
 scrubbing the user data of node demo-nodes-0
@@ -164,9 +166,10 @@ Applied: 3 created, 0 updated, 0 replaced, 0 deleted. Nodes: 3 created, 0 waited
   into a running Nomad agent. The first server has no peers to join; every later server and every client is given the
   servers that exist.
 - Once the servers have a leader, tent bootstraps the ACL system with the secret in the state store, then waits until
-  the servers are healthy. Then, for each combined node, it waits until the node has registered, replaces the node's
-  user data with a stub and labels the machine `tent/joined=true`. With separate clients it creates them after that,
-  each with an intro token, waits for each to register and scrubs it. Each of these waits takes at most 10 minutes.
+  the servers are healthy and Nomad's keyring has an active key, which signs intro tokens. Then, for each combined
+  node, it waits until the node has registered, replaces the node's user data with a stub and labels the machine
+  `tent/joined=true`. With separate clients it creates them after that, each with an intro token, waits for each to
+  register and scrubs it. Each of these waits takes at most 10 minutes.
 - `cluster.completed.yaml` in the state store holds the specs with every default that tent applied, among them the
   Nomad version. The first build also writes the cluster's CA, gossip key and ACL bootstrap secret there, and
   `nomad/bootstrapped`, the mark that the ACL system is bootstrapped.
