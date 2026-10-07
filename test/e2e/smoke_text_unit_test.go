@@ -102,3 +102,24 @@ func TestValidateArgsAcceptTheSingleServer(t *testing.T) {
 		t.Errorf("validateArgs = %q, want %q", got, want)
 	}
 }
+
+func TestDeleteInCleanup(t *testing.T) {
+	cases := []struct {
+		name                   string
+		ran, done, interrupted bool
+		want                   bool
+	}{
+		{"no delete ran", false, false, false, true},
+		{"delete exited 0", true, true, false, false},
+		{"delete failed on its own", true, false, false, false},
+		{"a signal ended the delete", true, false, true, true},
+		{"a signal after the delete exited 0", true, true, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := deleteInCleanup(tc.ran, tc.done, tc.interrupted); got != tc.want {
+				t.Fatalf("deleteInCleanup(%v, %v, %v) = %v, want %v", tc.ran, tc.done, tc.interrupted, got, tc.want)
+			}
+		})
+	}
+}

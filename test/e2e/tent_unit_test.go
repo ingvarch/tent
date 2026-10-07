@@ -49,17 +49,23 @@ func TestTentEnvReplacesTheXDGDirectoriesAndDropsTheStateVariables(t *testing.T)
 	}
 }
 
+// fakeProgram writes a sh script as a stand-in for the program name and returns its path.
+func fakeProgram(t *testing.T, name, body string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skipf("the fake %s is a /bin/sh script", name)
+	}
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
+		t.Fatalf("write the fake %s: %v", name, err)
+	}
+	return path
+}
+
 // fakeTent writes a sh script as a stand-in for the tent binary and returns its path.
 func fakeTent(t *testing.T, body string) string {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("the fake tent is a /bin/sh script")
-	}
-	path := filepath.Join(t.TempDir(), "tent")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
-		t.Fatalf("write the fake tent: %v", err)
-	}
-	return path
+	return fakeProgram(t, "tent", body)
 }
 
 const echoScript = `echo "args: $*"

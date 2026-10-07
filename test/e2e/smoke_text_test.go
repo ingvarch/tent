@@ -65,3 +65,9 @@ const validateWait = "5m"
 func validateArgs(cluster string) []string {
 	return []string{"validate", "cluster", cluster, "--wait", validateWait, "--allow-single-server"}
 }
+
+// deleteInCleanup tells whether the cleanup deletes the cluster: when no delete ran, or when a signal ended the
+// delete before it finished. A delete that failed on its own is not repeated.
+func deleteInCleanup(ran, done, interrupted bool) bool {
+	return !done && (!ran || interrupted)
+}
