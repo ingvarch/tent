@@ -131,6 +131,7 @@ var nomadLines = []string{
 	"waiting for a Nomad leader", "Nomad has a leader (10.64.0.3:4647)",
 	"bootstrapping the ACL system", "bootstrapped the ACL system",
 	"waiting for 3 healthy Nomad servers", "3 Nomad servers are healthy",
+	"waiting for Nomad's keyring", "Nomad's keyring is ready",
 	"scrubbing the user data of node prod-servers-0", "scrubbed the user data of node prod-servers-0",
 	"scrubbing the user data of node prod-servers-1", "scrubbed the user data of node prod-servers-1",
 	"scrubbing the user data of node prod-servers-2", "scrubbed the user data of node prod-servers-2",
@@ -537,6 +538,8 @@ func TestUpdateClusterApplyJSON(t *testing.T) {
 			{Type: "nomad", Step: "done", Action: "bootstrap"},
 			{Type: "nomad", Step: "started", Action: "healthy", Voters: 3},
 			{Type: "nomad", Step: "done", Action: "healthy", Voters: 3},
+			{Type: "nomad", Step: "started", Action: "keyring"},
+			{Type: "nomad", Step: "done", Action: "keyring"},
 		}
 		for _, n := range nodeNames[3:] {
 			wantNomad = append(wantNomad,

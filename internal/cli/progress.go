@@ -101,6 +101,10 @@ func nomadText(p app.Progress) string {
 			fmt.Sprintf("%d Nomad %s %s healthy", e.Voters, servers, verb),
 			fmt.Sprintf("failed to wait for %d healthy Nomad %s", e.Voters, servers),
 		}
+	case app.NomadKeyring:
+		lines = [3]string{
+			"waiting for Nomad's keyring", "Nomad's keyring is ready", "failed to wait for Nomad's keyring",
+		}
 	case app.NomadRegister:
 		lines = [3]string{
 			"waiting for node " + e.Node + " to register", "node " + e.Node + " registered",

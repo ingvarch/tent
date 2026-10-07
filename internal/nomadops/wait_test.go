@@ -182,6 +182,29 @@ func TestWaitHealthy(t *testing.T) {
 	})
 }
 
+// TestWaitKeyring checks that WaitKeyring goes on until the keyring has an active key, and calls once when it has.
+func TestWaitKeyring(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f, a := newFake()
+		f.SetLeader(leaderAddr)
+		f.SetKeyringDelay(2)
+		start := time.Now()
+
+		if err := nomadops.WaitKeyring(bounded(t), a); err != nil {
+			t.Errorf("WaitKeyring() = %v, want nil", err)
+		}
+		wantTook(t, start, 4*time.Second)
+		wantCalls(t, f, "KeyringReady", "KeyringReady", "KeyringReady")
+
+		start = time.Now()
+		if err := nomadops.WaitKeyring(bounded(t), a); err != nil {
+			t.Errorf("WaitKeyring() with a ready keyring = %v, want nil", err)
+		}
+		wantTook(t, start, 0)
+		wantCalls(t, f, "KeyringReady", "KeyringReady", "KeyringReady", "KeyringReady")
+	})
+}
+
 // wait is a call of one of the waits, on a cluster that it waits for.
 type wait struct {
 	name string
@@ -189,7 +212,7 @@ type wait struct {
 	run  func(context.Context, nomadops.API) error
 }
 
-// A wait of each kind: for the leader, for prod-workers-0, and for healthy servers with 3 voters.
+// A wait of each kind: for the leader, for prod-workers-0, for healthy servers with 3 voters, and for the keyring.
 var (
 	waitLeader = wait{"WaitLeader", "Leader", func(ctx context.Context, a nomadops.API) error {
 		got, err := nomadops.WaitLeader(ctx, a)
@@ -203,7 +226,8 @@ var (
 		got, err := nomadops.WaitHealthy(ctx, a, 3)
 		return noValue(got, err)
 	}}
-	waits = []wait{waitLeader, waitNode, waitHealthy}
+	waitKeyring = wait{"WaitKeyring", "KeyringReady", nomadops.WaitKeyring}
+	waits       = []wait{waitLeader, waitNode, waitHealthy, waitKeyring}
 )
 
 // errValue is the error of a wait that returned a value with its error.
@@ -290,6 +314,10 @@ func TestWaitsEndWithTheContext(t *testing.T) {
 			f.SetHealth(nomadops.Health{Healthy: true, Voters: 2})
 		}, waitHealthy.run, "nomad: wait for healthy servers with at least 3 voters" + ended +
 			"the servers are healthy, with 2 voters"},
+		{"a keyring without an active key", func(f *nomadfake.Fake) {
+			f.SetLeader(leaderAddr)
+			f.SetKeyringDelay(100)
+		}, waitKeyring.run, "nomad: wait for the keyring" + ended + "the keyring has no active key"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -322,6 +350,7 @@ func TestWaitWithAnEndedContext(t *testing.T) {
 		{waitLeader, "nomad: wait for a leader: context canceled"},
 		{waitNode, "nomad: wait for node prod-workers-0: context canceled"},
 		{waitHealthy, "nomad: wait for healthy servers with at least 3 voters: context canceled"},
+		{waitKeyring, "nomad: wait for the keyring: context canceled"},
 	} {
 		f, a := newFake()
 		f.SetLeader(leaderAddr)

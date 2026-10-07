@@ -470,6 +470,17 @@ func (c *worldClient) Health(ctx context.Context) (v nomadops.Health, err error)
 	return c.w.shapeHealth(v), nil
 }
 
+func (c *worldClient) KeyringReady(ctx context.Context) (v bool, err error) {
+	err = c.do(ctx, nomadfake.Call{Name: "KeyringReady"}, func(ctx context.Context) (err error) {
+		v, err = c.inner.KeyringReady(ctx)
+		return
+	})
+	if err != nil {
+		return false, err
+	}
+	return v, nil
+}
+
 // shapeNodes returns the nodes without those that a test dropped, and with the edits of the test.
 func (w *nomadWorld) shapeNodes(nodes []nomadops.Node) []nomadops.Node {
 	w.mu.Lock()

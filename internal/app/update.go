@@ -50,10 +50,13 @@ const (
 	NomadHealthy
 	// NomadRegister waits until a node has registered with the servers.
 	NomadRegister
+	// NomadKeyring waits until Nomad's keyring has an active key, so that intro tokens can be signed.
+	NomadKeyring
 )
 
 var nomadActionNames = [...]string{
 	NomadLeader: "leader", NomadBootstrap: "bootstrap", NomadHealthy: "healthy", NomadRegister: "register",
+	NomadKeyring: "keyring",
 }
 
 // String returns the action's name in lower case, such as leader.
@@ -132,9 +135,10 @@ func (s NodeStep) String() string {
 // completed spec, and applies the plan in this order: the infrastructure's changes other than its deletes; the deletion
 // of a stale mark of the bootstrap; the waits that repeat a create, then the creates, of the server and combined nodes;
 // the Nomad step, which waits for a leader, bootstraps the ACL system with the stored secret, waits for healthy servers
-// that all vote, reads the Raft configuration when the plan has a server or combined change, and then, for each server
-// and combined node of the plan in order, waits for a combined node to register, checks that its server votes at its
-// private address, and replaces its user data with a stub and labels its machine as joined, and last writes the mark;
+// that all vote and for an active key in Nomad's keyring, reads the Raft configuration when the plan has a server or
+// combined change, and then, for each server and combined node of the plan in order, waits for a combined node to
+// register, checks that its server votes at its private address, and replaces its user data with a stub and labels its
+// machine as joined, and last writes the mark;
 // then the waits for client nodes, the deletes of the clients that never registered and the creates of the missing
 // clients, each client booting with an intro token, registering, and then being scrubbed and labelled as a server is,
 // before the next is made; a wait for a client without an operation id asks for no token and calls no cloud until the
