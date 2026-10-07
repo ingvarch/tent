@@ -4,13 +4,12 @@ import (
 	"cmp"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/model"
+	"github.com/ingvarch/tent/internal/rollout"
 )
 
 // NodeAction is what an update does to one node. A plan holds NodeCreate, NodeWait and NodeDelete. NodeScrub is a step
@@ -203,14 +202,10 @@ func createNodes(cluster string, g model.NodeGroup, nodes []cloud.Instance, take
 		perZone[in.Zone]++
 	}
 	var creates []NodeChange
-	index := 0
 	for range g.Size - len(nodes) {
-		for taken[nodeName(cluster, g.Name, index)] {
-			index++
-		}
-		name := nodeName(cluster, g.Name, index)
+		name := rollout.FreeName(cluster, g.Name, taken)
 		taken[name] = true
-		zone := leastUsedZone(g.Zones, perZone)
+		zone := rollout.LeastUsedZone(g.Zones, perZone)
 		perZone[zone]++
 		creates = append(creates, NodeChange{
 			Action: NodeCreate, Name: name, Group: g.Name, Role: g.Role, Zone: zone,
@@ -218,22 +213,6 @@ func createNodes(cluster string, g model.NodeGroup, nodes []cloud.Instance, take
 		})
 	}
 	return creates
-}
-
-// nodeName returns the machine name of the node index of a group.
-func nodeName(cluster, group string, index int) string {
-	return cluster + "-" + group + "-" + strconv.Itoa(index)
-}
-
-// leastUsedZone returns the zone with the fewest nodes, the one listed first on a tie; "" when there are no zones.
-func leastUsedZone(zones []string, perZone map[string]int) string {
-	var best string
-	for i, z := range zones {
-		if i == 0 || perZone[z] < perZone[best] {
-			best = z
-		}
-	}
-	return best
 }
 
 // waitFor returns the wait for the machine in of group g, and whether there is one. It keeps the machine's name,
@@ -283,19 +262,7 @@ func clientRank(c NodeChange) int {
 
 // compareAge orders machines oldest first: by creation time, a machine without one last, then by ID.
 func compareAge(a, b cloud.Instance) int {
-	return cmp.Or(compareCreated(a.Created, b.Created), strings.Compare(a.ID, b.ID))
-}
-
-// compareCreated orders creation times, the earliest first; the zero time, an unknown one, counts as the latest.
-func compareCreated(a, b time.Time) int {
-	switch {
-	case a.IsZero() == b.IsZero():
-		return a.Compare(b)
-	case a.IsZero():
-		return 1
-	default:
-		return -1
-	}
+	return cmp.Or(rollout.CompareCreated(a.Created, b.Created), strings.Compare(a.ID, b.ID))
 }
 
 // compareName orders machines by name alone.

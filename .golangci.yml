@@ -49,6 +49,16 @@ linters:
           files: ["${base-path}/internal/english/**", "!$test"]
           allow:
             - $gostd
+        # internal/rollout decides the steps of rolling updates and removals from what the cloud and Nomad report, as
+        # pure functions: it imports the standard library, the API types, internal/english and x/mod/semver, and
+        # nothing that reaches a cloud, Nomad or the state store.
+        rollout-pure:
+          files: ["${base-path}/internal/rollout/**", "!$test"]
+          allow:
+            - $gostd
+            - github.com/ingvarch/tent/api/v1alpha1$
+            - github.com/ingvarch/tent/internal/english$
+            - golang.org/x/mod/semver$
         # internal/secrettest holds the checks that tests of every layer run, so it imports only the standard library.
         secrettest-stdlib-only:
           files: ["${base-path}/internal/secrettest/**", "!$test"]
