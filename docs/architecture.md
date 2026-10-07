@@ -379,7 +379,7 @@ Since Nomad 1.5 jobs default to `datacenters = ["*"]`, so mapping zones to datac
 │                  │   cloud.Provider ──► engine (plan/apply DAG)             │
 │                  │   ├─ vultr   (first)                                     │
 │                  │   └─ hetzner (second; aws later)                         │
-│                  └──► rollout / validate ──► nomadops (ACL, raft, drain)   │
+│                  └──► rollout ──► nomadops (ACL, raft, drain, proxy)       │
 └──────┬───────────────────┬──────────────────────────┬──────────────────────┘
        ▼                   ▼                          ▼
   S3 / file          Cloud API                Nomad API :4646 (mTLS + ACL)
@@ -425,7 +425,8 @@ github.com/ingvarch/tent
 │   ├── spec/            # multi-document YAML specs: strict decoding with file lines, encoding in field order
 │   ├── apischema/       # generates api/v1alpha1/tent.schema.json (make generate); not linked into tent
 │   ├── licenses/        # licence check and THIRD_PARTY_NOTICES (make licenses, make notices); not linked into tent
-│   ├── app/             # use cases; used by the CLI, e2e tests and a future controller
+│   ├── app/             # use cases, validate and operator access included; used by the CLI, e2e tests and a
+│   │                    # future controller
 │   ├── model/           # spec -> cloud-agnostic intents (network, access, rules between nodes, join, groups)
 │   ├── engine/          # task graph: plan/apply, diff rendering, retries, concurrency
 │   │   └── enginetest/  # ApplyReplan for provider task tests: apply, plan again, expect no changes
@@ -443,15 +444,17 @@ github.com/ingvarch/tent
 │   │   ├── retry/       # what tent-node's retries share: the answers worth another try, a sleep that ctx cancels
 │   │   └── nodeuptest/  # tests only: in-memory FS, scripted runner, fake Ubuntu with systemd, nft, apt and ufw;
 │   │                    # tars and zips, HTTPS and mTLS servers
-│   ├── nomadops/        # the ONLY importer of github.com/hashicorp/nomad/api: mTLS client, ACL bootstrap, waits
+│   ├── nomadops/        # the ONLY importer of github.com/hashicorp/nomad/api: mTLS client, ACL bootstrap and tokens,
+│   │                    # waits, the proxy of tent ui
 │   │   └── nomadfake/   # in-memory Nomad cluster behind nomadops.API, for the app's tests
 │   ├── rollout/         # scale up/down, rolling update, server quorum safety
-│   ├── validate/        # cloud + Nomad health checks
 │   ├── pki/             # CA, node and operator certificates, gossip key, ACL bootstrap secret
 │   ├── secret/          # the Secret type of keys and tokens, which never prints
 │   ├── uuid/            # random lower-case UUIDs of version 4: operation ids, the ACL bootstrap secret
 │   ├── english/         # lists as English sentences write them, "a, b and c", for messages
 │   ├── secrettest/      # tests only: looks for a secret in what tent prints or logs
+│   ├── shellenv/        # env lines for fish and sh, for the tools whose output a shell runs
+│   │   └── shellenvtest/ # tests only: runs the lines in a real sh and fish
 │   ├── statestore/      # Store interface, file:// and s3://, layout, locking
 │   ├── s3url/           # s3:// URLs of a bucket and prefix, and their S3 clients: the state store, dev uploads
 │   │   └── s3urltest/   # tests only: keeps the developer's AWS configuration out of a test
@@ -462,15 +465,15 @@ github.com/ingvarch/tent
 │   ├── buildinfo/       # version, commit, date (ldflags); which release a version counts as
 │   └── buildconfig/     # tests only: CI, Makefile and release config agree; what tent-node links
 ├── test/e2e/            # //go:build e2e: black-box tests against real clouds (Vultr first)
-├── hack/                # tent-node-upload/ (dev builds), tent-node-userdata/ (VM check), tent-operator/
-│   │                    # (operator access before export nomad), vultr-spike/, janitor
-│   └── internal/shellenv/ # env lines for fish and sh; shellenvtest/ is tests only
+├── hack/                # tent-node-upload/ (dev builds), tent-node-userdata/ (VM check), vultr-spike/, janitor
 └── docs/                # this document, ADRs, platform notes, roadmap
 ```
 
 The node planner of M1, which scales node groups without Nomad ([13.4](#134-scaling)), is in `internal/app`. It moves
 to `internal/rollout` with the drain and the quorum checks
-([ADR-0005](adr/0005-immutable-nodes-and-nomad-aware-rollouts.md)).
+([ADR-0005](adr/0005-immutable-nodes-and-nomad-aware-rollouts.md)). `validate cluster` is in `internal/app` as well,
+since it reuses that planner ([13.6](#136-tent-validate-cluster---wait-duration),
+[ADR-0033](adr/0033-operator-commands.md)).
 
 `depguard` in golangci-lint enforces the dependency rules ([ADR-0021](adr/0021-import-rules.md)):
 
@@ -496,9 +499,11 @@ to `internal/rollout` with the drain and the quorum checks
   import of the API module in `internal/app` code, in an `internal/app` test and in `cmd/tent`, and an import of the
   root module in `internal/nomadops`, gave four findings; the API module in `internal/nomadops` gave none.
 - Since M2.7a `internal/app`, `internal/cli` and `cmd/tent` import `internal/nomadops` in non-test code, so the `tent`
-  binary links `nomad/api`. `internal/cli` also imports `internal/assets` and `internal/channels` for its options;
-  `internal/cli` has the options `WithAssets` and `WithNomad`; the channel list has no option: the tests of
-  `internal/cli` set the unexported `channels` field of its options, which goes to `Service.Channels`.
+  binary links `nomad/api`. `internal/cli` also imports `internal/assets` and `internal/channels` for its options, and
+  `internal/shellenv` for the lines of `export nomad`. `internal/cli` has the options `WithProviders`, `WithAssets`,
+  `WithNomad` and, since M2.8, `WithNomadProxy`, which gives `tent ui` the handler of `nomadops.NewProxy`; the channel
+  list has no option: the tests of `internal/cli` set the unexported `channels` field of its options, which goes to
+  `Service.Channels`.
 - `internal/nomadops/nomadfake`, tests included, imports no Nomad module: it stands in for Nomad with the types of
   `internal/nomadops` alone (`nomadfake-no-nomad`). It imports `testing`, so only tests import it.
 - `internal/pki` imports only the standard library, `internal/uuid`, `internal/secret` and `api/v1alpha1`, so the
@@ -509,7 +514,7 @@ to `internal/rollout` with the drain and the quorum checks
   [ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md),
   [ADR-0031](adr/0031-bootstrap-in-update.md)). Only tests import `internal/secrettest`,
   `internal/nomadops/nomadfake`, `internal/nodeup/nodeuptest`, `internal/s3url/s3urltest`,
-  `internal/assets/assetstest` and `hack/internal/shellenv/shellenvtest`.
+  `internal/assets/assetstest` and `internal/shellenv/shellenvtest`.
 - `internal/nodeconfig`, the contract that tent-node decodes, imports only the standard library, `internal/secret`
   and `api/v1alpha1`. Its tests are exempt ([ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)).
 - Only tests import `github.com/hashicorp/hcl`: they parse the rendered Nomad configuration back with HCL1. No code
@@ -1347,11 +1352,16 @@ from the CA without storing them (M2.7a). The storage and certificate details ar
     Nomad region, `spec.nomad.region` (default `global`), not the cloud region;
   - extended key usage is `serverAuth` **and** `clientAuth`, because tent-node's join refresh calls the servers' HTTP
     API with the node certificate;
-  - validity is 1 year, and renewal means replacement; `tent validate` warns 30 days before expiry.
+  - validity is 1 year, and renewal means replacement. `tent validate cluster` warns 30 days before the end and fails
+    after it. tent stores no node certificate, so it reads the end as the machine's creation time plus one year
+    (`pki.NodeCertificateEnd`, which `IssueNode` uses too): an estimate, since the machine is created after its
+    certificate is issued. A machine without a creation time is not checked. The CA's end is checked the same way
+    ([13.6](#136-tent-validate-cluster---wait-duration)).
 - **No node IP addresses in certificates**, only `127.0.0.1`. The CLI connects to a server's public IP with
   `TLSServerName = server.<region>.nomad`, so server IPs can change freely.
 - **Operator certificates** use `cli.<region>.nomad`, with `clientAuth` only. They are short-lived and issued on
-  demand by `tent export nomad`, whose TTL defaults to 24 hours. `internal/pki` takes any TTL above zero.
+  demand by `tent export nomad`, whose `--ttl` defaults to 24 hours, and by `tent ui`, which uses 24 hours
+  ([9.7](#97-operator-access)). `internal/pki` takes any TTL above zero.
 - **mTLS** is on for RPC and HTTP: `verify_server_hostname = true`, and `verify_https_client = true` by default.
 - **tent-node's calls** to Nomad's HTTP API (`join`, `refresh-join` and `verify`, M2.6b,
   [ADR-0030](adr/0030-nomad-on-nodes.md)) use `net/http` and `crypto/tls` alone, since `nomadops` would link
@@ -1387,7 +1397,18 @@ from the CA without storing them (M2.7a). The storage and certificate details ar
   - So a bootstrap whose answer was lost is safe to repeat. The lost call fails with `ErrNotReady`, since its outcome
     is unknown, and the next call finds the bootstrap done and verifies the secret.
 - **The bootstrap token is used only by tent itself.** Scoped tokens with TTLs for tent's own operations come later.
-- **For humans**, `tent export nomad` issues a separate ACL token with a TTL.
+- **For humans**, `tent export nomad` and `tent ui` each make a separate management token with a TTL
+  (`nomadops.CreateToken`, `PUT /v1/acl/token`, [ADR-0033](adr/0033-operator-commands.md)).
+  - The token's name is `tent <purpose> <owner>@<host>`, such as `tent export nomad igor@laptop`, with the owner and
+    host as the cluster lock names its holder. Nomad makes the accessor and the secret and keeps the token; tent
+    keeps neither.
+  - Nomad allows a TTL from 1 minute to 24 hours unless its servers are set otherwise. tent does not check that and
+    shows Nomad's refusal, which reads like `nomad: PUT /v1/acl/token: 400: token 0 invalid: 1 error occurred: *
+    expiration time cannot be more than 24h0m0s in the future (was 24h1m0s)`.
+  - It is a management token, since tent owns no ACL policy yet. The TTL is the limit.
+  - A call that fails or loses its answer may leave a token that nobody holds. It ends with its TTL, as do the token
+    of an earlier export and the token of a `tent ui` that has ended. `nomad acl token delete <accessor>` revokes one
+    early.
 
 ### 9.3 Client introduction
 
@@ -1503,7 +1524,8 @@ User data then carries no secrets at all. Credential delivery is therefore a str
   - ICMP from anywhere, IPv4 and IPv6;
   - 4646/tcp to servers from `access.api`. Left out, `access.api` is `[0.0.0.0/0]`, because mTLS and ACL protect the
     API. An explicit empty list is a validation error, because the tent CLI reaches the servers through this port.
-    `validate` and every mutating command warn loudly while it is open to the whole internet.
+    `validate cluster` and the commands that change a cluster warn loudly while it is open to the whole internet
+    ([14](#14-cli)).
 
   Everything else is dropped.
 - **Hetzner** firewalls are applied both by label selector and explicitly at server creation. **Vultr** sets the
@@ -1526,11 +1548,148 @@ User data then carries no secrets at all. Credential delivery is therefore a str
 
 ### 9.7 Operator access
 
-- **`tent export nomad`** writes `NOMAD_ADDR`, `NOMAD_CACERT`, `NOMAD_CLIENT_CERT`, `NOMAD_CLIENT_KEY`,
-  `NOMAD_TLS_SERVER_NAME` and `NOMAD_TOKEN` into files and prints the matching `export` lines. The certificate and the
-  token are short-lived.
-- **`tent ui`** is a local reverse proxy from `127.0.0.1:4646` to the cluster that injects mTLS and the token. The
-  browser UI works without installing client certificates, and `verify_https_client = true` stays on.
+**Built in M2.8** ([ADR-0033](adr/0033-operator-commands.md)): `tent export nomad` and `tent ui`. Neither hands the
+operator the CA key or the ACL bootstrap secret.
+
+- **`Service.OperatorAccess(ctx, cluster, purpose, ttl)`** makes the access for both commands. A TTL that is not above
+  zero fails first, with `operator access: TTL 0s is not above zero`.
+  - **It reads** the state store (the tent version, the stored specs with their defaults and without validation, so no
+    `--allow-single-server`, the four secrets and the mark `nomad/bootstrapped`), then the cloud's list of the
+    machines, then it calls Nomad once. It writes nothing and takes no lock.
+  - **It makes** a management token ([9.2](#92-acl-and-tokens)) and an operator certificate: `cli.<region>.nomad`,
+    client authentication only, a new ECDSA P-256 key, valid from 5 minutes before now for the TTL and never past the
+    CA ([9.1](#91-pki)). A certificate that cannot be issued leaves no token. It is made in memory.
+  - **It returns** `app.Access`: the cluster, the Nomad region, the servers' API addresses as `host:port`, the CA
+    bundle (public), the certificate and its key, the token's secret and accessor, and when the access ends (in UTC,
+    the earlier of the token's end and the certificate's end). The key and the secret are `secret.Secret`, so printing
+    an `Access` shows their sizes only.
+  - **The servers** are the cluster's machines with a server or combined role label and a public address, also a
+    stopped one or one that the specs no longer want, ordered by name. The server that answered the token call comes
+    first. A call that fails with `ErrNotReady` moves to the next server.
+  - **Errors,** each before any Nomad call unless it says otherwise:
+    - `cluster prod: the state store lacks pki/private/ca.key and pki/ca-bundle.pem; run tent update cluster --yes
+      first`, with the missing paths of the layout; a stored secret that does not load fails as in `update`;
+    - `cluster prod: Nomad is not bootstrapped yet (prod/nomad/bootstrapped is missing); run tent update cluster --yes
+      first`;
+    - `cluster prod has no server machine; run tent update cluster --yes first`;
+    - `cluster prod: no server has a public address`, and `no Nomad client is set up` when the service has no way to
+      reach Nomad;
+    - `create the operator token: <cause>`, and after an error that matches `ErrNotReady`, also a cluster without a
+      leader, the hint `; tent reaches the servers on port 4646: check spec.access.api`.
+  - **Safe to repeat.** Each call makes a new token and certificate; for the tokens that stay, see
+    [9.2](#92-acl-and-tokens).
+- **`tent export nomad [NAME] [--ttl 24h] [--dir DIR] [--shell sh|fish]`** writes the access to four files and prints
+  the lines that use them.
+  - **The files** are `ca.pem` (the CA bundle), `cli.pem` (the certificate), `cli-key.pem` (its key, PKCS#8 PEM) and
+    `token` (the token's secret, one line without a line end). The CA key and the bootstrap secret are in none of them.
+  - **The directory** is `--dir` (made absolute), else `$XDG_CACHE_HOME/tent/<cluster>`, else
+    `~/.cache/tent/<cluster>`, on every operating system; a relative `XDG_CACHE_HOME` is ignored. A directory that does
+    not exist is made with mode 0700, and one that exists keeps its mode. When `OperatorAccess` fails, a directory
+    that this run made is removed again, that one directory only and only while it is empty; one that existed stays as
+    it was. The files have mode 0600 (on Unix). Two state
+    stores with a cluster of the same name share the directory; `--dir` separates them.
+  - **The files are written in two steps.** Each goes to a temporary file `.<name>-*` in the directory, created with
+    mode 0600. When all four are written, they are renamed over their places in the order `ca.pem`, `cli.pem`,
+    `cli-key.pem`, `token`. So a `nomad` that runs meanwhile reads a whole file, and a later run replaces the files of
+    an earlier one. A write that fails removes every temporary file, reads `write <path>: <cause>` and leaves the files
+    of an earlier run as they were. A rename that fails reads the same and leaves the files renamed before it, so old
+    and new files can then sit side by side.
+  - **The order:** `--shell`, `--ttl` (`invalid --ttl 0s: must be above zero`) and the cluster's name are checked, the
+    directory is made, then `OperatorAccess` runs, then the files are written. So a directory that cannot be made
+    leaves no token.
+  - **stdout** has six lines and nothing else, for sh:
+
+    ```
+    export NOMAD_ADDR='https://203.0.113.5:4646'
+    export NOMAD_CACERT='/home/igor/.cache/tent/prod/ca.pem'
+    export NOMAD_CLIENT_CERT='/home/igor/.cache/tent/prod/cli.pem'
+    export NOMAD_CLIENT_KEY='/home/igor/.cache/tent/prod/cli-key.pem'
+    export NOMAD_TLS_SERVER_NAME='server.global.nomad'
+    export NOMAD_TOKEN="$(cat '/home/igor/.cache/tent/prod/token')"
+    ```
+
+    For fish each line reads `set -gx NAME 'value'`, and the last `set -gx NOMAD_TOKEN (cat '<dir>/token')`. `--shell`
+    defaults to fish when `$SHELL` names fish, else sh; any other value is `invalid --shell "x": want sh or fish`.
+  - **Why the last line reads the file.** The `nomad` CLI reads the token from `NOMAD_TOKEN` or `-token` only and has no
+    variable for a file (`api/api.go` at v2.0.7, [platform notes §1.2](platform-notes.md#12-features-tent-relies-on)).
+    A line with the secret would put a secret on stdout. In fish `(cat file)` splits a file of several lines into a
+    list, and the token file holds one line.
+  - **`NOMAD_ADDR`** is the server that answered the token call. A server's certificate holds no address but
+    `127.0.0.1` ([9.1](#91-pki)), so `NOMAD_TLS_SERVER_NAME` is needed: without it the CLI cannot verify the
+    certificate for the server's public address. By Go's x509 the error reads `x509: certificate is valid for
+    127.0.0.1, not <ip>` (not run against a tent server; the local run of 2026-10-06, whose certificate had no IP
+    address, read `... because it doesn't contain any IP SANs`).
+  - **stderr** says `wrote the Nomad access of cluster prod to /home/igor/.cache/tent/prod; it works until 2026-10-07
+    12:00:00 UTC (token accessor <accessor>)`. The accessor is no secret.
+  - **`-o json` and `-o yaml`** print `cluster`, `dir`, `address` (the whole `https://host:port`), `caCert`,
+    `clientCert`, `clientKey`, `tlsServerName`, `tokenFile`, `tokenAccessor` and `expires` (RFC 3339, UTC, whole
+    seconds), and no shell line. Windows and PowerShell users take these until PowerShell lines exist.
+  - **The operator** runs `eval "$(tent export nomad prod)"` in sh, bash or zsh, or `tent export nomad prod | source` in
+    fish, and then `nomad server members` or `nomad job run`. After the TTL, the same command again.
+  - The token's secret and the key are never printed, and `-v` and `-vv` log neither.
+- **`tent ui [NAME] [--listen 127.0.0.1:4646]`** serves a reverse proxy to the cluster on a loopback port, so the
+  browser UI and the `nomad` CLI work with `verify_https_client = true` on and no certificate or token on the operator's
+  side ([ADR-0033](adr/0033-operator-commands.md)). `internal/nomadops` holds the proxy (`NewProxy`, `ProxyConfig`).
+  - **What it does to a request.** It passes the request to one of the servers at `https://<public IP>:4646` over mTLS:
+    TLS 1.2 or newer, the cluster's CA as the only root, the operator certificate, the name `server.<region>.nomad`. It
+    sets `X-Nomad-Token` to the token that `OperatorAccess` made for this run (purpose `ui`, 24 hours), in place of any
+    token the request carried, and drops `Origin` and `Authorization`. It streams the answer as it comes
+    (`FlushInterval: -1`), passes websocket upgrades through, and never follows a redirect. `HTTPS_PROXY` and `NO_PROXY`
+    apply to it, as to `nomadops.New`. It speaks HTTP/1.1 to the servers, so each open request, such as a blocking
+    query of the UI, holds one connection, and a Nomad server takes 100 connections from one address by default
+    (`limits.http_max_conns_per_client`; not measured through the proxy).
+  - **Servers.** It uses the first server until a request reaches no server. That request gets 502 `bad gateway: no
+    Nomad server answered`, and the next request goes to the next server. An error status from a server does not move
+    it on, and neither does a caller that gave up.
+  - **Who may use the port.** While `tent ui` runs, a request to the port acts with a management token. So:
+    - `--listen` takes `host:port` where the host is `localhost` (in any case) or an address in `127.0.0.0/8` or `::1`,
+      and the port a number from 0 to 65535 (0 lets the system pick). An IPv4-mapped address, an address with a zone,
+      `127.1`, another name and an empty host are refused: `--listen 0.0.0.0:4646: tent ui listens on a loopback
+      address only`, `--listen x: want host:port, such as 127.0.0.1:4646`, `--listen 127.0.0.1:http: the port must be a
+      number from 0 to 65535`. The check comes before the cluster's name and before any call, and the listener's real
+      address is checked again;
+    - a request whose `Host` is not the listener's own address, or `localhost` with the listener's port, gets 403
+      `forbidden: unexpected Host`;
+    - a request with an `Origin` gets 403 `forbidden: unexpected Origin` unless it is exactly one `http` origin whose
+      host and port are the request's `Host`; one with a `Sec-Fetch-Site` gets 403 `forbidden: cross-site request`
+      unless it is the single value `same-origin` or `none`;
+    - a request with neither header, such as the Nomad CLI's, passes;
+    - the 403 comes before anything goes to a server. Nomad's CORS answers cover 14 endpoints, and a blind `no-cors`
+      POST from a page of another port wrote to Nomad even with `Origin` removed (a run of 2026-10-06, [platform notes
+      §1.2](platform-notes.md#12-features-tent-relies-on)), so dropping `Origin` is not enough;
+    - a link to the UI on a page of another site is a cross-site request and gets 403 too: the operator opens the
+      address from the terminal, or types or pastes it;
+    - every process of every user on the operator's machine can still use the port. `kubectl proxy` has the same
+      property. Such a process can read the token's secret from `GET /v1/acl/token/self` and, with a management
+      token, make tokens that do not expire; the end of the session undoes none of that;
+    - two kinds of GET from a web page still pass, by the Fetch Metadata rules (not tried in a browser): a navigation
+      that the user typed and that another site redirects to the port carries `Sec-Fetch-Site: none`, and a browser
+      that sends no fetch metadata (Safari before 16.4) sends neither header with a cross-site GET. The page cannot
+      read the answer of either.
+  - **What the browser keeps.** The UI calls `/v1/acl/token/self` on every load and stores the secret of the answer in
+    `localStorage` for `http://127.0.0.1:<port>`. So the browser holds the session's token until it expires after 24
+    hours. It is no use without a client certificate of the cluster's CA.
+  - **Order.** `--listen` is checked, the listener is opened (so a busy port leaves no token), `OperatorAccess` runs,
+    the proxy is built with the listener's real address, then tent prints and serves. A context that ends before the
+    server starts is `interrupted` with exit code 1.
+  - **stdout:** `Nomad UI of cluster prod: http://127.0.0.1:4646/ui/`, or with `-o json` and `-o yaml` one object with
+    `cluster`, `url` and `expires`. **stderr:** `the Nomad CLI works through it with NOMAD_ADDR=http://127.0.0.1:4646;
+    press Ctrl-C to stop; the session ends at 2026-10-07 12:00:00 UTC`. With `-v` the log has one line per request:
+    method, path and status, never a header or the query. tent opens no browser.
+  - **The end.** Nomad answers an expired token as it answers a missing right on `/v1/jobs` and the autopilot report
+    (403 `Permission denied`); only `/v1/acl/token/self` says `ACL token expired`
+    ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)). So the session's end is tent's own clock.
+    The session ends at Ctrl-C, or when the operator's wall clock reaches the end of the access, which tent
+    reads at least once a minute: a Go timer does not count the time that the machine sleeps. tent then closes the
+    listener, waits up to 5 seconds for open requests, closes what stays open and exits with 0. When the clock ends
+    the session, stderr gets `the session of tent ui ended: its certificate and token expired; run it again`; Ctrl-C
+    prints nothing more. An upgraded connection, such as an exec, is ended by the process's exit. The token
+    is not deleted: it expires. The server has a read header timeout of 10 seconds and no other limit.
+  - **Limits.** The UI's log view first calls the node's own HTTP address from the browser, which fails, and falls back
+    to the server through the proxy after a delay. The port is a loopback port of the machine that runs tent: from
+    another machine it is reached through an SSH tunnel with the same local port (`ssh -L 4646:127.0.0.1:4646`), since
+    a `Host` with another port gets 403. Not tested: a page left open across a restart of `tent ui` with a new token,
+    a real sleep of the machine, and whether the UI falls back to polling when a websocket fails.
 - **tent's own calls** go through `nomadops.Client` (built in M2.4, used by `update` since M2.7a):
   - `update` makes one client per server with a public address, at `<public IP>:4646`, and uses them as one API
     (`nomadops.Servers`, [13.2](#132-tent-update-cluster---yes)). Its operator certificate lasts 24 hours, is made in
@@ -1702,6 +1861,8 @@ take a cluster lock. `statestore.NewLocker` picks the first mechanism that fits 
   server stays atomic under concurrent writers: S3Proxy and S3Mock pass it and are not. Before trusting a
   self-hosted server, set `TENT_TEST_S3_URL` to a bucket on it and run
   `go test -race -count=1 -run S3 ./internal/statestore/`, which includes the race tests.
+- **The holder's name** `owner@host`, the OS user and the host name, comes from `statestore.LocalHolder`, which the
+  lease of a lock and the name of an operator token ([9.2](#92-acl-and-tokens)) share.
 - **The lease** records a random holder ID, the owner (the OS user), host, pid, operation, acquired-at and
   expires-at. Rows 2 and 4 keep it in `<cluster>/lock`. Under flock it sits next to the lock file, in
   `.tent-locks/<cluster>.lease`, because Windows keeps other processes from reading a locked file.
@@ -2067,7 +2228,8 @@ create that may have been carried out is never sent again.
 
 - **One failure domain.** A Vultr cluster lives in a single data center. There are no availability zones and no
   placement or anti-affinity parameters. Three servers survive the loss of a VM, not of the data center, and there is
-  no guarantee that they run on different hosts. `validate` states this.
+  no guarantee that they run on different hosts. `validate cluster` warns about the single failure domain
+  ([13.6](#136-tent-validate-cluster---wait-duration)).
 - **Preflight.** `Validate` checks the specs against the live API before tent changes anything. It fills in the
   defaults on copies and makes three calls:
   1. `GET /v2/regions/{region}/availability`: the plans of every type that the region can deploy now. An unknown
@@ -2443,7 +2605,8 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
 **Built in M2.4, used since M2.7a.** `internal/nomadops` holds the calls that the Nomad step and the clients need, and
 `nomadfake` stands in for Nomad in the app's tests ([15](#15-testing)).
 - **Calls.** `nomadops.API` has `Leader`, `Bootstrap` ([9.2](#92-acl-and-tokens)), `IntroToken`
-  ([9.3](#93-client-introduction)), `Nodes`, `Peers` (M2.7b) and `Health`. A `Client` talks to one server
+  ([9.3](#93-client-introduction)), `CreateToken` (M2.8, [9.2](#92-acl-and-tokens)), `Nodes`, `Peers` (M2.7b) and
+  `Health`. A `Client` talks to one server
   ([9.7](#97-operator-access)); the caller moves to the next server when a call fails with `ErrNotReady`. Make one
   client per server and reuse it: its idle connections stay open for 90 seconds, and a server takes at most 100 HTTP
   connections from one address.
@@ -2453,11 +2616,15 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
   write the outcome is then unknown. When the caller's context ends, the error matches the context's error instead.
   TLS failures and every other 4xx are permanent. Messages read like `nomad: PUT /v1/acl/bootstrap: 400: …`.
 - **Answers.** `Leader` takes an empty leader as no leader. `Health` takes the 429 of an unhealthy cluster as a
-  report, not an error, and returns whether the servers are healthy and how many vote. `Nodes` reads `/v1/nodes`
+  report, not an error, and returns whether the servers are healthy, how many vote and, since M2.8, each server of the
+  report as a `ServerHealth`: its name (`<name>.<region>`), its Raft address, Serf's status of it, whether it is
+  healthy, votes and leads, and its Nomad version. Nomad changes the order of the servers between calls, so a caller
+  finds a server by address or name. `Nodes` reads `/v1/nodes`
   itself, skips `null` elements and keeps the server's order: the API module's `Nodes().List` panics on a `null`.
   A name can appear twice, for a node that went down and its replacement. Each node carries its address, the host of
   the HTTP address that the client advertises: with tent's configuration, the node's private address
-  ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)). `Node.Is(name, addr)` tells a node by both.
+  ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)), and the Nomad version that it runs.
+  `Node.Is(name, addr)` tells a node by both.
   `Peers` (`GET /v1/operator/raft/configuration`) returns each server of the Raft configuration with its name, its
   Raft address and whether it votes. Nomad answers it only to a management token, and names a server `(unknown)`
   when no Serf member has its Raft address ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)).
@@ -2480,9 +2647,24 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
     wait for a leader: context deadline exceeded; last: nomad: no server is ready: …`.
   - `NewServers` fails with `nomad: no servers` or `nomad: server <address> has no API`. It is safe for concurrent
     use, and printing it with any verb shows the addresses alone.
+- **`Servers.Last()`** (M2.8) is the address of the server that answered the last call that returned no error, which
+  the next call asks first; before any such call it is the first server's. `export nomad` prints it as `NOMAD_ADDR`.
+  `Servers.CreateToken` moves on after `ErrNotReady` as the other writes do, so a lost answer leaves a token that
+  nobody holds, one per server at most.
+- **`CreateToken`** (M2.8) sends one `PUT /v1/acl/token` with the name, `Type: "management"` and the TTL as a Go
+  duration (`24h0m0s`); the token is not global. Before any request it fails with `nomad: ACL token: no name` or
+  `nomad: ACL token: TTL 0s is not above zero`. An answer without a secret is the permanent error `nomad: PUT
+  /v1/acl/token: the answer holds no secret`, and one without an end `... the answer holds no end`. The client's own
+  token must be a management token. A `Token` prints without its secret.
+- **`nomadops.NewProxy`** (M2.8) is the handler of `tent ui` ([9.7](#97-operator-access)). It shares the checks and the
+  TLS settings of `New`.
 - **`nomadfake`** logs the server that each call reached (`Call.Server`, the `Address` of the `Config` that made the
-  client), so a test can show that the app moved to the next server. It lists nodes with an address, serves the peers
-  that a test sets (`SetPeers`), and fails `Peers` before the bootstrap as Nomad's 403 does.
+  client), so a test can show that the app moved to the next server. It lists nodes with an address and a version,
+  serves the peers that a test sets (`SetPeers`) and the servers of the health report, and fails `Peers` before the
+  bootstrap as Nomad's 403 does. Since M2.8 `CreateToken` gives a new accessor and secret for each call, ends the token
+  at its clock plus the TTL, answers a TTL under a minute or over 24 hours with Nomad's text, fails with `permission
+  denied` before the bootstrap, and lists each token it issued, also one whose answer was lost, by name, TTL and
+  accessor and never by secret (`Issued()`).
 
 **Built in M2.7a.** The flow of `update` with Nomad ([ADR-0031](adr/0031-bootstrap-in-update.md)). It is in
 `internal/app` and reaches Nomad only through `internal/nomadops`.
@@ -2630,8 +2812,9 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
   scrubbed after they are healthy and before the mark is written, and each client is scrubbed right after it
   registers. The day-1 configuration (step 6, without node pools: decision
   17 of [18](#18-open-questions)) is not built.
-- The drain and the purge (step 9), `validate` and the history (step 11) and the report of outdated nodes (step 12)
-  are not built yet.
+- The drain and the purge (step 9), the history (step 11) and the report of outdated nodes (step 12) are not built
+  yet. `tent validate cluster` is built ([13.6](#136-tent-validate-cluster---wait-duration)), but `update` does not call
+  it at its end: that part of step 11 stays a target.
 
 `update` never replaces existing nodes. With Nomad it reports outdated nodes and why. Replacement is always explicit.
 
@@ -2804,20 +2987,101 @@ cni:
 - It never downgrades, and neither does `rolling-update`.
 - **Later:** an opt-in in-place upgrade strategy (swap the binary and restart).
 
-### 13.6 `tent validate cluster [--wait 10m]`
+### 13.6 `tent validate cluster [--wait DURATION]`
 
-- **Cloud checks.** Every group has `size` running machines. There are no unknown machines with the cluster marker
-  and no duplicates.
-  - Lock state is reported.
-  - On Vultr, it warns about the single failure domain.
-- **Nomad checks.**
-  - A leader exists, and every expected server is an alive voter.
-  - Autopilot is healthy.
-  - Every expected client is `ready` and eligible.
-  - Nomad versions are consistent.
-  - Certificate expiry is more than 30 days away.
-- **Output.** A table of failures. `--wait` loops until the cluster is valid, and the exit code is non-zero while it
-  is not.
+**Built in M2.8** ([ADR-0033](adr/0033-operator-commands.md)): `tent validate cluster [NAME] [--wait DURATION]
+[--allow-single-server]`. It compares the machines and Nomad with the specs, prints what differs, and exits with 2
+while something does. It is `Service.ValidateCluster` in `internal/app`.
+
+- **Reads only.** It reads the state store, the cloud and Nomad, writes nothing and takes no lock.
+  - The state store: the specs, loaded and validated as `update` loads them (`loadCluster`: defaults, `checkCluster`,
+    the pinned Nomad version, the model), so a single server needs `--allow-single-server`; the four secrets; the
+    mark `nomad/bootstrapped`; and who holds the cluster's lock (`statestore.Holder`,
+    which reads the lease without choosing a lock mechanism: no `Capabilities` probe and no write, and on a store that
+    is no file store an expired lease reads as a free lock).
+  - The cloud: one `Nodes.List`. No inventory, no preflight, no release file.
+  - Nomad: one round is `Leader`, `Peers`, `Health` and `Nodes`, once each and in this order, through every server or
+    combined machine that stays and has a public address, with tent's own access (an in-memory operator certificate and
+    the bootstrap secret, as `update` has).
+- **The machines** are judged by the node planner of `update` ([13.4](#134-scaling)) over the cluster's machines, with
+  no machine that never registered: each node change that `update` would plan is a failure, and so is a machine that
+  stays and that the cloud does not report as running or that has no joined label. So what `update` would change and
+  what `validate` reports cannot differ. `validate` runs the node planner, not the whole plan of `update`
+  ([ADR-0033](adr/0033-operator-commands.md)).
+- **The failures.** A failure has a check, a node (left out for a failure of the whole cluster, shown as `-`), the
+  machine's ID and a detail. The check names are in the JSON, so they stay.
+
+  | Check | What it compares | Detail |
+  |---|---|---|
+  | `machine-missing` | a group's machines with its size | `no machine: node group workers has 1 of its 2` |
+  | `machine-not-running` | `Instance.Ready` of a machine that stays | `the cloud reports its machine (ID instance-4) as not running` |
+  | `machine-surplus` | a group's machines with its size | `machine ID instance-6 is one more than the size of node group workers, 2` |
+  | `machine-duplicate` | the names of the machines | `machine ID instance-9 has the name of machine ID instance-4` |
+  | `machine-unknown` | a machine's group label with the specs | `machine ID instance-7 is of node group old, which the specs do not have`, or `machine ID instance-7 has no node group label` |
+  | `not-joined` | the `tent/joined` label of a machine that stays | `machine ID instance-3 has not joined Nomad: it carries no tent/joined label` |
+  | `nomad-not-set-up` | the secrets, the mark, a server's public address | `the state store lacks <paths>`, `Nomad is not bootstrapped yet: tent update cluster --yes bootstraps it`, or `no server has a public address`, checked in this order; Nomad is not asked |
+  | `nomad-no-leader` | the first call of the round that fails | `Nomad has no leader, or tent cannot reach it: <error>; tent reaches the servers on port 4646: check spec.access.api`; the error of `Peers`, `Health` or `Nodes` is also this check, with the step in front of it (`read the Raft configuration: `, `read autopilot's health: `, `list the nodes: `); the rest of the round is skipped |
+  | `server-no-vote` | each expected server with the Raft configuration | `no server votes at its address 10.64.0.4`, `its server at 10.64.0.5:4647 has no vote`, or `the cloud reports no private address for it` |
+  | `server-unknown` | each Raft peer with the expected servers | `the Raft configuration lists a server at 10.64.0.9:4647 (prod-servers-9.global) that is no server machine of the cluster`, or `a server named <name> with no usable address, which is no server machine of the cluster` |
+  | `autopilot-unhealthy` | `Health.Healthy` | `autopilot reports the servers unhealthy` |
+  | `server-not-alive` | each expected server's entry in autopilot's report, found by private address | `Serf reports its server as left` (the status Nomad gave), or `autopilot does not list its server` |
+  | `server-unhealthy` | the same entry | `autopilot reports its server unhealthy` |
+  | `client-not-registered` | each expected client with `Nodes`, told by name and private address | `Nomad lists no client of its name at 10.64.0.7`, or `the cloud reports no private address for it` |
+  | `client-not-ready` | that node's status and eligibility | `its Nomad client is down`, `its Nomad client is initializing` or `its Nomad client is ready but not eligible` |
+  | `nomad-version` | each server's and each client's version with the pinned one, as text | `its client runs Nomad 2.0.6; the cluster is pinned to 2.0.7` (`its server runs …` for a server); a server that the report lacks and a client that Nomad does not list or lists as `down` are not compared |
+  | `certificate-expired` | the CA's end, and each machine's creation time plus a year, with now | `its node certificate ended about 2027-10-05`, or for the CA, with no node, `the cluster CA ended on 2036-10-05` |
+
+  - The expected servers are the machines that stay in the server and combined groups, the expected clients those in
+    the client and combined groups. Of several nodes of one name at one address, a ready one passes, as `WaitNode`
+    counts ([ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)).
+  - A stopped machine that has not joined shows two failures. The failures come in the order of the table, then by node
+    name, then by ID, whatever the order of the machines.
+  - A node that joined and later died keeps its label. It shows as `client-not-ready` or `client-not-registered`, as
+    `server-no-vote` once autopilot has removed the server, and as `machine-not-running` or `machine-missing` when the
+    cloud knows.
+  - **Nomad that does not answer is a failure** (`nomad-no-leader`), so `--wait` can wait for a cluster that is still
+    starting. A cloud that does not answer is an error.
+  - **A server that died seconds ago still reads as valid.** On Nomad 2.0.7 the autopilot report shows a killed server
+    as `alive` for about 36 s, until Serf marks it failed, and the Raft configuration keeps its vote until autopilot
+    removes it (47.8 s in the run of 2026-10-05). A later run, or `--wait`, finds it
+    ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)).
+  - **Certificates** are checked for the machines that stay and for the CA when the store holds all four secrets, also
+    when Nomad cannot be asked. A certificate that ends within 30 days is a warning (below), one that has ended a
+    failure. A machine without a creation time is not checked. The end of a node certificate is an estimate
+    ([9.1](#91-pki)).
+- **The warnings** go to stderr as `WARNING:` lines ([14](#14-cli)), once per command, and never change the exit code.
+  They are those of every change (an open `access.api`, a combined group, a Nomad version that the channel has not
+  tested), then:
+  - `cluster prod runs in one failure domain, ams: an outage there takes the whole cluster down`, when the model has one
+    zone, which is always so on Vultr. The model gives the zones: `cloud.Capabilities` does not exist yet, and the
+    warning that a cluster has no host anti-affinity waits for it ([ADR-0018](adr/0018-vultr-provider-design.md));
+  - `the certificate of node prod-workers-0 ends about 2026-11-01, in 26 days; node certificates last one year, and a
+    node gets a new one when it is replaced`, by node name, and `the cluster CA ends on 2036-10-05, in 29 days; tent
+    cannot renew a CA yet` (`in 1 day` and `in less than a day` for the last day);
+  - `tent could not read the lock of cluster prod: <error>`, when the lease of the lock cannot be read.
+- **Output.**
+  - A notice on stderr, in every output format, when the cluster is locked: `cluster prod is locked by igor@laptop (pid
+    4242) for update since 2026-10-06 10:00:00 UTC`, or `an unknown holder` when the holder cannot be named. A lock is
+    no failure, and with `--wait` the notice is that of the last round.
+  - `-o table`, valid: `cluster prod is valid: 3 servers and 2 clients run Nomad 2.0.7`. The counts are the machines
+    that stay under the specs, by their group's role, a combined machine as a server and a client.
+  - `-o table`, not valid: a table with the columns `NODE` and `FAILURE`, then a blank line and `cluster prod is not
+    valid: 4 failures` (`1 failure`).
+  - `-o json` and `-o yaml`: `cluster`, `valid`, `servers`, `clients`, `nomadVersion`, `failures` (each with `check`,
+    `node`, `id` and `detail`; `node` and `id` are left out for a failure of the whole cluster), `warnings` and `lock`
+    (the lease, left out when the lock is free). `failures` and `warnings` are lists even when empty.
+- **`--wait DURATION`.** Without it, one round. With it, a round every 10 seconds until the cluster is valid or the
+  duration has passed, the last sleep cut to the time left; the result of the last round is printed. Before the first
+  sleep, one line on stderr: `cluster prod is not valid yet (3 failures); checking every 10s for up to 10m0s`. A
+  negative duration is `invalid --wait -1m0s: must not be negative`. A round that could not check ends the wait with
+  exit code 1 and no result. Ctrl-C during a wait gives `Error: interrupted` and exit code 1.
+- **Exit codes.** 0 when the cluster is valid. 2 when it is not, with the table and no `Error:` line. 1 when tent could
+  not check: an invalid spec, a stored secret that does not load, a cloud call that failed (`VULTR_API_KEY is not
+  set`), `no Nomad client is set up`, a result that cannot be written, or Ctrl-C.
+- **Needs** the cloud's credentials in the environment (`VULTR_API_KEY` for Vultr) and a way to port 4646 of the
+  servers, which `spec.access.api` allows.
+- **Not checked.** The infrastructure (firewalls and the network; `update --exit-code` reports them), a node's spec
+  hash (`rolling-update` will), and the `drain_on_shutdown` of `extraConfig` ([ADR-0030](adr/0030-nomad-on-nodes.md)).
 
 ### 13.7 `tent delete cluster [--yes]`
 
@@ -2917,8 +3181,8 @@ cni:
 ## 14. CLI
 
 The last column names the milestone that built the command. The spec commands of M0 work only on the state store;
-`update cluster` and `delete cluster` of M1 reach the cloud. The other commands come with later milestones
-([roadmap](roadmap.md)).
+`update cluster` and `delete cluster` of M1 reach the cloud, and `validate cluster`, `export nomad` and `ui` of M2.8
+reach the cloud and the Nomad API. The other commands come with later milestones ([roadmap](roadmap.md)).
 
 | Command | kops analogue | Purpose | Built |
 |---|---|---|---|
@@ -2931,10 +3195,10 @@ The last column names the milestone that built the command. The spec commands of
 | `tent update cluster [NAME] [--yes] [--exit-code]` | `update cluster` | infrastructure, node counts, the Nomad cluster: servers, ACL bootstrap, clients, the scrub of user data, the delete guard ([13.2](#132-tent-update-cluster---yes)) | M1; Nomad in M2.7a; scrub and guard in M2.7b |
 | `tent rolling-update cluster [--yes] [--nodegroups a,b] [--force]` | `rolling-update cluster` | Nomad-aware replacement | — |
 | `tent upgrade cluster [--yes]` | `upgrade cluster` | version bumps from the channel | — |
-| `tent validate cluster [--wait 10m]` | `validate cluster` | cloud and Nomad health | — |
+| `tent validate cluster [NAME] [--wait DURATION] [--allow-single-server]` | `validate cluster` | the machines and Nomad against the specs; exits with 2 while they differ ([13.6](#136-tent-validate-cluster---wait-duration)) | M2.8 |
 | `tent delete cluster [NAME] [--yes] [--force]` | `delete cluster` | full cleanup by ownership markers ([13.7](#137-tent-delete-cluster---yes)) | M1 |
-| `tent export nomad [--ttl 24h]` | `export kubeconfig --admin` | short-lived operator credentials and env | — |
-| `tent ui` | — | local mTLS proxy for the UI and CLI | — |
+| `tent export nomad [NAME] [--ttl 24h] [--dir DIR] [--shell sh\|fish]` | `export kubeconfig --admin` | short-lived operator credentials in files, and the shell lines that use them ([9.7](#97-operator-access)) | M2.8 |
+| `tent ui [NAME] [--listen 127.0.0.1:4646]` | — | local mTLS proxy for the UI and CLI ([9.7](#97-operator-access)) | M2.8 |
 | `tent cost` | — | monthly and hourly cost of the cluster or plan (Vultr `/plans`, Hetzner `/pricing`) | — |
 | `tent backup create\|restore` | etcd-manager backups | Raft snapshots | — |
 | `tent toolbox dump` | `toolbox dump` | diagnostics bundle (via SSH) | — |
@@ -2953,8 +3217,10 @@ The last column names the milestone that built the command. The spec commands of
   line must agree. `get nodegroups` and `edit nodegroup` take the cluster from `--name`, as does `get` for a cluster
   named `cluster`, `clusters`, `nodegroup` or `nodegroups`.
 - Cloud credentials come from the environment. tent reads `VULTR_API_KEY` only when a command reaches a cluster on
-  Vultr: `update cluster`, `delete cluster` and `create --yes` ([7.1](#71-interfaces)). `HCLOUD_TOKEN` comes with
-  the Hetzner provider.
+  Vultr: `update cluster`, `delete cluster`, `create --yes`, and since M2.8 `validate cluster`, `export nomad` and `ui`
+  ([7.1](#71-interfaces)). The last three need it because tent stores no address of a machine: a server's public
+  address, which the calls to port 4646 need, comes from the cloud's list. `HCLOUD_TOKEN` comes with the Hetzner
+  provider.
 - A development build of tent reads `TENT_NODE_URL` and `TENT_NODE_SHA256` once at start, for the tent-node that its
   nodes download ([8.5](#85-artifacts-and-verification)). A release build ignores them. The long help of
   `update cluster` names them.
@@ -3008,6 +3274,11 @@ The last column names the milestone that built the command. The spec commands of
   - With `-o json`, stderr mixes the JSON progress lines with plain `WARNING:` lines and the logs. A program reads
     the lines that start with `{`. The logs are text unless `--log-format json` makes them JSON objects too; they
     carry `level` and `msg`, which progress lines never have.
+- `validate cluster`, `export nomad` and `ui` print one result on stdout and notices on stderr, and no progress lines
+  ([13.6](#136-tent-validate-cluster---wait-duration), [9.7](#97-operator-access)). None of them prints a secret, in
+  any output format, in a log or in an error. `export nomad` prints the six shell lines, or with `-o json` and `-o yaml`
+  its paths, address and end; `ui` prints the URL, or with `-o json` and `-o yaml` the cluster, the URL and the end of
+  the session.
 - Then `-o table` prints a blank line and one line in the past tense on stdout: `Applied: …`, `Nodes: …`, `Nomad: …`
   and `Wrote …` (the objects written to the state store) for `update`, and `Deleted: …` for `delete`. `-o yaml` and
   `-o json` print the plan that was applied instead, with `"applied": true`.
@@ -3058,22 +3329,32 @@ The last column names the milestone that built the command. The spec commands of
 
 **Warnings, errors and exit codes**
 - tent warns about the cluster that results from a change: after `create`, `replace` or a saved `edit`, and before
-  `update cluster --yes` applies changes. A command prints each warning once, `create --yes` included. It warns:
+  `update cluster --yes` applies changes. `validate cluster` warns on every run. A command prints each warning once,
+  `create --yes` included. A plan without `--yes`, `delete cluster`, `get`, `state unlock`, `export nomad` and `ui` do
+  not warn: they leave no changed cluster behind. It warns:
   - while `access.api` lets the whole internet reach the Nomad API, a `/0` range such as the default `0.0.0.0/0`;
+  - for a combined node group: `WARNING: node group nodes is combined: its nodes run the Nomad servers and the
+    workloads together, which is meant for development and small clusters; workloads share them with Raft and the
+    gossip key` ([ADR-0019](adr/0019-combined-server-client-role.md));
   - when a release build has `TENT_NODE_URL` or `TENT_NODE_SHA256` set and so ignores it, only before
     `update cluster --yes` applies changes ([8.5](#85-artifacts-and-verification));
   - when the cluster's Nomad version is one that its channel allows but has not tested
     ([13.5](#135-tent-upgrade-cluster---yes)), such as `WARNING: Nomad 2.0.8 is not tested by this tent; channel
     stable tests 2.0.7`. `create`, `replace` and `edit` check the version that the spec sets, and `update` also a
-    pinned one ([13.2](#132-tent-update-cluster---yes)).
+    pinned one ([13.2](#132-tent-update-cluster---yes));
+  - and `validate cluster` also warns about a cluster in one failure domain and about certificates that end within 30
+    days ([13.6](#136-tent-validate-cluster---wait-duration)).
 - An error goes to stderr after `Error: `. An invalid spec prints `Error: invalid spec:` and then one indented line
   per problem, with the field path ([3.3](#33-api-rules)). An `update cluster` that would delete a node that joined
   prints the one error of [13.4](#134-scaling) and exits with 1, with and without `--yes` and with `--exit-code`.
 - The long help of `update cluster` says that tent replaces the user data of a node that has joined with a stub, that
   a client that did not register within 31 minutes of its creation is deleted and created again, and that an update
-  that would delete a node that joined fails.
-- Exit codes: 0 success, 1 error, 2 when `update cluster --exit-code` finds a plan with changes, and 130 when a
-  second Ctrl-C or SIGTERM ends tent. Exit code 2 prints no error.
+  that would delete a node that joined fails. The long help of `validate cluster`, `export nomad` and `ui` says what
+  they check or write, what they print, and that they need the cloud's credentials and a way to port 4646 of the
+  servers; the help of `validate cluster` also gives its exit codes.
+- Exit codes: 0 success, 1 error, 2 when `update cluster --exit-code` finds a plan with changes or `validate cluster`
+  finds the cluster not valid, and 130 when a second Ctrl-C or SIGTERM ends tent. Exit code 2 prints no error. `tent ui`
+  ends with 0 at Ctrl-C and at the end of its session.
 
 ---
 
@@ -3229,19 +3510,59 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
        whose answer is lost; user data scrubbed by hand without the label; after a client registered and before its
        scrub; after the delete of an unregistered client and before its create. Every test of a step that changes
        the cloud or the store ends with a plan that has no changes (`wantConverged`).
-   - `hack/tent-operator` gives the real-cloud check its access to the Nomad API until `tent export nomad` exists
-     (M2.8, [9.7](#97-operator-access)): it reads the CA and the bootstrap secret from the state store, issues an
-     operator certificate and writes `ca.pem`, `cli.pem`, `cli-key.pem` and `token` (0600) into a new directory
-     ([README](../hack/tent-operator/README.md)).
-   - `hack/vultr-spike/spike.sh --only cluster` (spike v11) checks the flow on a real Vultr account: tent builds a
+   - **Built in M2.8** ([ADR-0033](adr/0033-operator-commands.md)): the three operator commands, in
+     `testing/synctest` bubbles where time matters, on `vultrfake`, `nomadfake` and loopback listeners.
+     - **The fakes.** The Nomad of the flow tests reports each server's health entry and each node's version, and a test
+       changes a version, the peers, one server or one node. `nomadfake` issues tokens
+       ([13.2](#132-tent-update-cluster---yes)). `internal/shellenv/shellenvtest` runs the printed lines in a real sh
+       and a real fish.
+     - **`validate cluster`.** A built cluster of three servers and two clients, a combined cluster of three and a
+       cluster of one node are valid. The golden files `validate.golden` and `validate.json.golden` hold a result with a
+       line for each check of [13.6](#136-tent-validate-cluster---wait-duration), 17 failures, and one certificate
+       warning. One round asks Nomad `Leader`, `Peers`, `Health` and `Nodes`, once each. A call
+       leaves the state store as it was and the lock free. `--wait` ends with 0 once the cluster turns valid and with 2
+       at its deadline, a negative `--wait` is refused, and Ctrl-C during a wait ends with 1.
+     - **`export nomad`.** The four files have the names, content and (on Unix) modes of [9.7](#97-operator-access); the
+       certificate and the key make a pair; the token file has no line end. The six lines set the six variables in a
+       real sh and fish. A second run replaces the files and leaves no temporary file, and a failed write keeps the
+       earlier files. A directory that cannot be made and a TTL that is not above zero leave no token: Nomad gets no
+       call. Neither they nor an access that fails leave a file or a directory that the run made. The bootstrap secret
+       is in no file.
+     - **Operator access.** The token is not the bootstrap secret; the certificate verifies against the CA bundle,
+       names `cli.global.nomad`, allows client authentication only and ends TTL after tent's clock, or with the CA; the
+       access ends with the earlier of the token's end and the certificate's end; each error of
+       [9.7](#97-operator-access) has its test, except `no Nomad client is set up`, which the tests of `validate` and
+       `update` cover. A lost `CreateToken` answer on the first server gives the second
+       server's token, and the fake has issued two. No call writes to the state store or takes a lock.
+     - **The proxy.** `httptest` servers with certificates from `internal/pki` require a client certificate. A request
+       reaches the server with the token header, path, query and body; a token that the request carried is replaced;
+       `Origin` is not passed on. A server of another CA gets 502 and nothing of the request reaches it. A foreign
+       `Host`, `Origin` and `Sec-Fetch-Site` get 403 before anything goes upstream (`TestRefusal` is a table). A
+       response written in two parts arrives in two parts; an upgrade carries bytes both ways; the next request goes to
+       the next server after one that reached none; a 302 comes back as a 302.
+     - **`tent ui`.** A loopback listener on port 0 and a stub proxy factory: the printed URL has the listener's real
+       port and answers through the stub, and the config holds the servers, the region, the CA and a token that is not
+       the bootstrap secret. Ctrl-C ends the command with 0 and closes the port. The end of the session is tested with
+       an injected clock, not with a real sleep: at the time, at the next check of the clock, and when the clock jumps.
+       A busy port fails without a token; the other addresses of [9.7](#97-operator-access) are refused before any call.
+       The wiring test of `cmd/tent` shows that the binary has the real proxy.
+     - **Secrets.** `internal/secrettest` finds none in the output, the logs, the JSON or an error of any of them.
+   - `hack/vultr-spike/spike.sh --only cluster` (spike v12) checks the flow on a real Vultr account: tent builds a
      cluster of three servers and two clients with `create cluster --yes` on a temporary `file://` state store and a
      development tent-node, five instances at once. It records the time to the leader, the bootstrap, healthy servers
-     and each registration. Through `hack/tent-operator` and curl it checks the members, autopilot and the nodes, and it
-     runs a docker job on a client. It checks that `update` has nothing left to do, each instance's `tent/spec-hash`,
-     the first peers call between two machines, a restart of `nomad.service` on a server, and `delete cluster --yes`
-     leaving nothing in the cloud or the store ([README](../hack/vultr-spike/README.md)). Since M2.7b it also checks
-     each node's scrub line, its `tent/joined=true` tag and its user data against the stub, a reboot of a client, the
-     refusal to delete a joined node, and with `--unregistered` the replacement of a client that never registered.
+     and each registration. It checks `tent export nomad` (the modes, the six lines, that the token differs from the
+     bootstrap token, and what Nomad says about it and about the certificate), and with the exported files and curl
+     the members, autopilot and the nodes. It runs a docker job on a client, and `nomad server members` when a `nomad`
+     binary is on the PATH. It checks `tent validate cluster` on the built cluster (exit 0, the valid line, the open
+     `access.api` and failure-domain warnings), `tent ui` in the background (four requests through its port, `Host:
+     example.com` refused with 403, SIGINT ending it with exit 0 and the port closed), and a client whose Nomad stops
+     (`validate` exits with 2 and names the node, then exits with 0 after `systemctl start nomad.service` and
+     `--wait 5m`). It checks that `update` has nothing left to do, each instance's `tent/spec-hash`, the first peers
+     call between two machines, a restart of `nomad.service` on a server, and `delete cluster --yes` leaving nothing in
+     the cloud or the store ([README](../hack/vultr-spike/README.md)). Since M2.7b it also checks each node's scrub
+     line, its `tent/joined=true` tag and its user data against the stub, a reboot of a client, the refusal to delete a
+     joined node, and with `--unregistered` the replacement of a client that never registered. It needs `openssl`.
+     Spike v12 ran on 2026-10-07 (run `9pxbqn`, [platform notes §3.16](platform-notes.md#316-spike-runs)).
 4. **tent-node tests.** Phases run with an abstracted filesystem and exec. Occasionally they run in a
    systemd-enabled container or a VM.
    - **Built in M2.5.** `internal/nodeup/nodeuptest` holds the fakes: an in-memory filesystem that behaves as
@@ -3433,6 +3754,10 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
 | A client whose machine is ready never registers, or a run is cut between a client's create and its registration | the client's intro token expires after 30 minutes and is refused a minute later, and the node never joins | the registration wait fails after 10 minutes and names the node; a client without the joined label that is older than 31 minutes and that Nomad does not list is deleted and created again ([13.4](#134-scaling), [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)) |
 | A scrub reaches a machine before cloud-init has read its user data (Vultr reported an instance ready 7 s before its kernel started, [platform notes §3.3](platform-notes.md#33-instances)) | the node boots without its config and never joins | tent scrubs a machine only after it saw a node of the machine's own name and private address; a stale node of an earlier machine at that name and address can read `ready` for up to 30 s after the machine died, 300 s after a leader change; a create takes longer than 30 s on Vultr; the node meta `tent_instance_id` would be exact ([ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)) |
 | An operator changes a tag of a machine between the read and the update of `MarkJoined` | the change is lost | see [11.6](#116-user_data) |
+| While `tent ui` runs, its loopback port acts with a management token: every process of every user on the operator's machine can use it, and the UI keeps the token in the browser's `localStorage` until it expires | such a process, or a web page that passes the proxy's checks, acts as an operator for up to 24 hours | loopback only; a foreign `Host`, `Origin` or `Sec-Fetch-Site` gets 403 before anything goes upstream; the token is of no use without a client certificate of the cluster's CA; a process of the operator's own user could also read the files of `export nomad`, a process of another user could not; accepted on 2026-10-06 ([9.7](#97-operator-access), [ADR-0033](adr/0033-operator-commands.md)) |
+| A token whose answer was lost, an earlier export's token and a `tent ui` token stay valid until they expire | an old token works for up to 24 hours | each has a TTL, and `nomad acl token delete <accessor>` revokes one early; `export nomad` prints the accessor ([9.2](#92-acl-and-tokens)) |
+| The autopilot report shows a killed server as `alive` for about 36 s on Nomad 2.0.7, and the Raft configuration keeps its vote until autopilot removes it ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)) | `validate` can read a server that died seconds ago as valid | `validate --wait`, or a second run, checks again ([13.6](#136-tent-validate-cluster---wait-duration)) |
+| tent stores no node certificate ([9.1](#91-pki)) | `validate` reads a node certificate's end by estimate | a warning 30 days ahead leaves room for the difference |
 | `nomad.service` should end as failed after every stop of a server or combined node, since servers run with `leave_on_terminate = false` (seen on a real server on 2026-10-05, [platform notes §3.16](platform-notes.md#316-spike-runs)) | an operator or a monitor sees a failed unit after a stop or restart that worked | accepted: `SuccessExitStatus=1` would hide real failures (decision 26 of [18](#18-open-questions), [ADR-0031](adr/0031-bootstrap-in-update.md)) |
 | Hetzner rate limit (3600/h per project) | slow or failing large rollouts | snapshots, batched waits, adaptive throttling, targeted rollouts, one project per cluster |
 
@@ -3554,11 +3879,23 @@ Decided on 2026-10-06:
     its intro token expired and creates it again, shown as `not registered`. It never ran a workload, so nothing is
     drained. The delete comes before the create, an exception to creating the replacement before removing the old node
     (confirmed on 2026-10-06; [13.4](#134-scaling), [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)).
+29. **`tent ui` and the token:** the proxy adds the token and mTLS, so the UI and the `nomad` CLI need neither a
+    certificate nor a token. It listens on a loopback address only, and a request with a foreign `Host` or `Origin`
+    gets 403. While it runs, every local process that can reach the port acts with a management token, and the UI keeps
+    that token in the browser until it expires ([9.7](#97-operator-access),
+    [ADR-0033](adr/0033-operator-commands.md)).
+30. **The exported token:** a management token with a TTL, 24 hours by default. tent owns no ACL policy yet, so the TTL
+    is the limit ([9.2](#92-acl-and-tokens)).
+31. **Where `export nomad` writes:** `$XDG_CACHE_HOME/tent/<cluster>`, else `~/.cache/tent/<cluster>`, the directory
+    with mode 0700 and the files with mode 0600. `--dir` changes the place ([9.7](#97-operator-access)).
+32. **`validate cluster` exit codes:** 2 when the cluster is not valid, with the table and no `Error:` line, and 1 when
+    tent could not check ([13.6](#136-tent-validate-cluster---wait-duration), [14](#14-cli)).
 
 Decisions 18 to 20 are recorded in [ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md), decision 21 in
 [ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md), decisions 22 to 25 in
-[ADR-0030](adr/0030-nomad-on-nodes.md), decision 26 in [ADR-0031](adr/0031-bootstrap-in-update.md), and decisions 27
-and 28 in [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md).
+[ADR-0030](adr/0030-nomad-on-nodes.md), decision 26 in [ADR-0031](adr/0031-bootstrap-in-update.md), decisions 27
+and 28 in [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md), and decisions 29 to 32 in
+[ADR-0033](adr/0033-operator-commands.md).
 
 ---
 

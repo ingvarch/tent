@@ -5,12 +5,11 @@ few cents.
 
 > tent is at milestone M2 ([roadmap](roadmap.md)). `update cluster --yes` builds the network, the firewalls, the
 > machines and a running, secured Nomad cluster: a leader, ACLs bootstrapped with the secret in the state store, and
-> registered nodes. Once a node has joined, tent replaces its user data, which holds its keys, with a stub. Not done
-> yet:
+> registered nodes. Once a node has joined, tent replaces its user data, which holds its keys, with a stub.
+> `tent export nomad` gives you a short-lived certificate and token for the Nomad API, `tent validate cluster` checks
+> the cluster, and `tent ui` serves the Nomad web UI on a port of your machine. Not done yet:
 > - tent cannot scale a running cluster down before M3: `update` refuses to delete a node that joined Nomad, since it
 >   cannot drain a node or check the Raft quorum yet. `delete cluster` still deletes everything.
-> - `tent export nomad`, which gives you the Nomad API's certificate and token, comes with M2.8, so this guide does
->   not run a job.
 
 ## What you need
 
@@ -26,6 +25,8 @@ few cents.
   its tent-node in its own release and ignores the variables. The tent-node is for linux/amd64, which is all that
   Vultr offers.
 - An SSH key pair, if you want to log in to the machines.
+- The `nomad` CLI, for steps 7 and 8 ([install Nomad](https://developer.hashicorp.com/nomad/install)). A browser, for
+  step 10.
 
 ## 1. Install tent
 
@@ -67,6 +68,11 @@ tent create cluster demo \
 cluster demo created
 node group nodes created
 ```
+
+On stderr tent also warns, because the group is combined: `WARNING: node group nodes is combined: its nodes run the
+Nomad servers and the workloads together, which is meant for development and small clusters; workloads share them
+with Raft and the gossip key`. `tent update cluster demo --yes` prints the same line after the plan, before its first
+step.
 
 - `--combined` makes one node group, `nodes`, of three machines that are both Nomad servers and clients. Without it
   tent makes three servers and three workers.
@@ -193,7 +199,161 @@ group cannot be made smaller yet: before M3 `update` refuses to delete a node th
 error that names the node. A combined group, like a server group, has 1, 3 or 5 machines, and 1
 needs `--allow-single-server` on each command.
 
-## 7. Delete the cluster
+## 7. Reach the Nomad API
+
+The Nomad API needs a client certificate of the cluster's CA and an ACL token. tent keeps the CA key and the ACL
+bootstrap secret in the state store and never gives them to you. `tent export nomad` makes a certificate and a token
+that both end after 24 hours instead:
+
+```sh
+tent export nomad demo
+```
+
+```
+export NOMAD_ADDR='https://198.51.100.10:4646'
+export NOMAD_CACERT='/home/you/.cache/tent/demo/ca.pem'
+export NOMAD_CLIENT_CERT='/home/you/.cache/tent/demo/cli.pem'
+export NOMAD_CLIENT_KEY='/home/you/.cache/tent/demo/cli-key.pem'
+export NOMAD_TLS_SERVER_NAME='server.global.nomad'
+export NOMAD_TOKEN="$(cat '/home/you/.cache/tent/demo/token')"
+```
+
+On stderr tent says where it wrote the files, when the access ends and the token's accessor:
+
+```
+wrote the Nomad access of cluster demo to /home/you/.cache/tent/demo; it works until 2026-10-08 12:00:00 UTC (token accessor 3f6c2a9e-...)
+```
+
+- The files are `ca.pem`, `cli.pem`, `cli-key.pem` and `token`, in `$XDG_CACHE_HOME/tent/demo`, else
+  `~/.cache/tent/demo`. `--dir` picks another place. The directory has mode 0700 and the files 0600.
+- The last line reads the token from its file when your shell runs it, so the token never appears on the screen. The
+  address is one server's public address.
+- `--ttl` sets how long the access lasts. Nomad refuses less than 1 minute and more than 24 hours.
+- The lines are for sh, bash and zsh. In fish, `--shell fish` prints `set -gx` lines, and tent picks them by itself
+  when `$SHELL` names fish. For another shell, `-o json` prints the paths and the address.
+- Run the command again for a new token. The earlier token works until it ends. To revoke it sooner, run `nomad acl
+  token delete <accessor>` with the new access.
+
+Run the lines:
+
+```sh
+eval "$(tent export nomad demo)"
+```
+
+```fish
+tent export nomad demo | source
+```
+
+```sh
+nomad server members
+nomad node status
+```
+
+`nomad server members` lists the three servers as alive, with one leader, and `nomad node status` the three nodes as
+ready. The CLI may end its output with a hint to a Web UI address on the server. A browser cannot open that address,
+since the server asks for the client certificate: use `tent ui` (step 10).
+
+## 8. Run a job
+
+The nodes run Docker, and Nomad's bridge network is set up. Save this as `hello.nomad.hcl`:
+
+```hcl
+job "hello" {
+  group "web" {
+    network {
+      mode = "bridge"
+      port "http" {
+        to = 8080
+      }
+    }
+    task "web" {
+      driver = "docker"
+      config {
+        image   = "busybox:1.38"
+        command = "sh"
+        args    = ["-c", "mkdir -p /www && echo hello >/www/index.html && exec httpd -f -p 8080 -h /www"]
+        ports   = ["http"]
+      }
+      resources {
+        cpu    = 50
+        memory = 32
+      }
+    }
+  }
+}
+```
+
+```sh
+nomad job run hello.nomad.hcl
+nomad job status hello
+```
+
+The status shows an allocation that runs on one of the nodes. Stop the job with `nomad job stop -purge hello`.
+
+## 9. Validate the cluster
+
+```sh
+tent validate cluster demo
+```
+
+```
+cluster demo is valid: 3 servers and 3 clients run Nomad 2.0.7
+```
+
+tent compares the specs with the machines in the cloud and with Nomad, and changes nothing. It checks that every node
+group has its machines and that the cloud reports them running, that each node has joined, that Nomad has a leader,
+that every server votes and is healthy, that every client is registered, ready and eligible, that each node runs the
+pinned Nomad version, and that no certificate has ended. It needs `VULTR_API_KEY` and a way to port 4646 of the servers,
+which `--api-access` allows.
+
+On stderr tent warns about what is not a failure. This cluster is combined and runs in one data center, so it prints:
+
+```
+WARNING: node group nodes is combined: its nodes run the Nomad servers and the workloads together, which is meant for development and small clusters; workloads share them with Raft and the gossip key
+WARNING: cluster demo runs in one failure domain, ams: an outage there takes the whole cluster down
+```
+
+A cluster that differs from its specs prints a table instead, such as:
+
+```
+NODE          FAILURE
+demo-nodes-1  its Nomad client is down
+
+cluster demo is not valid: 1 failure
+```
+
+and the exit code is 2. The exit code is 1 when tent could not check at all. `--wait 5m` checks every 10 seconds until
+the cluster is valid or the time has passed, which suits a script that builds a cluster and then waits for it.
+
+## 10. Open the Nomad UI
+
+```sh
+tent ui demo
+```
+
+```
+Nomad UI of cluster demo: http://127.0.0.1:4646/ui/
+```
+
+Open the address in a browser. tent keeps running and passes each request to a server of the cluster with a certificate
+and a token, so the browser needs neither. On stderr tent says when the session ends:
+
+```
+the Nomad CLI works through it with NOMAD_ADDR=http://127.0.0.1:4646; press Ctrl-C to stop; the session ends at 2026-10-08 12:00:00 UTC
+```
+
+- Stop it with Ctrl-C. The session also ends after 24 hours.
+- Type or paste the address, or open it from the terminal: tent refuses a link to it on a web page of another site.
+- While it runs, every program on your machine that can reach the port acts as an administrator of the cluster. So tent
+  listens on a loopback address only, and refuses a request with another `Host` or `Origin`. Do not run it on a
+  machine that others use.
+- The `nomad` CLI works through the same port: set `NOMAD_ADDR` to the address in the notice and nothing else.
+- `--listen 127.0.0.1:0` picks a free port, for a machine where a local Nomad uses 4646.
+- The port is on the machine that runs tent. When that is another machine, forward the same port to it, for example
+  `ssh -L 4646:127.0.0.1:4646 that-machine`, and open the address on your own machine; tent refuses a request that
+  names another port.
+
+## 11. Delete the cluster
 
 ```sh
 tent delete cluster demo
@@ -253,9 +413,15 @@ tent deletes the machines first and waits until Vultr no longer lists them. Then
 VPC and the SSH key, and last the specs and the secrets in the state store. It finds the cloud objects by the markers
 it put on them, so it deletes only this cluster's objects.
 
+`delete cluster` does not touch the files of `tent export nomad`. Remove the directory yourself, such as
+`~/.cache/tent/demo`. The certificate and the token in it are no use once the cluster is gone.
+
 ## Next
 
 - [Architecture §13](architecture.md#13-lifecycle-flows): what `update cluster` and `delete cluster` do, step by
   step.
 - [Architecture §14](architecture.md#14-cli): every command, flag, output format and exit code.
+- [Architecture §9.7](architecture.md#97-operator-access) and
+  [§13.6](architecture.md#136-tent-validate-cluster---wait-duration): what `export nomad`, `ui` and `validate cluster`
+  do, in detail.
 - [Roadmap](roadmap.md): what comes next.

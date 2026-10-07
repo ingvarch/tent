@@ -10,7 +10,9 @@
   `cmd/tent-node`; `nodeuptest` and `s3urltest` only in tests; the follow-up `go list -deps ./cmd/tent-node` test is
   built; `internal/s3url` imports only the standard library and the AWS SDK's S3 client) and by
   [ADR-0031](0031-bootstrap-in-update.md) (`internal/assets/assetstest` imports only the standard library; only
-  tests import it and `hack/internal/shellenv/shellenvtest`)
+  tests import it and `hack/internal/shellenv/shellenvtest`) and by [ADR-0033](0033-operator-commands.md)
+  (`internal/shellenv` and `internal/shellenv/shellenvtest` replace `hack/internal/shellenv`, since tent prints shell
+  lines and `cmd/tent` cannot import a package under `hack/internal`; only tests import `shellenvtest`)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0004](0004-layered-architecture.md), [ADR-0006](0006-two-binaries-and-nodeconfig.md),

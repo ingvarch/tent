@@ -20,7 +20,9 @@
   [ADR-0027](0027-nodeconfig-contract-rendering-and-spec-hash.md) (item 5: one budget of 24 KiB for the whole user data
   on every provider, instead of the measured limit minus 25% and the 64 KiB budget) and by
   [ADR-0032](0032-joined-label-scrub-and-delete-guard.md) (item 5: `Nodes.MarkJoined` replaces `Nodes.ScrubUserData`,
-  and sets the label `tent/joined=true` in the same PATCH).
+  and sets the label `tent/joined=true` in the same PATCH) and by [ADR-0033](0033-operator-commands.md) (item 6:
+  `validate cluster` warns about the single failure domain, from the model's zones; the warning about a missing host
+  anti-affinity waits for `cloud.Capabilities`; item 20 there).
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0014](0014-vultr-first-provider-and-e2e.md), [ADR-0015](0015-idempotency-without-unique-names.md),

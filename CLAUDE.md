@@ -78,7 +78,12 @@ Providers, in order:
     ran on Vultr on 2026-10-06 (spike v10 run `rugw2m`, v11 runs `sv3vwb` and `rgfckj`). It found that cloud-init
     read the stub as degraded and that the account's instance limit refused the replacement's create right after
     the delete; both are fixed in the code (a line `{}` in the stub, a retry in the Vultr provider).
-  - Next: M2.8: `tent export nomad`, `validate cluster` and `tent ui`.
+  - M2.8 added `tent export nomad`, `tent ui` and `tent validate cluster` (`internal/app`, `internal/cli`,
+    `internal/nomadops`, `internal/shellenv`, ADR-0033; maintainer decisions 29 to 32), a warning about combined
+    clusters, and removed `hack/tent-operator`. The three commands need `VULTR_API_KEY`. The real-cloud check ran on
+    Vultr on 2026-10-07 (spike v12, run `9pxbqn`); its one unexpected row was a fault of the script, which is fixed.
+  - Next: M2.9: the E2E `smoke` on Vultr, which can reach Nomad through `tent export nomad` and end with `tent validate
+    cluster --wait`.
 
 ## Read before changing anything
 
@@ -120,7 +125,7 @@ Providers, in order:
   - `internal/nodeconfig` imports only the standard library, `internal/secret` and `api/v1alpha1`; its tests are
     exempt (ADR-0027).
   - Only tests import `internal/secrettest`, `internal/nomadops/nomadfake`, `internal/nodeup/nodeuptest`,
-    `internal/s3url/s3urltest`, `internal/assets/assetstest`, `hack/internal/shellenv/shellenvtest` and
+    `internal/s3url/s3urltest`, `internal/assets/assetstest`, `internal/shellenv/shellenvtest` and
     `github.com/hashicorp/hcl`.
   - Only `internal/assets` imports `github.com/ProtonMail/go-crypto`, tests included (ADR-0026).
   - `internal/nodeup`, `internal/nodeconfig` and `cmd/tent-node`, tests included, import neither `internal/assets`

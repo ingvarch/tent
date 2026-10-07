@@ -4,6 +4,8 @@
   user data", "A ready machine that has not registered is not seen" and "A health wait that stops" are closed, the M2.7b
   follow-up is built, and the bootstrap mark is written after the servers' scrubs; a renamed server group is refused
   once its machines carry the joined label; of item 4, only a create and a wait that repeats a create read the assets)
+  and by [ADR-0033](0033-operator-commands.md) (the M2.8 follow-up is built: `tent export nomad` replaced
+  `hack/tent-operator`)
 - **Date:** 2026-10-05
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),
@@ -168,8 +170,8 @@ The facts that shaped it. The ones about Nomad were verified on 2026-10-05 on a 
 - **M2.7b** (built, [ADR-0032](0032-joined-label-scrub-and-delete-guard.md)): the scrub of user data once a node has
   joined; nodes that never registered, such as a client whose intro token expired; and decision 27 of [architecture
   §18](../architecture.md#18-open-questions): until M3, `update` refuses to delete a node that joined.
-- **M2.8:** `tent export nomad` replaces `hack/tent-operator`, the tool that gives the real-cloud check its access to
-  the Nomad API.
+- **M2.8** (built, [ADR-0033](0033-operator-commands.md)): `tent export nomad` replaces `hack/tent-operator`, the tool
+  that gave the real-cloud check its access to the Nomad API.
 - **M3:** server removal through the API; the E2E check of ADR-0016 that a client rejoins after every server has been
   replaced.
 - **The real-cloud check** passed on Vultr on 2026-10-05 (run `qypvsk`, [platform notes

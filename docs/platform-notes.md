@@ -117,7 +117,7 @@ give. ⏳ Re-check them against the version tent runs.
     `Healthy` for 41 s (Serf marked it failed at 41 s). It turned 429 at 41.7 s, autopilot removed the server from
     Raft at 47.8 s, and the report dropped it at 49.8 s. A 200 report does not mean that its servers are up.
   - A Raft server without a Serf entry stays in the report with `SerfStatus` `left` and the name it had, or an empty
-    one (read, not run).
+    one (read, not run). The run of 2026-10-06 below saw a `left` entry.
 - **A node's address in `GET /v1/nodes`** is the host of the client's `advertise.http` (`Node.Stub`,
   `nomad/structs/structs.go:2296` at v2.0.7, which splits `HTTPAddr`; run on 2026-10-05: a client that advertised
   `10.64.0.9:15102` showed `"Address":"10.64.0.9"`). It is not the bind address and not `advertise.rpc`. With tent's
@@ -126,6 +126,83 @@ give. ⏳ Re-check them against the version tent runs.
     that renders tent's address (it needs a real interface in the VPC's CIDR). The real-cloud runs of 2026-10-06
     (`rugw2m`, `sv3vwb`, `rgfckj`; [3.16](#316-spike-runs)) used it: in `sv3vwb` Nomad listed the replacement client
     ready and eligible at its private address, 10.64.0.7.
+
+**Report entries and versions** (v2.0.7, run on 2026-10-06 on a local cluster of three servers and a client, and read
+in the source at that tag):
+- **An entry of `GET /v1/operator/autopilot/health`** has `Name` as `<name>.<region>` (`s1.global`), `Address` as the
+  Raft address `<ip>:<rpc port>`, `SerfStatus`, `Version` (`2.0.7`), `Healthy`, `Voter` and `Leader`. The order of
+  `Servers` changes between calls, so find a server by address or name. A node in `GET /v1/nodes` has `Version` `2.0.7`.
+- **A killed server** (SIGKILL of a follower, the report read every 5 s, 1 s and 0.2 s) read `alive` for about 36 s
+  (Serf's log marked it failed at the same moment), then `left` for 2 to 8 s with `Healthy` false and the cluster
+  unhealthy, then left the report. `failed` was never seen, also at 0.2 s. Not explained: `nomad/autopilot.go` maps
+  `serf.StatusFailed` to `failed` and `serf.StatusLeft` to `left`. The run of 2026-10-05 above measured 41 s for the
+  delay. `none` is a fourth status by the source (not run).
+
+**ACL tokens that expire** (v2.0.7, run on 2026-10-06 with curl and the operator certificate; source at the tag):
+- **The create.** `PUT /v1/acl/token {"Name", "Type": "management", "ExpirationTTL": "24h"}` with the bootstrap secret
+  answers 200 with an `AccessorID`, a `SecretID` of 36 characters (a UUID) and an `ExpirationTime` exactly 24 hours
+  after `CreateTime`. `1m` answers 200. `30s` answers 400 `token 0 invalid: 1 error occurred:\n\t* expiration time
+  cannot be less than 1m0s in the future (was 30s)`, and `24h1m` 400 `... cannot be more than 24h0m0s in the future (was
+  24h1m0s)`.
+  - The limits are `ACLTokenMinExpirationTTL` 1 minute and `ACLTokenMaxExpirationTTL` 24 hours (`nomad/config.go`
+    lines 697 and 698), checked in `ACLToken.Validate` (`nomad/structs/acl.go` line 756). Nothing there depends on the
+    type, so a management token may expire.
+  - `GET /v1/acl/token/self` with the new secret answers 200 with the same accessor, name and times.
+- **After the end.** A token of 1 minute, read 4 s after its end: `GET /v1/acl/token/self` answers 500 `rpc error: ACL
+  token expired`, while `GET /v1/jobs` and `GET /v1/operator/autopilot/health` answer 403 `Permission
+  denied`. By the answer of `/v1/jobs` or of the autopilot report a caller cannot tell an expired token from a missing
+  right.
+- **The bootstrap secret** must be a UUID, else 400 `invalid acl token`.
+- ⏳ A one-time token lives 10 minutes, and `nomad ui -authenticate` makes one (v1.11.3 source, not checked on 2.0.7);
+  tent uses neither.
+
+**The `nomad` CLI's environment** (v2.0.7, run on 2026-10-06; `api/api.go` lines 342 to 388):
+- The client reads `NOMAD_ADDR`, `NOMAD_REGION`, `NOMAD_NAMESPACE`, `NOMAD_HTTP_AUTH`, `NOMAD_CACERT`, `NOMAD_CAPATH`,
+  `NOMAD_CLIENT_CERT`, `NOMAD_CLIENT_KEY`, `NOMAD_TLS_SERVER_NAME`, `NOMAD_SKIP_VERIFY` and `NOMAD_TOKEN`. No variable
+  names a token file.
+- With `NOMAD_ADDR`, `NOMAD_CACERT`, `NOMAD_CLIENT_CERT`, `NOMAD_CLIENT_KEY`, `NOMAD_TLS_SERVER_NAME` and `NOMAD_TOKEN`
+  and nothing else (checked with `env`), against servers whose certificate has DNS names only, `nomad server members`,
+  `nomad node status` and `nomad job run` of a small job worked, in sh through `eval` and in fish through `source`
+  (run as `fish --no-config`). The key was PKCS#8, and the token file held 36 bytes with no line end.
+- Without `NOMAD_TLS_SERVER_NAME` each command exits 1 with `x509: cannot validate certificate for 127.0.0.1 because it
+  doesn't contain any IP SANs`.
+- A raw_exec job needs `plugin "raw_exec"` in the client configuration, since the driver is disabled by default.
+- After its table, `nomad server members` prints a hint on stderr: two empty lines and `==> View and manage Nomad
+  servers in the Web UI: <NOMAD_ADDR>/ui/servers`. `NOMAD_CLI_SHOW_HINTS=false` turns it off (run on 2026-10-07 against
+  a cluster that tent built). A script that reads the table takes stdout alone. Through `tent ui` the hint named the
+  proxy's address. With the exported variables it then names a server's own `https` address (not seen: the run kept
+  no output of that call), which a browser cannot open without the client certificate.
+
+**The web UI and the CLI behind a proxy** that adds mTLS and a management token (v2.0.7, run on 2026-10-06 in Chromium
+through Playwright, with a throwaway `httputil.ReverseProxy`, and read in the source at the tag):
+- **No sign-in.** `/ui/` lists jobs, clients and servers with no token entered. The UI calls `/v1/acl/token/self` on
+  every load and stores the secret of the answer in `localStorage.nomadTokenSecret`, so the browser then holds the
+  proxy's token (the same sha256). A made-up secret stored first is overwritten, with no error shown
+  (`ui/app/services/token.js`, `routes/application.js`).
+- **Exec** works with `Origin` removed. With `Origin` passed on and `Host` rewritten to the server's, the upgrade fails
+  with 500 `websocket: request origin not allowed by Upgrader.CheckOrigin`; with `Origin` passed on and the browser's
+  `Host` kept it works. The UI's live updates are websockets too (`ws_handshake=true`,
+  `ui/app/services/watcher-fetch.js`), so the same pair breaks them. An agent option
+  `http_disable_websocket_origin_check` and dev mode turn the check off (`command/agent/http.go`).
+- **The websocket handshake** reads the token from the first frame and, when a header also carries one, requires the two
+  to be equal (`command/agent/websockets.go`, `readWsHandshake`). Behind the proxy they are.
+- **Live updates.** A job's page changed within 6 s of `nomad job stop`, with no reload, and the log view followed new
+  lines.
+- **The log view** first calls the node's own HTTP address from the browser, which fails (the node's API is not
+  reachable from outside), and falls back to the server through the proxy after a delay
+  (`ui/app/components/task-log.js`).
+- **CORS.** Nomad answers cross-origin requests for 14 wrapped endpoints (`/v1/client/fs/`, `/v1/client/stats`,
+  `/v1/client/allocation/`, `/v1/client/metadata`, `/v1/client/identity`, `/v1/vars`, `/v1/var/` and others), with all
+  origins, all headers and credentials. `/v1/jobs`, `/v1/agent/self` and `/v1/namespace*` have none.
+- **Another page** (on another port of the same host, whose `Sec-Fetch-Site` is `same-site`) calling a proxy that adds
+  the token and removes `Origin`: `fetch('/v1/jobs')` failed in the page, but the request reached Nomad, and a blind
+  `fetch(..., {method: 'POST', mode: 'no-cors'})` of a namespace created it. With `Origin` passed on, `/v1/vars` and
+  `/v1/client/stats` were readable. A proxy that answers 403 to a foreign `Host`, `Origin` or a `Sec-Fetch-Site` other
+  than `same-origin` and `none` stopped all of it, and nothing was created.
+- **The CLI** with `NOMAD_ADDR=http://127.0.0.1:<proxy>` and no other variable ran `nomad status`, `job run`, `job
+  stop`, `alloc logs` and `alloc exec`, with the checks on. It sends neither `Origin` nor `Sec-Fetch-Site`.
+- Not tested: a page left open across a restart of the proxy with a new token, and whether the UI falls back to polling
+  when a websocket fails.
 
 **Node pools** (since 1.6.0):
 - Client configuration: `client { node_pool = "x" }`, default `default`. The built-ins `default` and `all` cannot
@@ -1352,7 +1429,7 @@ All runs: region `ams`, plan `vc2-1c-1gb`, Ubuntu 24.04 (`os_id` 2284), except o
 VM check and its rerun, and one M2.6b VM check and its rerun, which ran Ubuntu 26.04 (`os_id` 2760). Runs 1 to 3 ran
 on 2026-09-25, run 4 on 2026-09-27, run 5 on 2026-09-28, the M2.5 VM checks on 2026-09-29, the M2.6a VM checks and
 their reruns on 2026-09-30, the M2.6b VM checks, their reruns and the M2.7a cluster check on 2026-10-05, and the
-three M2.7b cluster runs below, all on 2026-10-06.
+three M2.7b cluster runs below, all on 2026-10-06. The M2.8 cluster check is pending.
 Reports are in `hack/vultr-spike/results/` (git-ignored). The M1 exit run below was not a spike run.
 
 **Run 1 (`tt3s1g`, spike v1)** verified:
@@ -1549,7 +1626,8 @@ cluster of 3 servers and 2 clients, five instances at once, from an empty accoun
   servers all at 190 s, and the clients registered 126 s and 263 s after the leader line (each client's create
   included). The bootstrap and the health wait with three voters answered at once, as on the local run
   ([1.6](#16-the-agent-on-a-node)). The longest wait of the Nomad step stayed far under its 10 minutes.
-- **The Nomad API,** through `hack/tent-operator`'s certificate (TLS name `server.global.nomad`) and token: 3 alive
+- **The Nomad API,** through the certificate and token of `hack/tent-operator`, the stopgap that `tent export nomad` has
+  since replaced (TLS name `server.global.nomad`): 3 alive
   servers, autopilot healthy with 3 voters, 2 ready and eligible clients under their instance labels. A docker job in
   bridge mode ran on a client after 5 s and was purged.
 - **A second run.** `update cluster --exit-code` exited 0 and `update cluster --yes` printed `cluster … is up to
@@ -1638,11 +1716,54 @@ the node ready and eligible 54 s after the reboot, and the row read `cloud-init 
 error` (`status: done` without dots, `extended_status: done`, `recoverable_errors: {}`, exit 0). The delete guard
 exited 1 in 7 s and 4 s with 5 instances left. `tent delete cluster --yes` exited 0 after 20 s and left nothing.
 
+**M2.8 cluster check (`9pxbqn`, spike v12, `--only cluster --keep`, 2026-10-07)** ran tent
+`v0.1.0-rc.2-67-g57d69b6-dirty`. Every row read as expected but one, where the script was wrong. `tent create cluster
+--yes` exited 0 after 490 s; the leader, the bootstrap and the healthy servers showed at 208 s; the clients registered
+138 s and 281 s after the leader line. The new rows:
+
+- **`tent export nomad`** exited 0 in 1 s. The directory had mode 700 and the four files 600; stdout was the six lines
+  with a server's public address; the token was not the bootstrap token and was in neither stream; Nomad called it a
+  management token named `tent export nomad ...` that ended 24 hours after the export; `cli.pem` was for
+  `cli.global.nomad`, for client authentication only, and ended with the token. With the exported files curl read
+  three alive members, a healthy autopilot report with three voters and two ready clients, and the docker job ran
+  after 6 s.
+- **`nomad server members`** with the six lines sourced listed the three servers as alive. The row read `UNEXPECTED:
+  3 alive of 4`: the script read stdout and stderr together and counted the CLI's hint
+  ([1.2](#12-features-tent-relies-on)) as a fourth server. The script now reads the table from stdout alone.
+- **`tent validate cluster`** exited 0 in 2 s with `cluster spk-9pxbqn is valid: 3 servers and 2 clients run Nomad
+  2.0.7` and the warnings about the open `spec.access.api` and the one failure domain.
+- **`tent ui --listen 127.0.0.1:0`** answered `/v1/status/leader` and `/ui/` with 200, used a management token named
+  `tent ui ...` that was not the bootstrap token, refused `Host: example.com` with 403, ended with exit 0 one second
+  after SIGINT, and its port then refused connections.
+- **A client whose Nomad stops.** After `systemctl stop nomad.service` on `spk-9pxbqn-workers-1` Nomad listed the node
+  down after 21 s. `tent validate cluster` then exited 2 in 3 s and named the node with `its Nomad client is down`.
+  After `systemctl start nomad.service`, `tent validate cluster --wait 5m` exited 0 in 2 s.
+
+The rows of M2.7a and M2.7b read as before: after the reboot of a client SSH answered after 53 s and Nomad listed the
+node ready and eligible after 54 s, and the delete guard exited 1 twice with five instances left. None of the six
+secrets that the run read (the CA key, the gossip key, the bootstrap token, the operator's key and token, the token of
+`tent ui`) was in its output. The delete rows did not run, since `--keep` left the cluster for the steps by hand; the
+maintainer deleted it with `tent delete cluster --yes` after them.
+
+**By hand against that cluster, through `tent ui`, the same day:**
+
+- The maintainer opened the UI in a browser and it worked, an exec into a task and the Logs tab included. The first
+  try showed nothing: `tent ui` ran on another machine over SSH, and its port is a loopback port of the machine that
+  runs tent.
+- Headless Chrome 154 loaded `/ui/` through the proxy, and the proxy's log at `-v` showed 200 or 204 for every request
+  it made. A request with a `Host` of another port got 403 `forbidden: unexpected Host`, as an SSH tunnel on another
+  local port would.
+- With `NOMAD_ADDR` set to the proxy's address and no other variable, the `nomad` CLI 2.0.7 ran the job of the
+  quickstart (`nomad job run`: the deployment was successful and the allocation ran on a client), `nomad alloc exec`
+  into its task (the proxy logged the upgrade with status 101), `nomad alloc logs` and `nomad job stop -purge`.
+  `tent ui` exited with 0 on SIGINT each time.
+
 **Still open:**
 - Object Storage conditional writes ([3.12](#312-object-storage-)).
 - Images other than Ubuntu 24.04 were not checked, except Ubuntu 26.04 by one M2.5 VM check, one M2.6a VM check and
   its rerun, and one M2.6b VM check and its rerun, for tent-node only.
 - Account limits beyond 5 concurrent instances were not tested (the M2.7a check and the three M2.7b runs ran 5).
+- Whether the Nomad UI works against a cluster that tent built: the by-hand step of the M2.8 check.
 - What `/vpcs` answers in the first 30 s after a create ([3.5](#35-vpc)).
 
 ---
