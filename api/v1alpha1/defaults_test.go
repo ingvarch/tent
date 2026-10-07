@@ -25,6 +25,9 @@ func TestSetDefaultsFillsEmptyFields(t *testing.T) {
 	}
 	workers := want.NodeGroups[1]
 	workers.Spec.Nomad.NodePool = "default"
+	workers.Spec.RollingUpdate = RollingUpdate{
+		MaxSurge: new(1), MaxUnavailable: new(0), DrainTimeout: "1h",
+	}
 
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("SetDefaults (-want +got):\n%s", diff)
@@ -142,6 +145,45 @@ func TestSetDefaultsNodePoolFollowsTheRole(t *testing.T) {
 	}
 }
 
+func TestSetDefaultsRollingUpdateFollowsTheRole(t *testing.T) {
+	tests := []struct {
+		role Role
+		want RollingUpdate
+	}{
+		{RoleServer, RollingUpdate{}},
+		{RoleClient, RollingUpdate{MaxSurge: new(1), MaxUnavailable: new(0), DrainTimeout: "1h"}},
+		{RoleCombined, RollingUpdate{DrainTimeout: "1h"}},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.role), func(t *testing.T) {
+			g := groups()[1]
+			g.Spec.Role = tt.role
+			SetDefaults(cluster(), []*NodeGroup{g})
+			if diff := cmp.Diff(tt.want, g.Spec.RollingUpdate); diff != "" {
+				t.Errorf("rollingUpdate (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestSetDefaultsKeepsRollingUpdateSettings(t *testing.T) {
+	// Each field is kept on its own, and 0 is a setting: it must not turn back into the default of 1.
+	g := groups()[1]
+	g.Spec.RollingUpdate = RollingUpdate{MaxSurge: new(0)}
+	SetDefaults(cluster(), []*NodeGroup{g})
+	want := RollingUpdate{MaxSurge: new(0), MaxUnavailable: new(0), DrainTimeout: "1h"}
+	if diff := cmp.Diff(want, g.Spec.RollingUpdate); diff != "" {
+		t.Errorf("rollingUpdate (-want +got):\n%s", diff)
+	}
+	g = groups()[1]
+	g.Spec.RollingUpdate = RollingUpdate{MaxUnavailable: new(2), DrainTimeout: "5m"}
+	SetDefaults(cluster(), []*NodeGroup{g})
+	want = RollingUpdate{MaxSurge: new(1), MaxUnavailable: new(2), DrainTimeout: "5m"}
+	if diff := cmp.Diff(want, g.Spec.RollingUpdate); diff != "" {
+		t.Errorf("rollingUpdate (-want +got):\n%s", diff)
+	}
+}
+
 func TestSetDefaultsKeepsAnEmptyAPIList(t *testing.T) {
 	// An operator who writes api: [] must not get port 4646 opened to everyone; Validate rejects the empty list.
 	tests := []struct {
@@ -230,5 +272,7 @@ func allSet() objects {
 	}
 	workers := o.NodeGroups[1]
 	workers.Spec.Nomad.NodePool = "batch"
+	// maxSurge: 0 with maxUnavailable: 1 is a setting that a default must not replace.
+	workers.Spec.RollingUpdate = RollingUpdate{MaxSurge: new(0), MaxUnavailable: new(1), DrainTimeout: "30m"}
 	return o
 }

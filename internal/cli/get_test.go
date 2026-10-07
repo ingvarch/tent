@@ -83,6 +83,10 @@ spec:
     - ams
   nomad:
     nodePool: default
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0
+    drainTimeout: 1h
 `
 )
 

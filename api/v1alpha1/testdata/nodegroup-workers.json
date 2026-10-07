@@ -20,6 +20,11 @@
       "meta": {
         "team": "platform"
       }
+    },
+    "rollingUpdate": {
+      "maxSurge": 2,
+      "maxUnavailable": 1,
+      "drainTimeout": "30m"
     }
   }
 }

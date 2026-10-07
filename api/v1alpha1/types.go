@@ -1,5 +1,7 @@
 package v1alpha1
 
+import "time"
+
 // APIVersion is the apiVersion of every object in this package.
 const APIVersion = "tent/v1alpha1"
 
@@ -199,6 +201,27 @@ type NodeGroupSpec struct {
 	Zones []string `json:"zones,omitzero"`
 	// Nomad configures the Nomad clients of the group. Server groups leave it empty.
 	Nomad NodeGroupNomad `json:"nomad,omitzero"`
+	// RollingUpdate says how tent replaces the group's nodes and removes the ones beyond its size.
+	RollingUpdate RollingUpdate `json:"rollingUpdate,omitzero"`
+}
+
+// RollingUpdate says how tent replaces the nodes of a group and removes the ones beyond its size.
+type RollingUpdate struct {
+	// MaxSurge is how many nodes beyond size the group may have while it rolls. Client groups only; defaults to 1.
+	// Server and combined groups roll one node at a time, with one more node first.
+	MaxSurge *int `json:"maxSurge,omitempty"`
+	// MaxUnavailable is how many of the group's nodes may be unavailable while tent rolls the group or scales it down.
+	// Client groups only; defaults to 0.
+	MaxUnavailable *int `json:"maxUnavailable,omitempty"`
+	// DrainTimeout is how long Nomad drains a node before it stops the allocations that remain, as a duration such as
+	// 1h or 30m. It applies when tent rolls the group and when it scales it down. Client and combined groups; defaults
+	// to 1h.
+	DrainTimeout string `json:"drainTimeout,omitempty"`
+}
+
+// Drain returns DrainTimeout as a duration.
+func (r RollingUpdate) Drain() (time.Duration, error) {
+	return time.ParseDuration(r.DrainTimeout)
 }
 
 // NodeGroupNomad configures the Nomad clients of a group.

@@ -20,6 +20,12 @@ const (
 	privateRule    = "must be a private range inside 10.0.0.0/8, 172.16.0.0/12 or 192.168.0.0/16"
 	whitespaceRule = "must not contain whitespace"
 	serverNomad    = "must be empty for role=server: client settings do not apply"
+	serverRolling  = "must be empty for role=server: a server has no client to drain and rolls one node at a time"
+	combinedRoll   = "must be left out for role=combined: combined nodes roll one at a time, with one more node first"
+	notNegative    = "must not be negative"
+	noRollRule     = "maxSurge and maxUnavailable must not both be 0: the group could not roll"
+	durationRule   = "must be a duration such as 1h or 30m"
+	aboveZeroRule  = "must be above zero: Nomad reads 0 as a drain without a deadline"
 	metaKeyRule    = `key must match ^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$`
 	tentMeta       = "key must not start with tent_: tent keeps those keys for its own meta, such as tent_cluster"
 	controlMeta    = "value must not have a control character, such as a line end or a tab"
@@ -152,6 +158,26 @@ func TestValidateAccepts(t *testing.T) {
 		{name: "no Nomad version", spec: func(o *objects) { o.Cluster.Spec.Nomad.Version = "" }},
 		// The channel, which Validate does not know, sets the versions a cluster may run.
 		{name: "any Nomad version", spec: func(o *objects) { o.Cluster.Spec.Nomad.Version = "1.10.3" }},
+		{
+			name: "client group that rolls without a surge",
+			spec: func(o *objects) {
+				o.NodeGroups[1].Spec.RollingUpdate = RollingUpdate{MaxSurge: new(0), MaxUnavailable: new(1)}
+			},
+		},
+		{
+			name: "client group that rolls with a surge and no unavailable nodes",
+			spec: func(o *objects) {
+				o.NodeGroups[1].Spec.RollingUpdate = RollingUpdate{MaxSurge: new(3), MaxUnavailable: new(0)}
+			},
+		},
+		{
+			name: "combined group with a drain timeout",
+			base: combined,
+			spec: func(o *objects) {
+				o.Cluster.Spec.Nomad.ClientIntroduction = ClientIntroductionWarn
+				o.NodeGroups[0].Spec.RollingUpdate = RollingUpdate{DrainTimeout: "30m"}
+			},
+		},
 		{name: "empty client group", spec: func(o *objects) { o.NodeGroups[1].Spec.Size = 0 }},
 		{
 			// drivers: [] decodes as an empty, non-nil slice, and it is still empty.
@@ -558,6 +584,122 @@ func TestValidateReportsFieldPaths(t *testing.T) {
 			name: "server group with drivers",
 			spec: func(o *objects) { o.NodeGroups[0].Spec.Nomad.Drivers = []string{"docker"} },
 			want: Errors{{"NodeGroup servers", "spec.nomad", serverNomad}},
+		},
+		// Rolling update settings.
+		{
+			name: "server group with maxSurge",
+			spec: func(o *objects) { o.NodeGroups[0].Spec.RollingUpdate.MaxSurge = new(1) },
+			want: Errors{{"NodeGroup servers", "spec.rollingUpdate.maxSurge", serverRolling}},
+		},
+		{
+			name: "server group with maxUnavailable",
+			spec: func(o *objects) { o.NodeGroups[0].Spec.RollingUpdate.MaxUnavailable = new(0) },
+			want: Errors{{"NodeGroup servers", "spec.rollingUpdate.maxUnavailable", serverRolling}},
+		},
+		{
+			// An invalid value on a server group gets the role error only.
+			name: "server group with drainTimeout",
+			spec: func(o *objects) { o.NodeGroups[0].Spec.RollingUpdate.DrainTimeout = "soon" },
+			want: Errors{{"NodeGroup servers", "spec.rollingUpdate.drainTimeout", serverRolling}},
+		},
+		{
+			name: "server group with every rolling update field",
+			spec: func(o *objects) {
+				o.NodeGroups[0].Spec.RollingUpdate = RollingUpdate{
+					MaxSurge: new(0), MaxUnavailable: new(0), DrainTimeout: "1h",
+				}
+			},
+			want: Errors{
+				{"NodeGroup servers", "spec.rollingUpdate.maxSurge", serverRolling},
+				{"NodeGroup servers", "spec.rollingUpdate.maxUnavailable", serverRolling},
+				{"NodeGroup servers", "spec.rollingUpdate.drainTimeout", serverRolling},
+			},
+		},
+		{
+			name: "combined group with maxSurge",
+			base: combined,
+			spec: func(o *objects) {
+				o.Cluster.Spec.Nomad.ClientIntroduction = ClientIntroductionWarn
+				o.NodeGroups[0].Spec.RollingUpdate.MaxSurge = new(1)
+			},
+			want: Errors{{"NodeGroup servers", "spec.rollingUpdate.maxSurge", combinedRoll}},
+		},
+		{
+			// Two zeros on a combined group get the role errors only: the group rolls anyway.
+			name: "combined group with maxSurge and maxUnavailable",
+			base: combined,
+			spec: func(o *objects) {
+				o.Cluster.Spec.Nomad.ClientIntroduction = ClientIntroductionWarn
+				o.NodeGroups[0].Spec.RollingUpdate = RollingUpdate{MaxSurge: new(0), MaxUnavailable: new(0)}
+			},
+			want: Errors{
+				{"NodeGroup servers", "spec.rollingUpdate.maxSurge", combinedRoll},
+				{"NodeGroup servers", "spec.rollingUpdate.maxUnavailable", combinedRoll},
+			},
+		},
+		{
+			name: "combined group with a bad drainTimeout",
+			base: combined,
+			spec: func(o *objects) {
+				o.Cluster.Spec.Nomad.ClientIntroduction = ClientIntroductionWarn
+				o.NodeGroups[0].Spec.RollingUpdate.DrainTimeout = "0s"
+			},
+			want: Errors{{"NodeGroup servers", "spec.rollingUpdate.drainTimeout", aboveZeroRule}},
+		},
+		{
+			name: "negative maxSurge",
+			spec: func(o *objects) { o.NodeGroups[1].Spec.RollingUpdate.MaxSurge = new(-1) },
+			want: Errors{{"NodeGroup workers", "spec.rollingUpdate.maxSurge", notNegative}},
+		},
+		{
+			name: "negative maxUnavailable",
+			spec: func(o *objects) { o.NodeGroups[1].Spec.RollingUpdate.MaxUnavailable = new(-1) },
+			want: Errors{{"NodeGroup workers", "spec.rollingUpdate.maxUnavailable", notNegative}},
+		},
+		{
+			name: "maxSurge and maxUnavailable both 0",
+			spec: func(o *objects) {
+				o.NodeGroups[1].Spec.RollingUpdate = RollingUpdate{MaxSurge: new(0), MaxUnavailable: new(0)}
+			},
+			want: Errors{{"NodeGroup workers", "spec.rollingUpdate", noRollRule}},
+		},
+		{
+			name: "maxSurge 0 with the default maxUnavailable",
+			spec: func(o *objects) { o.NodeGroups[1].Spec.RollingUpdate.MaxSurge = new(0) },
+			want: Errors{{"NodeGroup workers", "spec.rollingUpdate", noRollRule}},
+		},
+		{
+			name: "drainTimeout that is no duration",
+			spec: func(o *objects) { o.NodeGroups[1].Spec.RollingUpdate.DrainTimeout = "soon" },
+			want: Errors{{"NodeGroup workers", "spec.rollingUpdate.drainTimeout", durationRule}},
+		},
+		{
+			name:      "drainTimeout missing after the defaults",
+			defaulted: func(o *objects) { o.NodeGroups[1].Spec.RollingUpdate.DrainTimeout = "" },
+			want:      Errors{{"NodeGroup workers", "spec.rollingUpdate.drainTimeout", durationRule}},
+		},
+		{
+			name: "drainTimeout of zero",
+			spec: func(o *objects) { o.NodeGroups[1].Spec.RollingUpdate.DrainTimeout = "0s" },
+			want: Errors{{"NodeGroup workers", "spec.rollingUpdate.drainTimeout", aboveZeroRule}},
+		},
+		{
+			name: "negative drainTimeout",
+			spec: func(o *objects) { o.NodeGroups[1].Spec.RollingUpdate.DrainTimeout = "-1h" },
+			want: Errors{{"NodeGroup workers", "spec.rollingUpdate.drainTimeout", aboveZeroRule}},
+		},
+		{
+			name: "every rolling update field wrong on a client group",
+			spec: func(o *objects) {
+				o.NodeGroups[1].Spec.RollingUpdate = RollingUpdate{
+					MaxSurge: new(-1), MaxUnavailable: new(-2), DrainTimeout: "x",
+				}
+			},
+			want: Errors{
+				{"NodeGroup workers", "spec.rollingUpdate.maxSurge", notNegative},
+				{"NodeGroup workers", "spec.rollingUpdate.maxUnavailable", notNegative},
+				{"NodeGroup workers", "spec.rollingUpdate.drainTimeout", durationRule},
+			},
 		},
 		{
 			name: "node pool too long",

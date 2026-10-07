@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 )
@@ -78,9 +79,33 @@ func TestNodeGroupJSONRoundTrip(t *testing.T) {
 				Drivers:   []string{"docker", "exec"},
 				Meta:      map[string]string{"team": "platform"},
 			},
+			RollingUpdate: RollingUpdate{MaxSurge: new(2), MaxUnavailable: new(1), DrainTimeout: "30m"},
 		},
 	}
 	checkRoundTrip(t, "nodegroup-workers.json", want)
+}
+
+func TestRollingUpdateZerosSurviveARoundTrip(t *testing.T) {
+	// Plain ints with omitempty would drop 0, and the default of maxSurge would come back.
+	in := decodeStrict[NodeGroup](t, []byte(`{"spec": {"rollingUpdate": {"maxSurge": 0, "maxUnavailable": 0}}}`))
+	out := marshal(t, in)
+	if !bytes.Contains(out, []byte(`"rollingUpdate":{"maxSurge":0,"maxUnavailable":0}`)) {
+		t.Errorf("encoded %s, want maxSurge and maxUnavailable of 0 kept", out)
+	}
+	again := decodeStrict[NodeGroup](t, out)
+	if diff := cmp.Diff(in, again); diff != "" {
+		t.Errorf("decoding the encoded group (-first +again):\n%s", diff)
+	}
+}
+
+func TestRollingUpdateDrain(t *testing.T) {
+	got, err := RollingUpdate{DrainTimeout: "90m"}.Drain()
+	if err != nil || got != 90*time.Minute {
+		t.Errorf("Drain() = %v, %v, want 1h30m0s, nil", got, err)
+	}
+	if _, err := (RollingUpdate{DrainTimeout: "soon"}).Drain(); err == nil {
+		t.Error("Drain() of soon = nil, want an error")
+	}
 }
 
 func TestServerNodeGroupJSONRoundTrip(t *testing.T) {
@@ -117,6 +142,17 @@ func TestZeroValuesAreOmitted(t *testing.T) {
 		if v, ok := doc.Spec[key]; ok {
 			t.Errorf("spec.%s = %s, want the key omitted", key, v)
 		}
+	}
+}
+
+func TestGroupWithoutRollingUpdateEncodesWithoutIt(t *testing.T) {
+	g := NodeGroup{
+		TypeMeta: TypeMeta{APIVersion: APIVersion, Kind: KindNodeGroup},
+		Metadata: NodeGroupMeta{Name: "workers", Cluster: "prod"},
+		Spec:     NodeGroupSpec{Role: RoleClient, MachineType: "vc2-2c-4gb"},
+	}
+	if out := marshal(t, g); bytes.Contains(out, []byte("rollingUpdate")) {
+		t.Errorf("encoded %s, want no rollingUpdate", out)
 	}
 }
 

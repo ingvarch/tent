@@ -230,6 +230,7 @@ func checkGroup(ck checker, g *NodeGroup, c *Cluster, opts ValidateOptions, shar
 		return false
 	})
 	checkGroupNomad(ck, s.Role, &s.Nomad)
+	checkRollingUpdate(ck, s.Role, &s.RollingUpdate)
 }
 
 func checkSize(ck checker, role Role, size int, opts ValidateOptions) {
@@ -268,6 +269,68 @@ func checkGroupNomad(ck checker, role Role, n *NodeGroupNomad) {
 	ck.list("spec.nomad.drivers", n.Drivers, "driver", ck.matching(driverPattern))
 	for _, key := range slices.Sorted(maps.Keys(n.Meta)) {
 		checkMeta(ck, fmt.Sprintf("spec.nomad.meta[%q]", key), key, n.Meta[key])
+	}
+}
+
+// rollingUpdatePath is the path of a node group's rolling update settings in field errors.
+const rollingUpdatePath = "spec.rollingUpdate"
+
+// checkRollingUpdate checks the rolling update settings of a group after SetDefaults. A server group has none, and
+// a combined group has only drainTimeout. A setting that a role would ignore is an error, so it cannot mislead.
+func checkRollingUpdate(ck checker, role Role, r *RollingUpdate) {
+	switch role {
+	case RoleServer:
+		const detail = "must be empty for role=server: a server has no client to drain and rolls one node at a time"
+		checkLeftOut(ck, r, detail)
+		if r.DrainTimeout != "" {
+			ck.add(rollingUpdatePath+".drainTimeout", detail)
+		}
+		return
+	case RoleCombined:
+		checkLeftOut(ck, r,
+			"must be left out for role=combined: combined nodes roll one at a time, with one more node first")
+	case RoleClient:
+		checkClientRolling(ck, r)
+	default:
+		// The role is reported on its own.
+		return
+	}
+	checkDrainTimeout(ck, r)
+}
+
+// checkLeftOut reports maxSurge and maxUnavailable when they are set, with detail.
+func checkLeftOut(ck checker, r *RollingUpdate, detail string) {
+	if r.MaxSurge != nil {
+		ck.add(rollingUpdatePath+".maxSurge", detail)
+	}
+	if r.MaxUnavailable != nil {
+		ck.add(rollingUpdatePath+".maxUnavailable", detail)
+	}
+}
+
+// checkClientRolling checks maxSurge and maxUnavailable of a client group.
+func checkClientRolling(ck checker, r *RollingUpdate) {
+	const path = rollingUpdatePath
+	if r.MaxSurge != nil && *r.MaxSurge < 0 {
+		ck.add(path+".maxSurge", "must not be negative")
+	}
+	if r.MaxUnavailable != nil && *r.MaxUnavailable < 0 {
+		ck.add(path+".maxUnavailable", "must not be negative")
+	}
+	if r.MaxSurge != nil && r.MaxUnavailable != nil && *r.MaxSurge == 0 && *r.MaxUnavailable == 0 {
+		ck.add(path, "maxSurge and maxUnavailable must not both be 0: the group could not roll")
+	}
+}
+
+// checkDrainTimeout checks that drainTimeout is a duration above zero.
+func checkDrainTimeout(ck checker, r *RollingUpdate) {
+	const path = rollingUpdatePath + ".drainTimeout"
+	d, err := r.Drain()
+	switch {
+	case err != nil:
+		ck.add(path, "must be a duration such as 1h or 30m")
+	case d <= 0:
+		ck.add(path, "must be above zero: Nomad reads 0 as a drain without a deadline")
 	}
 }
 
