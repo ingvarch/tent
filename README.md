@@ -13,11 +13,12 @@
 clusters on cloud providers. It aims to be what [kops](https://github.com/kubernetes/kops) is for Kubernetes. A nomad
 pitches a tent anywhere; tent pitches a Nomad cluster on any cloud.
 
-> **Status: early development (milestone M2 in progress).** `tent update cluster --yes` builds a running Nomad
-> cluster on [Vultr](https://www.vultr.com): servers with a leader, ACLs bootstrapped and clients registered, and it
-> scrubs a node's keys from its user data once the node has joined. `tent export nomad`, `tent ui` and `tent validate
-> cluster` give you access to the cluster and check it. It is not for production yet. Vultr is the first
-> provider (it also hosts the E2E suite), then [Hetzner Cloud](https://www.hetzner.com/cloud). AWS is planned.
+> **Status: early development, release v0.1.0.** `tent update cluster --yes` builds a running Nomad cluster on
+> [Vultr](https://www.vultr.com): servers with a leader, ACLs bootstrapped and clients registered, and it scrubs a
+> node's keys from its user data once the node has joined. `tent export nomad`, `tent ui` and `tent validate cluster`
+> give you access to the cluster and check it. An end-to-end suite builds clusters on Vultr and checks them. It is not
+> for production yet: tent cannot scale a running cluster down or roll it before M3. Vultr is the first provider, then
+> [Hetzner Cloud](https://www.hetzner.com/cloud). AWS is planned.
 
 ## What works now
 
@@ -38,11 +39,12 @@ pitches a tent anywhere; tent pitches a Nomad cluster on any cloud.
 - **Safe re-runs.** A run that stops halfway can run again. tent adopts what it created by the markers on each
   object and never creates a second machine for one node.
 - **Full teardown** with `tent delete cluster --yes`: every object with the cluster's markers, then its state.
+- **An end-to-end suite on Vultr** (`make e2e`): it builds a cluster on Ubuntu 24.04 and one on 26.04, runs a job
+  with a service, checks that containers cannot reach the metadata service and that the servers refuse a node
+  without an intro token, and deletes the clusters ([details](test/e2e/README.md)).
 
 ## What comes next
 
-- **Finish the Nomad bootstrap** (M2).
-  - M2.9: the E2E `smoke` on Vultr.
 - **Run day-2 operations with Nomad semantics** (M3).
   - Rolling updates drain clients and replace servers without losing Raft quorum.
   - Upgrades, scaling (before M3 `update` refuses to delete a node that joined, since it cannot drain a node or check
@@ -51,14 +53,11 @@ pitches a tent anywhere; tent pitches a Nomad cluster on any cloud.
 
 ## Quick start
 
-With Go 1.26 or newer and a Vultr API key. A build from `main` is a development build: its nodes need a tent-node built
-from the same commit, which you give with `TENT_NODE_URL` and `TENT_NODE_SHA256`. In a clone of the repository, `make
-dev-upload` prints the lines that set them ([details](hack/tent-node-upload/README.md)). A release build finds its
-tent-node in its own release, and no release has the bootstrap yet.
+With a Vultr API key. Install a release: with Homebrew, or an archive, a `.deb` or a `.rpm` from the
+[releases](https://github.com/ingvarch/tent/releases). A release finds the tent-node of its nodes in its own release.
 
 ```sh
-go install github.com/ingvarch/tent/cmd/tent@main
-export TENT_NODE_URL="<tent-node URL>" TENT_NODE_SHA256="<its sha256>"
+brew install --cask ingvarch/tap/tent
 export TENT_STATE="file://$HOME/.tent" VULTR_API_KEY="<your API key>"
 
 tent create cluster demo --provider vultr --region ams --machine-type vc2-1c-1gb --combined
@@ -73,6 +72,10 @@ tent delete cluster demo --yes    # delete them, the specs and the secrets
 The [quick start guide](docs/quickstart.md) walks through each step with its output, SSH access, a job with the `nomad`
 CLI and the Nomad web UI.
 
+A build from `main`, such as `go install github.com/ingvarch/tent/cmd/tent@main`, is a development build: its nodes need
+a tent-node built from the same commit, which you give with `TENT_NODE_URL` and `TENT_NODE_SHA256`. In a clone of the
+repository, `make dev-upload` prints the lines that set them ([details](hack/tent-node-upload/README.md)).
+
 ## Documentation
 
 - [Quick start](docs/quickstart.md): build a small cluster on Vultr and delete it again.
@@ -81,6 +84,7 @@ CLI and the Nomad web UI.
 - [Roadmap](docs/roadmap.md): milestones and current status.
 - [Platform notes](docs/platform-notes.md): verified facts about Nomad, Vultr, Hetzner Cloud and prior art that the
   design relies on.
+- [E2E suite](test/e2e/README.md): how the end-to-end suite runs on Vultr.
 - [Vultr spike](hack/vultr-spike/README.md): a script that checks undocumented Vultr behaviour on a real account.
 
 ## License

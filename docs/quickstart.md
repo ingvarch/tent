@@ -3,11 +3,12 @@
 This guide builds a small Nomad cluster on Vultr and deletes it again. It takes about fifteen minutes and costs a
 few cents.
 
-> tent is at milestone M2 ([roadmap](roadmap.md)). `update cluster --yes` builds the network, the firewalls, the
-> machines and a running, secured Nomad cluster: a leader, ACLs bootstrapped with the secret in the state store, and
-> registered nodes. Once a node has joined, tent replaces its user data, which holds its keys, with a stub.
-> `tent export nomad` gives you a short-lived certificate and token for the Nomad API, `tent validate cluster` checks
-> the cluster, and `tent ui` serves the Nomad web UI on a port of your machine. Not done yet:
+> This guide uses tent v0.1.0, the first release that builds a Nomad cluster ([roadmap](roadmap.md)). `update cluster
+> --yes` builds the network, the firewalls, the machines and a running, secured Nomad cluster: a leader, ACLs
+> bootstrapped with the secret in the state store, and registered nodes. Once a node has joined, tent replaces its
+> user data, which holds its keys, with a stub. `tent export nomad` gives you a short-lived certificate and token for
+> the Nomad API, `tent validate cluster` checks the cluster, and `tent ui` serves the Nomad web UI on a port of your
+> machine. Not done yet:
 > - tent cannot scale a running cluster down before M3: `update` refuses to delete a node that joined Nomad, since it
 >   cannot drain a node or check the Raft quorum yet. `delete cluster` still deletes everything.
 
@@ -15,12 +16,12 @@ few cents.
 
 - A Vultr account and an API key (Account → API). Vultr accepts the key only from the addresses in the access
   control list next to it, so add the address you run tent from.
-- Go 1.26 or newer, to build tent. The releases so far predate the Nomad bootstrap, so the guide builds tent from
-  `main`.
-- The tent-node of that build. A development build needs `TENT_NODE_URL` and `TENT_NODE_SHA256`, which
-  `make dev-upload` prints the lines that set, in a clone of the repository, which `go install` does not give you
-  (it needs an R2 bucket and token; [details](../hack/tent-node-upload/README.md)). Without them
-  `tent update cluster` fails with `find tent-node: tent dev is a development build, so no release holds its
+- tent v0.1.0 or later, from a release ([step 1](#1-install-tent)). A release finds the tent-node that its nodes run
+  in its own release.
+- For a build of tent from `main` instead, the tent-node of that build. A development build needs `TENT_NODE_URL` and
+  `TENT_NODE_SHA256`, which `make dev-upload` prints the lines that set, in a clone of the repository, which `go
+  install` does not give you (it needs an R2 bucket and token; [details](../hack/tent-node-upload/README.md)). Without
+  them `tent update cluster` fails with `find tent-node: tent dev is a development build, so no release holds its
   tent-node: set TENT_NODE_URL and TENT_NODE_SHA256 to a tent-node built from the same commit`. A release build finds
   its tent-node in its own release and ignores the variables. The tent-node is for linux/amd64, which is all that
   Vultr offers.
@@ -31,11 +32,14 @@ few cents.
 ## 1. Install tent
 
 ```sh
-go install github.com/ingvarch/tent/cmd/tent@main
+brew install --cask ingvarch/tap/tent
 tent version
 ```
 
-`go install` puts `tent` into `$(go env GOPATH)/bin`, which must be on your `PATH`.
+Without Homebrew, download the archive for your system, or the `.deb` or the `.rpm`, from the
+[releases](https://github.com/ingvarch/tent/releases), and put `tent` on your `PATH`. To build from `main` instead,
+with Go 1.26 or newer, run `go install github.com/ingvarch/tent/cmd/tent@main`, which puts `tent` into
+`$(go env GOPATH)/bin`; that build needs the tent-node variables above.
 
 ## 2. Set the state store and the API key
 
@@ -377,15 +381,15 @@ tent delete cluster demo
 - state demo/pki/ca-bundle.pem
 - state demo/pki/private/ca.key
 - state demo/cluster.yaml
+- state demo/tent-version
 
 Nodes: 3 to delete.
 Plan: 0 to create, 0 to update, 0 to replace, 3 to delete.
-State: 8 objects to delete.
+State: 9 objects to delete.
 run with --yes to delete them
 ```
 
-A release build, and the `bin/tent` that `make build` makes, also lists `- state demo/tent-version`, so the count is
-9.
+A build from `main` with `go install` does not list `- state demo/tent-version`, so its count is 8.
 
 Without `--yes` this is only the plan. To delete:
 
@@ -409,7 +413,7 @@ deleted vultr.VPC/demo (ID <id>)
 deleting vultr.SSHKey/demo-7855a371 (ID <id>)
 deleted vultr.SSHKey/demo-7855a371 (ID <id>)
 
-Deleted: 3 nodes, 3 infrastructure objects, 8 state objects.
+Deleted: 3 nodes, 3 infrastructure objects, 9 state objects.
 ```
 
 tent deletes the machines first and waits until Vultr no longer lists them. Then it deletes the firewall group, the
