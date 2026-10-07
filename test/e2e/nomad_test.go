@@ -79,34 +79,14 @@ func (n *nomadAPI) del(ctx context.Context, path string) error {
 	return n.do(ctx, http.MethodDelete, path, nil, nil)
 }
 
-// do sends one request. Errors name the method and the path, never the token.
+// do sends one request and decodes the JSON answer into out, unless out is nil. Errors name the method and the
+// path, never the token.
 func (n *nomadAPI) do(ctx context.Context, method, path string, in, out any) error {
-	label := fmt.Sprintf("nomad: %s %s", method, path)
-	var body io.Reader
-	if in != nil {
-		data, err := json.Marshal(in)
-		if err != nil {
-			return fmt.Errorf("%s: encode: %w", label, err)
-		}
-		body = bytes.NewReader(data)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, n.base+path, body)
+	resp, label, err := n.send(ctx, method, path, in)
 	if err != nil {
-		return fmt.Errorf("%s: %w", label, err)
-	}
-	req.Header.Set("X-Nomad-Token", n.token)
-	if in != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := n.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("%s: %w", label, err)
+		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		text, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
-		return fmt.Errorf("%s: %d: %s", label, resp.StatusCode, strings.TrimSpace(string(text)))
-	}
 	if out == nil {
 		return nil
 	}
@@ -114,4 +94,36 @@ func (n *nomadAPI) do(ctx context.Context, method, path string, in, out any) err
 		return fmt.Errorf("%s: decode: %w", label, err)
 	}
 	return nil
+}
+
+// send sends one request, with in as its JSON body unless in is nil, and returns an answer with a 2xx status and
+// the label that errors about it start with. The caller closes the body.
+func (n *nomadAPI) send(ctx context.Context, method, path string, in any) (*http.Response, string, error) {
+	label := fmt.Sprintf("nomad: %s %s", method, path)
+	var body io.Reader
+	if in != nil {
+		data, err := json.Marshal(in)
+		if err != nil {
+			return nil, label, fmt.Errorf("%s: encode: %w", label, err)
+		}
+		body = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, n.base+path, body)
+	if err != nil {
+		return nil, label, fmt.Errorf("%s: %w", label, err)
+	}
+	req.Header.Set("X-Nomad-Token", n.token)
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := n.client.Do(req)
+	if err != nil {
+		return nil, label, fmt.Errorf("%s: %w", label, err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		defer func() { _ = resp.Body.Close() }()
+		text, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+		return nil, label, fmt.Errorf("%s: %d: %s", label, resp.StatusCode, strings.TrimSpace(string(text)))
+	}
+	return resp, label, nil
 }

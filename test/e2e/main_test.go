@@ -10,8 +10,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -27,6 +29,8 @@ type suiteRun struct {
 	Runner string
 	Tent   tentRunner
 	Vultr  *vultrapi.Client
+	// Ctx ends when a signal interrupts the run; the steps' contexts end with it.
+	Ctx context.Context
 	// SSHKey is the path of the private key; the public key is SSHKey + ".pub".
 	SSHKey string
 }
@@ -38,9 +42,14 @@ func TestMain(m *testing.M) {
 	os.Exit(runSuite(m))
 }
 
-// runSuite prepares the run, runs the tests and returns the exit code.
+// runSuite prepares the run, runs the tests and returns the exit code. An interrupt or SIGTERM ends the contexts of
+// the steps, so each test's cleanup deletes its cluster before the run ends.
 func runSuite(m *testing.M) int {
-	s, err := setup(context.Background())
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	stopAnnounce := announceInterrupt(ctx, os.Stdout)
+	defer stopAnnounce()
+	s, err := setup(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "e2e: %v\n", err)
 		return 1
@@ -91,7 +100,7 @@ func setup(ctx context.Context) (suiteRun, error) {
 	}
 	return suiteRun{
 		ID: id, Dir: dir, Settings: cfg, Runner: runner,
-		Tent: tentRunner{Bin: cfg.Tent, Dir: dir}, Vultr: api, SSHKey: keyPath,
+		Tent: tentRunner{Bin: cfg.Tent, Dir: dir}, Vultr: api, Ctx: ctx, SSHKey: keyPath,
 	}, nil
 }
 
