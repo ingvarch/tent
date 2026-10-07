@@ -13,7 +13,8 @@ Providers, in order:
 3. **AWS** comes later. It must remain possible without changes to the core.
 
 **Status:** M0 Foundation (2026-09-27), M1 Vultr infrastructure (2026-09-28) and M2 Nomad bootstrap (2026-10-07) are
-complete.
+complete. v0.1.0, the first release that builds a Nomad cluster, was tagged on 2026-10-07: archives, `.deb` and `.rpm`
+packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries that its nodes download.
 - The skeleton is in place: Go module, `tent version`, Makefile, lint rules, CI on Linux, macOS and Windows, and a
   GoReleaser release pipeline. The repository is public, the release secrets are set, and the archives and packages
   ship third-party licence notices (ADR-0020). Renovate updates the Go modules and GitHub Actions.
@@ -63,8 +64,8 @@ complete.
     agent first), with a lock between `up` and `refresh-join`. The weekly online job runs `nomad config validate` on
     the goldens (`internal/assets`, maintainer decision 23). `hack/tent-node-userdata` builds its node through
     `app.NodeConfigOf`, and the spike's `tentnode` check (v8) boots Nomad. The VM check ran on 2026-10-05 with one
-    finding, accepted as a trade-off: a restart of Docker restarts Nomad's docker tasks. Pending: the
-    online job's first run on Linux.
+    finding, accepted as a trade-off: a restart of Docker restarts Nomad's docker tasks. The online job passed
+    on Linux in the scheduled CI run of 2026-10-05.
   - M2.7a added the bootstrap in `update` (`internal/app`, `internal/nomadops`, ADR-0031): `tent update cluster --yes`
     builds a Nomad cluster: servers, then the Nomad step (leader, ACL bootstrap with the stored secret, healthy
     servers, the mark `nomad/bootstrapped`), then clients with intro tokens until Nomad lists them. `cmd/tent` reads
