@@ -588,8 +588,25 @@ and python over mTLS; the source is the v2.0.7 tag:
     (`client: node registration complete`, `GET /v1/nodes` showed it `ready`). The file stayed after registration. A
     client without a token did not register: the client logged `Permission denied` for `Node.Register`, the server
     `node registration without introduction token: enforcement_level=strict`, and `GET /v1/nodes` was empty.
+  - **The log lines** (Nomad 2.0.7, a local server with `client_introduction { enforcement = "strict" }` and a client
+    with no token, 2026-10-07). The server logs `[ERROR] nomad.client: node registration without introduction token:
+    enforcement_level=strict node_id=<uuid> node_pool=default node_name=rogue`. The client logs `[ERROR] client.rpc:
+    error performing RPC to server: error="rpc error: Permission denied" rpc=Node.Register server=...` and `[ERROR]
+    client: error registering: error="rpc error: Permission denied"`. `GET /v1/nodes` stays empty. The E2E step
+    `intro-token` looks for the server's line, with `node_name=e2e-rogue`, and for the client's `error registering`
+    line ([ADR-0034](adr/0034-e2e-suite-on-vultr.md)).
   - **`warn`.** After the servers restarted with `enforcement = "warn"`, a client without a token registered, and the
     server logged a warning with `enforcement_level=warn`.
+  - **The keyring signs the tokens, and it comes after the leader** (Nomad 2.0.7, 2026-10-07). A local server with ACLs
+    and strict introduction had a leader at 2.05 s and its ACL bootstrap at 2.09 s; at 2.13 s `GET
+    /v1/operator/keyring/keys` answered 200 with `[]`, and `PUT /v1/acl/identity/client-introduction-token` answered
+    500 `failed to sign node introduction identity claims: keyring has not been initialized yet`; at 2.28 s the keys
+    listed one with `"State":"active"` and the token was issued. The agent logged `nomad.keyring: initialized keyring`
+    after the failed request. In the v2.0.7 source, both calls are forwarded to the leader, and `activeCipherSet`
+    (`nomad/encrypter.go`) fails with that text while the state store holds no active root key. The E2E run `4bjbp8`
+    on Vultr hit it with one server: the first client's intro token got the 500 right after `1 Nomad server is
+    healthy`. Since M2.9 the Nomad step of `update` waits for an active key before it scrubs the servers and asks for
+    any intro token.
 
 **Nodes of one name and expired intro tokens.** Run on 2026-10-05 against local Nomad 2.0.7 (the official
 `nomad_2.0.7_darwin_arm64.zip`, sha256 `4ada34db43f8b75c80c4e09ce50f4753e661bcb4a3745f415dd4aa7d01483e58`, which
@@ -655,6 +672,18 @@ tag:
 the VPC interface was up by `network-online.target` and the go-sockaddr templates resolved; at a shutdown with a job
 running Nomad stopped in 1.1 s, before Docker, without a drain; the client was ready and eligible after the reboot.
 Nomad did not reattach to its container after `systemctl restart docker` ([6.2](#62-firewalls-on-the-host)).
+
+**A tent-node of another version** (the first E2E run, run `0oqujb`, and a debug cluster built the same way,
+`e2e-dbgaa1-2404`, 2026-10-07). tent-node's `preflight` refuses a tent-node whose version is not the one in the
+NodeConfig's tent-node asset. The suite had built tent with `go build`, so its version was `dev`, and the tent-node that
+`make dev-upload` had uploaded carried the Makefile's `git describe` version. Both clusters of the run failed at
+`create`; on the debug cluster `preflight` failed with `tent-node is v0.1.0-rc.3-2-gf15e11a, not dev, the version of the
+node config's tent-node asset`. tent-node failed, so ufw stayed on and dropped port 4646, while SSH from the runner
+still passed (the cloud firewall's /32 rules worked). `create` then failed after about 11 minutes with `failed to wait
+for a Nomad leader: ... <ip>:4646: ... no answer within 30s`. A development build of tent and the tent-node that
+`TENT_NODE_URL` names must carry one version; `make build` gives both binaries one. The suite checks this by comparing
+`TENT_NODE_SHA256` with the sha256 of the tent-node from the same `make build`, since a second `make build` of one
+commit writes another `DATE` and so another sha256.
 
 ---
 
@@ -901,6 +930,12 @@ Nomad did not reattach to its container after `systemctl restart docker` ([6.2](
     provisioning, subscriptions, subscriptions_view, support, upgrade.
   - `service_user` creates an API-only user.
   - The IP allow-list is per user (all of the user's keys), not per key.
+  - **The E2E service user** (set up by the maintainer by 2026-10-06; its rights told on 2026-10-07): an API-only
+    user with every right except billing, user management and one more that the maintainer did not name, and an
+    allow-list of the maintainer's two addresses. The key works only from those addresses, so the suite runs from the
+    maintainer's machine ([ADR-0034](adr/0034-e2e-suite-on-vultr.md)). Vultr raised the account's instance limit from
+    5 to 20 at the maintainer's request (told on 2026-10-06). On 2026-10-07 the key listed instances, VPCs, firewall
+    groups, SSH keys, regions, plans and images with 200.
 - **IAM (2026).**
   - Policies list actions such as `compute.instance.Create|Delete|List|Read|Update`, `network.firewall.*` and
     `network.vpc.*`, with Allow or Deny.
@@ -1426,11 +1461,14 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
 ### 3.16 Spike runs
 
 All runs: region `ams`, plan `vc2-1c-1gb`, Ubuntu 24.04 (`os_id` 2284), except one of the M2.5 VM checks, one M2.6a
-VM check and its rerun, and one M2.6b VM check and its rerun, which ran Ubuntu 26.04 (`os_id` 2760). Runs 1 to 3 ran
+VM check and its rerun, one M2.6b VM check and its rerun, and the second cluster of each E2E run, which ran Ubuntu
+26.04 (`os_id` 2760). Runs 1 to 3 ran
 on 2026-09-25, run 4 on 2026-09-27, run 5 on 2026-09-28, the M2.5 VM checks on 2026-09-29, the M2.6a VM checks and
 their reruns on 2026-09-30, the M2.6b VM checks, their reruns and the M2.7a cluster check on 2026-10-05, and the
-three M2.7b cluster runs below, all on 2026-10-06. The M2.8 cluster check is pending.
-Reports are in `hack/vultr-spike/results/` (git-ignored). The M1 exit run below was not a spike run.
+three M2.7b cluster runs below, all on 2026-10-06, and the M2.8 cluster check on 2026-10-07. The six E2E runs of M2.9
+(2026-10-07, below) ran the `smoke` scenario of `test/e2e` on Ubuntu 24.04 and 26.04 at once. Reports are in
+`hack/vultr-spike/results/` (git-ignored), and the E2E runs' results in `test/e2e/results/` (git-ignored). The M1 exit
+run below was not a spike run.
 
 **Run 1 (`tt3s1g`, spike v1)** verified:
 - the tag syntax, limits and filter semantics;
@@ -1758,12 +1796,35 @@ maintainer deleted it with `tent delete cluster --yes` after them.
   into its task (the proxy logged the upgrade with status 101), `nomad alloc logs` and `nomad job stop -purge`.
   `tent ui` exited with 0 on SIGINT each time.
 
+**E2E runs of M2.9 (2026-10-07)**, `make e2e`, each with one cluster of 1 server and 1 client per image, both images
+at once ([ADR-0034](adr/0034-e2e-suite-on-vultr.md)):
+- **`0oqujb`**: both clusters failed `create` after about 11 minutes with `failed to wait for a Nomad leader`. On a
+  debug cluster built the same way, `e2e-dbgaa1-2404`, tent-node refused to run: `tent-node is
+  v0.1.0-rc.3-2-gf15e11a, not dev, the version of the node config's tent-node asset`, since the suite had built tent
+  without the Makefile's version ([1.6](#16-the-agent-on-a-node)). `make e2e` now builds tent and tent-node with one
+  version and uploads that tent-node.
+- **`4bjbp8`**: on 26.04 the first client's intro token got Nomad's 500 `keyring has not been initialized yet` right
+  after `1 Nomad server is healthy` ([1.2](#12-features-tent-relies-on)); tent now waits for the keyring. 24.04 passed
+  `create` in 6m22s, and the suite's `validate` lacked `--allow-single-server`.
+- **`b2qpe2`**: `create`, `validate`, `export` and `service` passed on both images; `metadata` failed on both with
+  exit 12 in all three groups: the one control site, `archive.ubuntu.com`, timed out. From the maintainer's machine,
+  `archive.ubuntu.com` and `security.ubuntu.com` did not answer over IPv4 at that time either, while
+  `deb.debian.org`, `detectportal.firefox.com` and `captive.apple.com` did. The probe now tries those three.
+- **`r7l48w`**, **`58sglh`** and **`g57k85`** (the last on the final code of M2.9): every step passed on both images,
+  in 435 s, 409 s and 348 s. Per image: `create` 4m6s to 6m18s, `validate` 1 to 2 s, `export` 1 to 2 s, `service` 5
+  to 10 s, `metadata` 10 s, `intro-token` 5 to 10 s, `delete` 18 to 20 s. Every metadata probe, on Nomad's bridge,
+  Docker's bridge and the host network, printed `wget: download timed out` after a control site answered; each
+  server logged `node registration without introduction token: enforcement_level=strict ... node_name=e2e-rogue`.
+  The leak check of the 24.04 cluster took 101 s, 71 s and 42 s while the other cluster was still being built. The
+  log of `r7l48w` did not show its polls; in `58sglh` and `g57k85` no poll listed anything, and in `g57k85` no retry
+  of a Vultr call was printed. The times fit one list request that
+  waits out its 30 s timeout per failed poll (by the timing only); the suite now logs a poll whose lists fail, with
+  the error and the time they took.
+
 **Still open:**
 - Object Storage conditional writes ([3.12](#312-object-storage-)).
-- Images other than Ubuntu 24.04 were not checked, except Ubuntu 26.04 by one M2.5 VM check, one M2.6a VM check and
-  its rerun, and one M2.6b VM check and its rerun, for tent-node only.
+- Images other than Ubuntu 24.04 and 26.04 were not checked.
 - Account limits beyond 5 concurrent instances were not tested (the M2.7a check and the three M2.7b runs ran 5).
-- Whether the Nomad UI works against a cluster that tent built: the by-hand step of the M2.8 check.
 - What `/vpcs` answers in the first 30 s after a create ([3.5](#35-vpc)).
 
 ---

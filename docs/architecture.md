@@ -130,7 +130,7 @@ These were verified on 2026-09-25. Details and sources are in [platform notes](p
 | 5 | **The core knows nothing about specific clouds, and providers know nothing about Nomad.** The core expresses intents, and providers map them to native resources. | [0004](adr/0004-layered-architecture.md) |
 | 6 | **Core mechanisms assume the weakest cloud primitives.** Unique names, fixed IPs and graceful shutdown are optimizations switched on by capabilities, never assumptions. | [0015](adr/0015-idempotency-without-unique-names.md), [0016](adr/0016-server-discovery-seed-and-refresh.md), [0017](adr/0017-api-driven-server-removal.md) |
 | 7 | **Secure by default.** mTLS everywhere, gossip encryption, ACLs and client introduction. Cloud credentials never reach nodes. | [0007](adr/0007-security-baseline.md), [0008](adr/0008-node-credential-delivery.md) |
-| 8 | **Testability is an architectural requirement.** The cloud and Nomad sit behind interfaces with fakes. We use golden tests and real-cloud E2E runs with a janitor. | [0012](adr/0012-testing-strategy.md), [0014](adr/0014-vultr-first-provider-and-e2e.md) |
+| 8 | **Testability is an architectural requirement.** The cloud and Nomad sit behind interfaces with fakes. We use golden tests and real-cloud E2E runs with a janitor. | [0012](adr/0012-testing-strategy.md), [0014](adr/0014-vultr-first-provider-and-e2e.md), [0034](adr/0034-e2e-suite-on-vultr.md) |
 | 9 | **Every command is idempotent and safe to interrupt.** It can be re-run after Ctrl-C or a crash and will converge. | [0003](adr/0003-cloud-is-source-of-truth.md), [0015](adr/0015-idempotency-without-unique-names.md) |
 
 ---
@@ -339,7 +339,6 @@ This table is also the check that the abstraction survives several providers.
 | `tent/op` | UUID | operation id of the create call ([ADR-0015](adr/0015-idempotency-without-unique-names.md)) |
 | `tent/joined` | `true` | machines whose node has joined its cluster, set together with the scrub of their user data ([7.1](#71-interfaces), [9.4](#94-secrets-on-nodes-threat-model), [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)) |
 | `tent/lock-for` | cluster name | the Hetzner lock firewall only; it deliberately has no `tent/cluster` |
-| `tent/e2e`, `tent/e2e-run` | `true`, run id | resources created by E2E tests |
 
 **How labels are encoded per provider:**
 
@@ -425,8 +424,8 @@ github.com/ingvarch/tent
 │   ├── spec/            # multi-document YAML specs: strict decoding with file lines, encoding in field order
 │   ├── apischema/       # generates api/v1alpha1/tent.schema.json (make generate); not linked into tent
 │   ├── licenses/        # licence check and THIRD_PARTY_NOTICES (make licenses, make notices); not linked into tent
-│   ├── app/             # use cases, validate and operator access included; used by the CLI, e2e tests and a
-│   │                    # future controller
+│   ├── app/             # use cases, validate and operator access included; used by the CLI and a future
+│   │                    # controller
 │   ├── model/           # spec -> cloud-agnostic intents (network, access, rules between nodes, join, groups)
 │   ├── engine/          # task graph: plan/apply, diff rendering, retries, concurrency
 │   │   └── enginetest/  # ApplyReplan for provider task tests: apply, plan again, expect no changes
@@ -464,8 +463,13 @@ github.com/ingvarch/tent
 │   ├── channels/        # embedded channel files: the Nomad versions allowed and tested, the CNI plugins
 │   ├── buildinfo/       # version, commit, date (ldflags); which release a version counts as
 │   └── buildconfig/     # tests only: CI, Makefile and release config agree; what tent-node links
-├── test/e2e/            # //go:build e2e: black-box tests against real clouds (Vultr first)
-├── hack/                # tent-node-upload/ (dev builds), tent-node-userdata/ (VM check), vultr-spike/, janitor
+├── test/e2e/            # black-box E2E suite against real clouds (Vultr first); only main_test.go, smoke_test.go
+│   │                    # and harness_test.go carry //go:build e2e; imports none of tent's internal packages (ADR-0034)
+│   ├── vultrapi/        # the suite's own Vultr API client over net/http
+│   └── janitor/         # finds and deletes the objects of E2E clusters that earlier runs left
+│       └── janitortest/ # tests only: a fake Vultr API for the janitor
+├── hack/                # tent-node-upload/ (dev builds), tent-node-userdata/ (VM check), vultr-spike/,
+│                        # e2e-janitor/ (the janitor's command)
 └── docs/                # this document, ADRs, platform notes, roadmap
 ```
 
@@ -506,6 +510,9 @@ since it reuses that planner ([13.6](#136-tent-validate-cluster---wait-duration)
   `Service.Channels`.
 - `internal/nomadops/nomadfake`, tests included, imports no Nomad module: it stands in for Nomad with the types of
   `internal/nomadops` alone (`nomadfake-no-nomad`). It imports `testing`, so only tests import it.
+- `test/e2e` and `hack/e2e-janitor`, tests included, import nothing under `github.com/ingvarch/tent/internal`: the
+  suite drives tent from outside and reads the clouds with its own clients (`e2e-black-box`,
+  [ADR-0034](adr/0034-e2e-suite-on-vultr.md)).
 - `internal/pki` imports only the standard library, `internal/uuid`, `internal/secret` and `api/v1alpha1`, so the
   code that makes the CA and the secrets never reaches a cloud or the state store. `internal/uuid`, `internal/secret`,
   `internal/english`, `internal/secrettest` and `internal/assets/assetstest` import only the standard library
@@ -514,7 +521,7 @@ since it reuses that planner ([13.6](#136-tent-validate-cluster---wait-duration)
   [ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md),
   [ADR-0031](adr/0031-bootstrap-in-update.md)). Only tests import `internal/secrettest`,
   `internal/nomadops/nomadfake`, `internal/nodeup/nodeuptest`, `internal/s3url/s3urltest`,
-  `internal/assets/assetstest` and `internal/shellenv/shellenvtest`.
+  `internal/assets/assetstest`, `internal/shellenv/shellenvtest` and `test/e2e/janitor/janitortest`.
 - `internal/nodeconfig`, the contract that tent-node decodes, imports only the standard library, `internal/secret`
   and `api/v1alpha1`. Its tests are exempt ([ADR-0027](adr/0027-nodeconfig-contract-rendering-and-spec-hash.md)).
 - Only tests import `github.com/hashicorp/hcl`: they parse the rendered Nomad configuration back with HCL1. No code
@@ -528,7 +535,8 @@ since it reuses that planner ([13.6](#136-tent-validate-cluster---wait-duration)
 - `internal/s3url` imports only the standard library, aws-sdk-go-v2's `aws`, `config` and `service/s3`, and
   smithy-go's `logging` (`s3url-stdlib-and-aws`). Its tests are exempt
   ([ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md)).
-- Everything except `api/` is `internal/`. The project makes no compatibility promises before it has to.
+- Everything except `api/` and the E2E suite's packages under `test/e2e/` is `internal/`. The project makes no
+  compatibility promises before it has to.
 
 ---
 
@@ -1814,7 +1822,8 @@ type Capabilities struct {
 that hold a `cluster.yaml`.
 
 `nomad/bootstrapped` is written last in the Nomad step: after the ACL bootstrap succeeded, the servers are healthy and
-all vote, and the server and combined machines of the plan are scrubbed and labelled (M2.7a, M2.7b,
+all vote, Nomad's keyring has an active key, and the server and combined machines of the plan are scrubbed and labelled
+(M2.7a, M2.7b, M2.9,
 [13.2](#132-tent-update-cluster---yes)). `update` deletes it and writes it again when the store holds it and no server
 or combined machine of the cluster stays. Only its existence is read; it holds the time in RFC 3339 and a newline.
 `tent delete cluster` knows it ([13.7](#137-tent-delete-cluster---yes)).
@@ -2261,7 +2270,8 @@ create that may have been carried out is never sent again.
   - Vultr does not raise the limit of 5 VPCs per region or the most rules a firewall group holds, so their errors
     name the limit instead: `ams may already have 5 VPCs, the most Vultr allows in a region: …` and
     `firewall group prod-servers may already hold the most rules Vultr allows in a group: …`.
-- **Deploy incidents recur.** E2E retries in a fallback region.
+- **Deploy incidents recur.** The E2E suite runs in the region that `E2E_REGION` names, `ams` by default; the
+  maintainer picks another by hand ([ADR-0034](adr/0034-e2e-suite-on-vultr.md)).
 
 ### 11.8 API client, rate limits, cost
 
@@ -2478,9 +2488,9 @@ its machine, replaces a client that never registered, and refuses to delete a no
  7. server and combined nodes: the waits that repeat a create, by name; then the creates, one at a time, by group
     and index, each seeded with the servers that exist and with a new operation id (cloud.NewOpID)
  8. the Nomad step: wait for a leader → bootstrap the ACL system → wait until the servers are healthy and all vote
-    → read the Raft configuration → for each server and combined node of the plan, in order: for a combined node,
-    wait until it has registered; check that a voter sits at its address; scrub its user data and label its machine
-    → write the mark
+    → wait until Nomad's keyring has an active key, which signs the intro tokens → read the Raft configuration
+    → for each server and combined node of the plan, in order: for a combined node, wait until it has registered;
+    check that a voter sits at its address; scrub its user data and label its machine → write the mark
  9. client nodes: the waits; then the deletes of clients that never registered; then the creates, one at a time, by
     group and index. A create, and a wait that repeats one, boots the machine with an intro token. Each client is
     waited for until it has registered, then scrubbed and labelled, before the next change
@@ -2605,8 +2615,8 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
 **Built in M2.4, used since M2.7a.** `internal/nomadops` holds the calls that the Nomad step and the clients need, and
 `nomadfake` stands in for Nomad in the app's tests ([15](#15-testing)).
 - **Calls.** `nomadops.API` has `Leader`, `Bootstrap` ([9.2](#92-acl-and-tokens)), `IntroToken`
-  ([9.3](#93-client-introduction)), `CreateToken` (M2.8, [9.2](#92-acl-and-tokens)), `Nodes`, `Peers` (M2.7b) and
-  `Health`. A `Client` talks to one server
+  ([9.3](#93-client-introduction)), `CreateToken` (M2.8, [9.2](#92-acl-and-tokens)), `Nodes`, `Peers` (M2.7b),
+  `Health` and `KeyringReady` (M2.9). A `Client` talks to one server
   ([9.7](#97-operator-access)); the caller moves to the next server when a call fails with `ErrNotReady`. Make one
   client per server and reuse it: its idle connections stay open for 90 seconds, and a server takes at most 100 HTTP
   connections from one address.
@@ -2629,12 +2639,15 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
   Raft address and whether it votes. Nomad answers it only to a management token, and names a server `(unknown)`
   when no Serf member has its Raft address ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)).
   Unlike the autopilot report, which `Health` reads, the configuration has no lag.
-- **Waits.** `WaitLeader`, `WaitNode` and `WaitHealthy` wait 2 seconds after each call and try again only after
-  `ErrNotReady`. When the context ends, the error says what they waited for and the last cause, and does not match
-  `ErrNotReady`. `WaitNode` takes a name and an address and ends when a node of that name that advertises that
+- **Waits.** `WaitLeader`, `WaitNode`, `WaitHealthy` and `WaitKeyring` wait 2 seconds after each call and try again
+  only after `ErrNotReady`. When the context ends, the error says what they waited for and the last cause, and does
+  not match `ErrNotReady`. `WaitNode` takes a name and an address and ends when a node of that name that advertises that
   address is ready and eligible; a node of the name at another address, such as a twin or the node of an earlier
   machine, and a `down` node do not end it. An invalid address matches no node. `WaitHealthy` needs healthy servers
-  and at least the given number of voters.
+  and at least the given number of voters. `WaitKeyring` reads `KeyringReady` (`GET /v1/operator/keyring/keys`, true
+  when a key is in the state `active`; M2.9): Nomad makes the keyring's first key after a server becomes the leader,
+  and until then it refuses to issue an intro token
+  ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)).
 - **Servers** (M2.7a, `nomadops.NewServers`). It makes the servers of a cluster one `API`.
   - A call goes to the server that answered last, the first one at the start. After an error that matches
     `ErrNotReady` it goes to the next server, each server once per call, wrapping around the list. Any other error is
@@ -2722,9 +2735,9 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
   - **The calls.** One `nomadops` client per known server with a public address, at `<public IP>:4646`, with the
     region, the CA bundle, the operator certificate and the bootstrap secret as the token, over `nomadops.Servers`. A
     cluster with no such server fails with `cluster prod: no server has a public address`. Then `WaitLeader`; with the
-    bootstrap, `Bootstrap`; `WaitHealthy` for the servers; the scrubs of the servers (the block of M2.7b below); with
-    the bootstrap, the put of the mark. Each wait and the bootstrap send progress events ([14](#14-cli)); the put of
-    the mark sends none.
+    bootstrap, `Bootstrap`; `WaitHealthy` for the servers; `WaitKeyring`; the scrubs of the servers (the block of
+    M2.7b below); with the bootstrap, the put of the mark. Each wait and the bootstrap send progress events
+    ([14](#14-cli)); the put of the mark sends none.
   - **Errors and cuts.** The texts are `bootstrap the ACL system: <error>`, for the put of the mark `write <path>:
     <error>`, such as `write prod/nomad/bootstrapped: <error>`, and for the delete of a stale mark `delete <path>:
     <error>`, which stops the run before any node is created; the next run tries again. The mark comes last in the Nomad
@@ -2759,10 +2772,10 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
   `Nodes.List` reports it as `Instance.Joined`, so a plan sees which machines still have to join without a call to
   Nomad.
 - **Who is scrubbed, and when.**
-  - **Servers**, in the Nomad step, after the servers are healthy and vote. `update` reads the Raft configuration once,
-    and then, for each server or combined change of the plan in order, checks that a voter sits at the private
-    address of the machine, and scrubs it. A combined node must have registered first. A plan with no server or
-    combined change reads no configuration.
+  - **Servers**, in the Nomad step, after the servers are healthy and vote and the keyring has an active key.
+    `update` reads the Raft configuration once, and then, for each server or combined change of the plan in order,
+    checks that a voter sits at the private address of the machine, and scrubs it. A combined node must have
+    registered first. A plan with no server or combined change reads no configuration.
   - **Clients**, one by one, after the wait until the node has registered.
   - A machine's node is told by its name and its private address together
     ([ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)).
@@ -3259,7 +3272,8 @@ reach the cloud and the Nomad API. The other commands come with later milestones
   - Nomad lines (`update`), for each step started, done and failed: `waiting for a Nomad leader`, `Nomad has a leader
     (10.64.0.3:4647)`, `failed to wait for a Nomad leader: <error>`; `bootstrapping the ACL system`, `bootstrapped the
     ACL system`, `failed to bootstrap the ACL system: <error>`; `waiting for 3 healthy Nomad servers`, `3 Nomad
-    servers are healthy`, `failed to wait for 3 healthy Nomad servers: <error>`; and, for each node that the run waits
+    servers are healthy`, `failed to wait for 3 healthy Nomad servers: <error>`; `waiting for Nomad's keyring`,
+    `Nomad's keyring is ready`, `failed to wait for Nomad's keyring: <error>`; and, for each node that the run waits
     for, `waiting for node prod-workers-0 to register`, `node prod-workers-0 registered`, `failed to wait for node
     prod-workers-0 to register: <error>`. One server reads `1 healthy Nomad server` and `1 Nomad server is healthy`.
   - JSON: `{"type":"infrastructure","event":"started","kind":"vultr.VPC","name":"prod","action":"create"}` with
@@ -3268,9 +3282,9 @@ reach the cloud and the Nomad API. The other commands come with later milestones
     `error` for a failed step, `{"type":"node","step":"done","action":"scrub","name":"prod-workers-0","id":"<id>"}`
     for a scrub, which has no `address`, `{"type":"wait","nodes":3}` for the wait of a delete, and
     `{"type":"nomad","step":"done","action":"leader","leader":"10.64.0.3:4647"}` for the Nomad step. Its `action` is
-    `leader`, `bootstrap`, `healthy` or `register`; `name` names the node of a `register`, `voters` the servers of a
-    `healthy` (the number waited for when it starts, the number that vote when it is done), and `error` a failed
-    step.
+    `leader`, `bootstrap`, `healthy`, `keyring` or `register`; `name` names the node of a `register`, `voters` the
+    servers of a `healthy` (the number waited for when it starts, the number that vote when it is done), and `error` a
+    failed step.
   - With `-o json`, stderr mixes the JSON progress lines with plain `WARNING:` lines and the logs. A program reads
     the lines that start with `{`. The logs are text unless `--log-format json` makes them JSON objects too; they
     carry `level` and `msg`, which progress lines never have.
@@ -3361,7 +3375,8 @@ reach the cloud and the Nomad API. The other commands come with later milestones
 ## 15. Testing
 
 Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen in
-[ADR-0014](adr/0014-vultr-first-provider-and-e2e.md).
+[ADR-0014](adr/0014-vultr-first-provider-and-e2e.md) and its running is set in
+[ADR-0034](adr/0034-e2e-suite-on-vultr.md).
 
 1. **Unit tests:**
    - defaults and validation;
@@ -3635,14 +3650,30 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
      ([5](#5-repository-layout-and-dependency-rules)).
    - `TestNomadAgentFiles`, on every pull request, fails when a golden of `internal/nodeconfig` goes to no role, so
      the weekly `nomad config validate` ([16](#16-technology-stack-and-releases)) covers every golden.
-5. **E2E on Vultr** (`//go:build e2e`, black box):
-   - Region `ams`, falling back to `fra` or `lhr`.
-   - Scenarios: `smoke`, `ha`, `upgrade` and `security`.
-   - A dedicated account or IAM service user, with limits raised before CI is wired.
-   - Runs are serialized, and each stays under 60 minutes because billing has a one-hour minimum.
-   - About $0.05–0.09 per 5-VM run.
-   - A janitor deletes everything tagged `tent/e2e` that is older than 3 hours.
-   - Nightly, and on a PR label.
+5. **E2E on Vultr** (`//go:build e2e`, black box, [ADR-0034](adr/0034-e2e-suite-on-vultr.md)):
+   - **How it runs.** `make e2e` runs it from the maintainer's machine. It is not in `make check` and not in CI, since
+     the service user's key works only from the maintainer's two addresses. `make e2e` runs `make dev-upload` first, so
+     tent and the uploaded tent-node carry one version. It needs `VULTR_API_KEY`, the R2 keys and `TENT_DEV_S3_URL`
+     ([`test/e2e/README.md`](../test/e2e/README.md)).
+   - **Region and images.** `E2E_REGION`, `ams` by default, chosen by hand, with no automatic fallback. Both
+     `ubuntu-24.04` and `ubuntu-26.04` run, one cluster each, in parallel.
+   - **Scenario `smoke`.** Each cluster has 1 server and 1 client. The steps are create, validate, export, service,
+     metadata, intro token, validate again, delete and the leak check. They are built to check the four exit criteria
+     of M2: a docker job with a service runs, a client without an intro token is rejected, containers cannot reach
+     the metadata endpoint, and `delete` leaves nothing behind.
+   - **Marking and the janitor.** Clusters are named `e2e-<run>-<image digits>`. The janitor (`hack/e2e-janitor`, and
+     `TestMain` before every run) deletes the objects of a cluster whose name starts with `e2e-` and whose oldest object
+     is older than 3 hours: instances first (polled every 10 s, up to 5 minutes, until none is listed), then firewall
+     groups, VPCs and SSH keys. A refused VPC delete is repeated every 10 s, for up to 5 minutes per VPC. Without
+     `--yes` it deletes nothing.
+   - **Black box.** The suite imports none of tent's internal packages. It has its own Vultr API client and Nomad
+     client, and uses `ssh`; the depguard rule `e2e-black-box` enforces it.
+   - Billing has a one-hour minimum per VM. A green run took 6 to 7 minutes on 2026-10-07: `create` 4 to 6.5
+     minutes, `delete` about 20 s, the leak check up to 2 minutes on the cluster whose check runs while the other is
+     still being built, every other step seconds ([platform notes §3.16](platform-notes.md#316-spike-runs)).
+   - The scenarios `ha` and `upgrade` are not built yet; they are the exit of M3. The checks of ADR-0012's `security`
+     scenario run in `smoke`.
+   - Nightly runs and runs on a PR label wait until a runner can reach the account.
    - Hetzner E2E, including the `arm` scenario on CAX, is added in M4 once an account can create servers reliably.
 6. **Platform spike.** [`hack/vultr-spike`](../hack/vultr-spike/README.md) verifies undocumented Vultr behaviour
    before the provider relies on it. It runs manually and its report goes into the platform notes.
@@ -3733,10 +3764,10 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Opaque Vultr new-account limits (possibly tiny; perhaps a per-day creation cap) | E2E cannot create its VMs | request increases before wiring CI; surface limit errors verbatim; the maintainer's account ran 3 instances at once on 2026-09-25 |
-| Recurring Vultr deploy/API incidents | flaky E2E and rollouts | idempotent retries, fallback region, tag-based janitor |
+| Opaque Vultr new-account limits (possibly tiny; perhaps a per-day creation cap) | E2E cannot create its VMs | Vultr raised the account's instance limit from 5 to 20 at the maintainer's request (told on 2026-10-06, [platform notes §3.1](platform-notes.md#31-api-basics-and-access-control)); a run makes 4 machines; surface limit errors verbatim |
+| Recurring Vultr deploy/API incidents | flaky E2E and rollouts | idempotent retries, a region chosen by hand (`E2E_REGION`), a janitor that reads tent's tags and markers and the `e2e-` name prefix |
 | Vultr single failure domain, no anti-affinity | a data-center outage takes the whole cluster down | documented; `validate` warns; multi-region federation later |
-| Vultr API churn (VPC 2.0 removed in 2026; the Terraform provider broke) | runtime breakage | pin govultr, Renovate, nightly E2E |
+| Vultr API churn (VPC 2.0 removed in 2026; the Terraform provider broke) | runtime breakage | pin govultr, Renovate; nightly E2E waits for a runner that can reach the account |
 | Undocumented Vultr behaviour (user_data limit, tag syntax, firewall scope, halt semantics) | wrong assumptions in code | `hack/vultr-spike` settled all of these on 2026-09-25 except Object Storage conditional writes; re-run it when Vultr changes something relevant |
 | Vultr counted a deleted machine against the account's instance limit, so the create of a replacement was refused (seen 2026-10-06, run `rugw2m`) | the replacement of a client that never registered fails in an account at its limit | the Vultr provider sends a refused node create again for up to 2 minutes after a delete that it made ([11.3](#113-creating-a-node)); a limit that still holds then returns the limit error with its hint, and so does a rerun of tent right after a run that deleted, since the window does not outlive the process |
 | Hetzner capacity and account limits (5 servers, creation restrictions since June 2026) | Hetzner provider cannot be E2E-tested | Vultr first (ADR-0014); Hetzner E2E in M4 |

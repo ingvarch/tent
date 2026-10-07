@@ -1,6 +1,7 @@
 # ADR-0018: Vultr provider design
 
-- **Status:** Accepted. The spike runs of 2026-09-25 resolved items 1, 3, 4, 5 and 7:
+- **Status:** Accepted. Amended by [ADR-0034](0034-e2e-suite-on-vultr.md): the label `tent/e2e` is gone; E2E
+  clusters are marked by the name prefix `e2e-`. The spike runs of 2026-09-25 resolved items 1, 3, 4, 5 and 7:
   - item 1: tags use `key=value`, verbatim and always lower-case, because the tag filter is case-insensitive; markers
     are stored verbatim;
   - item 3: `/16` is accepted;

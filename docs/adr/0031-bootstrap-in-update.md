@@ -5,7 +5,8 @@
   follow-up is built, and the bootstrap mark is written after the servers' scrubs; a renamed server group is refused
   once its machines carry the joined label; of item 4, only a create and a wait that repeats a create read the assets)
   and by [ADR-0033](0033-operator-commands.md) (the M2.8 follow-up is built: `tent export nomad` replaced
-  `hack/tent-operator`)
+  `hack/tent-operator`) and by [ADR-0034](0034-e2e-suite-on-vultr.md) (the Nomad step waits for an active key in
+  Nomad's keyring after the health wait)
 - **Date:** 2026-10-05
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),
