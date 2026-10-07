@@ -96,6 +96,22 @@ func WaitHealthy(ctx context.Context, a API, voters int) (Health, error) {
 	return h, nil
 }
 
+// WaitKeyring calls KeyringReady until the keyring has an active key. It waits 2 seconds after each call. It fails at
+// once with an error of KeyringReady that does not match ErrNotReady. When ctx ends, it fails with an error that
+// matches ctx.Err() and names the error of the last call, or says that the keyring has no active key.
+func WaitKeyring(ctx context.Context, a API) error {
+	return poll(ctx, "the keyring", func(ctx context.Context) error {
+		ready, err := a.KeyringReady(ctx)
+		switch {
+		case err != nil:
+			return err
+		case !ready:
+			return pending("the keyring has no active key")
+		}
+		return nil
+	})
+}
+
 // pending is why a wait goes on after a call that succeeded, such as a node that is still initializing. It matches
 // ErrNotReady.
 type pending string

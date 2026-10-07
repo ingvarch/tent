@@ -20,8 +20,8 @@ import (
 	"github.com/ingvarch/tent/internal/statestore"
 )
 
-// nomadTimeout is how long each wait of the Nomad step may take: for a leader, for healthy servers and for a node to
-// register.
+// nomadTimeout is how long each wait of the Nomad step may take: for a leader, for healthy servers, for the keyring and
+// for a node to register.
 const nomadTimeout = 10 * time.Minute
 
 // operatorCertTTL is how long the operator certificate that tent calls Nomad with is valid: longer than any run. It is
@@ -352,9 +352,11 @@ func (s *Service) nomadOver(servers []cloud.Instance, access nomadAccess) (*noma
 }
 
 // nomadStep waits for a leader, bootstraps the ACL system when the plan says so, and waits for healthy servers that
-// all vote. Then, when the plan has a server or combined change, it reads the Raft configuration once and, for each
-// such change in order, waits for a combined node to register, checks that the machine's server votes at its address,
-// and scrubs the machine. Last it stores the mark of the bootstrap when it bootstrapped.
+// all vote and for an active key in Nomad's keyring, which Nomad makes after it elects a leader and which it needs to
+// sign the intro tokens of clients. Then, when the plan has a server or combined change, it reads the Raft
+// configuration once and, for each such change in order, waits for a combined node to register, checks that the
+// machine's server votes at its address, and scrubs the machine. Last it stores the mark of the bootstrap when it
+// bootstrapped.
 func (a *applier) nomadStep(ctx context.Context, servers []NodeChange) error {
 	api, err := a.nomadAPI()
 	if err != nil {
@@ -385,6 +387,13 @@ func (a *applier) nomadStep(ctx context.Context, servers []NodeChange) error {
 		h, err := nomadops.WaitHealthy(waitCtx, api, want)
 		voters = h.Voters
 		return NomadEvent{Action: NomadHealthy, Voters: h.Voters}, err
+	}); err != nil {
+		return err
+	}
+	if err := a.step(NomadEvent{Action: NomadKeyring}, func() (NomadEvent, error) {
+		waitCtx, cancel := context.WithTimeout(ctx, nomadTimeout)
+		defer cancel()
+		return NomadEvent{Action: NomadKeyring}, nomadops.WaitKeyring(waitCtx, api)
 	}); err != nil {
 		return err
 	}

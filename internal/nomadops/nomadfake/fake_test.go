@@ -120,6 +120,10 @@ var apiCalls = []apiCall{
 		_, err := a.Peers(ctx)
 		return err
 	}},
+	{"KeyringReady", func(ctx context.Context, a nomadops.API) error {
+		_, err := a.KeyringReady(ctx)
+		return err
+	}},
 }
 
 func TestAPICallsCoverTheAPI(t *testing.T) {
@@ -186,11 +190,11 @@ func argOf(name string) string {
 	return ""
 }
 
-// TestACLCallsNeedTheBootstrap checks that, before the ACL system is bootstrapped, Nodes, Health, Peers, IntroToken
-// and CreateToken fail for good as Nomad's 403 does, while Leader and Bootstrap work; and that they work after the
-// bootstrap.
+// TestACLCallsNeedTheBootstrap checks that, before the ACL system is bootstrapped, Nodes, Health, Peers, KeyringReady,
+// IntroToken and CreateToken fail for good as Nomad's 403 does, while Leader and Bootstrap work; and that they work
+// after the bootstrap.
 func TestACLCallsNeedTheBootstrap(t *testing.T) {
-	for _, name := range []string{"IntroToken", "CreateToken", "Nodes", "Health", "Peers"} {
+	for _, name := range []string{"IntroToken", "CreateToken", "Nodes", "Health", "Peers", "KeyringReady"} {
 		t.Run(name, func(t *testing.T) {
 			f, a := newAPI()
 			var call apiCall
@@ -413,6 +417,79 @@ func TestIntroToken(t *testing.T) {
 		nomadfake.Call{Name: "IntroToken", Arg: "prod-workers-2 default 30m0s"},
 		nomadfake.Call{Name: "IntroToken", Arg: "prod-workers-1 gpu 30m0s"},
 	)
+}
+
+// introKeyringError is what the fake's IntroToken fails with while the keyring is not ready, as Nomad answers it.
+const introKeyringError = "nomadfake: IntroToken: 500: failed to sign node introduction identity claims: " +
+	"keyring has not been initialized yet"
+
+// TestKeyringIsReadyAtOnceByDefault checks that, without SetKeyringDelay, the keyring is ready as soon as the ACL
+// system is bootstrapped, so that IntroToken works then.
+func TestKeyringIsReadyAtOnceByDefault(t *testing.T) {
+	f, a := newBootstrappedAPI(t)
+	if ready, err := a.KeyringReady(t.Context()); err != nil || !ready {
+		t.Errorf("KeyringReady() = %v, %v; want true, nil", ready, err)
+	}
+	if _, err := a.IntroToken(t.Context(), introRequest); err != nil {
+		t.Errorf("IntroToken: %v", err)
+	}
+	wantCalls(t, f, bootstrapCall, nomadfake.Call{Name: "KeyringReady"},
+		nomadfake.Call{Name: "IntroToken", Arg: argOf("IntroToken")})
+}
+
+// TestSetKeyringDelay checks that the keyring is not ready for as many reads as SetKeyringDelay says, counted from
+// the bootstrap, and that IntroToken fails while it is not ready, as a failure that matches ErrNotReady, and works
+// after the reads.
+func TestSetKeyringDelay(t *testing.T) {
+	f, a := newAPI()
+	f.SetKeyringDelay(2)
+	// Reads before the bootstrap are refused and do not count.
+	_, err := a.KeyringReady(t.Context())
+	checkErr(t, err, "nomadfake: KeyringReady: permission denied", false)
+	if err := a.Bootstrap(t.Context(), bootstrapSecret); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	_, err = a.IntroToken(t.Context(), introRequest)
+	checkErr(t, err, introKeyringError, true)
+	for i, want := range []bool{false, false, true, true} {
+		if ready, err := a.KeyringReady(t.Context()); err != nil || ready != want {
+			t.Errorf("KeyringReady() read %d = %v, %v; want %v, nil", i+1, ready, err, want)
+		}
+	}
+	if _, err := a.IntroToken(t.Context(), introRequest); err != nil {
+		t.Errorf("IntroToken after the keyring was ready: %v", err)
+	}
+}
+
+// TestIntroTokenFailsWhileTheKeyringIsNotReady checks that IntroToken does not count as a read of the keyring: it
+// fails for as long as the reads of KeyringReady have not used up the delay.
+func TestIntroTokenFailsWhileTheKeyringIsNotReady(t *testing.T) {
+	f, a := newBootstrappedAPI(t)
+	f.SetKeyringDelay(1)
+	for range 3 {
+		_, err := a.IntroToken(t.Context(), introRequest)
+		checkErr(t, err, introKeyringError, true)
+	}
+	if ready, err := a.KeyringReady(t.Context()); err != nil || ready {
+		t.Errorf("KeyringReady() = %v, %v; want false, nil", ready, err)
+	}
+	if _, err := a.IntroToken(t.Context(), introRequest); err != nil {
+		t.Errorf("IntroToken after the delay: %v", err)
+	}
+}
+
+// TestNewClusterClearsTheKeyringDelay checks that NewCluster makes the keyring ready at once again.
+func TestNewClusterClearsTheKeyringDelay(t *testing.T) {
+	f, a := newBootstrappedAPI(t)
+	f.SetKeyringDelay(5)
+	f.NewCluster()
+	f.SetLeader(leader)
+	if err := a.Bootstrap(t.Context(), bootstrapSecret); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if ready, err := a.KeyringReady(t.Context()); err != nil || !ready {
+		t.Errorf("KeyringReady() = %v, %v; want true, nil", ready, err)
+	}
 }
 
 // TestCreateToken checks that CreateToken makes a new accessor and secret for each call, ends each token at the clock

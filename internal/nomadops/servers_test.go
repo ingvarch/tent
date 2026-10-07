@@ -93,6 +93,13 @@ func (s *stub) Health(context.Context) (nomadops.Health, error) {
 	return nomadops.Health{Healthy: true, Voters: 3}, nil
 }
 
+func (s *stub) KeyringReady(context.Context) (bool, error) {
+	if err := s.record("KeyringReady"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // notReady is an error of the class ErrNotReady, as a server that broke its answer off makes.
 func notReady(path string) error {
 	return nomadops.NewCallError("GET", path, io.ErrUnexpectedEOF)
@@ -205,6 +212,13 @@ func TestServersEveryMethodMovesOn(t *testing.T) {
 		"Nodes":  func(ctx context.Context, a nomadops.API) error { _, err := a.Nodes(ctx); return err },
 		"Health": func(ctx context.Context, a nomadops.API) error { _, err := a.Health(ctx); return err },
 		"Peers":  func(ctx context.Context, a nomadops.API) error { _, err := a.Peers(ctx); return err },
+		"KeyringReady": func(ctx context.Context, a nomadops.API) error {
+			ready, err := a.KeyringReady(ctx)
+			if err == nil && !ready {
+				return errors.New("the keyring is not ready")
+			}
+			return err
+		},
 	}
 	for name, call := range calls {
 		t.Run(name, func(t *testing.T) {
@@ -293,6 +307,11 @@ func (r ctxRecorder) Peers(ctx context.Context) ([]nomadops.Peer, error) {
 	return r.API.Peers(ctx)
 }
 
+func (r ctxRecorder) KeyringReady(ctx context.Context) (bool, error) {
+	r.record(ctx)
+	return r.API.KeyringReady(ctx)
+}
+
 func (r ctxRecorder) Health(ctx context.Context) (nomadops.Health, error) {
 	r.record(ctx)
 	return r.API.Health(ctx)
@@ -348,6 +367,12 @@ func TestServersPassArgumentsContextAndValues(t *testing.T) {
 	if got, err := s.Peers(ctx); err != nil || len(got) != 1 || got[0].Name != "prod-servers-0.eu" {
 		t.Errorf("Peers() = %+v, %v; want the set one", got, err)
 	}
+	f.SetKeyringDelay(1)
+	for _, want := range []bool{false, true} {
+		if got, err := s.KeyringReady(ctx); err != nil || got != want {
+			t.Errorf("KeyringReady() = %v, %v; want %v, nil", got, err, want)
+		}
+	}
 
 	const bootstrapArg = "[secret, 36 bytes]"
 	const introArg = "prod-workers-1 default 30m0s"
@@ -362,12 +387,14 @@ func TestServersPassArgumentsContextAndValues(t *testing.T) {
 		{Name: "Nodes", Server: addr1},
 		{Name: "Health", Server: addr1},
 		{Name: "Peers", Server: addr1},
+		{Name: "KeyringReady", Server: addr1},
+		{Name: "KeyringReady", Server: addr1},
 	}
 	if diff := cmp.Diff(want, f.Calls()); diff != "" {
 		t.Errorf("calls (-want +got):\n%s", diff)
 	}
-	if len(seen) != 8 { // the calls of Servers: the ones of single have no recorder
-		t.Fatalf("%d calls seen, want 8", len(seen))
+	if len(seen) != 10 { // the calls of Servers: the ones of single have no recorder
+		t.Fatalf("%d calls seen, want 10", len(seen))
 	}
 	for i, c := range seen {
 		if c != ctx {

@@ -132,3 +132,8 @@ func (s *Servers) Health(ctx context.Context) (Health, error) {
 func (s *Servers) Peers(ctx context.Context) ([]Peer, error) {
 	return try(ctx, s, func(a API) ([]Peer, error) { return a.Peers(ctx) })
 }
+
+// KeyringReady reports whether the keyring has an active key.
+func (s *Servers) KeyringReady(ctx context.Context) (bool, error) {
+	return try(ctx, s, func(a API) (bool, error) { return a.KeyringReady(ctx) })
+}

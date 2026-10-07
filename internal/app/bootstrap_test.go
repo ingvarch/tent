@@ -298,7 +298,7 @@ func TestUpdateBuildsANomadCluster(t *testing.T) {
 		wantCalls := []string{
 			"nomad Leader (prod-servers-0)",
 			bootstrapLine(t, svc, "prod-servers-0"),
-			"nomad Health (prod-servers-0)", "nomad Peers (prod-servers-0)",
+			"nomad Health (prod-servers-0)", "nomad KeyringReady (prod-servers-0)", "nomad Peers (prod-servers-0)",
 			introLine("prod-workers-0", "prod-servers-0"), "nomad Nodes (prod-servers-0)",
 			introLine("prod-workers-1", "prod-servers-0"), "nomad Nodes (prod-servers-0)",
 		}
@@ -310,15 +310,15 @@ func TestUpdateBuildsANomadCluster(t *testing.T) {
 			"GetInstance <prod-servers-1>", "UpdateInstance <prod-servers-1>",
 			"GetInstance <prod-servers-2>", "UpdateInstance <prod-servers-2>",
 		}
-		if diff := cmp.Diff(wantScrubCalls, cloudCallsBetween(f, w, 3, 4)); diff != "" {
+		if diff := cmp.Diff(wantScrubCalls, cloudCallsBetween(f, w, 4, 5)); diff != "" {
 			t.Errorf("the cloud calls between Peers and the first intro token (-want +got):\n%s", diff)
 		}
 		if diff := cmp.Diff([]string{"GetInstance <prod-workers-0>", "UpdateInstance <prod-workers-0>"},
-			cloudCallsBetween(f, w, 5, 6)); diff != "" {
+			cloudCallsBetween(f, w, 6, 7)); diff != "" {
 			t.Errorf("the cloud calls after the first client registered (-want +got):\n%s", diff)
 		}
 		if diff := cmp.Diff([]string{"GetInstance <prod-workers-1>", "UpdateInstance <prod-workers-1>"},
-			cloudCallsAfter(f, w, 7)); diff != "" {
+			cloudCallsAfter(f, w, 8)); diff != "" {
 			t.Errorf("the cloud calls after the last client registered (-want +got):\n%s", diff)
 		}
 		if first := w.Log()[0]; countOf(f.Calls()[:first.Cloud], "CreateInstance") != 3 {
@@ -334,7 +334,7 @@ func TestUpdateBuildsANomadCluster(t *testing.T) {
 			nodeSteps("create", "prod-servers-2"),
 			[]string{
 				"nomad started leader", "nomad done leader", "nomad started bootstrap", "nomad done bootstrap",
-				"nomad started healthy", "nomad done healthy",
+				"nomad started healthy", "nomad done healthy", "nomad started keyring", "nomad done keyring",
 			},
 			nodeSteps("scrub", "prod-servers-0"), nodeSteps("scrub", "prod-servers-1"),
 			nodeSteps("scrub", "prod-servers-2"),
@@ -510,14 +510,14 @@ func TestUpdateBuildsACombinedCluster(t *testing.T) {
 			}
 			wantCalls := []string{
 				"nomad Leader (prod-all-0)", bootstrapLine(t, svc, "prod-all-0"), "nomad Health (prod-all-0)",
-				"nomad Peers (prod-all-0)",
+				"nomad KeyringReady (prod-all-0)", "nomad Peers (prod-all-0)",
 				"nomad Nodes (prod-all-0)", "nomad Nodes (prod-all-0)", "nomad Nodes (prod-all-0)",
 			}
 			if diff := cmp.Diff(wantCalls, nomadLines(w)); diff != "" {
 				t.Errorf("the Nomad calls (-want +got):\n%s", diff)
 			}
 			wantProgress := slices.Concat(
-				[]string{"nomad done healthy"},
+				[]string{"nomad done healthy", "nomad started keyring", "nomad done keyring"},
 				registerSteps("prod-all-0"), nodeSteps("scrub", "prod-all-0"),
 				registerSteps("prod-all-1"), nodeSteps("scrub", "prod-all-1"),
 				registerSteps("prod-all-2"), nodeSteps("scrub", "prod-all-2"),
@@ -572,7 +572,8 @@ func TestUpdateMovesToTheNextServer(t *testing.T) {
 
 		wantCalls := []string{
 			"nomad Leader (prod-servers-0)", "nomad Leader (prod-servers-1)",
-			bootstrapLine(t, svc, "prod-servers-1"), "nomad Health (prod-servers-1)", "nomad Peers (prod-servers-1)",
+			bootstrapLine(t, svc, "prod-servers-1"), "nomad Health (prod-servers-1)",
+			"nomad KeyringReady (prod-servers-1)", "nomad Peers (prod-servers-1)",
 			introLine("prod-workers-0", "prod-servers-1"), "nomad Nodes (prod-servers-1)",
 			introLine("prod-workers-1", "prod-servers-1"), "nomad Nodes (prod-servers-1)",
 		}
@@ -610,6 +611,10 @@ func TestUpdateResumesAfter(t *testing.T) {
 			"create prod-workers-1",
 		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 1, nodes: 2},
 		{name: "the health wait, before the mark", cut: "nomad Health (prod-servers-0)", plan: []string{
+			"wait prod-servers-0", "wait prod-servers-1", "wait prod-servers-2", "create prod-workers-0",
+			"create prod-workers-1",
+		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 2, nodes: 2},
+		{name: "the keyring wait, before the mark", cut: "nomad KeyringReady (prod-servers-0)", plan: []string{
 			"wait prod-servers-0", "wait prod-servers-1", "wait prod-servers-2", "create prod-workers-0",
 			"create prod-workers-1",
 		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 2, nodes: 2},
@@ -729,7 +734,7 @@ func TestUpdateStoresNoMarkBeforeTheServersAreHealthy(t *testing.T) {
 
 		want := []string{
 			"nomad Leader (prod-servers-0)", bootstrapLine(t, svc, "prod-servers-0"), "nomad Health (prod-servers-0)",
-			"nomad Peers (prod-servers-0)",
+			"nomad KeyringReady (prod-servers-0)", "nomad Peers (prod-servers-0)",
 			introLine("prod-workers-0", "prod-servers-0"), "nomad Nodes (prod-servers-0)",
 			introLine("prod-workers-1", "prod-servers-0"), "nomad Nodes (prod-servers-0)",
 		}
@@ -740,6 +745,41 @@ func TestUpdateStoresNoMarkBeforeTheServersAreHealthy(t *testing.T) {
 			t.Errorf("the store holds no %s", markPath)
 		}
 		wantNodes(t, f, allNodes...)
+		wantConverged(t, svc)
+	})
+}
+
+// TestUpdateWaitsForTheKeyringBeforeTheScrubAndTheFirstIntroToken holds back the keyring of Nomad for two reads after
+// the bootstrap. The run reads it until it is ready, once more than it was held back, and only then scrubs the servers
+// and asks for an intro token, which fails while the keyring is not ready.
+func TestUpdateWaitsForTheKeyringBeforeTheScrubAndTheFirstIntroToken(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, w := newRelease(t)
+		w.SetKeyringDelay(2)
+		progress := recordProgress(svc)
+
+		mustUpdate(t, svc)
+
+		want := []string{
+			"nomad Leader (prod-servers-0)", bootstrapLine(t, svc, "prod-servers-0"), "nomad Health (prod-servers-0)",
+			"nomad KeyringReady (prod-servers-0)", "nomad KeyringReady (prod-servers-0)",
+			"nomad KeyringReady (prod-servers-0)", "nomad Peers (prod-servers-0)",
+			introLine("prod-workers-0", "prod-servers-0"), "nomad Nodes (prod-servers-0)",
+			introLine("prod-workers-1", "prod-servers-0"), "nomad Nodes (prod-servers-0)",
+		}
+		if diff := cmp.Diff(want, nomadLines(w)); diff != "" {
+			t.Errorf("the Nomad calls (-want +got):\n%s", diff)
+		}
+		got := onlyNomadAndNodes(*progress)
+		first, scrub := slices.Index(got, "nomad started healthy"), slices.Index(got, "node started scrub prod-servers-0")
+		wantWaits := []string{"nomad started healthy", "nomad done healthy", "nomad started keyring", "nomad done keyring"}
+		if first < 0 || scrub < first {
+			t.Fatalf("the progress has the health wait at %d and the first scrub at %d: %q", first, scrub, got)
+		}
+		if diff := cmp.Diff(wantWaits, got[first:scrub]); diff != "" {
+			t.Errorf("the progress between the bootstrap and the first scrub (-want +got):\n%s", diff)
+		}
+		wantJoined(t, f, allNames...)
 		wantConverged(t, svc)
 	})
 }
@@ -780,12 +820,18 @@ func TestUpdateRepeatsAHealthWaitThatStopped(t *testing.T) {
 
 		mustUpdate(t, svc)
 
-		want := []string{"nomad Leader (prod-servers-0)", "nomad Health (prod-servers-0)", "nomad Peers (prod-servers-0)"}
+		want := []string{
+			"nomad Leader (prod-servers-0)", "nomad Health (prod-servers-0)", "nomad KeyringReady (prod-servers-0)",
+			"nomad Peers (prod-servers-0)",
+		}
 		if diff := cmp.Diff(want, nomadLines(w)[before:]); diff != "" {
 			t.Errorf("the Nomad calls of the run (-want +got):\n%s", diff)
 		}
 		wantProgress := slices.Concat(
-			[]string{"nomad started leader", "nomad done leader", "nomad started healthy", "nomad done healthy"},
+			[]string{
+				"nomad started leader", "nomad done leader", "nomad started healthy", "nomad done healthy",
+				"nomad started keyring", "nomad done keyring",
+			},
 			nodeSteps("scrub", "prod-servers-2"),
 		)
 		if diff := cmp.Diff(wantProgress, onlyNomadAndNodes(*progress)); diff != "" {
@@ -1186,6 +1232,37 @@ func TestUpdateWaitsTenMinutes(t *testing.T) {
 			wantLockFree(t, svc.Store)
 		})
 	})
+	t.Run("a keyring that stays without a key", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			svc, f, w := newRelease(t)
+			w.SetKeyringDelay(1 << 20)
+			var started time.Time
+			svc.OnProgress = func(p app.Progress) {
+				if p.Nomad != nil && p.Nomad.Action == app.NomadKeyring && p.Step == app.NodeStarted {
+					started = time.Now()
+				}
+			}
+
+			_, err := svc.Update(t.Context(), "prod", true)
+
+			const prefix = "nomad: wait for the keyring: context deadline exceeded; last: the keyring has no active key"
+			if err == nil || err.Error() != prefix || !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("Update = %v, want %q, which matches context.DeadlineExceeded", err, prefix)
+			}
+			if d := time.Since(started); d < 10*time.Minute || d >= 10*time.Minute+time.Second {
+				t.Errorf("the wait took %v, want 10m0s", d)
+			}
+			if n := countNomad(w, "IntroToken") + countNomad(w, "Peers"); n != 0 {
+				t.Errorf("%d Peers and IntroToken calls were made, want none before the keyring is ready", n)
+			}
+			wantNodes(t, f, server(0), server(1), server(2))
+			wantJoined(t, f)
+			if slices.Contains(list(t, svc.Store, ""), markPath) {
+				t.Errorf("the failed run stored %s", markPath)
+			}
+			wantLockFree(t, svc.Store)
+		})
+	})
 	t.Run("a client that never registers", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			svc, f, w := newRelease(t)
@@ -1501,8 +1578,8 @@ func TestUpdatePlansTheNomadStep(t *testing.T) {
 				t.Error("the plan has no changes")
 			}
 			mustUpdate(t, svc)
-			if got := nomadLines(w)[before:]; len(got) != 3 || !strings.HasPrefix(got[1], "nomad Bootstrap") {
-				t.Errorf("the update made the Nomad calls %v, want Leader, Bootstrap and Health", got)
+			if got := nomadLines(w)[before:]; len(got) != 4 || !strings.HasPrefix(got[1], "nomad Bootstrap") {
+				t.Errorf("the update made the Nomad calls %v, want Leader, Bootstrap, Health and KeyringReady", got)
 			}
 			wantConverged(t, svc)
 		})
@@ -1633,7 +1710,8 @@ func TestUpdatePlansTheNomadStep(t *testing.T) {
 			}
 			mustUpdate(t, svc)
 			want := []string{
-				"nomad Leader (prod-servers-0)", "nomad Health (prod-servers-0)", "nomad Peers (prod-servers-0)",
+				"nomad Leader (prod-servers-0)", "nomad Health (prod-servers-0)", "nomad KeyringReady (prod-servers-0)",
+				"nomad Peers (prod-servers-0)",
 			}
 			if diff := cmp.Diff(want, nomadLines(w)[before:]); diff != "" {
 				t.Errorf("the Nomad calls of the update (-want +got):\n%s", diff)

@@ -579,7 +579,7 @@ func TestUpdate(t *testing.T) {
 			nodeSteps("create", "prod-servers-2"),
 			[]string{
 				"nomad started leader", "nomad done leader", "nomad started bootstrap", "nomad done bootstrap",
-				"nomad started healthy", "nomad done healthy",
+				"nomad started healthy", "nomad done healthy", "nomad started keyring", "nomad done keyring",
 			},
 			nodeSteps("scrub", "prod-servers-0"), nodeSteps("scrub", "prod-servers-1"),
 			nodeSteps("scrub", "prod-servers-2"),

@@ -45,7 +45,7 @@ func TestFaultedCallsReturnNoValue(t *testing.T) {
 		func(call string) { f.Fail(t, call, errBoom) },
 		func(call string) { f.LoseResponse(t, call) },
 	} {
-		for _, call := range []string{"Leader", "IntroToken", "CreateToken", "Nodes", "Health"} {
+		for _, call := range []string{"Leader", "IntroToken", "CreateToken", "Nodes", "Health", "KeyringReady"} {
 			fault(call)
 		}
 		if got, err := a.Leader(ctx); err == nil || got != "" {
@@ -62,6 +62,9 @@ func TestFaultedCallsReturnNoValue(t *testing.T) {
 		}
 		if got, err := a.Health(ctx); err == nil || !cmp.Equal(got, nomadops.Health{}, equateAddrs) {
 			t.Errorf("Health() = %+v, %v; want an error and the zero Health", got, err)
+		}
+		if ready, err := a.KeyringReady(ctx); err == nil || ready {
+			t.Errorf("KeyringReady() = %v, %v; want an error and false", ready, err)
 		}
 	}
 }

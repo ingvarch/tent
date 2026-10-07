@@ -66,6 +66,7 @@ ListInstanceVPCs <prod-servers-2>
 nomad Leader (prod-servers-0)
 nomad Bootstrap [secret, 36 bytes] (prod-servers-0)
 nomad Health (prod-servers-0)
+nomad KeyringReady (prod-servers-0)
 nomad Peers (prod-servers-0)
 GetInstance <prod-servers-0>
 UpdateInstance <prod-servers-0>

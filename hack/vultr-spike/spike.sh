@@ -13,7 +13,7 @@
 # cluster also openssl, mkfifo and find (and nomad, which only adds a row).
 set -euo pipefail
 
-readonly SPIKE_VERSION="12"
+readonly SPIKE_VERSION="13"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 readonly SCRIPT_DIR
 REPO_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
@@ -3180,32 +3180,34 @@ cl_scrub_names() {
 }
 
 # cl_scrub_early: the nodes whose scrub line comes before the line it must follow: a server's, the line that says the
-# servers are healthy; a client's, its own registration line. They come out as one sorted list, space-separated.
+# keyring is ready; a client's, its own registration line. They come out as one sorted list, space-separated.
 cl_scrub_early() {
   awk '
     $2 == "node" && $NF == "registered" { reg[$3] = NR }
-    index($0, "Nomad servers are healthy") && healthy == "" { healthy = NR }
+    index($0, "Nomad'"'"'s keyring is ready") && keyring == "" { keyring = NR }
     $2 == "scrubbed" && $7 == "node" { scrub[$8] = NR }
     END {
       for (n in scrub) {
-        after = (n in reg) ? reg[n] : healthy
+        after = (n in reg) ? reg[n] : keyring
         if (after != "" && scrub[n] < after) print n
       }
     }' "$CL_ERR" 2>/dev/null | sort | paste -sd ' ' - || true
 }
 
-# cl_progress_row: the lines of create's progress, and the seconds from the start of create to the leader, the bootstrap
-# and the healthy servers, and from the leader line to each registration line. Each node has a scrub line: a server's
-# after the healthy servers, a client's after its registration.
+# cl_progress_row: the lines of create's progress, and the seconds from the start of create to the leader, the
+# bootstrap, the healthy servers and the ready keyring, and from the leader line to each registration line. Each node
+# has a scrub line: a server's after the ready keyring, a client's after its registration.
 cl_progress_row() {
-  local leader boot healthy regs missing="" res n=0 node t list="" text scrubs early want_nodes=$((CL_SERVERS + CL_WORKERS))
+  local leader boot healthy keyring regs missing="" res n=0 node t list="" text scrubs early want_nodes=$((CL_SERVERS + CL_WORKERS))
   leader=$(cl_line_time "Nomad has a leader")
   boot=$(cl_line_time "bootstrapped the ACL system")
   healthy=$(cl_line_time "Nomad servers are healthy")
+  keyring=$(cl_line_time "Nomad's keyring is ready")
   regs=$(awk '$2 == "node" && $NF == "registered" { print $3, $1 }' "$CL_ERR" 2>/dev/null || true)
   [ -n "$leader" ] || missing="leader"
   [ -n "$boot" ] || missing="$missing${missing:+, }bootstrap"
   [ -n "$healthy" ] || missing="$missing${missing:+, }healthy"
+  [ -n "$keyring" ] || missing="$missing${missing:+, }keyring"
   if [ -n "$regs" ]; then n=$(printf '%s\n' "$regs" | wc -l | tr -d ' '); fi
   [ "$n" = "$CL_WORKERS" ] || missing="$missing${missing:+, }$n of $CL_WORKERS registrations"
   scrubs=$(cl_scrub_names | grep -c . || true)
@@ -3216,12 +3218,12 @@ cl_progress_row() {
     [ -n "$node" ] || continue
     list="$list${list:+, }$node +$((t - ${leader:-$t}))s"
   done <<<"$regs"
-  text="Nomad had a leader at +$((${leader:-$CL_T0} - CL_T0))s of create, the ACL system was bootstrapped at +$((${boot:-$CL_T0} - CL_T0))s, the servers were healthy at +$((${healthy:-$CL_T0} - CL_T0))s; registered, after the leader line: ${list:-none}; the user data of $scrubs nodes was scrubbed"
+  text="Nomad had a leader at +$((${leader:-$CL_T0} - CL_T0))s of create, the ACL system was bootstrapped at +$((${boot:-$CL_T0} - CL_T0))s, the servers were healthy at +$((${healthy:-$CL_T0} - CL_T0))s, the keyring was ready at +$((${keyring:-$CL_T0} - CL_T0))s; registered, after the leader line: ${list:-none}; the user data of $scrubs nodes was scrubbed"
   if [ -n "$missing" ]; then
     res="UNEXPECTED: missing lines: $missing"
   elif [ -n "$early" ]; then
     res="UNEXPECTED: a scrub comes before the line it must follow: $early"
-  elif [ "$boot" -lt "$leader" ] || [ "$healthy" -lt "$boot" ]; then
+  elif [ "$boot" -lt "$leader" ] || [ "$healthy" -lt "$boot" ] || [ "$keyring" -lt "$healthy" ]; then
     res="UNEXPECTED: the lines are out of order: $text"
   else
     res="as expected: $text"

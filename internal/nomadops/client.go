@@ -1,5 +1,6 @@
 // Package nomadops calls the HTTP API of a Nomad cluster's servers over mutual TLS: the leader, the ACL bootstrap,
-// client introduction tokens, management tokens that expire, the client nodes, the autopilot health and the Raft peers.
+// client introduction tokens, management tokens that expire, the client nodes, the autopilot health, the Raft peers
+// and the keyring.
 // It also makes the reverse proxy that serves a cluster's API on a local port, with the mutual TLS and the token added.
 package nomadops
 
@@ -59,6 +60,8 @@ type API interface {
 	Health(ctx context.Context) (Health, error)
 	// Peers returns the servers of the Raft configuration.
 	Peers(ctx context.Context) ([]Peer, error)
+	// KeyringReady reports whether the keyring has an active key, which Nomad signs intro tokens with.
+	KeyringReady(ctx context.Context) (bool, error)
 }
 
 // Client is the API over the HTTP API of one Nomad server. Each call has at most 30 seconds, and none is retried.

@@ -32,9 +32,11 @@ import (
 //
 // The fake is simpler than Nomad in these ways:
 //   - It checks no ACL token: each call succeeds whatever token its client holds. Tokens tells which tokens the
-//     clients got. Only before the bootstrap does a call fail: Nodes, Health, Peers, IntroToken and CreateToken fail
-//     for good, as Nomad's 403, until a Bootstrap succeeds; Leader and Bootstrap work. Peers fails so, since Nomad
-//     answers the Raft configuration to a management token alone.
+//     clients got. Only before the bootstrap does a call fail: Nodes, Health, Peers, KeyringReady, IntroToken and
+//     CreateToken fail for good, as Nomad's 403, until a Bootstrap succeeds; Leader and Bootstrap work. Peers fails so,
+//     since Nomad answers the Raft configuration to a management token alone.
+//   - Its keyring has an active key as soon as the ACL system is bootstrapped, unless SetKeyringDelay holds it back;
+//     meanwhile KeyringReady is false and IntroToken fails as Nomad's 500 does.
 //
 // Faults change the outcome of the next call of a nomadops.API method, named as in the interface, such as Bootstrap:
 // see Fail and LoseResponse. A call takes the first fault set for its method, and each fault applies to one call.
@@ -45,6 +47,7 @@ type Fake struct {
 	nodes        []nomadops.Node
 	health       nomadops.Health
 	peers        []nomadops.Peer
+	keyringReads int             // how many reads of the keyring still find no active key
 	tokens       []secret.Secret // the tokens of the clients, in the order Client made them
 	issued       []IssuedToken   // the management tokens that CreateToken made, in order
 	faults       []fault         // in the order they were set
@@ -76,11 +79,13 @@ func (f *Fake) SetLeader(addr string) {
 }
 
 // NewCluster makes the cluster a new one, as New returns it: without a leader, nodes, peers or bootstrap, and with the
-// zero Health. The log of calls, the clients' tokens, the issued tokens and the faults stay.
+// zero Health and a keyring that is ready at once. The log of calls, the clients' tokens, the issued tokens and the
+// faults stay.
 func (f *Fake) NewCluster() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.leader, f.bootstrapped, f.nodes, f.peers, f.health = "", nil, nil, nil, nomadops.Health{}
+	f.keyringReads = 0
 }
 
 // SetBootstrapped makes the cluster one whose ACL system was bootstrapped with a copy of bootstrapSecret, without a
@@ -89,6 +94,15 @@ func (f *Fake) SetBootstrapped(bootstrapSecret secret.Secret) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.bootstrapped = slices.Clone(bootstrapSecret)
+}
+
+// SetKeyringDelay makes the next reads calls of KeyringReady after the bootstrap find no active key, and makes
+// IntroToken fail as Nomad does until those calls were made. A call before the bootstrap fails and is not counted.
+// With 0, the default, the keyring is ready as soon as the ACL system is bootstrapped.
+func (f *Fake) SetKeyringDelay(reads int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.keyringReads = reads
 }
 
 // Register lists the node, in the place of the node of the same name and address when there is one, and after the
@@ -170,9 +184,20 @@ func (f *Fake) Calls() []Call {
 var (
 	errNoLeader = errors.New("no leader")
 	errLost     = errors.New("the answer was lost")
+	// errKeyring is the 500 of Nomad for an intro token that is asked for before the keyring has a key.
+	errKeyring = notReadyError("500: failed to sign node introduction identity claims: keyring has not been " +
+		"initialized yet")
 	// errDenied is the 403 of Nomad for a call that needs an ACL token before any exists.
 	errDenied = errors.New("permission denied")
 )
+
+// notReadyError is a cause that matches nomadops.ErrNotReady, as the 5xx answers of Nomad do.
+type notReadyError string
+
+func (e notReadyError) Error() string { return string(e) }
+
+// Is makes errors.Is hold for nomadops.ErrNotReady.
+func (notReadyError) Is(target error) bool { return target == nomadops.ErrNotReady }
 
 // callError is the error of a call that the fake fails.
 type callError struct {
@@ -255,15 +280,19 @@ func (c client) Bootstrap(ctx context.Context, bootstrapSecret secret.Secret) er
 }
 
 // IntroToken returns a JWT without a signature whose claims are Nomad's {"nomad_node_name": <node>,
-// "nomad_node_pool": <pool>}, so the same node and pool always get the same token.
+// "nomad_node_pool": <pool>}, so the same node and pool always get the same token. While SetKeyringDelay holds back the
+// keyring, it fails with Nomad's 500 and a cause that matches nomadops.ErrNotReady.
 func (c client) IntroToken(ctx context.Context, req nomadops.IntroRequest) (secret.Secret, error) {
 	if err := req.Check(); err != nil {
 		return nil, &callError{name: "IntroToken", cause: err}
 	}
 	var jwt secret.Secret
 	err := c.f.call(ctx, c.server, "IntroToken", req.NodeName+" "+req.NodePool+" "+req.TTL.String(), func() error {
-		if c.f.bootstrapped == nil {
+		switch {
+		case c.f.bootstrapped == nil:
 			return errDenied
+		case c.f.keyringReads > 0:
+			return errKeyring
 		}
 		claims, err := json.Marshal(map[string]string{"nomad_node_name": req.NodeName, "nomad_node_pool": req.NodePool})
 		if err != nil {
@@ -347,6 +376,24 @@ func (c client) Peers(ctx context.Context) ([]nomadops.Peer, error) {
 		return nil
 	})
 	return result(peers, err)
+}
+
+// KeyringReady is true once the reads that SetKeyringDelay asked for were made after the bootstrap. A read that finds
+// no active key counts down those reads.
+func (c client) KeyringReady(ctx context.Context) (bool, error) {
+	var ready bool
+	err := c.f.call(ctx, c.server, "KeyringReady", "", func() error {
+		if c.f.bootstrapped == nil {
+			return errDenied
+		}
+		if c.f.keyringReads > 0 {
+			c.f.keyringReads--
+			return nil
+		}
+		ready = true
+		return nil
+	})
+	return result(ready, err)
 }
 
 // result returns v, or the zero value and err when err is not nil.
