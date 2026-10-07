@@ -121,6 +121,10 @@ func TestSchemaShape(t *testing.T) {
 			prop("ClusterNomad", "clientIntroduction"),
 		},
 		{"access.api", &node{Type: "array", Items: &node{Type: "string"}}, prop("Access", "api")},
+		{"rollingUpdate", &node{Ref: "#/$defs/RollingUpdate"}, prop("NodeGroupSpec", "rollingUpdate")},
+		{"rollingUpdate.maxSurge", &node{Type: "integer"}, prop("RollingUpdate", "maxSurge")},
+		{"rollingUpdate.maxUnavailable", &node{Type: "integer"}, prop("RollingUpdate", "maxUnavailable")},
+		{"rollingUpdate.drainTimeout", &node{Type: "string"}, prop("RollingUpdate", "drainTimeout")},
 		{
 			"nomad.meta",
 			&node{Type: "object", AdditionalProperties: map[string]any{"type": "string"}},
@@ -179,6 +183,16 @@ func TestSchemaRejectsInvalidDocuments(t *testing.T) {
 	}{
 		{"an unknown field", func(spec map[string]any) { spec["replicas"] = 3 }, "'replicas'"},
 		{"an unknown role", func(spec map[string]any) { spec["role"] = "master" }, "'/spec/role'"},
+		{
+			"a string maxSurge",
+			func(spec map[string]any) { spec["rollingUpdate"] = map[string]any{"maxSurge": "1"} },
+			"'/spec/rollingUpdate/maxSurge'",
+		},
+		{
+			"an unknown rollingUpdate field",
+			func(spec map[string]any) { spec["rollingUpdate"] = map[string]any{"maxDrain": 1} },
+			"'maxDrain'",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

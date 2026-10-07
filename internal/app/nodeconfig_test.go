@@ -417,6 +417,23 @@ func TestGroupTemplatesSpecHash(t *testing.T) {
 	}
 }
 
+// TestRollingUpdateLeavesTheSpecHash checks that the rollingUpdate settings of a group change no template's hash:
+// they say how nodes are replaced, and a node's configuration does not hold them.
+func TestRollingUpdateLeavesTheSpecHash(t *testing.T) {
+	gossip, bundle := pki.NewGossipKey(), testCA(t).Bundle()
+	want := templates(t, gossip, bundle, nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
+	rolling := nodeWorkersYAML + "  rollingUpdate:\n    maxSurge: 3\n    maxUnavailable: 1\n    drainTimeout: 5m\n"
+	got := templates(t, gossip, bundle, nodeClusterYAML, nodeServersYAML, rolling)
+	for name, tmpl := range got {
+		if tmpl.SpecHash != want[name].SpecHash {
+			t.Errorf("the rollingUpdate settings change the spec hash of %s", name)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("got %d templates, want %d", len(got), len(want))
+	}
+}
+
 // TestGroupTemplatesProvider checks that every template names the model's provider, which tells tent-node whose
 // metadata service to read.
 func TestGroupTemplatesProvider(t *testing.T) {

@@ -319,6 +319,10 @@
         "nomad": {
           "$ref": "#/$defs/NodeGroupNomad",
           "description": "Nomad configures the Nomad clients of the group. Server groups leave it empty."
+        },
+        "rollingUpdate": {
+          "$ref": "#/$defs/RollingUpdate",
+          "description": "RollingUpdate says how tent replaces the group's nodes and removes the ones beyond its size."
         }
       },
       "additionalProperties": false,
@@ -329,6 +333,25 @@
         "size"
       ],
       "description": "NodeGroupSpec is what the operator wants the node group to be."
+    },
+    "RollingUpdate": {
+      "properties": {
+        "maxSurge": {
+          "type": "integer",
+          "description": "MaxSurge is how many nodes beyond size the group may have while it rolls. Client groups only; defaults to 1. Server and combined groups roll one node at a time, with one more node first."
+        },
+        "maxUnavailable": {
+          "type": "integer",
+          "description": "MaxUnavailable is how many of the group's nodes may be unavailable while tent rolls the group or scales it down. Client groups only; defaults to 0."
+        },
+        "drainTimeout": {
+          "type": "string",
+          "description": "DrainTimeout is how long Nomad drains a node before it stops the allocations that remain, as a duration such as 1h or 30m. It applies when tent rolls the group and when it scales it down. Client and combined groups; defaults to 1h."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "RollingUpdate says how tent replaces the nodes of a group and removes the ones beyond its size."
     },
     "TLS": {
       "properties": {

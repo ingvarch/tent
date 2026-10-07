@@ -10,6 +10,10 @@ const (
 	DefaultNomadRegion = "global"       // spec.nomad.region
 	DefaultImage       = "ubuntu-24.04" // NodeGroup spec.image
 	DefaultNodePool    = "default"      // NodeGroup spec.nomad.nodePool
+
+	DefaultMaxSurge       = 1    // NodeGroup spec.rollingUpdate.maxSurge of a client group
+	DefaultMaxUnavailable = 0    // NodeGroup spec.rollingUpdate.maxUnavailable of a client group
+	DefaultDrainTimeout   = "1h" // NodeGroup spec.rollingUpdate.drainTimeout of a client or combined group
 )
 
 // SetDefaults fills the empty fields of a cluster and its node groups in place. groups must be all node groups of
@@ -39,9 +43,7 @@ func setClusterDefaults(s *ClusterSpec, groups []*NodeGroup) {
 		s.Access.API = []string{DefaultAPISource}
 	}
 	setIfEmpty(&s.Nomad.Region, DefaultNomadRegion)
-	if s.Nomad.TLS.VerifyHTTPSClient == nil {
-		s.Nomad.TLS.VerifyHTTPSClient = new(true)
-	}
+	setIfNil(&s.Nomad.TLS.VerifyHTTPSClient, true)
 	setIfEmpty(&s.Nomad.ClientIntroduction, defaultClientIntroduction(groups))
 }
 
@@ -63,6 +65,11 @@ func setGroupDefaults(s *NodeGroupSpec, clusterZones []string) {
 	}
 	if s.Role.RunsClient() {
 		setIfEmpty(&s.Nomad.NodePool, DefaultNodePool)
+		setIfEmpty(&s.RollingUpdate.DrainTimeout, DefaultDrainTimeout)
+	}
+	if s.Role == RoleClient {
+		setIfNil(&s.RollingUpdate.MaxSurge, DefaultMaxSurge)
+		setIfNil(&s.RollingUpdate.MaxUnavailable, DefaultMaxUnavailable)
 	}
 }
 
@@ -71,5 +78,12 @@ func setIfEmpty[T comparable](v *T, def T) {
 	var zero T
 	if *v == zero {
 		*v = def
+	}
+}
+
+// setIfNil points *v at a copy of def when *v is nil, so that a set 0 stays.
+func setIfNil[T any](v **T, def T) {
+	if *v == nil {
+		*v = &def
 	}
 }
