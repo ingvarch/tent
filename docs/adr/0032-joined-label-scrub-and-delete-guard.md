@@ -1,6 +1,7 @@
 # ADR-0032: The joined label, the scrub and the delete guard
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by [ADR-0033](0033-operator-commands.md) (the M2.8 follow-up is built: `validate
+  cluster` finds a labelled node that died)
 - **Date:** 2026-10-06
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),
@@ -150,8 +151,8 @@ its source ([platform notes §1.2](../platform-notes.md#12-features-tent-relies-
   newest machine is refused while an older one of its group has not joined. The scrub lines show on every cloud,
   also where user data cannot change, and Hetzner will need them to depend on `MutableUserData`. The scrub's progress
   line names the node, and the JSON event has the machine's ID.
-- **A node that joined and later died** keeps its label, and `update` plans nothing for it. `validate` (M2.8) and M3
-  deal with it.
+- **A node that joined and later died** keeps its label, and `update` plans nothing for it. `validate cluster` (M2.8,
+  [ADR-0033](0033-operator-commands.md)) reports it, and M3 deals with it.
 - **A client without the label that Nomad lists as `down`** when the plan asks is replaced without a drain. This
   includes a client of a cluster that M2.7a's tent built, and one cut between its registration and its scrub.
 - **A client without the label that is registered and not eligible** fails every run at its wait and blocks the
@@ -170,7 +171,7 @@ its source ([platform notes §1.2](../platform-notes.md#12-features-tent-relies-
 ### Follow-ups
 
 - **M3 (#103):** scale down with drain and server removal lifts the guard.
-- **M2.8:** `validate`, which finds a labelled node that died.
+- **M2.8** (built, [ADR-0033](0033-operator-commands.md)): `validate`, which finds a labelled node that died.
 - **Later:** the node meta `tent_instance_id` as the exact way to tell a machine's node.
 
 ## Alternatives considered

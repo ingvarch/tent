@@ -1,6 +1,6 @@
 # Roadmap
 
-> **Current status (2026-10-06):** M0 Foundation and M1 Vultr infrastructure are complete, and M2 is in progress.
+> **Current status (2026-10-07):** M0 Foundation and M1 Vultr infrastructure are complete, and M2 is in progress.
 >
 > M0 built the Go module, `tent version`, the Makefile, the import rules in golangci-lint, CI on Linux, macOS and
 > Windows, the release pipeline for `tent`, the API types with defaults and validation, the spec reader and writer,
@@ -19,12 +19,17 @@
 > - Vultr is the first provider and the E2E platform ([ADR-0014](adr/0014-vultr-first-provider-and-e2e.md)).
 > - Hetzner Cloud is second.
 >
-> M2 is in progress (2026-10-06). M2.1 to M2.6b built the PKI and secrets, the channels and assets, NodeConfig, the
+> M2 is in progress (2026-10-07). M2.1 to M2.6b built the PKI and secrets, the channels and assets, NodeConfig, the
 > Nomad client, tent-node and its phases. M2.7a made `tent update cluster --yes` build a Nomad cluster: servers,
 > the ACL bootstrap and clients with intro tokens ([ADR-0031](adr/0031-bootstrap-in-update.md)). M2.7b scrubs the user
 > data of each node that has joined and labels its machine, replaces a client that never registered, and refuses to
 > delete a node that joined ([ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)). Its real-cloud check ran on
-> Vultr on 2026-10-06 and found two things, now fixed. M2.8 is next.
+> Vultr on 2026-10-06 and found two things, now fixed. M2.8 added the operator commands
+> ([ADR-0033](adr/0033-operator-commands.md)): `tent export nomad` writes a short-lived certificate and a management
+> token and prints the lines that point the `nomad` CLI at them, `tent ui` serves the Nomad UI and API on a loopback
+> port, `tent validate cluster` compares the machines and Nomad with the specs and exits with 2 while they differ, and
+> a combined cluster gets a warning. `hack/tent-operator` is gone. Its real-cloud check ran on Vultr on 2026-10-07.
+> M2.9, the E2E `smoke`, is next.
 >
 > **Work items live in GitHub:** each milestone below links to its GitHub milestone, and the
 > [tent roadmap project][project] shows the open issues. This file keeps the goals and exit criteria; close issues as
@@ -37,14 +42,14 @@ and, from M2 on, in the E2E suite on Vultr.
 
 These come from [architecture §18](architecture.md#18-open-questions). The first six were decided on 2026-09-25, the
 seventh to the fifteenth on 2026-09-28, the sixteenth to the twenty-first on 2026-09-29, the twenty-second to the
-twenty-fourth on 2026-09-30, the twenty-fifth to the twenty-seventh on 2026-10-05, and the twenty-eighth on 2026-10-06.
-The maintainer extended the twenty-third on 2026-10-02.
+twenty-fourth on 2026-09-30, the twenty-fifth to the twenty-seventh on 2026-10-05, and the twenty-eighth to the
+thirty-second on 2026-10-06. The maintainer extended the twenty-third on 2026-10-02.
 
 | # | Question | Decision |
 |---|---|---|
 | 1 | Label prefix and API group | `tent/` and `tent/v1alpha1` |
-| 2 | Default `access.api` | `[0.0.0.0/0]` with mTLS + ACL, and a loud warning while it is open |
-| 3 | Combined server+client mode | allowed for dev and small clusters through the `combined` role ([ADR-0019](adr/0019-combined-server-client-role.md)) |
+| 2 | Default `access.api` | `[0.0.0.0/0]` with mTLS + ACL, and a loud warning while it is open, from `validate cluster` and from the commands that change a cluster ([ADR-0033](adr/0033-operator-commands.md)) |
+| 3 | Combined server+client mode | allowed for dev and small clusters through the `combined` role ([ADR-0019](adr/0019-combined-server-client-role.md)), with a warning from `validate cluster` and from the commands that change a cluster ([ADR-0033](adr/0033-operator-commands.md)) |
 | 4 | Default OS image | `ubuntu-24.04`; E2E also runs on `ubuntu-26.04` |
 | 5 | Consul and Vault | out of v1 |
 | 6 | Licence of tent | Apache-2.0 |
@@ -70,6 +75,10 @@ The maintainer extended the twenty-third on 2026-10-02.
 | 26 | `leave_on_terminate` by role | server and combined agents set it to `false`, so a stopped server stays a Raft peer, and clients keep `true`; tent removes servers through the Nomad API on every provider ([ADR-0031](adr/0031-bootstrap-in-update.md)) |
 | 27 | Deleting nodes that joined | until M3, `update` refuses to delete a node that joined Nomad: a machine with the joined label, a registered client or a server of the Raft configuration; a Nomad node that is `down` does not count as registered (2026-10-06); `delete cluster` works as before; built in M2.7b ([ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)) |
 | 28 | A client that never registered | `update` deletes a client that did not register before its intro token expired and creates it again, shown as `not registered`; nothing is drained, since it never ran a workload; the delete comes before the create, an exception to creating the replacement first (2026-10-06; [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)) |
+| 29 | `tent ui` and the token | the proxy adds the token and mTLS; it listens on a loopback address only, and a request with a foreign `Host` or `Origin` gets 403; every local process that can reach the port acts with a management token while it runs ([ADR-0033](adr/0033-operator-commands.md)) |
+| 30 | The exported token | a management token with a TTL, 24 hours by default; tent owns no ACL policy yet ([ADR-0033](adr/0033-operator-commands.md)) |
+| 31 | Where `export nomad` writes | `$XDG_CACHE_HOME/tent/<cluster>`, else `~/.cache/tent/<cluster>`; the directory has mode 0700, the files 0600; `--dir` changes the place ([ADR-0033](adr/0033-operator-commands.md)) |
+| 32 | Exit codes of `validate cluster` | 2 when the cluster is not valid, with no `Error:` line; 1 when tent could not check ([ADR-0033](adr/0033-operator-commands.md)) |
 
 New questions for the maintainer are issues with the `decision` label.
 
@@ -190,6 +199,11 @@ Work after M6 or not scheduled yet: [issues with the `later` label][later].
   (runs `rugw2m`, `sv3vwb` and `rgfckj`, [platform notes §3.16](platform-notes.md#316-spike-runs)). It found two
   things, both fixed in the code: cloud-init read the stub as degraded, and the account's instance limit refused the
   replacement of a client. Closes #93.
+- 2026-10-07: M2.8 is built. `tent export nomad`, `tent ui` and `tent validate cluster` exist, a combined cluster gets
+  a warning, and `hack/tent-operator` is removed (decisions 29 to 32, [ADR-0033](adr/0033-operator-commands.md)). The
+  real-cloud check ran on Vultr the same day (spike v12, run `9pxbqn`,
+  [platform notes §3.16](platform-notes.md#316-spike-runs)): the three commands worked against a cluster that tent
+  built, and the one unexpected row was the script's own fault. Closes #94 and #98.
 
 [project]: https://github.com/users/ingvarch/projects/2
 [later]: https://github.com/ingvarch/tent/issues?q=is%3Aissue%20label%3Alater

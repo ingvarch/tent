@@ -9,7 +9,8 @@
   clients after healthy servers and the wait for registration are built; the check of the peers call between
   two VMs is part of the real-cloud check) and by [ADR-0032](0032-joined-label-scrub-and-delete-guard.md) (the scrub
   that the VM check lacked is built for clusters that `update` builds; the VM of `hack/tent-node-userdata` is still not
-  scrubbed)
+  scrubbed) and by [ADR-0033](0033-operator-commands.md) (`validate cluster` makes no warning about `drain_on_shutdown`
+  in `extraConfig`)
 - **Date:** 2026-10-02
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md) and
@@ -349,7 +350,7 @@ checks the Nomad agent. The facts that shaped it, with their sources in
 - **`leave_on_terminate` on server and combined agents:** decide with the server rollout in M2.7 (ADR-0017), from the
   facts in [platform notes §1.6](../platform-notes.md#16-the-agent-on-a-node).
 - tent does not check `extraConfig.client` for `drain_on_shutdown`: a warning needs HCL parsing outside `api/` and
-  `nodeconfig`, such as in M2.8's `validate cluster`.
+  `nodeconfig`. M2.8's `validate cluster` does not make it either ([ADR-0033](0033-operator-commands.md)).
 - **M2.7:** `update` builds NodeConfig through `NodeConfigOf` or the same steps. The rollout creates clients after
   the servers are healthy and judges a client by its registration in Nomad. By the M2.6b VM checks (an inference
   from one combined node), a client registered 21 to 24 s after a fresh server's leadership and 20 to 23 s after a

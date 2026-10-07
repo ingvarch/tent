@@ -4,7 +4,10 @@
   intro token, also those made once the cluster runs, since their clusters never run `strict`, so a token adds
   nothing; after the health wait `update` waits until each combined node it created or waited for has
   registered; M3 can revisit this with server scaling) and by [ADR-0032](0032-joined-label-scrub-and-delete-guard.md) (a
-  combined node has joined when it has registered as a client and votes as a server; it is scrubbed after both)
+  combined node has joined when it has registered as a client and votes as a server; it is scrubbed after both) and by
+  [ADR-0033](0033-operator-commands.md) (item 5: the warning is printed by `validate cluster` and by the commands that
+  print the open-`access.api` warning, since "every mutating command" means the commands that warn about the cluster
+  that results from a change; item 23 there)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0007](0007-security-baseline.md), [ADR-0008](0008-node-credential-delivery.md),

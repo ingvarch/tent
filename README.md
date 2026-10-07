@@ -15,7 +15,8 @@ pitches a tent anywhere; tent pitches a Nomad cluster on any cloud.
 
 > **Status: early development (milestone M2 in progress).** `tent update cluster --yes` builds a running Nomad
 > cluster on [Vultr](https://www.vultr.com): servers with a leader, ACLs bootstrapped and clients registered, and it
-> scrubs a node's keys from its user data once the node has joined. It is not for production yet. Vultr is the first
+> scrubs a node's keys from its user data once the node has joined. `tent export nomad`, `tent ui` and `tent validate
+> cluster` give you access to the cluster and check it. It is not for production yet. Vultr is the first
 > provider (it also hosts the E2E suite), then [Hetzner Cloud](https://www.hetzner.com/cloud). AWS is planned.
 
 ## What works now
@@ -27,6 +28,13 @@ pitches a tent anywhere; tent pitches a Nomad cluster on any cloud.
   tent keeps in the state store, and clients that join with an introduction token. Once a node has joined, tent
   replaces its user data with a stub and labels its machine, and it replaces a client that never registered. No
   separate state file: the cloud is the source of truth.
+- **Access to the Nomad API.** `tent export nomad` writes a short-lived client certificate and a management token into
+  files and prints the lines that point the `nomad` CLI at them. `tent ui` serves the Nomad web UI and API on a
+  loopback port of your machine, through a proxy that adds the certificate and a token. Neither gives you the cluster's
+  CA key or its ACL bootstrap secret.
+- **A check against the specs.** `tent validate cluster` compares the machines, the Nomad servers and clients, their
+  versions and the certificates with the specs, prints what differs and exits with 2 while something does. A combined
+  cluster, an open `access.api` and a single failure domain are warnings.
 - **Safe re-runs.** A run that stops halfway can run again. tent adopts what it created by the markers on each
   object and never creates a second machine for one node.
 - **Full teardown** with `tent delete cluster --yes`: every object with the cluster's markers, then its state.
@@ -34,7 +42,7 @@ pitches a tent anywhere; tent pitches a Nomad cluster on any cloud.
 ## What comes next
 
 - **Finish the Nomad bootstrap** (M2).
-  - M2.8: `tent export nomad` for the operator's access to the Nomad API, `validate cluster` and `tent ui`.
+  - M2.9: the E2E `smoke` on Vultr.
 - **Run day-2 operations with Nomad semantics** (M3).
   - Rolling updates drain clients and replace servers without losing Raft quorum.
   - Upgrades, scaling (before M3 `update` refuses to delete a node that joined, since it cannot drain a node or check
@@ -56,11 +64,14 @@ export TENT_STATE="file://$HOME/.tent" VULTR_API_KEY="<your API key>"
 tent create cluster demo --provider vultr --region ams --machine-type vc2-1c-1gb --combined
 tent update cluster demo          # print the plan
 tent update cluster demo --yes    # build the VPC, a firewall group, three machines and the Nomad cluster
+eval "$(tent export nomad demo)"  # point the nomad CLI at it (in fish: tent export nomad demo | source)
+nomad server members
+tent validate cluster demo        # check it against the specs
 tent delete cluster demo --yes    # delete them, the specs and the secrets
 ```
 
-The [quick start guide](docs/quickstart.md) walks through each step with its output, SSH access and the Nomad API
-access list.
+The [quick start guide](docs/quickstart.md) walks through each step with its output, SSH access, a job with the `nomad`
+CLI and the Nomad web UI.
 
 ## Documentation
 

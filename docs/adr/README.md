@@ -28,7 +28,7 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0004](0004-layered-architecture.md) | Layered architecture: a cloud-agnostic core and providers that translate intents | Accepted; provider order changed by 0014; narrowed by 0021 |
 | [0005](0005-immutable-nodes-and-nomad-aware-rollouts.md) | Immutable nodes and Nomad-aware rolling updates | Accepted; amended by 0017, 0030, 0031 and 0032 |
 | [0006](0006-two-binaries-and-nodeconfig.md) | Two binaries and a versioned NodeConfig contract | Accepted; extended by 0026; amended by 0027 and 0028 |
-| [0007](0007-security-baseline.md) | Security baseline: PKI, mTLS, ACL, client introduction | Accepted; see 0019; amended by 0024 and 0029 |
+| [0007](0007-security-baseline.md) | Security baseline: PKI, mTLS, ACL, client introduction | Accepted; see 0019; amended by 0024, 0029 and 0033 |
 | [0008](0008-node-credential-delivery.md) | Node credential delivery: user data in v1, bootstrap controller as the target | Accepted; exception in 0019; amended by 0029 and 0032 |
 | [0009](0009-server-discovery-fixed-ip-slots.md) | Nomad server discovery on Hetzner through fixed private IP slots | Accepted (Hetzner-specific; generic strategy in 0016) |
 | [0010](0010-state-store-and-locking.md) | State store backends, layout and locking | Accepted; see 0015 |
@@ -39,18 +39,19 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0015](0015-idempotency-without-unique-names.md) | Idempotent creation on clouds without unique names | Accepted; amended by 0023 and 0032 |
 | [0016](0016-server-discovery-seed-and-refresh.md) | Nomad server discovery with a seed list and tent-node refresh | Accepted; amended by 0027, 0030 and 0031 |
 | [0017](0017-api-driven-server-removal.md) | Remove Nomad servers through the Nomad API; ACPI shutdown is an optimization | Accepted; amended by 0030 and 0031 |
-| [0018](0018-vultr-provider-design.md) | Vultr provider design | Accepted (item 11 still provisional); amended by 0023, 0027 and 0032 |
-| [0019](0019-combined-server-client-role.md) | A combined server+client role for dev and small clusters | Accepted; amended by 0031 and 0032 |
+| [0018](0018-vultr-provider-design.md) | Vultr provider design | Accepted (item 11 still provisional); amended by 0023, 0027, 0032 and 0033 |
+| [0019](0019-combined-server-client-role.md) | A combined server+client role for dev and small clusters | Accepted; amended by 0031, 0032 and 0033 |
 | [0020](0020-release-channels-and-ci-conventions.md) | Release channels and CI conventions | Accepted; amended by 0028 |
-| [0021](0021-import-rules.md) | Import rules that list the allowed importers | Accepted; extended by 0025, 0026, 0027, 0028 and 0031 |
+| [0021](0021-import-rules.md) | Import rules that list the allowed importers | Accepted; extended by 0025, 0026, 0027, 0028, 0031 and 0033 |
 | [0022](0022-json-schema-from-go-types.md) | Generate the JSON Schema from the Go types | Accepted |
 | [0023](0023-vultr-inventory-dedupe-and-images.md) | Vultr inventory, dedupe, images and firewall groups | Accepted |
-| [0024](0024-cluster-pki-storage-and-certificates.md) | Cluster PKI storage and certificate details | Accepted; amended by 0031 |
+| [0024](0024-cluster-pki-storage-and-certificates.md) | Cluster PKI storage and certificate details | Accepted; amended by 0031 and 0033 |
 | [0025](0025-stdlib-only-helper-packages.md) | Standard-library-only helper packages | Accepted; amended by 0027 |
 | [0026](0026-channels-and-release-assets.md) | Channels and release assets | Accepted; M2.3 follow-ups moved to M2.7 by 0027; amended by 0028 and 0031 |
 | [0027](0027-nodeconfig-contract-rendering-and-spec-hash.md) | NodeConfig contract, rendering and spec hash | Accepted; amended by 0028, 0029, 0030, 0031 and 0032 |
 | [0028](0028-tent-node-agent-units-and-delivery.md) | tent-node agent, units and delivery | Accepted; amended by 0029 and 0030 |
 | [0029](0029-host-firewall-runtime-and-cni-on-nodes.md) | Host firewall, container runtime and CNI plugins on nodes | Accepted; amended by 0030 and 0032 |
-| [0030](0030-nomad-on-nodes.md) | Nomad on nodes | Accepted; amended by 0031 and 0032 |
-| [0031](0031-bootstrap-in-update.md) | Bootstrap in `update` | Accepted; amended by 0032 |
-| [0032](0032-joined-label-scrub-and-delete-guard.md) | The joined label, the scrub and the delete guard | Accepted |
+| [0030](0030-nomad-on-nodes.md) | Nomad on nodes | Accepted; amended by 0031, 0032 and 0033 |
+| [0031](0031-bootstrap-in-update.md) | Bootstrap in `update` | Accepted; amended by 0032 and 0033 |
+| [0032](0032-joined-label-scrub-and-delete-guard.md) | The joined label, the scrub and the delete guard | Accepted; amended by 0033 |
+| [0033](0033-operator-commands.md) | Operator commands: validate, export nomad and ui | Accepted |

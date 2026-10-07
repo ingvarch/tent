@@ -3,7 +3,9 @@
 - **Status:** Accepted; amended by [ADR-0031](0031-bootstrap-in-update.md) (a run holds the CA, the gossip key and the
   bootstrap secret in memory and issues each node's certificate from the CA, storing none; the operator certificate
   of a run lasts 24 hours, longer than any run, and is never stored; the bootstrap secret reaches the first
-  `Bootstrap` call as the client's token)
+  `Bootstrap` call as the client's token) and by [ADR-0033](0033-operator-commands.md) (the operator certificate that
+  `tent export nomad` and `tent ui` issue lasts for a TTL, 24 hours by default, and is stored nowhere but in the
+  operator's files; a node certificate's end is read as the machine's creation time plus one year)
 - **Date:** 2026-09-28
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0007](0007-security-baseline.md); [ADR-0010](0010-state-store-and-locking.md),
