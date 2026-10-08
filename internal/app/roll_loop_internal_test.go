@@ -1,0 +1,600 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"maps"
+	"net/netip"
+	"slices"
+	"testing"
+	"testing/synctest"
+	"time"
+
+	"github.com/google/go-cmp/cmp"
+
+	"github.com/ingvarch/tent/api/v1alpha1"
+	"github.com/ingvarch/tent/internal/cloud"
+	"github.com/ingvarch/tent/internal/model"
+	"github.com/ingvarch/tent/internal/nomadops"
+	"github.com/ingvarch/tent/internal/rollout"
+)
+
+// TestKeyOfKeysACreateByItsName tells two creates of one group apart by the name of their machines, which have no ID
+// yet, and a step on a machine by its ID.
+func TestKeyOfKeysACreateByItsName(t *testing.T) {
+	create := func(name string) rollout.Step {
+		return rollout.Step{Action: rollout.Create, Group: "workers", Machine: rollout.Machine{Name: name}}
+	}
+	if keyOf(create("prod-workers-2")) == keyOf(create("prod-workers-3")) {
+		t.Error("two creates of different machines have one key")
+	}
+	first, again := keyOf(create("prod-workers-2")), keyOf(create("prod-workers-2"))
+	if first != again {
+		t.Error("two creates of one machine have different keys")
+	}
+	other := create("prod-workers-2")
+	other.Group = "db"
+	if keyOf(create("prod-workers-2")) == keyOf(other) {
+		t.Error("two creates of different groups have one key")
+	}
+	drain := func(id string, node string) rollout.Step {
+		return rollout.Step{
+			Action: rollout.Drain, Group: "workers", Machine: rollout.Machine{ID: id, Name: "prod-workers-0"},
+			Node: rollout.Node{ID: node},
+		}
+	}
+	if keyOf(drain("i-1", "n-1")) == keyOf(drain("i-2", "n-1")) {
+		t.Error("two steps on different machines have one key")
+	}
+	if keyOf(drain("i-1", "n-1")) == keyOf(drain("i-1", "n-2")) {
+		t.Error("two steps on different nodes have one key")
+	}
+}
+
+// TestWaitOfGivesEachWaitItsLimitAndItsEvent holds each wait of a client roll to its limit and tells Nomad's event
+// what the wait waits for.
+func TestWaitOfGivesEachWaitItsLimitAndItsEvent(t *testing.T) {
+	r := &rollRun{groups: []rollout.Group{{Name: "workers", DrainTimeout: 10 * time.Minute}}}
+	node := rollout.Node{ID: "n-1", Name: "prod-workers-0", Address: netip.MustParseAddr("10.64.0.6")}
+	for _, tc := range []struct {
+		name string
+		step rollout.Step
+		want rollWait
+	}{
+		{"join", rollout.Step{Action: rollout.WaitJoined, Group: "workers", Machine: rollout.Machine{Name: "prod-workers-2"}},
+			rollWait{NomadEvent{Action: NomadRegister, Node: "prod-workers-2"}, 10 * time.Minute, "node prod-workers-2",
+				"join"}},
+		{"drained", rollout.Step{Action: rollout.WaitDrained, Group: "workers", Node: node},
+			rollWait{NomadEvent{Action: NomadDrained, Node: "prod-workers-0"}, 15 * time.Minute, "node prod-workers-0",
+				"finish draining"}},
+		{"down", rollout.Step{Action: rollout.WaitNodeDown, Group: "workers", Node: node},
+			rollWait{NomadEvent{Action: NomadDown, Node: "prod-workers-0", Address: "10.64.0.6"}, 6 * time.Minute,
+				"node prod-workers-0 (10.64.0.6)", "go down"}},
+		{"healthy", rollout.Step{Action: rollout.WaitHealthy, Group: "workers", Voters: 3},
+			rollWait{NomadEvent{Action: NomadHealthy, Voters: 3}, 10 * time.Minute, "the servers", "become healthy and vote"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := r.waitOf(tc.step)
+			if err != nil {
+				t.Fatalf("waitOf: %v", err)
+			}
+			if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(rollWait{})); diff != "" {
+				t.Errorf("the wait (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestWaitOfFailsForAWaitWithoutALimit refuses to poll a wait that has no limit, so that a wait added later cannot
+// run for ever.
+func TestWaitOfFailsForAWaitWithoutALimit(t *testing.T) {
+	r := &rollRun{}
+	for _, step := range []rollout.Step{
+		{Action: rollout.WaitServerDown, Machine: rollout.Machine{Name: "prod-servers-0"}},
+		{Action: rollout.WaitStable, Until: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)},
+	} {
+		_, err := r.waitOf(step)
+		if want := "no deadline for the wait " + step.String(); err == nil || err.Error() != want {
+			t.Errorf("waitOf(%s) error = %v, want %q", step, err, want)
+		}
+	}
+}
+
+// TestCarryFailsForAStepOfAServerGroup refuses a step that a client roll never gets from the decisions.
+func TestCarryFailsForAStepOfAServerGroup(t *testing.T) {
+	r := &rollRun{}
+	step := rollout.Step{Action: rollout.Stop, Machine: rollout.Machine{Name: "prod-servers-0", ID: "i-1"}}
+
+	err := r.carry(t.Context(), step)
+
+	if want := "no way to carry out the step " + step.String(); err == nil || err.Error() != want {
+		t.Errorf("carry error = %v, want %q", err, want)
+	}
+}
+
+// TestTryAgainOnlyAfterAGoneNodeOrNoAnswer tries a write again when the node is gone or no server answered, a create
+// when it failed before it sent anything because no server answered, and nothing else.
+func TestTryAgainOnlyAfterAGoneNodeOrNoAnswer(t *testing.T) {
+	notReady := fmt.Errorf("no server: %w", nomadops.ErrNotReady)
+	gone := fmt.Errorf("no node: %w", nomadops.ErrGone)
+	denied := errors.New("denied")
+	mark, create := rollout.Step{Action: rollout.MarkIneligible}, rollout.Step{Action: rollout.Create}
+	for _, tc := range []struct {
+		name string
+		step rollout.Step
+		err  error
+		want bool
+	}{
+		{"a write that no server answered", mark, notReady, true},
+		{"a write on a node that is gone", mark, gone, true},
+		{"a write that failed otherwise", mark, denied, false},
+		{"a create that no server answered before it sent anything", create, notSentError{notReady}, true},
+		{"a create that failed before it sent anything otherwise", create, notSentError{denied}, false},
+		{"a create that failed after it sent its request", create, notReady, false},
+		{"a delete", rollout.Step{Action: rollout.Delete}, notReady, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tryAgain(tc.step, tc.err); got != tc.want {
+				t.Errorf("tryAgain = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestShowingSaysWhatNomadListsOfTheWait says what Nomad lists of what each wait waits for.
+func TestShowingSaysWhatNomadListsOfTheWait(t *testing.T) {
+	addr := netip.MustParseAddr("10.64.0.6")
+	nodes := []nomadops.Node{
+		{ID: "n-1", Name: "prod-workers-0", Address: addr, Status: "ready"},
+		{ID: "n-2", Name: "prod-workers-1", Address: netip.MustParseAddr("10.64.0.7"), Status: "ready", Draining: true},
+	}
+	reading := nomadReading{nodes: nodes, health: nomadops.Health{Healthy: true, Voters: 3}}
+	join := rollout.Step{Action: rollout.WaitJoined, Machine: rollout.Machine{Name: "prod-workers-0", PrivateIP: addr}}
+	for _, tc := range []struct {
+		name    string
+		step    rollout.Step
+		reading nomadReading
+		want    string
+	}{
+		{"a node that joined", join, reading, "Nomad lists it ready"},
+		{"a node at another address", rollout.Step{Action: rollout.WaitJoined, Machine: rollout.Machine{
+			Name: "prod-workers-0", PrivateIP: netip.MustParseAddr("10.64.0.9")}}, reading,
+			"Nomad lists no node of that name at its address"},
+		{"a node that drains", rollout.Step{Action: rollout.WaitDrained, Node: rollout.Node{ID: "n-2"}}, reading,
+			"Nomad lists it draining"},
+		{"a node that is down", rollout.Step{Action: rollout.WaitNodeDown, Node: rollout.Node{ID: "n-1"}}, reading,
+			"Nomad lists it ready"},
+		{"a node that is gone", rollout.Step{Action: rollout.WaitDrained, Node: rollout.Node{ID: "n-9"}}, reading,
+			"Nomad does not list it"},
+		{"healthy servers", rollout.Step{Action: rollout.WaitHealthy}, reading,
+			"autopilot reports 3 voters and the servers healthy"},
+		{"servers that are not healthy", rollout.Step{Action: rollout.WaitHealthy},
+			nomadReading{health: nomadops.Health{Voters: 2}}, "autopilot reports 2 voters and the servers not healthy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := showing(tc.step, tc.reading); got != tc.want {
+				t.Errorf("showing = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// readsNomad is a Nomad API whose reads fail while fail is true, as when no server answers.
+type readsNomad struct {
+	nomadops.API
+	fail *bool
+}
+
+func (n readsNomad) Peers(context.Context) ([]nomadops.Peer, error) {
+	if *n.fail {
+		return nil, fmt.Errorf("peers: %w", nomadops.ErrNotReady)
+	}
+	return nil, nil
+}
+
+func (readsNomad) Health(context.Context) (nomadops.Health, error)    { return nomadops.Health{}, nil }
+func (readsNomad) Members(context.Context) ([]nomadops.Member, error) { return nil, nil }
+func (readsNomad) Nodes(context.Context) ([]nomadops.Node, error)     { return nil, nil }
+
+// TestObserveCountsTheFailuresOfNomadInARow ends the run when the reads fail for ten minutes in a row, and counts again
+// from the next failure after an answer.
+func TestObserveCountsTheFailuresOfNomadInARow(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fail := true
+		r := &rollRun{api: readsNomad{fail: &fail}, rollLoop: newRollLoop()}
+		observeFor := func(d time.Duration, when string) {
+			t.Helper()
+			for start := time.Now(); time.Since(start) < d; time.Sleep(rollPoll) {
+				if _, ok, err := r.observe(t.Context()); ok || err != nil {
+					t.Fatalf("%s: observe = %v, %v while the reads fail, want false, nil", when, ok, err)
+				}
+			}
+		}
+
+		observeFor(6*time.Minute, "the first six minutes")
+		fail = false
+		if _, ok, err := r.observe(t.Context()); !ok || err != nil {
+			t.Fatalf("observe after an answer = %v, %v, want true, nil", ok, err)
+		}
+		fail = true
+		observeFor(6*time.Minute, "the second six minutes, a new run of failures and not 12 minutes of one")
+		time.Sleep(5 * time.Minute)
+		_, ok, err := r.observe(t.Context())
+		if ok || !errors.Is(err, nomadops.ErrNotReady) {
+			t.Errorf("observe after 11 minutes of failures = %v, %v, want the error of the read", ok, err)
+		}
+	})
+}
+
+// TestMachinesListsThePendingOnesAfterTheListedOnes adds the machines that no list showed yet to those of the last
+// list, by operation id.
+func TestMachinesListsThePendingOnesAfterTheListedOnes(t *testing.T) {
+	r := &rollRun{rollLoop: newRollLoop(), listed: []cloud.Instance{{ID: "i-1", Name: "prod-workers-0"}}}
+	r.pending["op-b"] = pendingMachine{in: cloud.Instance{ID: "i-3", Name: "prod-workers-3"}}
+	r.pending["op-a"] = pendingMachine{in: cloud.Instance{ID: "i-2", Name: "prod-workers-2"}}
+
+	got := r.machines()
+
+	want := []cloud.Instance{{ID: "i-1", Name: "prod-workers-0"}, {ID: "i-2", Name: "prod-workers-2"},
+		{ID: "i-3", Name: "prod-workers-3"}}
+	if diff := cmp.Diff(want, got, equateNetip); diff != "" {
+		t.Errorf("machines (-want +got):\n%s", diff)
+	}
+}
+
+// listsNodes is a cloud that lists the same machines at every call.
+type listsNodes struct {
+	cloud.Nodes
+	listed []cloud.Instance
+}
+
+func (n listsNodes) List(context.Context, string) ([]cloud.Instance, error) { return n.listed, nil }
+
+// TestListDropsWhatTheCloudShows drops the pending machines that the list shows and the deleted machines that it does
+// not, and keeps the others.
+func TestListDropsWhatTheCloudShows(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		nodes := listsNodes{listed: []cloud.Instance{{ID: "i-2"}, {ID: "i-5"}}}
+		r := &rollRun{kit: nodeKit{nodes: nodes}, rollLoop: newRollLoop()}
+		r.pending["op-a"] = pendingMachine{in: cloud.Instance{ID: "i-2"}, since: time.Now()}
+		r.pending["op-b"] = pendingMachine{in: cloud.Instance{ID: "i-3"}, since: time.Now()}
+		r.deleting["i-5"] = time.Now()
+		r.deleting["i-6"] = time.Now()
+		r.relist = true
+
+		if err := r.list(t.Context()); err != nil {
+			t.Fatalf("list: %v", err)
+		}
+
+		if _, ok := r.pending["op-a"]; ok {
+			t.Error("the machine that the list shows is still pending")
+		}
+		if _, ok := r.pending["op-b"]; !ok {
+			t.Error("the machine that the list misses is not pending any more")
+		}
+		if _, ok := r.deleting["i-5"]; !ok {
+			t.Error("the machine that the list still shows is not among the deleted ones any more")
+		}
+		if _, ok := r.deleting["i-6"]; ok {
+			t.Error("the machine that the list does not show is still among the deleted ones")
+		}
+		if r.relist {
+			t.Error("the next observation lists again")
+		}
+		if len(r.listed) != 2 {
+			t.Errorf("the run holds %d machines of the list, want 2", len(r.listed))
+		}
+	})
+}
+
+// TestListFailsForAMachineThatItCreatedAndThatTheListsMissForAMinute names the machine that no list showed within the
+// pending time, the first of them by operation id.
+func TestListFailsForAMachineThatItCreatedAndThatTheListsMissForAMinute(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		r := &rollRun{kit: nodeKit{nodes: listsNodes{}}, rollLoop: newRollLoop()}
+		r.pending["op-b"] = pendingMachine{in: cloud.Instance{ID: "i-3", Name: "prod-workers-3"}, since: time.Now()}
+		r.pending["op-a"] = pendingMachine{in: cloud.Instance{ID: "i-2", Name: "prod-workers-2"}, since: time.Now()}
+		time.Sleep(pendingTimeout - time.Second)
+		if err := r.list(t.Context()); err != nil {
+			t.Fatalf("list after a little less than a minute: %v", err)
+		}
+		time.Sleep(time.Second)
+
+		want := "the cloud does not list node prod-workers-2 (ID i-2), which this run created"
+		for range 30 { // map order is random: a list that does not sort fails one of these
+			if err := r.list(t.Context()); err == nil || err.Error() != want {
+				t.Fatalf("list after a minute = %v, want %q", err, want)
+			}
+		}
+	})
+}
+
+// TestRepeatCreateCarriesTheGroupsHashAndTheMachinesOperationId repeats the create of a machine that is not ready with
+// its operation id and with the hash of its group, which a create makes the machine with when the cloud lacks it, and
+// lists the machines at the next observation.
+func TestRepeatCreateCarriesTheGroupsHashAndTheMachinesOperationId(t *testing.T) {
+	const op = "4f6a2d5e-8c3b-4d1e-9a7f-0b2c3d4e5f60"
+	var steps []string
+	nodes := &recordingNodes{}
+	m := &model.Cluster{Name: "prod", Groups: []model.NodeGroup{
+		{Name: "servers", Role: v1alpha1.RoleServer},
+		{Name: "workers", Role: v1alpha1.RoleClient, MachineType: "vc2-4c-8gb", Image: "ubuntu-24.04"},
+	}}
+	r := &rollRun{
+		s: testService(&steps), kit: testKit(t, nodes), model: m, api: &introStub{}, rollLoop: newRollLoop(),
+		groups: []rollout.Group{{Name: "workers", SpecHash: "group-hash"}},
+		listed: []cloud.Instance{{Name: "prod-servers-0", Group: "servers", PrivateIP: netip.MustParseAddr("10.64.0.3")}},
+	}
+	in := cloud.Instance{
+		ID: "i-9", Name: "prod-workers-0", Group: "workers", Role: v1alpha1.RoleClient, Zone: "ams", Op: op,
+	}
+
+	if err := r.repeatCreate(t.Context(), in); err != nil {
+		t.Fatalf("repeatCreate: %v", err)
+	}
+
+	if len(nodes.creates) != 1 {
+		t.Fatalf("the cloud was asked for %d machines, want 1", len(nodes.creates))
+	}
+	got := nodes.creates[0]
+	if got.Op != op || got.SpecHash != "group-hash" || got.MachineType != "vc2-4c-8gb" || got.Image != "ubuntu-24.04" ||
+		got.Name != in.Name || got.Zone != "ams" || got.Role != v1alpha1.RoleClient {
+		t.Errorf("the create request is %+v, want the machine's operation id, name and zone and the group's hash, "+
+			"machine type and image", got)
+	}
+	if !r.relist {
+		t.Error("the next observation does not list the machines")
+	}
+}
+
+// TestScrubMarksOnlyThePendingCopyOfItsMachine labels the machine and replaces its user data once, reports the wait as
+// done, makes the pending copy of that machine joined and no other, and lists at the next observation.
+func TestScrubMarksOnlyThePendingCopyOfItsMachine(t *testing.T) {
+	var steps []string
+	nodes := &recordingNodes{}
+	svc := &Service{Now: func() time.Time { return testNow }, OnProgress: func(p Progress) {
+		if p.Nomad != nil {
+			steps = append(steps, "nomad "+p.Nomad.Action.String()+" "+p.Step.String())
+		} else {
+			steps = append(steps, p.Node.Action.String()+" "+p.Node.Name+" "+p.Step.String())
+		}
+	}}
+	r := &rollRun{s: svc, kit: testKit(t, nodes), rollLoop: newRollLoop()}
+	a, b := cloud.Instance{ID: "i-2", Name: "prod-workers-2"}, cloud.Instance{ID: "i-3", Name: "prod-workers-3"}
+	r.pending["op-a"], r.pending["op-b"] = pendingMachine{in: a}, pendingMachine{in: b}
+	r.open = &openWait{event: NomadEvent{Action: NomadRegister, Node: a.Name}}
+
+	if err := r.scrub(t.Context(), a); err != nil {
+		t.Fatalf("scrub: %v", err)
+	}
+
+	if len(nodes.joined) != 1 || nodes.joined[0].ID != a.ID {
+		t.Errorf("the cloud was asked to label %+v, want only %s", nodes.joined, a.ID)
+	}
+	if !r.pending["op-a"].in.Joined || r.pending["op-b"].in.Joined {
+		t.Errorf("the pending copies are joined %v and %v, want true and false", r.pending["op-a"].in.Joined,
+			r.pending["op-b"].in.Joined)
+	}
+	if !r.relist {
+		t.Error("the next observation does not list the machines")
+	}
+	if r.open != nil {
+		t.Error("the wait for the node is still open")
+	}
+	want := []string{"nomad register done", "scrub prod-workers-2 started", "scrub prod-workers-2 done"}
+	if diff := cmp.Diff(want, steps); diff != "" {
+		t.Errorf("the progress (-want +got):\n%s", diff)
+	}
+}
+
+// TestRollRunSeedHoldsTheServersByName seeds a new node with the private addresses of the listed servers and combined
+// nodes, by name, without the clients.
+func TestRollRunSeedHoldsTheServersByName(t *testing.T) {
+	m := &model.Cluster{Name: "prod", Groups: []model.NodeGroup{
+		{Name: "servers", Role: v1alpha1.RoleServer}, {Name: "all", Role: v1alpha1.RoleCombined},
+		{Name: "workers", Role: v1alpha1.RoleClient},
+	}}
+	addr := netip.MustParseAddr
+	r := &rollRun{model: m, kit: nodeKit{cluster: "prod"}, listed: []cloud.Instance{
+		{Name: "prod-workers-0", Group: "workers", PrivateIP: addr("10.64.0.9")},
+		{Name: "prod-servers-1", Group: "servers", PrivateIP: addr("10.64.0.4")},
+		{Name: "prod-all-0", Group: "all", PrivateIP: addr("10.64.0.2")},
+		{Name: "prod-servers-0", Group: "servers", PrivateIP: addr("10.64.0.3")},
+	}}
+
+	got, err := r.seed("prod-workers-2", true)
+
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	want := []netip.Addr{addr("10.64.0.2"), addr("10.64.0.3"), addr("10.64.0.4")}
+	if diff := cmp.Diff(want, got, equateNetip); diff != "" {
+		t.Errorf("seed (-want +got):\n%s", diff)
+	}
+}
+
+// TestSeedOfFailsForServersWithoutAddresses names the servers that have no private address, and has an empty seed for a
+// server that is the first.
+func TestSeedOfFailsForServersWithoutAddresses(t *testing.T) {
+	servers := []cloud.Instance{
+		{Name: "prod-servers-0", PrivateIP: netip.MustParseAddr("10.64.0.3")}, {Name: "prod-servers-1"},
+	}
+	for _, tc := range []struct {
+		name    string
+		servers []cloud.Instance
+		node    string
+		client  bool
+		want    string
+	}{
+		{"a seed with one address", servers, "prod-workers-0", true, ""},
+		{"no address at all", servers[1:], "prod-workers-0", true,
+			"node prod-workers-0: no server of cluster prod has a private address yet (prod-servers-1); " +
+				"run the command again"},
+		{"a client and no server", nil, "prod-workers-0", true,
+			"node prod-workers-0: no server of cluster prod has a private address yet; run the command again"},
+		{"the first server", nil, "prod-servers-0", false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := seedOf("prod", tc.servers, tc.node, tc.client)
+			if got := fmt.Sprint(err); (tc.want == "") != (err == nil) || err != nil && got != tc.want {
+				t.Errorf("seedOf error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestOpenWaitIsOverWhenTheReadingShowsWhatItWaitsFor ends each wait only when Nomad or the cloud show its end, not
+// when the decisions give another step.
+func TestOpenWaitIsOverWhenTheReadingShowsWhatItWaitsFor(t *testing.T) {
+	m := rollout.Machine{ID: "i-1", Name: "prod-workers-0"}
+	node := rollout.Node{ID: "n-1"}
+	drain := func(status, meta string) nomadops.Node {
+		return nomadops.Node{ID: "n-1", Status: "ready", Draining: status == "draining",
+			LastDrain: nomadops.LastDrain{Status: status, Meta: map[string]string{drainMeta: meta}}}
+	}
+	one := func(n nomadops.Node) nomadReading { return nomadReading{nodes: []nomadops.Node{n}} }
+	servers := func(versions ...string) nomadReading {
+		var r nomadReading
+		for i, v := range versions {
+			id := fmt.Sprint("s-", i)
+			r.peers = append(r.peers, nomadops.Peer{ID: id})
+			r.health.Servers = append(r.health.Servers, nomadops.ServerHealth{ID: id, Version: v})
+		}
+		return r
+	}
+	for _, tc := range []struct {
+		name     string
+		step     rollout.Step
+		joined   bool
+		reading  nomadReading
+		wantOver bool
+	}{
+		{"a machine that has not joined", rollout.Step{Action: rollout.WaitJoined, Machine: m}, false, nomadReading{}, false},
+		{"a machine that joined", rollout.Step{Action: rollout.WaitJoined, Machine: m}, true, nomadReading{}, true},
+		{"a node that still drains", rollout.Step{Action: rollout.WaitDrained, Machine: m, Node: node}, false,
+			one(drain("draining", "i-1")), false},
+		{"a node whose drain is complete", rollout.Step{Action: rollout.WaitDrained, Machine: m, Node: node}, false,
+			one(drain("complete", "i-1")), true},
+		{"a drain complete for another machine", rollout.Step{Action: rollout.WaitDrained, Machine: m, Node: node}, false,
+			one(drain("complete", "i-9")), false},
+		{"a draining node that went down", rollout.Step{Action: rollout.WaitDrained, Machine: m, Node: node}, false,
+			one(nomadops.Node{ID: "n-1", Status: "down", Draining: true}), true},
+		{"a draining node that is not listed", rollout.Step{Action: rollout.WaitDrained, Machine: m, Node: node}, false,
+			nomadReading{}, true},
+		{"a node that is ready", rollout.Step{Action: rollout.WaitNodeDown, Node: node}, false,
+			one(nomadops.Node{ID: "n-1", Status: "ready"}), false},
+		{"a node that is down", rollout.Step{Action: rollout.WaitNodeDown, Node: node}, false,
+			one(nomadops.Node{ID: "n-1", Status: "down"}), true},
+		{"a node that is not listed", rollout.Step{Action: rollout.WaitNodeDown, Node: node}, false, nomadReading{}, true},
+		{"a server without a version", rollout.Step{Action: rollout.WaitHealthy}, false, servers("2.0.7", ""), false},
+		{"servers that all report a version", rollout.Step{Action: rollout.WaitHealthy}, false,
+			servers("2.0.7", "2.0.7"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &rollRun{rollLoop: newRollLoop(), listed: []cloud.Instance{{ID: "i-1", Joined: tc.joined}}}
+			w := openWait{step: tc.step}
+			if got := w.over(r, tc.reading); got != tc.wantOver {
+				t.Errorf("over = %v, want %v", got, tc.wantOver)
+			}
+		})
+	}
+}
+
+// TestCreateChangeCarriesTheGroupsHashAndANewOperationID makes the create of a step from the machine, the group's plan
+// and image, and the group's spec hash, with an operation id of its own each time.
+func TestCreateChangeCarriesTheGroupsHashAndANewOperationID(t *testing.T) {
+	r := &rollRun{
+		model: &model.Cluster{Groups: []model.NodeGroup{{Name: "workers", MachineType: "vc2-4c-8gb", Image: "ubuntu-24.04"}}},
+	}
+	r.groups = []rollout.Group{{Name: "workers", SpecHash: "group-hash"}}
+	step := rollout.Step{Action: rollout.Create, Machine: rollout.Machine{
+		Name: "prod-workers-2", Group: "workers", Role: v1alpha1.RoleClient, Zone: "ams",
+	}}
+	want := NodeChange{
+		Action: NodeCreate, Name: "prod-workers-2", Group: "workers", Role: v1alpha1.RoleClient, Zone: "ams",
+		MachineType: "vc2-4c-8gb", Image: "ubuntu-24.04", SpecHash: "group-hash",
+	}
+
+	first, second := r.createChange(step), r.createChange(step)
+
+	for _, got := range []NodeChange{first, second} {
+		if !cloud.ValidOpID(got.Op) {
+			t.Errorf("Op = %q, want an operation id", got.Op)
+		}
+		got.Op = ""
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("createChange (-want +got):\n%s", diff)
+		}
+	}
+	if first.Op == second.Op {
+		t.Errorf("two creates have the operation id %q", first.Op)
+	}
+}
+
+// TestPollFailsTheWaitThatRanOutAndNotTheOpenOne ends a wait whose limit passed while the wait for a node to join is
+// the open one, and reports the failure on the wait that ran out. It reports no start for it.
+func TestPollFailsTheWaitThatRanOutAndNotTheOpenOne(t *testing.T) {
+	t.Parallel()
+	var got []Progress
+	r := &rollRun{s: &Service{OnProgress: func(p Progress) { got = append(got, p) }}, rollLoop: newRollLoop()}
+	joining := rollout.Step{Action: rollout.WaitJoined, Machine: rollout.Machine{ID: "i-3", Name: "prod-workers-3"}}
+	healthy := rollout.Step{Action: rollout.WaitHealthy, Group: "workers", Voters: 3}
+	joined := NomadEvent{Action: NomadRegister, Node: "prod-workers-3"}
+	r.open = &openWait{key: keyOf(joining), step: joining, event: joined}
+	r.seen[keyOf(healthy)] = seenWait{step: healthy, since: time.Now().Add(-nomadTimeout)}
+
+	err := r.poll(t.Context(), healthy, nomadReading{})
+	r.endWait(err)
+
+	if err == nil {
+		t.Fatal("poll succeeded, want the error of the wait that ran out")
+	}
+	if len(got) != 1 || got[0].Step != NodeFailed || got[0].Nomad == nil || got[0].Nomad.Action != NomadHealthy ||
+		!errors.Is(got[0].Err, err) {
+		t.Errorf("the progress is %+v, want one failure of the wait for the servers with the error of the poll", got)
+	}
+}
+
+// TestRepeatCreateCountsOnlyAMachineThatItMakes counts the machine of a repeated create when the cloud made a new one,
+// and not when the cloud found the machine that the create names.
+func TestRepeatCreateCountsOnlyAMachineThatItMakes(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		id   string // the ID of the machine that the repeated create names; the cloud's create answers with id-1
+		want []string
+	}{
+		{"the cloud has no machine with the operation id", "i-9", []string{"id-1"}},
+		{"the cloud found the machine", "id-1", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var steps []string
+			m := &model.Cluster{Name: "prod", Groups: []model.NodeGroup{
+				{Name: "servers", Role: v1alpha1.RoleServer}, {Name: "workers", Role: v1alpha1.RoleClient},
+			}}
+			r := &rollRun{
+				s: testService(&steps), kit: testKit(t, &recordingNodes{}), model: m, api: &introStub{}, rollLoop: newRollLoop(),
+				groups: []rollout.Group{{Name: "workers"}},
+				listed: []cloud.Instance{{Name: "prod-servers-0", Group: "servers", PrivateIP: netip.MustParseAddr("10.64.0.3")}},
+			}
+			in := cloud.Instance{
+				ID: tc.id, Name: "prod-workers-0", Group: "workers", Role: v1alpha1.RoleClient, Zone: "ams",
+				Op: "4f6a2d5e-8c3b-4d1e-9a7f-0b2c3d4e5f60",
+			}
+
+			if err := r.repeatCreate(t.Context(), in); err != nil {
+				t.Fatalf("repeatCreate: %v", err)
+			}
+
+			if p, ok := r.pending[in.Op]; ok != (tc.want != nil) || ok && p.in.ID != "id-1" {
+				t.Errorf("r.pending[%q] = %+v (held %t), want the machine id-1 only when the create made it", in.Op, p, ok)
+			}
+			got := slices.Sorted(maps.Keys(r.rolled.created))
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("the roll counts the created machines %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/ingvarch/tent/internal/cloud"
@@ -94,6 +95,45 @@ func (s *Service) markJoined(ctx context.Context, k nodeKit, in cloud.Instance) 
 		return err
 	}
 	s.progress(Progress{Node: step, Step: NodeDone})
+	return nil
+}
+
+// seedOf returns the private addresses of the servers other than the node called name, in the order of servers, which
+// are the cluster's servers by name. It fails when servers are known and none has an address yet, as a server's join
+// would be in vain; and when none is known, if the node is not a server.
+func seedOf(cluster string, servers []cloud.Instance, name string, client bool) ([]netip.Addr, error) {
+	var seed []netip.Addr
+	var missing []string
+	for _, in := range servers {
+		switch {
+		case in.Name == name:
+		case in.PrivateIP.IsValid():
+			seed = append(seed, in.PrivateIP)
+		default:
+			missing = append(missing, in.Name)
+		}
+	}
+	if len(seed) > 0 || len(missing) == 0 && !client {
+		return seed, nil
+	}
+	detail := ""
+	if len(missing) > 0 {
+		detail = " (" + strings.Join(missing, ", ") + ")"
+	}
+	return nil, fmt.Errorf("node %s: no server of %s has a private address yet%s; run the command again", name,
+		clusterLabel(cluster), detail)
+}
+
+// reportNomad reports the Nomad step that started describes as started, runs do, and reports it as done with the event
+// that do returns, or as failed with its error, which reportNomad returns.
+func (s *Service) reportNomad(started NomadEvent, do func() (NomadEvent, error)) error {
+	s.progress(Progress{Step: NodeStarted, Nomad: &started})
+	done, err := do()
+	if err != nil {
+		s.progress(Progress{Step: NodeFailed, Err: err, Nomad: &started})
+		return err
+	}
+	s.progress(Progress{Step: NodeDone, Nomad: &done})
 	return nil
 }
 
