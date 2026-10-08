@@ -26,8 +26,9 @@ type Server struct {
 // ineligible stays so. A repeated Drain moves the deadline of the drain that runs to the time of the repeat plus the
 // deadline. A node that the first server purged is gone on the next one, which counts as purged. A
 // TransferLeadership to the server that leads by then is answered 200 and changes nothing. A peer that the first
-// server removed is gone on the next one, which counts as removed. ErrGone ends a call at once, like any error that
-// is not ErrNotReady.
+// server removed is gone on the next one, which counts as removed. A ForceLeave that is repeated is answered 200 and
+// changes nothing more. Members is a read, and shows the gossip pool as the server that answers sees it. ErrGone ends
+// a call at once, like any error that is not ErrNotReady.
 //
 // When no server answers, the error matches ErrNotReady and names each server with its cause, so the waits go on
 // polling over Servers and show the last causes when they end. Servers is safe for concurrent use.
@@ -170,5 +171,16 @@ func (s *Servers) TransferLeadership(ctx context.Context, raftID string) error {
 // RemovePeer removes the server with the Raft ID from the Raft configuration.
 func (s *Servers) RemovePeer(ctx context.Context, raftID string) error {
 	_, err := try(ctx, s, func(a API) (struct{}, error) { return struct{}{}, a.RemovePeer(ctx, raftID) })
+	return err
+}
+
+// Members returns the servers of the gossip pool, as the server that answers sees it.
+func (s *Servers) Members(ctx context.Context) ([]Member, error) {
+	return try(ctx, s, func(a API) ([]Member, error) { return a.Members(ctx) })
+}
+
+// ForceLeave forces the member called name out of the gossip pool and prunes it.
+func (s *Servers) ForceLeave(ctx context.Context, name string) error {
+	_, err := try(ctx, s, func(a API) (struct{}, error) { return struct{}{}, a.ForceLeave(ctx, name) })
 	return err
 }

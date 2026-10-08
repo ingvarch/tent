@@ -113,6 +113,15 @@ func (s *stub) TransferLeadership(context.Context, string) error {
 
 func (s *stub) RemovePeer(context.Context, string) error { return s.record("RemovePeer") }
 
+func (s *stub) Members(context.Context) ([]nomadops.Member, error) {
+	if err := s.record("Members"); err != nil {
+		return nil, err
+	}
+	return []nomadops.Member{{Name: "s0.eu", Status: "alive"}}, nil
+}
+
+func (s *stub) ForceLeave(context.Context, string) error { return s.record("ForceLeave") }
+
 // notReady is an error of the class ErrNotReady, as a server that broke its answer off makes.
 func notReady(path string) error {
 	return nomadops.NewCallError("GET", path, io.ErrUnexpectedEOF)
@@ -239,6 +248,8 @@ func TestServersEveryMethodMovesOn(t *testing.T) {
 			return a.TransferLeadership(ctx, raftID)
 		},
 		"RemovePeer": func(ctx context.Context, a nomadops.API) error { return a.RemovePeer(ctx, raftID) },
+		"Members":    func(ctx context.Context, a nomadops.API) error { _, err := a.Members(ctx); return err },
+		"ForceLeave": func(ctx context.Context, a nomadops.API) error { return a.ForceLeave(ctx, memberName) },
 	}
 	for name, call := range calls {
 		t.Run(name, func(t *testing.T) {
@@ -360,6 +371,16 @@ func (r ctxRecorder) TransferLeadership(ctx context.Context, raftID string) erro
 func (r ctxRecorder) RemovePeer(ctx context.Context, raftID string) error {
 	r.record(ctx)
 	return r.API.RemovePeer(ctx, raftID)
+}
+
+func (r ctxRecorder) Members(ctx context.Context) ([]nomadops.Member, error) {
+	r.record(ctx)
+	return r.API.Members(ctx)
+}
+
+func (r ctxRecorder) ForceLeave(ctx context.Context, name string) error {
+	r.record(ctx)
+	return r.API.ForceLeave(ctx, name)
 }
 
 // The arguments, the context itself and the values pass through Servers, and a write moves on after a lost answer.
@@ -877,6 +898,125 @@ func TestServersLoseTheAnswerOfARaftWrite(t *testing.T) {
 			if got := peerIDs(t, s); !slices.Equal(got, tc.want) {
 				t.Errorf("peers = %v, want %v", got, tc.want)
 			}
+		})
+	}
+}
+
+// memberName is the name of a member of the gossip pool in the tests.
+const memberName = "s3.eu"
+
+// gossipFixture is a gossip pool of three servers, s3 failed, and Servers over two clients of it, which record the
+// contexts they get.
+func gossipFixture(t *testing.T, seen *[]context.Context) (*nomadfake.Fake, *nomadops.Servers) {
+	t.Helper()
+	f := nomadfake.New()
+	f.SetLeader(leaderAddr)
+	f.SetBootstrapped(pki.NewBootstrapSecret())
+	f.SetMembers([]nomadops.Member{
+		{Name: "s1.eu", Address: netip.MustParseAddr("10.0.0.1"), Status: "alive"},
+		{Name: "s2.eu", Address: netip.MustParseAddr("10.0.0.2"), Status: "alive"},
+		{Name: memberName, Address: netip.MustParseAddr("10.0.0.3"), Status: "failed"},
+	})
+	return f, fakeServers(t, f, pki.NewBootstrapSecret(), func(a nomadops.API) nomadops.API {
+		return ctxRecorder{API: a, seen: seen}
+	})
+}
+
+// memberNames returns the names of the members that the pool lists.
+func memberNames(t *testing.T, s *nomadops.Servers) []string {
+	t.Helper()
+	members, err := s.Members(t.Context())
+	if err != nil {
+		t.Fatalf("Members: %v", err)
+	}
+	var names []string
+	for _, m := range members {
+		names = append(names, m.Name)
+	}
+	return names
+}
+
+// TestServersPassTheGossipCalls checks that the name reaches the server, with the caller's context, that Members
+// returns what the server lists, and that ForceLeave changes the pool.
+func TestServersPassTheGossipCalls(t *testing.T) {
+	var seen []context.Context
+	f, s := gossipFixture(t, &seen)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	members, err := s.Members(ctx)
+	if err != nil || len(members) != 3 || members[2].Name != memberName || members[2].Status != "failed" {
+		t.Fatalf("Members() = %+v, %v; want the three members set", members, err)
+	}
+	if err := s.ForceLeave(ctx, memberName); err != nil {
+		t.Fatalf("ForceLeave: %v", err)
+	}
+
+	want := []nomadfake.Call{
+		{Name: "Members", Server: addr1},
+		{Name: "ForceLeave", Server: addr1, Arg: memberName},
+	}
+	if diff := cmp.Diff(want, f.Calls()); diff != "" {
+		t.Errorf("calls (-want +got):\n%s", diff)
+	}
+	if len(seen) != 2 || seen[0] != ctx || seen[1] != ctx {
+		t.Errorf("the calls got %d contexts, want the caller's twice", len(seen))
+	}
+	if got, want := memberNames(t, s), []string{"s1.eu", "s2.eu"}; !slices.Equal(got, want) {
+		t.Errorf("members = %v, want %v", got, want)
+	}
+}
+
+// TestServersLoseTheAnswerOfAGossipCall checks that each call moves on to the next server after an answer that was
+// lost, and that the repeat succeeds: a force-leave of a member that is gone answers 200.
+func TestServersLoseTheAnswerOfAGossipCall(t *testing.T) {
+	for _, name := range []string{"Members", "ForceLeave"} {
+		t.Run(name, func(t *testing.T) {
+			f, s := gossipFixture(t, new([]context.Context))
+			f.LoseResponse(t, name)
+
+			var err error
+			switch name {
+			case "Members":
+				_, err = s.Members(t.Context())
+			case "ForceLeave":
+				err = s.ForceLeave(t.Context(), memberName)
+			}
+
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if want := []string{addr1, addr2}; !slices.Equal(callServers(f, name), want) {
+				t.Errorf("servers of the %s calls = %v, want %v", name, callServers(f, name), want)
+			}
+			if last := s.Last(); last != addr2 {
+				t.Errorf("Last() = %q, want %s", last, addr2)
+			}
+		})
+	}
+}
+
+// TestServersReturnAPermanentErrorOfAGossipCall checks that a permanent error of Members or ForceLeave comes back as it
+// is, and that no other server is asked.
+func TestServersReturnAPermanentErrorOfAGossipCall(t *testing.T) {
+	permanent := errors.New("forbidden")
+	for name, call := range map[string]func(*testing.T, *nomadops.Servers) error{
+		"Members": func(t *testing.T, s *nomadops.Servers) error {
+			got, err := s.Members(t.Context())
+			if got != nil {
+				t.Errorf("Members() = %v with an error, want nil", got)
+			}
+			return err
+		},
+		"ForceLeave": func(t *testing.T, s *nomadops.Servers) error { return s.ForceLeave(t.Context(), memberName) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, b := &stub{err: permanent}, &stub{}
+			if err := call(t, servers(t, a, b)); !errors.Is(err, permanent) || err.Error() != permanent.Error() {
+				t.Errorf("%s() error = %v, want the permanent error as it is", name, err)
+			}
+			wantStubCalls(t, a, name)
+			wantStubCalls(t, b)
 		})
 	}
 }

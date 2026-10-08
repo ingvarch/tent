@@ -1,6 +1,7 @@
 // Package nomadops calls the HTTP API of a Nomad cluster's servers over mutual TLS: the leader, the ACL bootstrap,
 // client introduction tokens, management tokens that expire, the client nodes with their eligibility, drains and
-// purges, the autopilot health, the Raft peers with leadership transfers and removals, and the keyring.
+// purges, the autopilot health, the Raft peers with leadership transfers and removals, the gossip members with
+// force-leave, and the keyring.
 // It also makes the reverse proxy that serves a cluster's API on a local port, with the mutual TLS and the token added.
 package nomadops
 
@@ -74,6 +75,10 @@ type API interface {
 	// RemovePeer removes the server with the Raft ID from the Raft configuration. A peer that is not there counts as
 	// removed.
 	RemovePeer(ctx context.Context, raftID string) error
+	// Members returns the servers of the gossip pool, as the server that answers sees it.
+	Members(ctx context.Context) ([]Member, error)
+	// ForceLeave forces the member called name out of the gossip pool and prunes it.
+	ForceLeave(ctx context.Context, name string) error
 }
 
 // Client is the API over the HTTP API of one Nomad server. Each call has at most 30 seconds, and none is retried.

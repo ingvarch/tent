@@ -46,7 +46,7 @@ func TestFaultedCallsReturnNoValue(t *testing.T) {
 		func(call string) { f.Fail(t, call, errBoom) },
 		func(call string) { f.LoseResponse(t, call) },
 	} {
-		for _, call := range []string{"Leader", "IntroToken", "CreateToken", "Nodes", "Health", "KeyringReady"} {
+		for _, call := range []string{"Leader", "IntroToken", "CreateToken", "Nodes", "Health", "KeyringReady", "Members"} {
 			fault(call)
 		}
 		if got, err := a.Leader(ctx); err == nil || got != "" {
@@ -66,6 +66,9 @@ func TestFaultedCallsReturnNoValue(t *testing.T) {
 		}
 		if ready, err := a.KeyringReady(ctx); err == nil || ready {
 			t.Errorf("KeyringReady() = %v, %v; want an error and false", ready, err)
+		}
+		if got, err := a.Members(ctx); err == nil || got != nil {
+			t.Errorf("Members() = %v, %v; want an error and no list", got, err)
 		}
 	}
 }

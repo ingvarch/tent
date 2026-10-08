@@ -1,6 +1,7 @@
 // Package nomadfake is an in-memory Nomad cluster for tests. Its clients implement nomadops.API with the types and
 // error classes of nomadops, so code that drives Nomad runs on it as on the real client. A test sets the cluster's
-// leader, nodes, peers and health, and makes chosen calls fail or lose their answer after the fake carried them out.
+// leader, nodes, peers, members and health, and makes chosen calls fail or lose their answer after the fake carried
+// them out.
 package nomadfake
 
 import (
@@ -35,15 +36,20 @@ import (
 // The fake is simpler than Nomad in these ways:
 //   - It checks no ACL token: each call succeeds whatever token its client holds. Tokens tells which tokens the
 //     clients got. Only before the bootstrap does a call fail: Nodes, Health, Peers, KeyringReady, IntroToken,
-//     CreateToken, MarkIneligible, Drain, Purge, TransferLeadership and RemovePeer fail for good, as Nomad's 403, until
-//     a Bootstrap succeeds; Leader and Bootstrap work. Peers fails so, since Nomad answers the Raft configuration to a
-//     management token alone.
+//     CreateToken, MarkIneligible, Drain, Purge, TransferLeadership, RemovePeer, Members and ForceLeave fail for good,
+//     as Nomad's 403, until a Bootstrap succeeds; Leader and Bootstrap work. Peers fails so, since Nomad answers the
+//     Raft configuration to a management token alone.
 //   - MarkIneligible, Drain and Purge change a node as their docs say, and nothing else happens to a node over time:
 //     it goes down, registers again or comes back after a purge only when a test says so with Register.
 //   - TransferLeadership changes the peers, the leader's address and the Health, and RemovePeer the peers alone, as
 //     their docs say, and nothing else happens to a server over time: the cluster re-adds a peer, promotes a server
 //     or removes a dead one only when a test says so with SetPeers, SetHealth and SetLeader, which stay independent:
 //     a test keeps them in step.
+//   - Members lists what SetMembers set, and ForceLeave drops a failed or left member at once and turns an alive one to
+//     leaving, which the next read shows and the one after it no longer lists, as their docs say. No member changes
+//     over time otherwise: one fails, joins or leaves only when a test says so with SetMembers. Nomad's servers
+//     answer these two calls from their own gossip pool even while the cluster has no leader; the fake fails them
+//     then, like every call. It has one pool, so every client sees the same members.
 //   - Its keyring has an active key as soon as the ACL system is bootstrapped, unless SetKeyringDelay holds it back;
 //     meanwhile KeyringReady is false and IntroToken fails as Nomad's 500 does.
 //
@@ -57,6 +63,7 @@ type Fake struct {
 	drainReads   int // how many reads of the nodes a new drain stays under way for
 	health       nomadops.Health
 	peers        []nomadops.Peer
+	members      []fakeMember
 	keyringReads int             // how many reads of the keyring still find no active key
 	tokens       []secret.Secret // the tokens of the clients, in the order Client made them
 	issued       []IssuedToken   // the management tokens that CreateToken made, in order
@@ -94,7 +101,7 @@ func (f *Fake) SetLeader(addr string) {
 func (f *Fake) NewCluster() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.leader, f.bootstrapped, f.nodes, f.peers, f.health = "", nil, nil, nil, nomadops.Health{}
+	f.leader, f.bootstrapped, f.nodes, f.peers, f.members, f.health = "", nil, nil, nil, nil, nomadops.Health{}
 	f.keyringReads, f.drainReads = 0, 0
 }
 
@@ -162,6 +169,17 @@ func (f *Fake) SetPeers(peers []nomadops.Peer) {
 	f.peers = slices.Clone(peers)
 }
 
+// SetMembers makes a copy of members the servers of the gossip pool, in that order. Every member stays as it is until
+// a ForceLeave changes it.
+func (f *Fake) SetMembers(members []nomadops.Member) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.members = make([]fakeMember, len(members))
+	for i, m := range members {
+		f.members[i] = fakeMember{Member: m}
+	}
+}
+
 // Tokens returns copies of the tokens that Client got, in order.
 func (f *Fake) Tokens() []secret.Secret {
 	f.mu.Lock()
@@ -195,7 +213,8 @@ type Call struct {
 	// Arg is the call's argument without a secret: the size of the secret for Bootstrap, such as [secret, 36 bytes];
 	// the node's name, the pool and the TTL for IntroToken, such as "prod-workers-1 default 30m0s"; the name and the TTL
 	// for CreateToken, such as "tent export nomad ana@laptop 24h0m0s"; the node ID for MarkIneligible and Purge; DrainArg
-	// for Drain; the Raft ID for TransferLeadership and RemovePeer; empty for the others.
+	// for Drain; the Raft ID for TransferLeadership and RemovePeer; the member's name for ForceLeave; empty for the
+	// others.
 	Arg string
 }
 
@@ -640,6 +659,57 @@ func (c client) RemovePeer(ctx context.Context, raftID string) error {
 			return fmt.Errorf("the peer %s leads the cluster", raftID)
 		}
 		c.f.peers = slices.Delete(c.f.peers, i, i+1)
+		return nil
+	})
+}
+
+// fakeMember is a member of the gossip pool, with what the fake does to it after a ForceLeave.
+type fakeMember struct {
+	nomadops.Member
+	forced bool // a ForceLeave turned the member to leaving
+	shown  bool // a read of Members showed it so
+}
+
+// Members returns a copy of the gossip pool. A member that a ForceLeave turned to leaving shows so at the first read
+// and is gone at the next one.
+func (c client) Members(ctx context.Context) ([]nomadops.Member, error) {
+	var members []nomadops.Member
+	err := c.f.call(ctx, c.server, "Members", "", func() error {
+		if c.f.bootstrapped == nil {
+			return errDenied
+		}
+		c.f.members = slices.DeleteFunc(c.f.members, func(m fakeMember) bool { return m.shown })
+		members = make([]nomadops.Member, len(c.f.members))
+		for i := range c.f.members {
+			c.f.members[i].shown = c.f.members[i].forced
+			members[i] = c.f.members[i].Member
+		}
+		return nil
+	})
+	return result(members, err)
+}
+
+// ForceLeave drops a member that failed or left at once, turns an alive member to leaving, as Members says, and leaves
+// a member that is leaving as it is. A name that is not in the pool succeeds, as Nomad answers 200 to any name. It
+// refuses a name that the client refuses before any call.
+func (c client) ForceLeave(ctx context.Context, name string) error {
+	if err := nomadops.CheckMemberName(name); err != nil {
+		return &callError{name: "ForceLeave", cause: err}
+	}
+	return c.f.call(ctx, c.server, "ForceLeave", name, func() error {
+		if c.f.bootstrapped == nil {
+			return errDenied
+		}
+		i := slices.IndexFunc(c.f.members, func(m fakeMember) bool { return m.Name == name })
+		if i < 0 {
+			return nil
+		}
+		switch m := &c.f.members[i]; m.Status {
+		case "failed", "left":
+			c.f.members = slices.Delete(c.f.members, i, i+1)
+		case "alive":
+			m.Status, m.forced = "leaving", true
+		}
 		return nil
 	})
 }

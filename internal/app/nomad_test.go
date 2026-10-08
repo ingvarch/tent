@@ -514,6 +514,23 @@ func (c *worldClient) RemovePeer(ctx context.Context, raftID string) error {
 	})
 }
 
+func (c *worldClient) Members(ctx context.Context) (v []nomadops.Member, err error) {
+	err = c.do(ctx, nomadfake.Call{Name: "Members"}, func(ctx context.Context) (err error) {
+		v, err = c.inner.Members(ctx)
+		return
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+func (c *worldClient) ForceLeave(ctx context.Context, name string) error {
+	return c.do(ctx, nomadfake.Call{Name: "ForceLeave", Arg: name}, func(ctx context.Context) error {
+		return c.inner.ForceLeave(ctx, name)
+	})
+}
+
 // shapeNodes returns the nodes without those that a test dropped, and with the edits of the test.
 func (w *nomadWorld) shapeNodes(nodes []nomadops.Node) []nomadops.Node {
 	w.mu.Lock()
