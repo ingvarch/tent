@@ -27,6 +27,20 @@ const (
 	WaitNodeDown
 	// Purge purges a node from Nomad.
 	Purge
+	// TransferLeadership moves the Raft leadership to a server.
+	TransferLeadership
+	// Stop stops a machine.
+	Stop
+	// WaitServerDown waits until autopilot no longer counts a server as a healthy voter.
+	WaitServerDown
+	// RemovePeer removes a server from the Raft configuration.
+	RemovePeer
+	// ForceLeave forces a member out of the gossip pool.
+	ForceLeave
+	// WaitHealthy waits until the servers are healthy and a number of them vote.
+	WaitHealthy
+	// WaitStable waits until a time, so that every node has refreshed its list of servers.
+	WaitStable
 )
 
 // Step is one thing that a run does next.
@@ -35,13 +49,17 @@ type Step struct {
 	Group    string
 	Machine  Machine       // the machine it acts on; for Create the new one's name, group, role and zone
 	Node     Node          // the client node it acts on
+	Server   Server        // RemovePeer: the peer; TransferLeadership: the new leader
+	Member   Member        // ForceLeave
+	Voters   int           // WaitHealthy
 	Deadline time.Duration // Drain
+	Until    time.Time     // WaitStable
 }
 
 // Waits reports whether the action polls until something happens.
 func (a Action) Waits() bool {
 	switch a {
-	case WaitJoined, WaitDrained, WaitNodeDown:
+	case WaitJoined, WaitDrained, WaitNodeDown, WaitServerDown, WaitHealthy, WaitStable:
 		return true
 	default:
 		return false
@@ -70,6 +88,20 @@ func (s Step) String() string {
 		return fmt.Sprintf("wait until Nomad lists node %s at %s as down", n.Name, n.Address)
 	case Purge:
 		return fmt.Sprintf("purge node %s at %s from Nomad", n.Name, n.Address)
+	case TransferLeadership:
+		return fmt.Sprintf("move the leadership from %s to %s", m.Name, nodeOfServer(s.Server.Name))
+	case Stop:
+		return fmt.Sprintf("stop node %s (ID %s)", m.Name, m.ID)
+	case WaitServerDown:
+		return fmt.Sprintf("wait until autopilot no longer counts %s as a healthy voter", m.Name)
+	case RemovePeer:
+		return fmt.Sprintf("remove %s from the Raft configuration", m.Name)
+	case ForceLeave:
+		return fmt.Sprintf("force %s out of the gossip pool", s.Member.Name)
+	case WaitHealthy:
+		return fmt.Sprintf("wait until %d healthy servers vote", s.Voters)
+	case WaitStable:
+		return fmt.Sprintf("wait until %s for the servers to be stable", s.Until.UTC().Format(time.TimeOnly))
 	default:
 		return fmt.Sprintf("unknown action %d", s.Action)
 	}

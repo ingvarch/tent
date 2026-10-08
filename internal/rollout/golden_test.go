@@ -25,10 +25,27 @@ func workersGroup(surge, unavailable int) rollout.Group {
 	}
 }
 
+// serversGroup is the server group servers: new hash, zones ams and fra.
+func serversGroup(size int) rollout.Group {
+	return rollout.Group{
+		Name: "servers", Role: v1alpha1.RoleServer, Size: size, Zones: []string{"ams", "fra"}, SpecHash: newHash,
+	}
+}
+
+// outdatedServers is a cluster of n outdated servers, the first leading, that run the old Nomad.
+func outdatedServers(n int) *world {
+	w := newWorld(curVersion)
+	w.addGroup(serversGroup(n))
+	for range n {
+		w.addServer(oldHash, oldVersion)
+	}
+	return w
+}
+
 // outdatedWorkers is a cluster of one server and three outdated workers.
 func outdatedWorkers(surge, unavailable int) *world {
 	w := newWorld(curVersion)
-	w.addServer(curVersion)
+	w.addServer(newHash, curVersion)
 	w.addGroup(workersGroup(surge, unavailable))
 	w.addClients("workers", 3, oldHash, oldVersion)
 	return w
@@ -51,14 +68,14 @@ var scenarios = []scenario{
 	}},
 	{"refuse_downgrade", rollout.Roll, func() *world {
 		w := newWorld(oldVersion)
-		w.addServer(oldVersion)
+		w.addServer(newHash, oldVersion)
 		w.addGroup(workersGroup(1, 0))
 		w.addClients("workers", 3, oldHash, curVersion)
 		return w.arm()
 	}},
 	{"refuse_stuck", rollout.Roll, func() *world {
 		w := newWorld(curVersion)
-		w.addServer(curVersion)
+		w.addServer(newHash, curVersion)
 		w.addGroup(workersGroup(1, 0))
 		w.addClients("workers", 1, newHash, curVersion)
 		w.addClients("workers", 2, oldHash, oldVersion)
@@ -70,6 +87,31 @@ var scenarios = []scenario{
 		w.duplicate("prod-workers-1")
 		return w.arm()
 	}},
+	{"servers3", rollout.Roll, func() *world { return outdatedServers(3) }},
+	{"servers5", rollout.Roll, func() *world { return outdatedServers(5) }},
+	{"server1", rollout.Roll, func() *world { return outdatedServers(1) }},
+	{"cluster", rollout.Roll, func() *world {
+		w := outdatedServers(3)
+		g := workersGroup(1, 0)
+		g.Size = 2
+		w.addGroup(g)
+		w.addClients("workers", 2, oldHash, oldVersion)
+		return w.arm()
+	}},
+	{"refuse_unhealthy", rollout.Roll, func() *world {
+		w := outdatedServers(3)
+		w.noCleanup = true
+		w.failServer("prod-servers-2")
+		return w
+	}},
+	{"refuse_tolerance", rollout.Roll, func() *world { return outdatedServers(2) }},
+	{"refuse_short", rollout.Roll, func() *world {
+		w := newWorld(curVersion)
+		w.addGroup(serversGroup(3))
+		w.addServer(oldHash, oldVersion)
+		w.addServer(oldHash, oldVersion)
+		return w
+	}},
 }
 
 // describe is the comment that starts a golden file: the mode, the groups and the machines.
@@ -80,8 +122,11 @@ func (w *world) describe(mode rollout.Mode) []string {
 		fmt.Sprintf("a new node runs Nomad %s", w.version),
 	}
 	for _, g := range w.groups {
-		lines = append(lines, fmt.Sprintf("group %s: %s, size %d, zones %s, maxSurge %d, maxUnavailable %d, drain %s",
-			g.Name, g.Role, g.Size, strings.Join(g.Zones, " and "), g.MaxSurge, g.MaxUnavailable, g.DrainTimeout))
+		line := fmt.Sprintf("group %s: %s, size %d, zones %s", g.Name, g.Role, g.Size, strings.Join(g.Zones, " and "))
+		if g.Role == v1alpha1.RoleClient {
+			line += fmt.Sprintf(", maxSurge %d, maxUnavailable %d, drain %s", g.MaxSurge, g.MaxUnavailable, g.DrainTimeout)
+		}
+		lines = append(lines, line)
 	}
 	for _, m := range w.machines {
 		line := fmt.Sprintf("machine %s (%s) in %s runs Nomad %s", m.Name, m.ID, m.Zone, m.version)
@@ -94,6 +139,12 @@ func (w *world) describe(mode rollout.Mode) []string {
 		}
 		if i := w.nodeIndexByOwner(m.ID); i >= 0 && !w.nodes[i].Eligible {
 			line += ", its node is ineligible"
+		}
+		if m.stopped {
+			line += ", stopped"
+		}
+		if i := w.memberIndexByMachine(m.ID); i >= 0 && w.members[i].status != memberAlive {
+			line += ", its gossip member is " + w.members[i].status
 		}
 		lines = append(lines, line)
 	}
@@ -169,6 +220,16 @@ func TestRollsEndUpToDate(t *testing.T) {
 			for _, n := range w.nodes {
 				if w.machineIndex(n.owner) < 0 {
 					t.Errorf("node %s of a deleted machine is still listed", n.Name)
+				}
+			}
+			voters, _ := w.voterCounts()
+			if got, want := len(w.servers), w.countOf("servers"); got != want || voters != want {
+				t.Errorf("the Raft configuration has %d servers and %d voters, want %d of each", got, voters, want)
+			}
+			for _, mem := range w.members {
+				if mem.status != memberAlive || w.serverIndexByMachine(mem.machine) < 0 {
+					t.Errorf("member %s is %s and has a server: %t", mem.name, mem.status,
+						w.serverIndexByMachine(mem.machine) >= 0)
 				}
 			}
 		})

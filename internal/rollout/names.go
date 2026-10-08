@@ -2,6 +2,7 @@ package rollout
 
 import (
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -41,4 +42,10 @@ func CompareCreated(a, b time.Time) int {
 	default:
 		return -1
 	}
+}
+
+// nodeOfServer returns the node name in the name of a server, which is <node name>.<region>.
+func nodeOfServer(name string) string {
+	node, _, _ := strings.Cut(name, ".")
+	return node
 }

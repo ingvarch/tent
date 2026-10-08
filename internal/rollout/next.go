@@ -39,16 +39,20 @@ func Next(s State, mode Mode) (Step, error) {
 		return Step{}, err
 	}
 	groups := sortedGroups(s.Groups)
+	next := map[v1alpha1.Role]func(State, Group) (Step, bool, error){
+		v1alpha1.RoleServer: nextServer,
+		v1alpha1.RoleClient: nextClient,
+	}
 	for _, g := range groups {
-		if g.Role != v1alpha1.RoleClient {
-			return Step{}, errors.New("rollout cannot roll server groups yet")
+		if next[g.Role] == nil {
+			return Step{}, fmt.Errorf("rollout cannot roll %s groups yet", g.Role)
 		}
 	}
 	if err := checkDuplicates(s, groups); err != nil {
 		return Step{}, err
 	}
 	for _, g := range groups {
-		step, found, err := nextClient(s, g)
+		step, found, err := next[g.Role](s, g)
 		if err != nil || found {
 			return step, err
 		}
@@ -56,10 +60,16 @@ func Next(s State, mode Mode) (Step, error) {
 	return Step{Action: Done}, nil
 }
 
-// sortedGroups returns a copy of the groups ordered by name.
+// sortedGroups returns a copy of the groups: the server and combined groups first, then the client groups, each by
+// name.
 func sortedGroups(groups []Group) []Group {
 	sorted := slices.Clone(groups)
-	slices.SortStableFunc(sorted, func(a, b Group) int { return cmp.Compare(a.Name, b.Name) })
+	slices.SortStableFunc(sorted, func(a, b Group) int {
+		return cmp.Or(
+			compareBool(a.Role == v1alpha1.RoleClient, b.Role == v1alpha1.RoleClient),
+			cmp.Compare(a.Name, b.Name),
+		)
+	})
 	return sorted
 }
 

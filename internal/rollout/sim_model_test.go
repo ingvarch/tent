@@ -1,8 +1,13 @@
 package rollout_test
 
 import (
+	"errors"
+	"net/netip"
 	"slices"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"github.com/ingvarch/tent/internal/rollout"
 )
@@ -63,7 +68,7 @@ func TestSimDrainMovesAllocationsAfterTwoTicks(t *testing.T) {
 
 func TestSimDrainWithNowhereToGoLeavesAllocationsUnplaced(t *testing.T) {
 	w := newWorld(curVersion)
-	w.addServer(curVersion)
+	w.addServer(newHash, curVersion)
 	w.addGroup(workersGroup(1, 0))
 	w.addClients("workers", 1, oldHash, oldVersion)
 	if err := w.apply(w.machineStep(rollout.Drain, "prod-workers-0")); err != nil {
@@ -109,8 +114,8 @@ func TestSimNodeOfADeletedMachineGoesDownAfterTwoTicksAndPurgeRemovesIt(t *testi
 
 func TestSimServersAreHealthyAndTheFirstLeads(t *testing.T) {
 	w := newWorld(curVersion)
-	w.addServer(curVersion)
-	w.addServer(curVersion)
+	w.addServer(newHash, curVersion)
+	w.addServer(newHash, curVersion)
 	s := w.observe()
 	if !s.Nomad.Healthy || len(s.Nomad.Servers) != 2 || len(s.Nomad.Members) != 2 {
 		t.Fatalf("Nomad = %+v, want two healthy servers and two members", s.Nomad)
@@ -134,5 +139,326 @@ func TestSimSummaryTellsWorldsApart(t *testing.T) {
 	b.makeIneligible("prod-workers-1")
 	if slices.Equal(a.summary(), b.summary()) {
 		t.Error("the summary does not show an ineligible node")
+	}
+}
+
+// serverWorld is a cluster of n up to date servers of the group servers, the first leading.
+func serverWorld(n int) *world {
+	w := newWorld(curVersion)
+	w.addGroup(serversGroup(n))
+	for range n {
+		w.addServer(newHash, curVersion)
+	}
+	return w
+}
+
+// ticks moves the world on by n ticks.
+func (w *world) ticks(n int) {
+	for range n {
+		w.tick()
+	}
+}
+
+func serverOf(t *testing.T, s rollout.State, name string) rollout.Server {
+	t.Helper()
+	for _, srv := range s.Nomad.Servers {
+		if srv.Name == name+".global" {
+			return srv
+		}
+	}
+	t.Fatalf("no server %s in %+v", name, s.Nomad.Servers)
+	return rollout.Server{}
+}
+
+func memberOf(s rollout.State, name string) (rollout.Member, bool) {
+	for _, m := range s.Nomad.Members {
+		if m.Name == name+".global" {
+			return m, true
+		}
+	}
+	return rollout.Member{}, false
+}
+
+func TestSimNewServerJoinsAsANonvoterAndVotesTwoTicksLater(t *testing.T) {
+	w := serverWorld(3)
+	create := rollout.Step{Action: rollout.Create, Group: "servers", Machine: rollout.Machine{
+		Name: "prod-servers-3", Zone: "ams"}}
+	if err := w.apply(create); err != nil {
+		t.Fatal(err)
+	}
+	newest := func() rollout.Machine { return w.observe().Machines[3] }
+	if m := newest(); m.Ready || m.Joined || len(w.observe().Nomad.Servers) != 3 {
+		t.Errorf("a created server machine = %+v, want it listed, not ready, with no server", m)
+	}
+	w.ticks(1)
+	if m := newest(); !m.Ready || m.Joined || len(w.observe().Nomad.Servers) != 3 {
+		t.Errorf("after 1 tick: %+v, want it ready with no server", m)
+	}
+	w.ticks(1)
+	joined := w.now
+	s := w.observe()
+	srv := serverOf(t, s, "prod-servers-3")
+	if srv.Voter || !srv.Healthy || srv.Leader || !srv.StableSince.Equal(joined) || srv.Version != curVersion ||
+		srv.Address.Addr() != newest().PrivateIP || newest().Joined {
+		t.Errorf("after 2 ticks: server %+v, want a healthy nonvoter stable since %s, not labelled", srv, joined)
+	}
+	if m, ok := memberOf(s, "prod-servers-3"); !ok || m.Status != "alive" || m.Address != newest().PrivateIP {
+		t.Errorf("after 2 ticks: member %+v, want it alive at the machine's address", m)
+	}
+	w.ticks(1)
+	if serverOf(t, w.observe(), "prod-servers-3").Voter || newest().Joined {
+		t.Error("after 3 ticks: the server votes or is labelled, want a nonvoter")
+	}
+	w.ticks(1)
+	srv = serverOf(t, w.observe(), "prod-servers-3")
+	if !srv.Voter || !newest().Joined || !srv.StableSince.Equal(joined) {
+		t.Errorf("after 4 ticks: server %+v and machine %+v, want a voter, labelled, stable since %s", srv, newest(), joined)
+	}
+}
+
+func TestSimStoppedServerFailsAfterFourTicksAndAutopilotRemovesItsPeerOneTickLater(t *testing.T) {
+	w := serverWorld(3)
+	if err := w.apply(w.serverStep(rollout.Stop, "prod-servers-1")); err != nil {
+		t.Fatal(err)
+	}
+	state := func() (rollout.State, rollout.Server) {
+		s := w.observe()
+		return s, serverOf(t, s, "prod-servers-1")
+	}
+	for tick := 1; tick <= 3; tick++ {
+		w.tick()
+		s, srv := state()
+		if m, _ := memberOf(s, "prod-servers-1"); m.Status != "alive" || !srv.Healthy || !s.Nomad.Healthy ||
+			s.Machines[1].Ready {
+			t.Fatalf("after %d ticks: member %+v, server %+v, want it alive and healthy on a stopped machine", tick, m, srv)
+		}
+	}
+	w.tick()
+	failed := w.now
+	s, srv := state()
+	if m, _ := memberOf(s, "prod-servers-1"); m.Status != "failed" || srv.Healthy || s.Nomad.Healthy ||
+		!srv.StableSince.Equal(failed) {
+		t.Errorf("after 4 ticks: member %+v, server %+v, want it failed and unhealthy since %s", m, srv, failed)
+	}
+	if serverOf(t, s, "prod-servers-0").StableSince.Equal(failed) {
+		t.Error("the health of the other servers did not change, but their StableSince did")
+	}
+	w.tick()
+	s = w.observe()
+	if len(s.Nomad.Servers) != 2 || !s.Nomad.Healthy {
+		t.Errorf("after 5 ticks: servers %+v, want autopilot to have removed the peer and be healthy", s.Nomad.Servers)
+	}
+	if m, ok := memberOf(s, "prod-servers-1"); !ok || m.Status != "failed" {
+		t.Errorf("member after the cleanup = %+v (%t), want it still listed as failed", m, ok)
+	}
+}
+
+func TestSimAutopilotCleanupCanBeTurnedOff(t *testing.T) {
+	w := serverWorld(3)
+	w.noCleanup = true
+	if err := w.apply(w.serverStep(rollout.Stop, "prod-servers-1")); err != nil {
+		t.Fatal(err)
+	}
+	w.ticks(8)
+	if got := len(w.observe().Nomad.Servers); got != 3 {
+		t.Errorf("servers = %d, want 3: nothing removes the peer", got)
+	}
+}
+
+func TestSimForceLeave(t *testing.T) {
+	member := func(w *world, name string) string {
+		m, ok := memberOf(w.observe(), name)
+		if !ok {
+			return "gone"
+		}
+		return m.Status
+	}
+	t.Run("an alive member leaves and is dropped one tick later", func(t *testing.T) {
+		w := serverWorld(3)
+		if err := w.apply(w.serverStep(rollout.ForceLeave, "prod-servers-1")); err != nil {
+			t.Fatal(err)
+		}
+		if got := member(w, "prod-servers-1"); got != "leaving" {
+			t.Fatalf("member = %s, want leaving", got)
+		}
+		w.tick()
+		if got := member(w, "prod-servers-1"); got != "gone" {
+			t.Errorf("member after 1 tick = %s, want gone", got)
+		}
+	})
+	t.Run("a failed member is dropped at once", func(t *testing.T) {
+		w := serverWorld(3)
+		w.noCleanup = true
+		w.failServer("prod-servers-1")
+		if err := w.apply(w.serverStep(rollout.ForceLeave, "prod-servers-1")); err != nil {
+			t.Fatal(err)
+		}
+		if got := member(w, "prod-servers-1"); got != "gone" {
+			t.Errorf("member = %s, want gone", got)
+		}
+	})
+	t.Run("an unknown member changes nothing", func(t *testing.T) {
+		w := serverWorld(3)
+		step := rollout.Step{Action: rollout.ForceLeave, Member: rollout.Member{Name: "prod-servers-9.global"}}
+		if err := w.apply(step); err != nil {
+			t.Fatal(err)
+		}
+		if got := len(w.observe().Nomad.Members); got != 3 {
+			t.Errorf("members = %d, want 3", got)
+		}
+	})
+}
+
+func TestSimRemovedPeerOfARunningServerComesBackAsANonvoter(t *testing.T) {
+	w := serverWorld(3)
+	if err := w.apply(w.serverStep(rollout.RemovePeer, "prod-servers-1")); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(w.observe().Nomad.Servers); got != 2 {
+		t.Fatalf("servers after the removal = %d, want 2", got)
+	}
+	w.ticks(3)
+	if got := len(w.observe().Nomad.Servers); got != 2 {
+		t.Fatalf("servers after 3 ticks = %d, want 2", got)
+	}
+	w.ticks(1)
+	back := w.now
+	srv := serverOf(t, w.observe(), "prod-servers-1")
+	if srv.Voter || !srv.Healthy || srv.ID != "r-2" || !srv.StableSince.Equal(back) {
+		t.Errorf("after 4 ticks: server %+v, want the same Raft ID back as a healthy nonvoter since %s", srv, back)
+	}
+	w.ticks(2)
+	if !serverOf(t, w.observe(), "prod-servers-1").Voter {
+		t.Error("after 2 more ticks: the server does not vote, want it promoted")
+	}
+}
+
+func TestSimRemovedPeerDoesNotComeBackWithoutAnAliveMemberOnARunningMachine(t *testing.T) {
+	t.Run("the member was forced out", func(t *testing.T) {
+		w := serverWorld(3)
+		if err := w.apply(w.serverStep(rollout.RemovePeer, "prod-servers-1")); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.apply(w.serverStep(rollout.ForceLeave, "prod-servers-1")); err != nil {
+			t.Fatal(err)
+		}
+		w.ticks(8)
+		if got := len(w.observe().Nomad.Servers); got != 2 {
+			t.Errorf("servers = %d, want 2", got)
+		}
+	})
+	t.Run("the machine was stopped", func(t *testing.T) {
+		w := serverWorld(3)
+		w.noCleanup = true
+		if err := w.apply(w.serverStep(rollout.RemovePeer, "prod-servers-1")); err != nil {
+			t.Fatal(err)
+		}
+		w.stopMachine("prod-servers-1")
+		w.ticks(8)
+		if got := len(w.observe().Nomad.Servers); got != 2 {
+			t.Errorf("servers = %d, want 2", got)
+		}
+	})
+}
+
+func TestSimTransferMovesTheLeaderAndResetsEveryStableSince(t *testing.T) {
+	w := serverWorld(3)
+	w.ticks(2)
+	if err := w.apply(w.serverStep(rollout.TransferLeadership, "prod-servers-2")); err != nil {
+		t.Fatal(err)
+	}
+	for _, srv := range w.observe().Nomad.Servers {
+		if srv.Leader != (srv.Name == "prod-servers-2.global") || !srv.StableSince.Equal(w.now) {
+			t.Errorf("server %+v after the transfer, want prod-servers-2 to lead and every StableSince %s", srv, w.now)
+		}
+	}
+}
+
+func TestSimTransferToTheLeaderChangesNothing(t *testing.T) {
+	w := serverWorld(3)
+	w.ticks(2)
+	before := w.observe().Nomad.Servers
+	if err := w.apply(w.serverStep(rollout.TransferLeadership, "prod-servers-0")); err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff(before, w.observe().Nomad.Servers, cmpopts.EquateComparable(netip.AddrPort{})); diff != "" {
+		t.Errorf("servers changed (-before +after):\n%s", diff)
+	}
+}
+
+func TestSimTransferToAServerThatCannotLeadIsAViolation(t *testing.T) {
+	w := serverWorld(3)
+	w.noCleanup = true
+	w.stopMachine("prod-servers-1")
+	var v *violation
+	if err := w.apply(w.serverStep(rollout.TransferLeadership, "prod-servers-1")); !errors.As(err, &v) {
+		t.Errorf("transfer to a stopped server = %v, want a violation", err)
+	}
+	unknown := rollout.Step{Action: rollout.TransferLeadership, Server: rollout.Server{ID: "r-99"}}
+	if err := w.apply(unknown); err == nil || errors.As(err, &v) {
+		t.Errorf("transfer to an unknown server = %v, want a plain error", err)
+	}
+}
+
+func TestSimFailureTolerance(t *testing.T) {
+	tests := []struct {
+		voters int
+		want   int
+	}{{1, 0}, {2, 0}, {3, 1}, {4, 1}, {5, 2}}
+	for _, tt := range tests {
+		if got := serverWorld(tt.voters).observe().Nomad.FailureTolerance; got != tt.want {
+			t.Errorf("failure tolerance with %d voters = %d, want %d", tt.voters, got, tt.want)
+		}
+	}
+	w := serverWorld(3)
+	w.noCleanup = true
+	w.failServer("prod-servers-1")
+	if got := w.observe().Nomad.FailureTolerance; got != 0 {
+		t.Errorf("failure tolerance with 2 healthy of 3 voters = %d, want 0", got)
+	}
+}
+
+func TestSimSummaryShowsServersAndMembers(t *testing.T) {
+	a, b := serverWorld(3), serverWorld(3)
+	if !slices.Equal(a.summary(), b.summary()) {
+		t.Fatal("equal worlds have different summaries")
+	}
+	b.noCleanup = true
+	b.failServer("prod-servers-1")
+	if slices.Equal(a.summary(), b.summary()) {
+		t.Error("the summary does not show a failed member")
+	}
+	c := serverWorld(3)
+	if err := c.apply(c.serverStep(rollout.RemovePeer, "prod-servers-1")); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Equal(a.summary(), c.summary()) {
+		t.Error("the summary does not show a removed peer")
+	}
+	d := serverWorld(3)
+	if err := d.apply(d.serverStep(rollout.TransferLeadership, "prod-servers-1")); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Equal(a.summary(), d.summary()) {
+		t.Error("the summary does not show the leader")
+	}
+}
+
+func TestSimServerCreateIgnoresTheVersionOfOlderServers(t *testing.T) {
+	w := serverWorld(3)
+	w.version = "2.0.8"
+	create := rollout.Step{Action: rollout.Create, Group: "servers", Machine: rollout.Machine{
+		Name: "prod-servers-3", Zone: "ams"}}
+	if err := w.apply(create); err != nil {
+		t.Errorf("creating a server that runs a newer Nomad than the others: %v", err)
+	}
+}
+
+func TestSimAutopilotKeepsTheLeadersPeerWhateverItsMember(t *testing.T) {
+	w := serverWorld(3)
+	w.failServer("prod-servers-0")
+	w.ticks(3)
+	if got := len(w.observe().Nomad.Servers); got != 3 {
+		t.Errorf("servers = %d, want 3: autopilot does not remove the leader", got)
 	}
 }

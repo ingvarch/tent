@@ -37,19 +37,15 @@ func TestNextRejectsModesItCannotRun(t *testing.T) {
 	}
 }
 
-func TestNextCannotRollServerOrCombinedGroupsYet(t *testing.T) {
-	for _, role := range []v1alpha1.Role{v1alpha1.RoleServer, v1alpha1.RoleCombined} {
-		t.Run(string(role), func(t *testing.T) {
-			s := baseState()
-			s.Groups = append(s.Groups, rollout.Group{Name: "control", Role: role, Size: 3})
-			_, err := rollout.Next(s, rollout.Roll)
-			if err == nil || err.Error() != "rollout cannot roll server groups yet" {
-				t.Errorf("Next error = %v, want the error for server groups", err)
-			}
-			if errors.Is(err, rollout.ErrRefused) {
-				t.Errorf("error %q matches ErrRefused, want a plain error", err)
-			}
-		})
+func TestNextCannotRollCombinedGroupsYet(t *testing.T) {
+	s := baseState()
+	s.Groups = append(s.Groups, rollout.Group{Name: "control", Role: v1alpha1.RoleCombined, Size: 3})
+	_, err := rollout.Next(s, rollout.Roll)
+	if err == nil || err.Error() != "rollout cannot roll combined groups yet" {
+		t.Errorf("Next error = %v, want the error for combined groups", err)
+	}
+	if errors.Is(err, rollout.ErrRefused) {
+		t.Errorf("error %q matches ErrRefused, want a plain error", err)
 	}
 }
 
@@ -130,7 +126,7 @@ func TestNextRefusesVersions(t *testing.T) {
 			addOrphan(s, workerName(7), "down", 50)
 		}, "tent never moves a node to an older Nomad: the cluster is pinned to 2.0.7, and server " +
 			"prod-servers-0.global runs 2.1.0"},
-		{"it comes before the error for server groups", func(_ *testing.T, s *rollout.State) {
+		{"it comes before the decisions of a server group", func(_ *testing.T, s *rollout.State) {
 			s.Groups = append(s.Groups, rollout.Group{Name: "control", Role: v1alpha1.RoleServer, Size: 3})
 			s.Nomad.Servers[0].Version = "2.1.0"
 		}, "tent never moves a node to an older Nomad: the cluster is pinned to 2.0.7, and server " +

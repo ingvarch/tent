@@ -1,0 +1,6 @@
+# mode roll
+# a new node runs Nomad 2.0.7
+# group servers: server, size 1, zones ams and fra
+# machine prod-servers-0 (m-1) in ams runs Nomad 2.0.6, outdated
+# leader prod-servers-0
+refused: node group servers: a group of one server cannot roll: its failure tolerance is 0

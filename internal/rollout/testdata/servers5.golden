@@ -1,0 +1,52 @@
+# mode roll
+# a new node runs Nomad 2.0.7
+# group servers: server, size 5, zones ams and fra
+# machine prod-servers-0 (m-1) in ams runs Nomad 2.0.6, outdated
+# machine prod-servers-1 (m-2) in fra runs Nomad 2.0.6, outdated
+# machine prod-servers-2 (m-3) in ams runs Nomad 2.0.6, outdated
+# machine prod-servers-3 (m-4) in fra runs Nomad 2.0.6, outdated
+# machine prod-servers-4 (m-5) in ams runs Nomad 2.0.6, outdated
+# leader prod-servers-0
+create node prod-servers-5 (server of servers, ams)
+wait until node prod-servers-5 joins
+wait until 12:01:30 for the servers to be stable
+stop node prod-servers-2 (ID m-3)
+wait until autopilot no longer counts prod-servers-2 as a healthy voter
+remove prod-servers-2 from the Raft configuration
+force prod-servers-2.global out of the gossip pool
+delete node prod-servers-2 (ID m-3)
+create node prod-servers-2 (server of servers, fra)
+wait until node prod-servers-2 joins
+wait until 12:03:40 for the servers to be stable
+stop node prod-servers-1 (ID m-2)
+wait until autopilot no longer counts prod-servers-1 as a healthy voter
+remove prod-servers-1 from the Raft configuration
+force prod-servers-1.global out of the gossip pool
+delete node prod-servers-1 (ID m-2)
+create node prod-servers-1 (server of servers, ams)
+wait until node prod-servers-1 joins
+wait until 12:05:50 for the servers to be stable
+stop node prod-servers-4 (ID m-5)
+wait until autopilot no longer counts prod-servers-4 as a healthy voter
+remove prod-servers-4 from the Raft configuration
+force prod-servers-4.global out of the gossip pool
+delete node prod-servers-4 (ID m-5)
+create node prod-servers-4 (server of servers, fra)
+wait until node prod-servers-4 joins
+wait until 12:08:00 for the servers to be stable
+stop node prod-servers-3 (ID m-4)
+wait until autopilot no longer counts prod-servers-3 as a healthy voter
+remove prod-servers-3 from the Raft configuration
+force prod-servers-3.global out of the gossip pool
+delete node prod-servers-3 (ID m-4)
+create node prod-servers-3 (server of servers, ams)
+wait until node prod-servers-3 joins
+wait until 12:10:10 for the servers to be stable
+move the leadership from prod-servers-0 to prod-servers-1
+wait until 12:11:20 for the servers to be stable
+stop node prod-servers-0 (ID m-1)
+wait until autopilot no longer counts prod-servers-0 as a healthy voter
+remove prod-servers-0 from the Raft configuration
+force prod-servers-0.global out of the gossip pool
+delete node prod-servers-0 (ID m-1)
+done

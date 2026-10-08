@@ -28,7 +28,8 @@ func nextClient(s State, g Group) (Step, bool, error) {
 		}
 	}
 	rules := []func() (Step, bool, error){
-		c.purgeOrphan, c.deleteRemoved, c.create, c.startRemoval, c.drain, c.waitDrained, c.waitJoined, c.waitOrphan,
+		c.purgeOrphan, c.deleteRemoved, c.create, c.startRemoval, c.drain, c.waitDrained,
+		func() (Step, bool, error) { return waitJoined(c.g, c.ms) }, c.waitOrphan,
 	}
 	for _, rule := range rules {
 		if step, found, err := rule(); err != nil || found {
@@ -116,31 +117,13 @@ func (c *clientGroup) drain() (Step, bool, error) {
 // create creates a node while the up to date machines are fewer than the size and the group is below its surge limit.
 // It refuses while a server runs an older Nomad than the new node would, unless a drain is due.
 func (c *clientGroup) create() (Step, bool, error) {
-	upToDate := 0
-	perZone := map[string]int{}
-	for _, m := range c.ms {
-		if !outdated(c.s, c.g, m) {
-			upToDate++
-			perZone[m.Zone]++
-		}
-	}
-	if upToDate >= c.g.Size || len(c.ms) >= c.g.Size+c.g.MaxSurge {
+	if len(upToDate(c.s, c.g, c.ms)) >= c.g.Size || len(c.ms) >= c.g.Size+c.g.MaxSurge {
 		return Step{}, false, nil
 	}
 	if err := c.requireServersAtVersion(); err != nil {
 		return c.drainOr(err)
 	}
-	taken := make(map[string]bool, len(c.s.Machines))
-	for _, m := range c.s.Machines {
-		taken[m.Name] = true
-	}
-	m := Machine{
-		Name:  FreeName(c.s.Cluster, c.g.Name, taken),
-		Group: c.g.Name,
-		Role:  c.g.Role,
-		Zone:  LeastUsedZone(c.g.Zones, perZone),
-	}
-	return Step{Action: Create, Group: c.g.Name, Machine: m}, true, nil
+	return Step{Action: Create, Group: c.g.Name, Machine: newMachine(c.s, c.g, c.ms)}, true, nil
 }
 
 // startRemoval starts the removal of the first victim when the group keeps enough available nodes without it. A
@@ -149,10 +132,8 @@ func (c *clientGroup) create() (Step, bool, error) {
 // refuses, as create does, while a server runs an older Nomad, unless a drain is due.
 func (c *clientGroup) startRemoval() (Step, bool, error) {
 	var victims []Machine
-	perZone := map[string]int{}
 	available := 0
 	for _, m := range c.ms {
-		perZone[m.Zone]++
 		if c.available(m) {
 			available++
 		}
@@ -163,7 +144,7 @@ func (c *clientGroup) startRemoval() (Step, bool, error) {
 	if len(victims) == 0 {
 		return Step{}, false, nil
 	}
-	victimOrder(victims, c.available, perZone)
+	victimOrder(victims, zoneCounts(c.ms), c.available)
 	v := victims[0]
 	if c.available(v) && available-1 < c.g.Size-c.g.MaxUnavailable {
 		return Step{}, false, nil
@@ -193,16 +174,6 @@ func (c *clientGroup) waitDrained() (Step, bool, error) {
 	for _, m := range c.ms {
 		if n := c.nodes[m.ID]; c.removing(m) && n.Draining {
 			return Step{Action: WaitDrained, Group: c.g.Name, Machine: m, Node: n}, true, nil
-		}
-	}
-	return Step{}, false, nil
-}
-
-// waitJoined waits for a machine that has not joined.
-func (c *clientGroup) waitJoined() (Step, bool, error) {
-	for _, m := range c.ms {
-		if !m.Joined {
-			return Step{Action: WaitJoined, Group: c.g.Name, Machine: m}, true, nil
 		}
 	}
 	return Step{}, false, nil
