@@ -14,6 +14,7 @@ import (
 	"io"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,9 +37,9 @@ import (
 // The fake is simpler than Nomad in these ways:
 //   - It checks no ACL token: each call succeeds whatever token its client holds. Tokens tells which tokens the
 //     clients got. Only before the bootstrap does a call fail: Nodes, Health, Peers, KeyringReady, IntroToken,
-//     CreateToken, MarkIneligible, Drain, Purge, TransferLeadership, RemovePeer, Members and ForceLeave fail for good,
-//     as Nomad's 403, until a Bootstrap succeeds; Leader and Bootstrap work. Peers fails so, since Nomad answers the
-//     Raft configuration to a management token alone.
+//     CreateToken, MarkIneligible, Drain, Purge, TransferLeadership, RemovePeer, Members, ForceLeave, SaveSnapshot
+//     and RestoreSnapshot fail for good, as Nomad's 403, until a Bootstrap succeeds; Leader and Bootstrap work. Peers
+//     fails so, since Nomad answers the Raft configuration to a management token alone.
 //   - MarkIneligible, Drain and Purge change a node as their docs say, and nothing else happens to a node over time:
 //     it goes down, registers again or comes back after a purge only when a test says so with Register.
 //   - TransferLeadership changes the peers, the leader's address and the Health, and RemovePeer the peers alone, as
@@ -50,6 +51,9 @@ import (
 //     over time otherwise: one fails, joins or leaves only when a test says so with SetMembers. Nomad's servers
 //     answer these two calls from their own gossip pool even while the cluster has no leader; the fake fails them
 //     then, like every call. It has one pool, so every client sees the same members.
+//   - A snapshot is the bytes "nomadfake snapshot <n>", and holds nothing of the cluster: RestoreSnapshot records the
+//     snapshot for Restored and changes no node, peer, member, health or leader, though Nomad's restore changes the
+//     keyring, the ACL tokens, the jobs and the nodes that registered after the snapshot.
 //   - Its keyring has an active key as soon as the ACL system is bootstrapped, unless SetKeyringDelay holds it back;
 //     meanwhile KeyringReady is false and IntroToken fails as Nomad's 500 does.
 //
@@ -67,6 +71,8 @@ type Fake struct {
 	keyringReads int             // how many reads of the keyring still find no active key
 	tokens       []secret.Secret // the tokens of the clients, in the order Client made them
 	issued       []IssuedToken   // the management tokens that CreateToken made, in order
+	saves        int             // how many snapshots the cluster saved
+	restored     []secret.Secret // the snapshots that the cluster restored, in order
 	faults       []fault         // in the order they were set
 	calls        []Call
 }
@@ -97,7 +103,7 @@ func (f *Fake) SetLeader(addr string) {
 
 // NewCluster makes the cluster a new one, as New returns it: without a leader, nodes, peers or bootstrap, and with the
 // zero Health, a keyring that is ready at once and drains that complete at the first read. The log of calls, the
-// clients' tokens, the issued tokens and the faults stay.
+// clients' tokens, the issued tokens, the count of saved snapshots, the restored snapshots and the faults stay.
 func (f *Fake) NewCluster() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -213,8 +219,8 @@ type Call struct {
 	// Arg is the call's argument without a secret: the size of the secret for Bootstrap, such as [secret, 36 bytes];
 	// the node's name, the pool and the TTL for IntroToken, such as "prod-workers-1 default 30m0s"; the name and the TTL
 	// for CreateToken, such as "tent export nomad ana@laptop 24h0m0s"; the node ID for MarkIneligible and Purge; DrainArg
-	// for Drain; the Raft ID for TransferLeadership and RemovePeer; the member's name for ForceLeave; empty for the
-	// others.
+	// for Drain; the Raft ID for TransferLeadership and RemovePeer; the member's name for ForceLeave; the size of the
+	// snapshot for RestoreSnapshot, such as [secret, 20 bytes]; empty for the others.
 	Arg string
 }
 
@@ -712,4 +718,56 @@ func (c client) ForceLeave(ctx context.Context, name string) error {
 		}
 		return nil
 	})
+}
+
+// snapshotPrefix starts every snapshot that the fake saves, and the only bytes that it restores.
+const snapshotPrefix = "nomadfake snapshot "
+
+// errBadSnapshot is Nomad's 500 for bytes that are no snapshot.
+const errBadSnapshot = notReadyError("500: failed to restore from snapshot: failed to decompress snapshot: " +
+	"gzip: invalid header")
+
+// SaveSnapshot returns "nomadfake snapshot <n>", where n counts the saves that the cluster carried out, from 1, whoever
+// asked; a save whose answer was lost counts, and one that fails before the bootstrap does not.
+func (c client) SaveSnapshot(ctx context.Context) (secret.Secret, error) {
+	var snap secret.Secret
+	err := c.f.call(ctx, c.server, "SaveSnapshot", "", func() error {
+		if c.f.bootstrapped == nil {
+			return errDenied
+		}
+		c.f.saves++
+		snap = secret.Secret(snapshotPrefix + strconv.Itoa(c.f.saves))
+		return nil
+	})
+	return result(snap, err)
+}
+
+// RestoreSnapshot records a copy of the snapshot for Restored and changes nothing else in the cluster. Bytes that do
+// not start with "nomadfake snapshot " fail as Nomad's 500 does for a file that is no snapshot, which matches
+// nomadops.ErrNotReady. It refuses an empty snapshot before any call, as the client does.
+func (c client) RestoreSnapshot(ctx context.Context, snap secret.Secret) error {
+	if err := nomadops.CheckSnapshot(snap); err != nil {
+		return &callError{name: "RestoreSnapshot", cause: err}
+	}
+	return c.f.call(ctx, c.server, "RestoreSnapshot", snap.String(), func() error {
+		switch {
+		case c.f.bootstrapped == nil:
+			return errDenied
+		case !bytes.HasPrefix(snap, []byte(snapshotPrefix)):
+			return errBadSnapshot
+		}
+		c.f.restored = append(c.f.restored, slices.Clone(snap))
+		return nil
+	})
+}
+
+// Restored returns copies of the snapshots that the cluster restored, in order, also those whose answer was lost.
+func (f *Fake) Restored() []secret.Secret {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]secret.Secret, len(f.restored))
+	for i, snap := range f.restored {
+		out[i] = slices.Clone(snap)
+	}
+	return out
 }

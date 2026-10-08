@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/netip"
 	"reflect"
 	"slices"
@@ -133,6 +134,9 @@ var tableMembers = []nomadops.Member{
 // setTableMembers lists tableMembers.
 func setTableMembers(f *nomadfake.Fake) { f.SetMembers(tableMembers) }
 
+// tableSnapshot is the snapshot that the RestoreSnapshot of apiCalls restores: one that the fake could have saved.
+var tableSnapshot = secret.Secret("nomadfake snapshot 1")
+
 // apiCalls holds an apiCall for every nomadops.API method.
 var apiCalls = []apiCall{
 	{"Leader", func(ctx context.Context, a nomadops.API) error {
@@ -180,6 +184,13 @@ var apiCalls = []apiCall{
 		return err
 	}, setTableMembers},
 	{"ForceLeave", func(ctx context.Context, a nomadops.API) error { return a.ForceLeave(ctx, "s3.eu") }, setTableMembers},
+	{"SaveSnapshot", func(ctx context.Context, a nomadops.API) error {
+		_, err := a.SaveSnapshot(ctx)
+		return err
+	}, nil},
+	{"RestoreSnapshot", func(ctx context.Context, a nomadops.API) error {
+		return a.RestoreSnapshot(ctx, tableSnapshot)
+	}, nil},
 }
 
 func TestAPICallsCoverTheAPI(t *testing.T) {
@@ -254,16 +265,20 @@ func argOf(name string) string {
 		return "p-3"
 	case "ForceLeave":
 		return "s3.eu"
+	case "RestoreSnapshot":
+		return "[secret, 20 bytes]"
 	}
 	return ""
 }
 
 // TestACLCallsNeedTheBootstrap checks that, before the ACL system is bootstrapped, Nodes, Health, Peers, KeyringReady,
-// IntroToken, CreateToken, MarkIneligible, Drain, Purge, TransferLeadership, RemovePeer, Members and ForceLeave fail
-// for good as Nomad's 403 does, while Leader and Bootstrap work; and that they work after the bootstrap.
+// IntroToken, CreateToken, MarkIneligible, Drain, Purge, TransferLeadership, RemovePeer, Members, ForceLeave,
+// SaveSnapshot and RestoreSnapshot fail for good as Nomad's 403 does, while Leader and Bootstrap work; and that they
+// work after the bootstrap.
 func TestACLCallsNeedTheBootstrap(t *testing.T) {
 	for _, name := range []string{"IntroToken", "CreateToken", "Nodes", "Health", "Peers", "KeyringReady",
-		"MarkIneligible", "Drain", "Purge", "TransferLeadership", "RemovePeer", "Members", "ForceLeave"} {
+		"MarkIneligible", "Drain", "Purge", "TransferLeadership", "RemovePeer", "Members", "ForceLeave", "SaveSnapshot",
+		"RestoreSnapshot"} {
 		t.Run(name, func(t *testing.T) {
 			f, a := newAPI()
 			var call apiCall
@@ -273,6 +288,11 @@ func TestACLCallsNeedTheBootstrap(t *testing.T) {
 				}
 			}
 			call.prepare(f)
+			ref, refAPI := newAPI()
+			call.prepare(ref)
+			if err := refAPI.Bootstrap(t.Context(), bootstrapSecret); err != nil {
+				t.Fatalf("Bootstrap of the reference: %v", err)
+			}
 			checkErr(t, call.call(t.Context(), a), "nomadfake: "+name+": permission denied", false)
 			if _, err := a.Leader(t.Context()); err != nil {
 				t.Errorf("Leader before the bootstrap: %v", err)
@@ -280,15 +300,32 @@ func TestACLCallsNeedTheBootstrap(t *testing.T) {
 			if err := a.Bootstrap(t.Context(), bootstrapSecret); err != nil {
 				t.Fatalf("Bootstrap: %v", err)
 			}
+			if got, want := clusterState(t, f, a), clusterState(t, ref, refAPI); got != want {
+				t.Errorf("%s before the bootstrap changed the cluster:\n got %s\nwant %s", name, got, want)
+			}
 			if err := call.call(t.Context(), a); err != nil {
 				t.Errorf("%s after the bootstrap: %v", name, err)
 			}
 			wantCalls(t, f,
 				nomadfake.Call{Name: name, Arg: argOf(name)}, nomadfake.Call{Name: "Leader"},
-				nomadfake.Call{Name: "Bootstrap", Arg: redacted}, nomadfake.Call{Name: name, Arg: argOf(name)},
+				nomadfake.Call{Name: "Bootstrap", Arg: redacted}, nomadfake.Call{Name: "Nodes"},
+				nomadfake.Call{Name: "Peers"}, nomadfake.Call{Name: "Members"},
+				nomadfake.Call{Name: name, Arg: argOf(name)},
 			)
 		})
 	}
+}
+
+// clusterState reads what the writes of the fake change: its nodes, peers, members and restores.
+func clusterState(t *testing.T, f *nomadfake.Fake, a nomadops.API) string {
+	t.Helper()
+	nodes, errNodes := a.Nodes(t.Context())
+	peers, errPeers := a.Peers(t.Context())
+	members, errMembers := a.Members(t.Context())
+	if err := errors.Join(errNodes, errPeers, errMembers); err != nil {
+		t.Fatalf("reading the cluster: %v", err)
+	}
+	return fmt.Sprintf("nodes %+v; peers %+v; members %+v; %d restored", nodes, peers, members, len(f.Restored()))
 }
 
 // TestNewCluster checks that NewCluster makes the cluster as New does, whatever it held, and keeps the log of calls,

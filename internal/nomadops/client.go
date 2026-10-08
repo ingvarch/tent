@@ -1,7 +1,7 @@
 // Package nomadops calls the HTTP API of a Nomad cluster's servers over mutual TLS: the leader, the ACL bootstrap,
 // client introduction tokens, management tokens that expire, the client nodes with their eligibility, drains and
 // purges, the autopilot health, the Raft peers with leadership transfers and removals, the gossip members with
-// force-leave, and the keyring.
+// force-leave, the snapshots, and the keyring.
 // It also makes the reverse proxy that serves a cluster's API on a local port, with the mutual TLS and the token added.
 package nomadops
 
@@ -28,6 +28,10 @@ import (
 
 // callTimeout bounds each call, so that a server that stops answering cannot hold the caller.
 const callTimeout = 30 * time.Second
+
+// snapshotTimeout bounds a snapshot call, which moves the whole state of the cluster and so takes longer as its jobs
+// grow.
+const snapshotTimeout = 5 * time.Minute
 
 // Config is how a client reaches one Nomad server and who it is there.
 type Config struct {
@@ -79,15 +83,21 @@ type API interface {
 	Members(ctx context.Context) ([]Member, error)
 	// ForceLeave forces the member called name out of the gossip pool and prunes it.
 	ForceLeave(ctx context.Context, name string) error
+	// SaveSnapshot returns a snapshot of the cluster's state. It holds the keyring and the ACL tokens.
+	SaveSnapshot(ctx context.Context) (secret.Secret, error)
+	// RestoreSnapshot replaces the cluster's state with the snapshot.
+	RestoreSnapshot(ctx context.Context, snap secret.Secret) error
 }
 
-// Client is the API over the HTTP API of one Nomad server. Each call has at most 30 seconds, and none is retried.
+// Client is the API over the HTTP API of one Nomad server. Each call has at most 30 seconds, a snapshot call 5 minutes,
+// and none is retried.
 // Make one Client per server and reuse it: its idle connections stay open for 90 seconds, and a Nomad server takes
 // at most 100 HTTP connections from one address.
 type Client struct {
-	api     *api.Client
-	url     string // the URL of the server
-	timeout time.Duration
+	api             *api.Client
+	url             string        // the URL of the server
+	timeout         time.Duration // the limit of a call
+	snapshotTimeout time.Duration // the limit of a snapshot call
 }
 
 // New returns a client of the server that cfg names. The NOMAD_* variables of the Nomad CLI have no effect on it. Like
@@ -113,7 +123,7 @@ func New(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("nomad: %w", err)
 	}
-	return &Client{api: c, url: u, timeout: callTimeout}, nil
+	return &Client{api: c, url: u, timeout: callTimeout, snapshotTimeout: snapshotTimeout}, nil
 }
 
 // checkCluster fails unless the region, the CA bundle, the operator certificate and the token are fit for a client of
@@ -190,7 +200,14 @@ func hostPortURL(addr string) (*url.URL, bool) {
 
 // call runs do with a context that ends after the client's timeout, and turns its failure into a *callError.
 func (c *Client) call(ctx context.Context, method, path string, do func(context.Context) error) error {
-	callCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	return c.callWithin(ctx, c.timeout, method, path, do)
+}
+
+// callWithin is call with a context that ends after limit.
+func (c *Client) callWithin(
+	ctx context.Context, limit time.Duration, method, path string, do func(context.Context) error,
+) error {
+	callCtx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	err := do(callCtx)
 	switch {
@@ -199,7 +216,7 @@ func (c *Client) call(ctx context.Context, method, path string, do func(context.
 	case ctx.Err() != nil:
 		return &callError{method: method, path: path, cause: ctx.Err()}
 	case callCtx.Err() != nil:
-		return &callError{method: method, path: path, cause: fmt.Errorf("no answer within %s", c.timeout),
+		return &callError{method: method, path: path, cause: fmt.Errorf("no answer within %s", limit),
 			notReady: true}
 	}
 	return newCallError(method, path, err)

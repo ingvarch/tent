@@ -46,7 +46,8 @@ func TestFaultedCallsReturnNoValue(t *testing.T) {
 		func(call string) { f.Fail(t, call, errBoom) },
 		func(call string) { f.LoseResponse(t, call) },
 	} {
-		for _, call := range []string{"Leader", "IntroToken", "CreateToken", "Nodes", "Health", "KeyringReady", "Members"} {
+		for _, call := range []string{"Leader", "IntroToken", "CreateToken", "Nodes", "Health", "KeyringReady", "Members",
+			"SaveSnapshot"} {
 			fault(call)
 		}
 		if got, err := a.Leader(ctx); err == nil || got != "" {
@@ -69,6 +70,9 @@ func TestFaultedCallsReturnNoValue(t *testing.T) {
 		}
 		if got, err := a.Members(ctx); err == nil || got != nil {
 			t.Errorf("Members() = %v, %v; want an error and no list", got, err)
+		}
+		if got, err := a.SaveSnapshot(ctx); err == nil || got != nil {
+			t.Errorf("SaveSnapshot() gave %d bytes and the error %v; want an error and no snapshot", len(got), err)
 		}
 	}
 }

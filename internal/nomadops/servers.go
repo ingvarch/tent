@@ -27,8 +27,11 @@ type Server struct {
 // deadline. A node that the first server purged is gone on the next one, which counts as purged. A
 // TransferLeadership to the server that leads by then is answered 200 and changes nothing. A peer that the first
 // server removed is gone on the next one, which counts as removed. A ForceLeave that is repeated is answered 200 and
-// changes nothing more. Members is a read, and shows the gossip pool as the server that answers sees it. ErrGone ends
-// a call at once, like any error that is not ErrNotReady.
+// changes nothing more. Members is a read, and shows the gossip pool as the server that answers sees it. So is
+// SaveSnapshot: each try reads a whole new snapshot. A RestoreSnapshot that is repeated restores the same state again,
+// and what was written between the two restores is lost twice; a snapshot that Nomad refuses is answered 500 by every
+// server, so it goes to each server once and the error names each cause. ErrGone ends a call at once, like any error
+// that is not ErrNotReady.
 //
 // When no server answers, the error matches ErrNotReady and names each server with its cause, so the waits go on
 // polling over Servers and show the last causes when they end. Servers is safe for concurrent use.
@@ -182,5 +185,18 @@ func (s *Servers) Members(ctx context.Context) ([]Member, error) {
 // ForceLeave forces the member called name out of the gossip pool and prunes it.
 func (s *Servers) ForceLeave(ctx context.Context, name string) error {
 	_, err := try(ctx, s, func(a API) (struct{}, error) { return struct{}{}, a.ForceLeave(ctx, name) })
+	return err
+}
+
+// SaveSnapshot returns a snapshot of the cluster's state. After an answer that was lost, the next server saves a new
+// snapshot, and only that one is returned.
+func (s *Servers) SaveSnapshot(ctx context.Context) (secret.Secret, error) {
+	return try(ctx, s, func(a API) (secret.Secret, error) { return a.SaveSnapshot(ctx) })
+}
+
+// RestoreSnapshot replaces the cluster's state with the snapshot. After an answer that was lost, the next server gets
+// the same snapshot.
+func (s *Servers) RestoreSnapshot(ctx context.Context, snap secret.Secret) error {
+	_, err := try(ctx, s, func(a API) (struct{}, error) { return struct{}{}, a.RestoreSnapshot(ctx, snap) })
 	return err
 }

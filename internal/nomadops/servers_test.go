@@ -122,6 +122,17 @@ func (s *stub) Members(context.Context) ([]nomadops.Member, error) {
 
 func (s *stub) ForceLeave(context.Context, string) error { return s.record("ForceLeave") }
 
+func (s *stub) SaveSnapshot(context.Context) (secret.Secret, error) {
+	if err := s.record("SaveSnapshot"); err != nil {
+		return nil, err
+	}
+	return testSnapshot(), nil
+}
+
+func (s *stub) RestoreSnapshot(context.Context, secret.Secret) error {
+	return s.record("RestoreSnapshot")
+}
+
 // notReady is an error of the class ErrNotReady, as a server that broke its answer off makes.
 func notReady(path string) error {
 	return nomadops.NewCallError("GET", path, io.ErrUnexpectedEOF)
@@ -250,6 +261,13 @@ func TestServersEveryMethodMovesOn(t *testing.T) {
 		"RemovePeer": func(ctx context.Context, a nomadops.API) error { return a.RemovePeer(ctx, raftID) },
 		"Members":    func(ctx context.Context, a nomadops.API) error { _, err := a.Members(ctx); return err },
 		"ForceLeave": func(ctx context.Context, a nomadops.API) error { return a.ForceLeave(ctx, memberName) },
+		"SaveSnapshot": func(ctx context.Context, a nomadops.API) error {
+			_, err := a.SaveSnapshot(ctx)
+			return err
+		},
+		"RestoreSnapshot": func(ctx context.Context, a nomadops.API) error {
+			return a.RestoreSnapshot(ctx, testSnapshot())
+		},
 	}
 	for name, call := range calls {
 		t.Run(name, func(t *testing.T) {
@@ -381,6 +399,16 @@ func (r ctxRecorder) Members(ctx context.Context) ([]nomadops.Member, error) {
 func (r ctxRecorder) ForceLeave(ctx context.Context, name string) error {
 	r.record(ctx)
 	return r.API.ForceLeave(ctx, name)
+}
+
+func (r ctxRecorder) SaveSnapshot(ctx context.Context) (secret.Secret, error) {
+	r.record(ctx)
+	return r.API.SaveSnapshot(ctx)
+}
+
+func (r ctxRecorder) RestoreSnapshot(ctx context.Context, snap secret.Secret) error {
+	r.record(ctx)
+	return r.API.RestoreSnapshot(ctx, snap)
 }
 
 // The arguments, the context itself and the values pass through Servers, and a write moves on after a lost answer.
@@ -1009,6 +1037,116 @@ func TestServersReturnAPermanentErrorOfAGossipCall(t *testing.T) {
 			return err
 		},
 		"ForceLeave": func(t *testing.T, s *nomadops.Servers) error { return s.ForceLeave(t.Context(), memberName) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, b := &stub{err: permanent}, &stub{}
+			if err := call(t, servers(t, a, b)); !errors.Is(err, permanent) || err.Error() != permanent.Error() {
+				t.Errorf("%s() error = %v, want the permanent error as it is", name, err)
+			}
+			wantStubCalls(t, a, name)
+			wantStubCalls(t, b)
+		})
+	}
+}
+
+// snapshotFixture is a cluster with a leader, and Servers over two clients of it, which record the contexts they get.
+func snapshotFixture(t *testing.T, seen *[]context.Context) (*nomadfake.Fake, *nomadops.Servers) {
+	t.Helper()
+	f := nomadfake.New()
+	f.SetLeader(leaderAddr)
+	f.SetBootstrapped(pki.NewBootstrapSecret())
+	return f, fakeServers(t, f, pki.NewBootstrapSecret(), func(a nomadops.API) nomadops.API {
+		return ctxRecorder{API: a, seen: seen}
+	})
+}
+
+// TestServersPassTheSnapshotCalls checks that the snapshot reaches the server, with the caller's context, and that a
+// save returns what the server saved.
+func TestServersPassTheSnapshotCalls(t *testing.T) {
+	var seen []context.Context
+	f, s := snapshotFixture(t, &seen)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	saved, err := s.SaveSnapshot(ctx)
+	if err != nil || string(saved) != "nomadfake snapshot 1" {
+		t.Fatalf("SaveSnapshot() = %q, %v; want the first snapshot of the fake", saved, err)
+	}
+	if err := s.RestoreSnapshot(ctx, saved); err != nil {
+		t.Fatalf("RestoreSnapshot: %v", err)
+	}
+
+	want := []nomadfake.Call{
+		{Name: "SaveSnapshot", Server: addr1},
+		{Name: "RestoreSnapshot", Server: addr1, Arg: "[secret, 20 bytes]"},
+	}
+	if diff := cmp.Diff(want, f.Calls()); diff != "" {
+		t.Errorf("calls (-want +got):\n%s", diff)
+	}
+	if len(seen) != 2 || seen[0] != ctx || seen[1] != ctx {
+		t.Errorf("the calls got %d contexts, want the caller's twice", len(seen))
+	}
+	if diff := cmp.Diff([]secret.Secret{saved}, f.Restored()); diff != "" {
+		t.Errorf("restored snapshots (-want +got):\n%s", diff)
+	}
+}
+
+// TestServersLoseTheAnswerOfASave checks that a save whose answer was lost goes on to the next server, and that its
+// own snapshot comes back, not the one that the first server saved.
+func TestServersLoseTheAnswerOfASave(t *testing.T) {
+	f, s := snapshotFixture(t, new([]context.Context))
+	f.LoseResponse(t, "SaveSnapshot")
+
+	saved, err := s.SaveSnapshot(t.Context())
+
+	if err != nil || string(saved) != "nomadfake snapshot 2" {
+		t.Fatalf("SaveSnapshot() = %q, %v; want the second snapshot of the fake alone", saved, err)
+	}
+	if want := []string{addr1, addr2}; !slices.Equal(callServers(f, "SaveSnapshot"), want) {
+		t.Errorf("servers of the SaveSnapshot calls = %v, want %v", callServers(f, "SaveSnapshot"), want)
+	}
+	if last := s.Last(); last != addr2 {
+		t.Errorf("Last() = %q, want %s", last, addr2)
+	}
+}
+
+// TestServersLoseTheAnswerOfARestore checks that a restore whose answer was lost goes on to the next server with the
+// same snapshot: the cluster is restored twice to the same state.
+func TestServersLoseTheAnswerOfARestore(t *testing.T) {
+	f, s := snapshotFixture(t, new([]context.Context))
+	snap := secret.Secret("nomadfake snapshot 7")
+	f.LoseResponse(t, "RestoreSnapshot")
+
+	if err := s.RestoreSnapshot(t.Context(), snap); err != nil {
+		t.Fatalf("RestoreSnapshot: %v", err)
+	}
+
+	if want := []string{addr1, addr2}; !slices.Equal(callServers(f, "RestoreSnapshot"), want) {
+		t.Errorf("servers of the RestoreSnapshot calls = %v, want %v", callServers(f, "RestoreSnapshot"), want)
+	}
+	if diff := cmp.Diff([]secret.Secret{snap, snap}, f.Restored()); diff != "" {
+		t.Errorf("restored snapshots (-want +got):\n%s", diff)
+	}
+	if last := s.Last(); last != addr2 {
+		t.Errorf("Last() = %q, want %s", last, addr2)
+	}
+}
+
+// TestServersReturnAPermanentErrorOfASnapshotCall checks that a permanent error of a snapshot call comes back as it
+// is, with no snapshot, and that no other server is asked.
+func TestServersReturnAPermanentErrorOfASnapshotCall(t *testing.T) {
+	permanent := errors.New("forbidden")
+	for name, call := range map[string]func(*testing.T, *nomadops.Servers) error{
+		"SaveSnapshot": func(t *testing.T, s *nomadops.Servers) error {
+			got, err := s.SaveSnapshot(t.Context())
+			if got != nil {
+				t.Errorf("SaveSnapshot() = %d bytes with an error, want none", len(got))
+			}
+			return err
+		},
+		"RestoreSnapshot": func(t *testing.T, s *nomadops.Servers) error {
+			return s.RestoreSnapshot(t.Context(), testSnapshot())
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			a, b := &stub{err: permanent}, &stub{}

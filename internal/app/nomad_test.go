@@ -531,6 +531,22 @@ func (c *worldClient) ForceLeave(ctx context.Context, name string) error {
 	})
 }
 
+func (c *worldClient) SaveSnapshot(ctx context.Context) (v secret.Secret, err error) {
+	err = c.do(ctx, nomadfake.Call{Name: "SaveSnapshot"}, func(ctx context.Context) (err error) {
+		v, err = c.inner.SaveSnapshot(ctx)
+		return
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+func (c *worldClient) RestoreSnapshot(ctx context.Context, snap secret.Secret) error {
+	call := nomadfake.Call{Name: "RestoreSnapshot", Arg: snap.String()}
+	return c.do(ctx, call, func(ctx context.Context) error { return c.inner.RestoreSnapshot(ctx, snap) })
+}
+
 // shapeNodes returns the nodes without those that a test dropped, and with the edits of the test.
 func (w *nomadWorld) shapeNodes(nodes []nomadops.Node) []nomadops.Node {
 	w.mu.Lock()
@@ -604,6 +620,16 @@ func TestWorldClientPassesTheWritesThroughItsHook(t *testing.T) {
 		"Purge":              func() error { return api.Purge(t.Context(), "n-1") },
 		"TransferLeadership": func() error { return api.TransferLeadership(t.Context(), "raft-1") },
 		"RemovePeer":         func() error { return api.RemovePeer(t.Context(), "raft-1") },
+		"Members": func() error {
+			_, err := api.Members(t.Context())
+			return err
+		},
+		"ForceLeave": func() error { return api.ForceLeave(t.Context(), "s1.global") },
+		"SaveSnapshot": func() error {
+			_, err := api.SaveSnapshot(t.Context())
+			return err
+		},
+		"RestoreSnapshot": func() error { return api.RestoreSnapshot(t.Context(), secret.Secret("nomadfake snapshot 1")) },
 	}
 	wantCalls := []nomadfake.Call{
 		{Name: "MarkIneligible", Server: server, Arg: "n-1"},
@@ -611,8 +637,13 @@ func TestWorldClientPassesTheWritesThroughItsHook(t *testing.T) {
 		{Name: "Purge", Server: server, Arg: "n-1"},
 		{Name: "TransferLeadership", Server: server, Arg: "raft-1"},
 		{Name: "RemovePeer", Server: server, Arg: "raft-1"},
+		{Name: "Members", Server: server},
+		{Name: "ForceLeave", Server: server, Arg: "s1.global"},
+		{Name: "SaveSnapshot", Server: server},
+		{Name: "RestoreSnapshot", Server: server, Arg: "[secret, 20 bytes]"},
 	}
-	names := []string{"MarkIneligible", "Drain", "Purge", "TransferLeadership", "RemovePeer"}
+	names := []string{"MarkIneligible", "Drain", "Purge", "TransferLeadership", "RemovePeer", "Members", "ForceLeave",
+		"SaveSnapshot", "RestoreSnapshot"}
 	logged := func() []nomadfake.Call {
 		var out []nomadfake.Call
 		for _, c := range w.Log() {
