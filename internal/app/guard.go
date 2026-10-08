@@ -101,7 +101,7 @@ func (a *applier) guardDelete(ctx context.Context, c NodeChange) error {
 	case joinedAs == "":
 		return nil
 	}
-	if err := a.markJoined(ctx, in); err != nil {
+	if err := a.s.markJoined(ctx, a.u.nodeKit, in); err != nil {
 		return fmt.Errorf("delete node %s (%s): the node has joined Nomad (%s): %w", c.Name, c.ID, joinedAs, err)
 	}
 	return fmt.Errorf("delete node %s (%s): the node has joined Nomad (%s); %s", c.Name, c.ID, joinedAs, noDrain)
