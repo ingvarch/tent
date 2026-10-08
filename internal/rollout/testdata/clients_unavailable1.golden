@@ -10,21 +10,21 @@ mark node prod-workers-0 ineligible
 drain node prod-workers-0 within 1h0m0s
 wait until node prod-workers-0 is drained
 delete node prod-workers-0 (ID m-2)
-create node prod-workers-0 (client of workers, ams)
-wait until node prod-workers-0 joins
+create node prod-workers-3 (client of workers, ams)
+wait until node prod-workers-3 joins
 purge node prod-workers-0 at 10.64.0.4 from Nomad
 mark node prod-workers-2 ineligible
 drain node prod-workers-2 within 1h0m0s
 wait until node prod-workers-2 is drained
 delete node prod-workers-2 (ID m-4)
-create node prod-workers-2 (client of workers, fra)
-wait until node prod-workers-2 joins
+create node prod-workers-0 (client of workers, fra)
+wait until node prod-workers-0 joins
 purge node prod-workers-2 at 10.64.0.6 from Nomad
 mark node prod-workers-1 ineligible
 drain node prod-workers-1 within 1h0m0s
 wait until node prod-workers-1 is drained
 delete node prod-workers-1 (ID m-3)
-create node prod-workers-1 (client of workers, ams)
-wait until node prod-workers-1 joins
+create node prod-workers-2 (client of workers, ams)
+wait until node prod-workers-2 joins
 purge node prod-workers-1 at 10.64.0.5 from Nomad
 done
