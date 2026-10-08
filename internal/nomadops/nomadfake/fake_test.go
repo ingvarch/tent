@@ -717,6 +717,75 @@ func TestRegisterListsOneNameAtTwoAddresses(t *testing.T) {
 	}
 }
 
+// TestRegisterByID checks that a node with an ID replaces the node with that ID, whatever its name and address, that
+// two nodes of one name and address with different IDs are both listed, and that a node without an ID keeps the rule
+// of the name and address.
+func TestRegisterByID(t *testing.T) {
+	f, a := newBootstrappedAPI(t)
+	addr := netip.MustParseAddr("10.64.0.6")
+	f.Register(nomadops.Node{ID: "n-1", Name: "prod-workers-0", Address: addr, Status: "ready", Eligible: true})
+	f.Register(nomadops.Node{ID: "n-2", Name: "prod-workers-0", Address: addr, Status: "initializing"})
+	f.Register(nomadops.Node{ID: "n-1", Name: "prod-workers-9", Status: "down"}) // replaces n-1 under a new name
+	// No ID: the node of the same name and address, n-2, is replaced.
+	f.Register(nomadops.Node{Name: "prod-workers-0", Address: addr, Status: "ready", Eligible: true})
+	want := []nomadops.Node{
+		{ID: "n-1", Name: "prod-workers-9", Status: "down"},
+		{Name: "prod-workers-0", Address: addr, Status: "ready", Eligible: true},
+	}
+	got, err := a.Nodes(t.Context())
+	if err != nil {
+		t.Fatalf("Nodes: %v", err)
+	}
+	if diff := cmp.Diff(want, got, equateAddrs); diff != "" {
+		t.Errorf("Nodes() (-want +got):\n%s", diff)
+	}
+}
+
+// TestRegisterListsTwoIDsOfOneNameAndAddress checks the listing of two nodes that share name and address.
+func TestRegisterListsTwoIDsOfOneNameAndAddress(t *testing.T) {
+	f, a := newBootstrappedAPI(t)
+	addr := netip.MustParseAddr("10.64.0.6")
+	f.Register(nomadops.Node{ID: "n-1", Name: "prod-workers-0", Address: addr, Status: "down"})
+	f.Register(nomadops.Node{ID: "n-2", Name: "prod-workers-0", Address: addr, Status: "ready", Eligible: true})
+	f.Register(nomadops.Node{ID: "n-1", Name: "prod-workers-0", Address: addr, Status: "down", Eligible: true})
+	want := []nomadops.Node{
+		{ID: "n-1", Name: "prod-workers-0", Address: addr, Status: "down", Eligible: true},
+		{ID: "n-2", Name: "prod-workers-0", Address: addr, Status: "ready", Eligible: true},
+	}
+	got, err := a.Nodes(t.Context())
+	if err != nil {
+		t.Fatalf("Nodes: %v", err)
+	}
+	if diff := cmp.Diff(want, got, equateAddrs); diff != "" {
+		t.Errorf("Nodes() (-want +got):\n%s", diff)
+	}
+}
+
+// TestNodeDrainMetaIsCopied checks that Register and Nodes copy the meta of a node's last drain: changing the map that
+// was registered or the one that was returned does not change the fake.
+func TestNodeDrainMetaIsCopied(t *testing.T) {
+	f, a := newBootstrappedAPI(t)
+	meta := map[string]string{"tent_machine": "m-1"}
+	f.Register(nomadops.Node{ID: "n-1", Name: "prod-workers-0",
+		LastDrain: nomadops.LastDrain{Status: "complete", Meta: meta}})
+	meta["tent_machine"] = "changed"
+	got, err := a.Nodes(t.Context())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("Nodes = %+v, %v; want one node", got, err)
+	}
+	if m := got[0].LastDrain.Meta["tent_machine"]; m != "m-1" {
+		t.Errorf("changing the registered map changed the fake: meta = %q, want m-1", m)
+	}
+	got[0].LastDrain.Meta["tent_machine"] = "changed again"
+	again, err := a.Nodes(t.Context())
+	if err != nil || len(again) != 1 {
+		t.Fatalf("Nodes = %+v, %v; want one node", again, err)
+	}
+	if m := again[0].LastDrain.Meta["tent_machine"]; m != "m-1" {
+		t.Errorf("changing a returned map changed the fake: meta = %q, want m-1", m)
+	}
+}
+
 func TestPeers(t *testing.T) {
 	f, a := newBootstrappedAPI(t)
 	if got, err := a.Peers(t.Context()); err != nil || got == nil || len(got) != 0 {

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -105,13 +106,18 @@ func (f *Fake) SetKeyringDelay(reads int) {
 	f.keyringReads = reads
 }
 
-// Register lists the node, in the place of the node of the same name and address when there is one, and after the
-// others when there is none. So one name can be listed at two addresses, as Nomad lists a node that went down beside
-// its replacement.
+// Register lists a copy of the node in the place of the node with the same ID when n.ID is set, or, when n.ID is
+// empty, of the node of the same name and address; when there is no such node, after the others. So one name can be
+// listed at two addresses, and with an ID at one address twice, as Nomad lists a node that went down beside its
+// replacement. A test that registers a node again sets every field, the drain state too.
 func (f *Fake) Register(n nomadops.Node) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	n = cloneNode(n)
 	i := slices.IndexFunc(f.nodes, func(o nomadops.Node) bool {
+		if n.ID != "" {
+			return o.ID == n.ID
+		}
 		return o.Name == n.Name && o.Address == n.Address
 	})
 	if i >= 0 {
@@ -347,7 +353,10 @@ func (c client) Nodes(ctx context.Context) ([]nomadops.Node, error) {
 		if c.f.bootstrapped == nil {
 			return errDenied
 		}
-		nodes = append(make([]nomadops.Node, 0, len(c.f.nodes)), c.f.nodes...)
+		nodes = make([]nomadops.Node, len(c.f.nodes))
+		for i, n := range c.f.nodes {
+			nodes[i] = cloneNode(n)
+		}
 		return nil
 	})
 	return result(nodes, err)
@@ -394,6 +403,12 @@ func (c client) KeyringReady(ctx context.Context) (bool, error) {
 		return nil
 	})
 	return result(ready, err)
+}
+
+// cloneNode returns n with a copy of the meta of its last drain.
+func cloneNode(n nomadops.Node) nomadops.Node {
+	n.LastDrain.Meta = maps.Clone(n.LastDrain.Meta)
+	return n
 }
 
 // result returns v, or the zero value and err when err is not nil.

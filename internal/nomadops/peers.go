@@ -12,11 +12,13 @@ const peersPath = "/v1/operator/raft/configuration"
 
 // Peer is a server in the Raft configuration.
 type Peer struct {
+	ID string // the Raft ID, a UUID
 	// Name is the server's name in Nomad, such as prod-servers-0.global; "(unknown)" when Nomad knows no server at
 	// the address.
 	Name    string
 	Address netip.AddrPort // the Raft address; invalid when the one that Nomad gives does not parse
 	Voter   bool           // the server has a vote
+	Leader  bool           // the server leads
 }
 
 // FindPeer returns the peer at addr, whatever its port.
@@ -48,7 +50,7 @@ func (c *Client) Peers(ctx context.Context) ([]Peer, error) {
 	for _, s := range conf.Servers {
 		if s != nil {
 			addr, _ := netip.ParseAddrPort(s.Address) // the invalid AddrPort when it does not parse
-			peers = append(peers, Peer{Name: s.Node, Address: addr, Voter: s.Voter})
+			peers = append(peers, Peer{ID: s.ID, Name: s.Node, Address: addr, Voter: s.Voter, Leader: s.Leader})
 		}
 	}
 	return peers, nil
