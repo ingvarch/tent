@@ -166,7 +166,15 @@ func exampleUpdate(t *testing.T) app.UpdatePlan {
 	t.Helper()
 	return app.UpdatePlan{
 		Infra: exampleInfra(t), Nodes: exampleNodes(), Nomad: &app.NomadStep{Bootstrap: true, Servers: 3},
-		Secrets: secretNames, Completed: true,
+		Secrets: secretNames, Completed: true, Outdated: someOutdated(),
+	}
+}
+
+// someOutdated returns two outdated machines of two node groups.
+func someOutdated() []app.OutdatedNode {
+	return []app.OutdatedNode{
+		{Name: "prod-servers-0", ID: "instance-1", Group: "servers", Reason: "spec hash"},
+		{Name: "prod-workers-2", ID: "instance-6", Group: "workers", Reason: "no spec hash"},
 	}
 }
 
@@ -231,6 +239,24 @@ Nodes: 1 to create, 0 to wait for, 1 to delete.
 			"State: secrets/gossip.key and cluster.completed.yaml will be written.\n",
 		},
 		{"nothing", app.UpdatePlan{}, "No changes.\n"},
+		{
+			"outdated machines alone",
+			app.UpdatePlan{Outdated: someOutdated()},
+			"No changes.\nOutdated: prod-servers-0 and prod-workers-2; tent rolling-update cluster replaces them.\n",
+		},
+		{
+			"one outdated machine",
+			app.UpdatePlan{Outdated: someOutdated()[:1]},
+			"No changes.\nOutdated: prod-servers-0; tent rolling-update cluster replaces it.\n",
+		},
+		{
+			"outdated machines after every other line",
+			app.UpdatePlan{
+				Nodes: someNodes(), Nomad: &app.NomadStep{Servers: 3}, Completed: true, Outdated: someOutdated(),
+			},
+			nodesOnly + "Nomad: wait for 3 healthy servers.\nState: cluster.completed.yaml will be written.\n" +
+				"Outdated: prod-servers-0 and prod-workers-2; tent rolling-update cluster replaces them.\n",
+		},
 		{
 			"the Nomad step with the bootstrap alone",
 			app.UpdatePlan{Nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, Completed: true},
@@ -297,6 +323,7 @@ func TestUpdatePlanHasChanges(t *testing.T) {
 		want bool
 	}{
 		{"nothing", app.UpdatePlan{}, false},
+		{"outdated machines", app.UpdatePlan{Infra: infraPlan(t, nil), Outdated: someOutdated()}, false},
 		{"an infrastructure plan without changes", app.UpdatePlan{Infra: infraPlan(t, nil)}, false},
 		{"the infrastructure", app.UpdatePlan{Infra: exampleInfra(t)}, true},
 		{"the nodes", app.UpdatePlan{Infra: infraPlan(t, nil), Nodes: someNodes()}, true},
@@ -319,21 +346,27 @@ func TestUpdatePlanJSONWithoutInfrastructure(t *testing.T) {
 		plan app.UpdatePlan
 		want string
 	}{
-		{app.UpdatePlan{}, `{"infrastructure":null,"nodes":[]}` + "\n"},
-		{app.UpdatePlan{Completed: true}, `{"infrastructure":null,"nodes":[],"completedSpec":true}` + "\n"},
-		{app.UpdatePlan{Applied: true}, `{"applied":true,"infrastructure":null,"nodes":[]}` + "\n"},
+		{app.UpdatePlan{}, `{"infrastructure":null,"nodes":[],"outdated":[]}` + "\n"},
+		{app.UpdatePlan{Completed: true}, `{"infrastructure":null,"nodes":[],"outdated":[],"completedSpec":true}` + "\n"},
+		{app.UpdatePlan{Applied: true}, `{"applied":true,"infrastructure":null,"nodes":[],"outdated":[]}` + "\n"},
 		{
 			app.UpdatePlan{Nomad: &app.NomadStep{Bootstrap: true, Servers: 3}},
-			`{"infrastructure":null,"nodes":[],"nomad":{"bootstrap":true,"servers":3}}` + "\n",
+			`{"infrastructure":null,"nodes":[],"outdated":[],"nomad":{"bootstrap":true,"servers":3}}` + "\n",
 		},
 		{
 			app.UpdatePlan{Nomad: &app.NomadStep{Servers: 1}, Completed: true},
-			`{"infrastructure":null,"nodes":[],"nomad":{"bootstrap":false,"servers":1},"completedSpec":true}` + "\n",
+			`{"infrastructure":null,"nodes":[],"outdated":[],"nomad":{"bootstrap":false,"servers":1},` +
+				`"completedSpec":true}` + "\n",
 		},
 		{
 			app.UpdatePlan{Secrets: secretNames[2:], Completed: true},
-			`{"infrastructure":null,"nodes":[],"secrets":["secrets/gossip.key","secrets/acl-bootstrap-token"],` +
-				`"completedSpec":true}` + "\n",
+			`{"infrastructure":null,"nodes":[],"outdated":[],` +
+				`"secrets":["secrets/gossip.key","secrets/acl-bootstrap-token"],"completedSpec":true}` + "\n",
+		},
+		{
+			app.UpdatePlan{Outdated: someOutdated()[:1]},
+			`{"infrastructure":null,"nodes":[],"outdated":[{"name":"prod-servers-0","id":"instance-1",` +
+				`"group":"servers","reason":"spec hash"}]}` + "\n",
 		},
 	} {
 		if got := encodeJSON(t, tc.plan, ""); got != tc.want {
@@ -353,7 +386,7 @@ func TestUpdatePlanJSONLeavesEscapingToTheCaller(t *testing.T) {
 	}
 	want := `{"infrastructure":{"changes":[{"kind":"vultr.VPC","name":"prod","action":"create",` +
 		`"reason":"<new> & more"}],"summary":{"create":1,"update":0,"replace":0,"delete":0}},` +
-		`"nodes":[{"action":"delete","name":"prod-x-0","id":"i-1","reason":"<old> & gone"}]}` + "\n"
+		`"nodes":[{"action":"delete","name":"prod-x-0","id":"i-1","reason":"<old> & gone"}],"outdated":[]}` + "\n"
 	if got := encodeJSON(t, p, ""); got != want {
 		t.Errorf("JSON without HTML escaping = %q, want %q", got, want)
 	}

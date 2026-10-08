@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"io"
 
 	"github.com/spf13/cobra"
@@ -16,7 +17,7 @@ func newRollingUpdateCommand(opts *globalOptions) *cobra.Command {
 }
 
 func newRollingUpdateClusterCommand(opts *globalOptions) *cobra.Command {
-	var yes, force, allowSingle bool
+	var yes, force, exitCode, allowSingle bool
 	var nodeGroups []string
 	cmd := &cobra.Command{
 		Use:   "cluster [NAME]",
@@ -28,14 +29,18 @@ func newRollingUpdateClusterCommand(opts *globalOptions) *cobra.Command {
 			"lists it down. tent cannot roll server groups yet: when the server or combined group has anything to " +
 			"do, which --force always gives it, select the client groups with --nodegroups. Run tent update " +
 			"cluster first after a change of the specs. Without --yes it prints the outdated nodes of each group " +
-			"and the next step. With --yes it takes the cluster's lock, prints the plan, prints each step on " +
-			"stderr as it goes and then what it did; with -o json or -o yaml it prints the plan it applied. A run " +
-			"that stops is finished by running the command again; a run with --force is finished by running it " +
-			"again with --force, which also replaces the nodes that the first run made. A development build of tent " +
-			"needs TENT_NODE_URL and TENT_NODE_SHA256 to find the tent-node that its nodes run. tent reads the " +
-			"cloud's credentials from the environment: VULTR_API_KEY for Vultr.",
+			"and the next step; with --exit-code it exits with 2 while a next step is due. With --yes it takes " +
+			"the cluster's lock, prints the plan, prints each step on stderr as it goes and then what it did; " +
+			"with -o json or -o yaml it prints the plan it applied. A run that stops is finished by running the " +
+			"command again; a run with --force is finished by running it again with --force, which also replaces " +
+			"the nodes that the first run made. A development build of tent needs TENT_NODE_URL and " +
+			"TENT_NODE_SHA256 to find the tent-node that its nodes run. tent reads the cloud's credentials from " +
+			"the environment: VULTR_API_KEY for Vultr.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if yes && exitCode {
+				return errors.New("--exit-code works only without --yes")
+			}
 			name, err := opts.clusterArg(args)
 			if err != nil {
 				return err
@@ -47,7 +52,7 @@ func newRollingUpdateClusterCommand(opts *globalOptions) *cobra.Command {
 			svc.OnWarning = warnOnce(cmd.ErrOrStderr())
 			roll := app.RollOptions{Apply: yes, NodeGroups: nodeGroups, Force: force}
 			if !yes {
-				return previewRoll(cmd, opts, svc, name, roll)
+				return previewRoll(cmd, opts, svc, name, roll, exitCode)
 			}
 			return applyRoll(cmd, opts, svc, name, roll)
 		},
@@ -55,6 +60,7 @@ func newRollingUpdateClusterCommand(opts *globalOptions) *cobra.Command {
 	cmd.Flags().BoolVar(&yes, "yes", false, "roll the nodes; without it, print the plan")
 	cmd.Flags().StringSliceVar(&nodeGroups, "nodegroups", nil, "`NAMES` of the node groups to roll; repeat or "+
 		"separate with commas; every node group of the specs by default")
+	cmd.Flags().BoolVar(&exitCode, "exit-code", false, "exit with code 2 when a roll is due; only without --yes")
 	cmd.Flags().BoolVar(&force, "force", false, "replace every node of the selected groups, whatever its spec hash")
 	addAllowSingleServer(cmd, &allowSingle)
 	return cmd
@@ -67,12 +73,13 @@ func refused(plan app.RollPlan, err error) bool {
 }
 
 // previewRoll prints the plan of the cluster's rolling update and, when it has a next step, how to roll the nodes. A
-// refusal prints the plan too, before its error.
+// refusal prints the plan too, before its error. With exitCode, a plan with a next step ends the command with
+// errPlanHasChanges.
 func previewRoll(cmd *cobra.Command, opts *globalOptions, svc *app.Service, cluster string,
-	roll app.RollOptions,
+	roll app.RollOptions, exitCode bool,
 ) error {
 	plan, err := svc.RollingUpdate(cmd.Context(), cluster, roll)
-	return report(err == nil || refused(plan, err), err, func() error {
+	err = report(err == nil || refused(plan, err), err, func() error {
 		if err := printObject(cmd.OutOrStdout(), opts.output, plan, plan.WriteText); err != nil {
 			return err
 		}
@@ -82,6 +89,10 @@ func previewRoll(cmd *cobra.Command, opts *globalOptions, svc *app.Service, clus
 		}
 		return nil
 	})
+	if err == nil && exitCode && plan.Next != nil {
+		return errPlanHasChanges
+	}
+	return err
 }
 
 // applyRoll rolls the cluster's nodes and prints each step on stderr as it happens. With -o table it prints the plan

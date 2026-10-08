@@ -634,8 +634,9 @@ func TestUpdateWritesTheCompletedSpec(t *testing.T) {
 
 				plan := mustUpdate(t, svc)
 
-				if got := planText(t, plan); got != "State: cluster.completed.yaml will be written.\n" {
-					t.Errorf("the plan is\n%s\nwant the completed spec alone", got)
+				// tent-node's version is part of every spec hash, so the new tent version outdates every node.
+				if got, want := planText(t, plan), "State: cluster.completed.yaml will be written.\n"+allOutdatedLine; got != want {
+					t.Errorf("the plan is\n%s\nwant the completed spec and the outdated nodes alone", got)
 				}
 				if diff := cmp.Diff([]string{lockPath, versionPath, completedPath, lockPath}, rec.writes); diff != "" {
 					t.Errorf("writes to the store (-want +got):\n%s", diff)

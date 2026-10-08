@@ -87,6 +87,20 @@
       "reason": "surplus"
     }
   ],
+  "outdated": [
+    {
+      "name": "prod-servers-0",
+      "id": "instance-1",
+      "group": "servers",
+      "reason": "spec hash"
+    },
+    {
+      "name": "prod-workers-2",
+      "id": "instance-6",
+      "group": "workers",
+      "reason": "no spec hash"
+    }
+  ],
   "nomad": {
     "bootstrap": true,
     "servers": 3

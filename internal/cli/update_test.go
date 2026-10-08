@@ -568,7 +568,8 @@ func TestUpdateClusterApplyJSON(t *testing.T) {
       "delete": 0
     }
   },
-  "nodes": []
+  "nodes": [],
+  "outdated": []
 }
 `
 		wantOK(t, got, upToDate)
@@ -1007,6 +1008,7 @@ func TestUpdateClusterHelp(t *testing.T) {
 		"Once a node has joined its cluster, tent replaces its user data with a stub.",
 		"A client that did not register within 31 minutes of its creation is deleted and created again.",
 		"An update that would delete a node that joined fails.",
+		"It lists the nodes that tent rolling-update cluster replaces, which are no change of the update.",
 	} {
 		if got.code != 0 || !strings.Contains(got.out, want) {
 			t.Errorf("exit code = %d, stdout\n%s\nwant 0 and it to hold %q", got.code, got.out, want)
@@ -1015,4 +1017,25 @@ func TestUpdateClusterHelp(t *testing.T) {
 	if strings.Contains(got.out, "without Nomad") {
 		t.Errorf("stdout\n%s\nwant no claim that the nodes run without Nomad", got.out)
 	}
+}
+
+// outdatedLine is the line of an update plan that names the three outdated workers of outdatedCluster.
+const outdatedLine = "Outdated: prod-workers-0, prod-workers-1 and prod-workers-2; " +
+	"tent rolling-update cluster replaces them.\n"
+
+// TestUpdateClusterReportsOutdatedNodesWithoutChanges prints the outdated nodes as a line of the plan and a field of
+// its JSON, and exits with 0 under --exit-code, since they are no change of the update.
+func TestUpdateClusterReportsOutdatedNodesWithoutChanges(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, f := outdatedCluster(t)
+
+		wantOK(t, runOn(t, f, update(s)...), "No changes.\n"+outdatedLine)
+		wantOK(t, runOn(t, f, update(s, "--exit-code")...), "No changes.\n"+outdatedLine)
+		wantResult(t, runOn(t, f, update(s, "--yes")...), 0, "cluster prod is up to date\n"+outdatedLine, "")
+		got := runOn(t, f, update(s, "-o", "json")...)
+		if got.code != 0 || !strings.Contains(got.out, `"outdated": [`) ||
+			!strings.Contains(got.out, `"name": "prod-workers-2"`) {
+			t.Errorf("update -o json: exit code %d, stdout\n%s\nwant 0 and the outdated machines", got.code, got.out)
+		}
+	})
 }

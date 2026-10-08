@@ -28,7 +28,8 @@ func newUpdateClusterCommand(opts *globalOptions) *cobra.Command {
 			"state store, and never replaces them. It starts Nomad on the nodes, bootstraps its ACL system and " +
 			"waits for the servers to be healthy and the clients to register. Once a node has joined its cluster, tent " +
 			"replaces its user data with a stub. A client that did not register within 31 minutes of its creation is " +
-			"deleted and created again. An update that would delete a node that joined fails. A development build of " +
+			"deleted and created again. An update that would delete a node that joined fails. It lists the nodes that " +
+			"tent rolling-update cluster replaces, which are no change of the update. A development build of " +
 			"tent needs TENT_NODE_URL and TENT_NODE_SHA256 to find the tent-node that its nodes run. " +
 			"Without --yes it prints the plan and changes nothing. With --yes it prints the plan, applies it, " +
 			"prints each step on stderr as it goes, and then prints what it did; with -o json or -o yaml it " +
@@ -61,8 +62,8 @@ func newUpdateClusterCommand(opts *globalOptions) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "apply the plan; without it, print the plan")
-	cmd.Flags().BoolVar(&exitCode, "exit-code", false, "exit with code 2 when the plan has changes; only "+
-		"without --yes")
+	cmd.Flags().BoolVar(&exitCode, "exit-code", false, "exit with code 2 when the plan has changes, which "+
+		"outdated nodes are not; only without --yes")
 	addAllowSingleServer(cmd, &allowSingle)
 	return cmd
 }
@@ -97,14 +98,17 @@ func applyUpdate(cmd *cobra.Command, opts *globalOptions, svc *app.Service, clus
 
 // applyUpdateText updates the cluster as update cluster --yes does with -o table: it prints the plan made under the
 // cluster's lock, applies it with each step on stderr, and prints a line that sums up what it did; or only that the
-// cluster is up to date.
+// cluster is up to date, followed by the outdated machines if there are any.
 func applyUpdateText(cmd *cobra.Command, opts *globalOptions, svc *app.Service, cluster string) error {
 	w := cmd.OutOrStdout()
 	svc.OnUpdatePlan = func(p app.UpdatePlan) error { return p.WriteText(w) }
 	plan, err := applyUpdate(cmd, opts, svc, cluster)
 	return report(err == nil || app.Saved(err), err, func() error {
 		if !plan.HasChanges() {
-			return writeClusterLine(w, cluster, "is up to date")
+			if err := writeClusterLine(w, cluster, "is up to date"); err != nil {
+				return err
+			}
+			return plan.WriteOutdated(w)
 		}
 		return writeApplied(w, plan)
 	})
