@@ -65,7 +65,8 @@ func wantRollDone(t *testing.T, svc *app.Service, f *vultrfake.Fake, before map[
 	}
 }
 
-// rollWrites are the writes of a roll to Vultr and to Nomad, as the first words of a call.
+// rollWrites are the writes of a roll to Vultr and to Nomad, as the first words of a call. The update of an instance is
+// the label of a machine that a forced roll replaces, and the scrub of a new machine.
 var rollWrites = []string{
 	"CreateInstance ", "DeleteInstance ", "UpdateInstance ",
 	"nomad IntroToken ", "nomad MarkIneligible ", "nomad Drain ", "nomad Purge ",
@@ -134,13 +135,26 @@ func TestCutPlacesStandAtWritesAndAtTheFirstReadOfEachObservation(t *testing.T) 
 	}
 }
 
-// TestCutPlacesOfARollHoldEveryWriteAndAReadBeforeEach checks the places on the calls of an uninterrupted roll: every
-// call of it is a read or a write of rollWrites; every kind of write of rollWrites occurs in it and has its cut at each
-// of its calls; a cut at a read stands between each write and the write before it; and the places are at most half of
-// the calls, which is the reason to choose them.
+// TestCutPlacesOfARollHoldEveryWriteAndAReadBeforeEach checks the places on the calls of an uninterrupted roll, as
+// wantCutPlaces says.
 func TestCutPlacesOfARollHoldEveryWriteAndAReadBeforeEach(t *testing.T) {
 	t.Parallel()
-	calls := uninterruptedRoll(t)
+	wantCutPlaces(t, uninterruptedRoll(t))
+}
+
+// TestCutPlacesOfAForcedRollHoldEveryWriteAndAReadBeforeEach checks the places on the calls of an uninterrupted forced
+// roll, which writes the replace label of each worker first, as wantCutPlaces says.
+func TestCutPlacesOfAForcedRollHoldEveryWriteAndAReadBeforeEach(t *testing.T) {
+	t.Parallel()
+	wantCutPlaces(t, uninterruptedForcedRoll(t))
+}
+
+// wantCutPlaces fails the test unless the places of cutPlaces on the calls of an uninterrupted roll are as the cut
+// tests need them: every call is a read or a write of rollWrites; every kind of write of rollWrites occurs in the
+// calls and has its cut at each of its calls; a cut at a read stands between each write and the write before it; and
+// the places are at most half of the calls, which is the reason to choose them.
+func wantCutPlaces(t *testing.T, calls []string) {
+	t.Helper()
 	places := cutPlaces(calls)
 
 	kinds := map[string]bool{}

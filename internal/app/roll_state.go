@@ -124,18 +124,26 @@ func rolloutGroups(m *model.Cluster, specs map[string]*v1alpha1.NodeGroup, b *no
 	return groups, nil
 }
 
-// forcedMachines returns the IDs of the listed machines of the groups, which a forced roll replaces whatever their
-// hash.
-func forcedMachines(listed []cloud.Instance, groups []rollout.Group) map[string]bool {
-	selected := make(map[string]bool, len(groups))
-	for _, g := range groups {
-		selected[g.Name] = true
-	}
+// inGroups returns the listed machines that belong to one of the groups.
+func inGroups(listed []cloud.Instance, groups []rollout.Group) []cloud.Instance {
+	return slices.DeleteFunc(slices.Clone(listed), func(in cloud.Instance) bool {
+		return !slices.ContainsFunc(groups, func(g rollout.Group) bool { return g.Name == in.Group })
+	})
+}
+
+// forcedMachines returns the IDs of the listed machines of the groups that a roll replaces whatever their hash: those
+// that carry the replace label, and with force every one of them.
+func forcedMachines(listed []cloud.Instance, groups []rollout.Group, force bool) map[string]bool {
 	forced := map[string]bool{}
-	for _, in := range listed {
-		if selected[in.Group] {
+	for _, in := range inGroups(listed, groups) {
+		if force || in.Replace {
 			forced[in.ID] = true
 		}
 	}
 	return forced
+}
+
+// unlabelled returns the listed machines of the groups that lack the replace label.
+func unlabelled(listed []cloud.Instance, groups []rollout.Group) []cloud.Instance {
+	return slices.DeleteFunc(inGroups(listed, groups), func(in cloud.Instance) bool { return in.Replace })
 }
