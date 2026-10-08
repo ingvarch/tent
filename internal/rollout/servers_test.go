@@ -147,11 +147,16 @@ type serverCase struct {
 
 func runServerCases(t *testing.T, base func() rollout.State, tests []serverCase) {
 	t.Helper()
+	runServerCasesIn(t, rollout.Roll, base, tests)
+}
+
+func runServerCasesIn(t *testing.T, mode rollout.Mode, base func() rollout.State, tests []serverCase) {
+	t.Helper()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := base()
 			tt.build(t, &s)
-			checkServerStep(t, nextRoll(t, s), tt.want)
+			checkServerStep(t, nextIn(t, mode, s), tt.want)
 		})
 	}
 }
@@ -164,11 +169,16 @@ type refusalCase struct {
 
 func runRefusalCases(t *testing.T, base func() rollout.State, tests []refusalCase) {
 	t.Helper()
+	runRefusalCasesIn(t, rollout.Roll, base, tests)
+}
+
+func runRefusalCasesIn(t *testing.T, mode rollout.Mode, base func() rollout.State, tests []refusalCase) {
+	t.Helper()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := base()
 			tt.build(t, &s)
-			checkRefused(t, s, tt.want)
+			checkRefusedIn(t, mode, s, tt.want)
 		})
 	}
 }
@@ -596,6 +606,17 @@ func TestServerRemovalOfAStoppedServer(t *testing.T) {
 			s.Nomad.Servers = append(s.Nomad.Servers, rollout.Server{ID: "r-9", Name: "x.global", Voter: true,
 				Healthy: true, Version: "2.0.7"})
 		}, serverOutcome{Action: rollout.WaitHealthy, Voters: 3}},
+		{"k: two servers are gone, and one server of the others does not vote", func(t *testing.T, s *rollout.State) {
+			stopServer(t, s, 2)
+			dropPeerAndMember(t, s, 1)
+			dropPeerAndMember(t, s, 2)
+			serverNode(t, s, 3).Voter = false
+		}, serverOutcome{Action: rollout.WaitHealthy, Voters: 2}},
+		{"l: two servers are gone and their peers with them: only the others vote", func(t *testing.T, s *rollout.State) {
+			stopServer(t, s, 2)
+			dropPeerAndMember(t, s, 1)
+			dropPeerAndMember(t, s, 2)
+		}, serverOutcome{Action: rollout.Delete, Machine: serverName(1)}},
 		{"l: the peer and the member are gone, and three servers vote", func(t *testing.T, s *rollout.State) {
 			dropPeerAndMember(t, s, 1)
 		}, serverOutcome{Action: rollout.Delete, Machine: serverName(1)}},

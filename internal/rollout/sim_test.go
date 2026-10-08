@@ -3,6 +3,7 @@ package rollout_test
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 	"slices"
 	"time"
@@ -65,10 +66,12 @@ type world struct {
 	nextNode    int
 	nextRaft    int
 	unplaced    int
-	lastChange  time.Time // when a server last joined or left the Raft configuration
+	lastChange  time.Time // when a server last joined the Raft configuration
 	noCleanup   bool      // autopilot does not remove the peers of failed servers
 	// keepsBudget has the groups that start with all their nodes available: the budget invariant holds for them.
 	keepsBudget map[string]bool
+	// startSize is how many machines each group had when arm was called.
+	startSize map[string]int
 }
 
 func newWorld(version string) *world {
@@ -77,6 +80,7 @@ func newWorld(version string) *world {
 		cluster:     "prod",
 		version:     version,
 		keepsBudget: map[string]bool{},
+		startSize:   map[string]int{},
 	}
 }
 
@@ -93,6 +97,7 @@ func (w *world) clone() *world {
 	for k, v := range w.keepsBudget {
 		c.keepsBudget[k] = v
 	}
+	c.startSize = maps.Clone(w.startSize)
 	return &c
 }
 
@@ -203,6 +208,13 @@ func (w *world) makeIneligible(name string) {
 	w.nodes[w.nodeIndexByOwner(w.machines[w.machineIndexByName(name)].ID)].Eligible = false
 }
 
+// staleDrain gives the node of the machine the drain meta of its own machine while it stays eligible, as an operator
+// leaves it by making a drained node eligible again.
+func (w *world) staleDrain(name string) {
+	id := w.machines[w.machineIndexByName(name)].ID
+	w.nodes[w.nodeIndexByOwner(id)].DrainedFor = id
+}
+
 func (w *world) machineIndexByName(name string) int {
 	return slices.IndexFunc(w.machines, func(m simMachine) bool { return m.Name == name })
 }
@@ -219,12 +231,24 @@ func (w *world) nodeIndexByOwner(id string) int {
 	return slices.IndexFunc(w.nodes, func(n simNode) bool { return n.owner == id })
 }
 
-// arm records which groups start with every node available, for the invariant of the budget.
+// arm records which groups start with every node available, for the invariant of the budget, and how many machines
+// each group starts with, for the invariant of the limit.
 func (w *world) arm() *world {
 	for _, g := range w.groups {
 		w.keepsBudget[g.Name] = w.availableCount(g) >= g.Size
+		w.startSize[g.Name] = w.countOf(g.Name)
 	}
 	return w
+}
+
+// limit is the most machines a group may have: its size plus its surge (a server or combined group: plus 1), or the
+// number it started with when that is more, as a group that a shrink starts to reduce.
+func (w *world) limit(g rollout.Group) int {
+	limit := g.Size + 1
+	if g.Role == v1alpha1.RoleClient {
+		limit = g.Size + g.MaxSurge
+	}
+	return max(limit, w.startSize[g.Name])
 }
 
 // available reports whether a machine's node can take work, by the world's own record.
@@ -276,7 +300,7 @@ func (w *world) tick() {
 		}
 		if m.Role.RunsServer() && m.age == 2 {
 			w.joinRaft(m.ID, w.newRaftID(), false, false, w.now)
-			w.changed()
+			w.serverJoined()
 		}
 	}
 	w.tickMembers()
@@ -418,21 +442,13 @@ func (w *world) check() error {
 		names[m.Name] = true
 	}
 	for _, g := range w.groups {
-		n := w.countOf(g.Name)
-		switch {
-		case g.Role.RunsServer():
-			if n > g.Size+1 {
-				return violated("group %s has %d machines, more than its size %d plus 1", g.Name, n, g.Size)
-			}
-		case g.Role == v1alpha1.RoleClient:
-			if n > g.Size+g.MaxSurge {
-				return violated("group %s has %d machines, more than its size %d plus surge %d", g.Name, n, g.Size,
-					g.MaxSurge)
-			}
-			if n := w.availableCount(g); w.keepsBudget[g.Name] && n < g.Size-g.MaxUnavailable {
-				return violated("group %s has %d available nodes, fewer than its size %d less %d unavailable", g.Name,
-					n, g.Size, g.MaxUnavailable)
-			}
+		if n := w.countOf(g.Name); n > w.limit(g) {
+			return violated("group %s has %d machines, more than the %d it may have", g.Name, n, w.limit(g))
+		}
+		if n := w.availableCount(g); g.Role == v1alpha1.RoleClient && w.keepsBudget[g.Name] &&
+			n < g.Size-g.MaxUnavailable {
+			return violated("group %s has %d available nodes, fewer than its size %d less %d unavailable", g.Name,
+				n, g.Size, g.MaxUnavailable)
 		}
 	}
 	return nil
@@ -517,6 +533,9 @@ func (w *world) run(mode rollout.Mode, decide decider, keepSnapshots bool) (resu
 		if err := w.checkOrder(mode, step); err != nil {
 			return res, err
 		}
+		if err := w.checkShrink(mode, step); err != nil {
+			return res, err
+		}
 		if step.Action.Waits() {
 			w.tick()
 		} else if err := w.apply(step); err != nil {
@@ -546,6 +565,22 @@ func (w *world) checkOrder(mode rollout.Mode, step rollout.Step) error {
 		if !done {
 			return violated("%s: group %s is not done", step, g.Name)
 		}
+	}
+	return nil
+}
+
+// checkShrink is the invariant that a shrink creates no machine and deletes none from a group that has no more
+// machines than its size.
+func (w *world) checkShrink(mode rollout.Mode, step rollout.Step) error {
+	g, ok := w.group(step.Group)
+	if mode != rollout.Shrink || !ok {
+		return nil
+	}
+	switch n := w.countOf(g.Name); {
+	case step.Action == rollout.Create:
+		return violated("%s: a shrink creates no machine", step)
+	case step.Action == rollout.Delete && n <= g.Size:
+		return violated("%s: group %s has %d machines, no more than its size %d", step, g.Name, n, g.Size)
 	}
 	return nil
 }

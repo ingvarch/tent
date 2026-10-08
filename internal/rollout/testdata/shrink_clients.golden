@@ -1,0 +1,20 @@
+# mode shrink
+# a new node runs Nomad 2.0.7
+# group workers: client, size 2, zones ams and fra, maxSurge 1, maxUnavailable 0, drain 1h0m0s
+# machine prod-servers-0 (m-1) in ams runs Nomad 2.0.7
+# machine prod-workers-0 (m-2) in ams runs Nomad 2.0.7, up to date
+# machine prod-workers-1 (m-3) in fra runs Nomad 2.0.7, up to date
+# machine prod-workers-2 (m-4) in ams runs Nomad 2.0.7, up to date
+# machine prod-workers-3 (m-5) in fra runs Nomad 2.0.7, up to date
+# leader prod-servers-0
+mark node prod-workers-3 ineligible
+mark node prod-workers-2 ineligible
+drain node prod-workers-2 within 1h0m0s
+drain node prod-workers-3 within 1h0m0s
+wait until node prod-workers-2 is drained
+delete node prod-workers-2 (ID m-4)
+delete node prod-workers-3 (ID m-5)
+wait until Nomad lists node prod-workers-2 at 10.64.0.6 as down
+purge node prod-workers-2 at 10.64.0.6 from Nomad
+purge node prod-workers-3 at 10.64.0.7 from Nomad
+done

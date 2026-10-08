@@ -71,7 +71,7 @@ func TestRunBreaksOnInvariants(t *testing.T) {
 				second.Machine.Name = "prod-workers-4"
 				return []rollout.Step{create, second}
 			},
-			"group workers has 5 machines, more than its size 3 plus surge 1"},
+			"group workers has 5 machines, more than the 4 it may have"},
 		{"a node is created while a server runs an older Nomad", func() *world {
 			w := outdatedWorkers(1, 0)
 			w.version = "2.0.8"
@@ -102,7 +102,7 @@ func TestRunBreaksOnInvariants(t *testing.T) {
 				wait := rollout.Step{Action: rollout.WaitJoined}
 				return []rollout.Step{create, wait, wait, w.serverStep(rollout.Stop, "prod-servers-1")}
 			},
-			"the Raft configuration changed 0s ago, less than the refresh interval of 1m0s"},
+			"a server joined the Raft configuration 0s ago, less than the refresh interval of 1m0s"},
 		{"a peer is removed right after another joined", func() *world { return serverWorld(3) },
 			func(w *world) []rollout.Step {
 				create := rollout.Step{Action: rollout.Create, Group: "servers", Machine: rollout.Machine{
@@ -110,7 +110,7 @@ func TestRunBreaksOnInvariants(t *testing.T) {
 				wait := rollout.Step{Action: rollout.WaitJoined}
 				return []rollout.Step{create, wait, wait, w.serverStep(rollout.RemovePeer, "prod-servers-1")}
 			},
-			"the Raft configuration changed 0s ago, less than the refresh interval of 1m0s"},
+			"a server joined the Raft configuration 0s ago, less than the refresh interval of 1m0s"},
 		{"a machine is deleted while its server is in the Raft configuration", func() *world { return serverWorld(3) },
 			func(w *world) []rollout.Step { return []rollout.Step{w.serverStep(rollout.Delete, "prod-servers-1")} },
 			"its server is still in the Raft configuration"},
@@ -122,7 +122,7 @@ func TestRunBreaksOnInvariants(t *testing.T) {
 				second.Machine.Name = "prod-servers-4"
 				return []rollout.Step{create, second}
 			},
-			"group servers has 5 machines, more than its size 3 plus 1"},
+			"group servers has 5 machines, more than the 4 it may have"},
 		{"a combined group has more machines than size plus one", func() *world { return combinedWorld(3) },
 			func(*world) []rollout.Step {
 				create := rollout.Step{Action: rollout.Create, Group: "control", Machine: rollout.Machine{
@@ -131,7 +131,7 @@ func TestRunBreaksOnInvariants(t *testing.T) {
 				second.Machine.Name = "prod-control-4"
 				return []rollout.Step{create, second}
 			},
-			"group control has 5 machines, more than its size 3 plus 1"},
+			"group control has 5 machines, more than the 4 it may have"},
 		{"a client step comes before the server group is done", func() *world {
 			w := outdatedServers(3)
 			w.addGroup(workersGroup(1, 0))
@@ -156,6 +156,47 @@ func TestRunBreaksOnInvariants(t *testing.T) {
 				t.Errorf("run error = %v, want a violation containing %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestRunBreaksOnShrinkInvariants(t *testing.T) {
+	tests := []struct {
+		name  string
+		world func() *world
+		steps func(w *world) []rollout.Step
+		want  string
+	}{
+		{"a machine is created", func() *world { return shrinkWorkers(4) },
+			func(*world) []rollout.Step {
+				return []rollout.Step{{Action: rollout.Create, Group: "workers", Machine: rollout.Machine{
+					Name: "prod-workers-4", Zone: "ams"}}}
+			},
+			"a shrink creates no machine"},
+		{"a machine is deleted from a group at its size", func() *world { return shrinkWorkers(2) },
+			func(w *world) []rollout.Step { return []rollout.Step{w.machineStep(rollout.Delete, "prod-workers-1")} },
+			"group workers has 2 machines, no more than its size 2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := tt.world()
+			_, err := w.run(rollout.Shrink, stepsThen(tt.steps(w)...), false)
+			var v *violation
+			if !errors.As(err, &v) || !strings.Contains(v.Error(), tt.want) {
+				t.Errorf("run error = %v, want a violation containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestLimitOfAGroupIsWhatItStartedWithWhenThatIsMore(t *testing.T) {
+	w := shrinkWorkers(4)
+	if err := w.check(); err != nil {
+		t.Fatalf("check of a group that starts above its size: %v", err)
+	}
+	w.addClients("workers", 1, newHash, curVersion)
+	var v *violation
+	if err := w.check(); !errors.As(err, &v) || v.Error() != "group workers has 5 machines, more than the 4 it may have" {
+		t.Errorf("check = %v, want the violation for a fifth machine", err)
 	}
 }
 
@@ -233,5 +274,25 @@ func TestResumeCheckFindsADecisionThatRemembers(t *testing.T) {
 	}
 	if !strings.Contains(problem, "prints other lines") {
 		t.Errorf("problem = %q, want a difference in the lines", problem)
+	}
+}
+
+func TestShrinkLeavesNoDrainedNodeBehind(t *testing.T) {
+	w := shrinkWorkers(4)
+	for _, name := range []string{"prod-workers-0", "prod-workers-1", "prod-workers-2"} {
+		w.makeIneligible(name)
+	}
+	w.arm()
+	if _, err := w.run(rollout.Shrink, rollout.Next, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := w.countOf("workers"); got != 2 {
+		t.Errorf("the group has %d machines, want 2", got)
+	}
+	for _, n := range w.observe().Nomad.Nodes {
+		if n.Draining || n.DrainedFor != "" {
+			t.Errorf("node %s is left draining or drained (draining %v, drained for %q)", n.Name, n.Draining,
+				n.DrainedFor)
+		}
 	}
 }

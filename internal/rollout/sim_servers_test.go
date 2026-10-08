@@ -88,8 +88,9 @@ func (w *world) healthy(srv simServer) bool {
 	return i >= 0 && w.members[i].status == memberAlive
 }
 
-// changed records a change of the servers of the Raft configuration.
-func (w *world) changed() { w.lastChange = w.now }
+// serverJoined records that a server joined the Raft configuration. A removal is no such change: every node that
+// knows the servers that stay can still reach the cluster.
+func (w *world) serverJoined() { w.lastChange = w.now }
 
 // joinRaft adds a server of a machine to the Raft configuration and gives its machine an alive member if it has none.
 func (w *world) joinRaft(machine, id string, leader, voter bool, since time.Time) {
@@ -164,7 +165,6 @@ func (w *world) tickMembers() {
 // dropServer removes a server from the Raft configuration.
 func (w *world) dropServer(i int) {
 	w.servers = slices.Delete(w.servers, i, i+1)
-	w.changed()
 }
 
 // readdServers adds a removed peer again after 4 ticks, while its machine runs and its member is alive.
@@ -177,7 +177,7 @@ func (w *world) readdServers() {
 		}
 		if r.ticks++; r.ticks >= 4 {
 			w.joinRaft(r.machine, r.id, false, false, w.now)
-			w.changed()
+			w.serverJoined()
 			continue
 		}
 		kept = append(kept, r)
@@ -185,11 +185,11 @@ func (w *world) readdServers() {
 	w.removed = kept
 }
 
-// checkWindow is the invariant that a server is stopped or removed only when the Raft configuration has not changed
-// for a refresh interval.
+// checkWindow is the invariant that a server is stopped, or removed while its machine runs, only when no server has
+// joined the Raft configuration for a refresh interval. The peer of a machine that is down goes at any time.
 func (w *world) checkWindow(step rollout.Step) error {
 	if age := w.now.Sub(w.lastChange); age < refreshInterval {
-		return violated("%s: the Raft configuration changed %s ago, less than the refresh interval of %s", step, age,
+		return violated("%s: a server joined the Raft configuration %s ago, less than the refresh interval of %s", step, age,
 			refreshInterval)
 	}
 	return nil
@@ -238,8 +238,10 @@ func (w *world) removePeer(step rollout.Step) error {
 	if srv.leader {
 		return violated("%s: it is the leader", step)
 	}
-	if err := w.checkWindow(step); err != nil {
-		return err
+	if w.up(srv.machine) {
+		if err := w.checkWindow(step); err != nil {
+			return err
+		}
 	}
 	w.dropServer(i)
 	if w.up(srv.machine) {

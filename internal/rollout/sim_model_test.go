@@ -334,6 +334,34 @@ func TestSimRemovedPeerOfARunningServerComesBackAsANonvoter(t *testing.T) {
 	}
 }
 
+func TestSimPeerOfAMachineThatIsDownGoesWithoutTheWindow(t *testing.T) {
+	// The window protects the nodes that still list the removed server as reachable; a machine that is down is not.
+	w := serverWorld(3)
+	w.lastChange = w.now
+	w.stopMachine("prod-servers-1")
+	if err := w.apply(w.serverStep(rollout.RemovePeer, "prod-servers-1")); err != nil {
+		t.Errorf("removing the peer of a stopped machine right after a join: %v", err)
+	}
+	var v *violation
+	if err := w.apply(w.serverStep(rollout.RemovePeer, "prod-servers-2")); !errors.As(err, &v) {
+		t.Errorf("removing the peer of a running machine right after a join = %v, want a violation", err)
+	}
+}
+
+func TestSimOnlyAServerThatJoinsStartsTheWindow(t *testing.T) {
+	w := serverWorld(3)
+	if err := w.apply(w.serverStep(rollout.RemovePeer, "prod-servers-1")); err != nil {
+		t.Fatal(err)
+	}
+	if !w.lastChange.IsZero() {
+		t.Errorf("a removal set the last change to %s, want it left alone", w.lastChange)
+	}
+	w.ticks(4)
+	if !w.lastChange.Equal(w.now) {
+		t.Errorf("after the server came back, the last change is %s, want %s", w.lastChange, w.now)
+	}
+}
+
 func TestSimRemovedPeerDoesNotComeBackWithoutAnAliveMemberOnARunningMachine(t *testing.T) {
 	t.Run("the member was forced out", func(t *testing.T) {
 		w := serverWorld(3)
