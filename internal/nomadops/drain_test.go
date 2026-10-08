@@ -84,19 +84,34 @@ func TestDrainSendsNoMetaWhenThereIsNone(t *testing.T) {
 	checkRequests(t, srv, clientTokens(token), want)
 }
 
-// TestCheckNodeID checks the IDs that CheckNodeID accepts.
-func TestCheckNodeID(t *testing.T) {
-	for _, id := range []string{
-		nodeID, "N-1", "abcdefghijklmnopqrstuvwxyz-ABCDEFGHIJKLMNOPQRSTUVWXYZ-0123456789", "-", "0",
+// TestCheckIDs checks the IDs that CheckNodeID and CheckRaftID accept: the same characters, each with its own name in
+// the message.
+func TestCheckIDs(t *testing.T) {
+	const rule = ` has a character other than an ASCII letter, a digit or "-"`
+	for _, tc := range []struct {
+		kind  string
+		check func(string) error
+	}{
+		{"node", nomadops.CheckNodeID},
+		{"Raft", nomadops.CheckRaftID},
 	} {
-		if err := nomadops.CheckNodeID(id); err != nil {
-			t.Errorf("CheckNodeID(%q) = %v, want nil", id, err)
-		}
-	}
-	for _, id := range []string{"`", "{", "@", "[", "/", ":", "_", "."} { // the neighbours of the ranges, and "_" and "."
-		if err := nomadops.CheckNodeID("a" + id); err == nil {
-			t.Errorf("CheckNodeID(%q) = nil, want an error", "a"+id)
-		}
+		t.Run(tc.kind, func(t *testing.T) {
+			for _, id := range []string{
+				nodeID, "N-1", "abcdefghijklmnopqrstuvwxyz-ABCDEFGHIJKLMNOPQRSTUVWXYZ-0123456789", "-", "0",
+			} {
+				if err := tc.check(id); err != nil {
+					t.Errorf("check(%q) = %v, want nil", id, err)
+				}
+			}
+			for _, id := range []string{"`", "{", "@", "[", "/", ":", "_", "."} { // the neighbours of the ranges, "_", "."
+				if err := tc.check("a" + id); err == nil || err.Error() != tc.kind+` ID "a`+id+`"`+rule {
+					t.Errorf("check(%q) = %v, want the %s ID refused", "a"+id, err, tc.kind)
+				}
+			}
+			if err := tc.check(""); err == nil || err.Error() != "no "+tc.kind+" ID" {
+				t.Errorf("check(\"\") = %v, want %q", err, "no "+tc.kind+" ID")
+			}
+		})
 	}
 }
 

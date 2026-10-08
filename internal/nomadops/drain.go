@@ -2,7 +2,6 @@ package nomadops
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -28,12 +27,15 @@ func (r DrainRequest) Check() error {
 
 // CheckNodeID checks that id is fit for the path of a request: Nomad's IDs are UUIDs, and the Nomad API module puts
 // an ID into the path as it is. It accepts ASCII letters, digits and "-".
-func CheckNodeID(id string) error {
+func CheckNodeID(id string) error { return checkID("node", id) }
+
+// checkID checks an ID of the kind, such as "node", for CheckNodeID and CheckRaftID.
+func checkID(kind, id string) error {
 	switch {
 	case id == "":
-		return errors.New("no node ID")
+		return fmt.Errorf("no %s ID", kind)
 	case strings.ContainsFunc(id, func(r rune) bool { return !isIDChar(r) }):
-		return fmt.Errorf("node ID %q has a character other than an ASCII letter, a digit or \"-\"", id)
+		return fmt.Errorf("%s ID %q has a character other than an ASCII letter, a digit or \"-\"", kind, id)
 	}
 	return nil
 }

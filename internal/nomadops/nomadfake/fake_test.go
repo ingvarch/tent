@@ -111,6 +111,18 @@ var tableDrain = nomadops.DrainRequest{Deadline: time.Hour, Meta: map[string]str
 // registerTableNode lists tableNode.
 func registerTableNode(f *nomadfake.Fake) { f.Register(tableNode) }
 
+// tablePeers are the servers that the calls of apiCalls on a Raft server need: p-1 leads, p-2 and p-3 vote. The
+// TransferLeadership of apiCalls moves the leadership to p-2 and its RemovePeer removes p-3, so that calls that run
+// together on one fake never remove the server that another call names.
+var tablePeers = []nomadops.Peer{
+	{ID: "p-1", Name: "s1", Address: netip.MustParseAddrPort("10.0.0.5:4647"), Voter: true, Leader: true},
+	{ID: "p-2", Name: "s2", Address: netip.MustParseAddrPort("10.0.0.6:4647"), Voter: true},
+	{ID: "p-3", Name: "s3", Address: netip.MustParseAddrPort("10.0.0.7:4647"), Voter: true},
+}
+
+// setTablePeers lists tablePeers.
+func setTablePeers(f *nomadfake.Fake) { f.SetPeers(tablePeers) }
+
 // apiCalls holds an apiCall for every nomadops.API method.
 var apiCalls = []apiCall{
 	{"Leader", func(ctx context.Context, a nomadops.API) error {
@@ -149,6 +161,10 @@ var apiCalls = []apiCall{
 		return a.Drain(ctx, tableNode.ID, tableDrain)
 	}, registerTableNode},
 	{"Purge", func(ctx context.Context, a nomadops.API) error { return a.Purge(ctx, "n-gone") }, nil},
+	{"TransferLeadership", func(ctx context.Context, a nomadops.API) error {
+		return a.TransferLeadership(ctx, "p-2")
+	}, setTablePeers},
+	{"RemovePeer", func(ctx context.Context, a nomadops.API) error { return a.RemovePeer(ctx, "p-3") }, setTablePeers},
 }
 
 func TestAPICallsCoverTheAPI(t *testing.T) {
@@ -217,16 +233,20 @@ func argOf(name string) string {
 		return "n-1 1h0m0s tent_machine=m-1"
 	case "Purge":
 		return "n-gone"
+	case "TransferLeadership":
+		return "p-2"
+	case "RemovePeer":
+		return "p-3"
 	}
 	return ""
 }
 
 // TestACLCallsNeedTheBootstrap checks that, before the ACL system is bootstrapped, Nodes, Health, Peers, KeyringReady,
-// IntroToken, CreateToken, MarkIneligible, Drain and Purge fail for good as Nomad's 403 does, while Leader and
-// Bootstrap work; and that they work after the bootstrap.
+// IntroToken, CreateToken, MarkIneligible, Drain, Purge, TransferLeadership and RemovePeer fail for good as Nomad's 403
+// does, while Leader and Bootstrap work; and that they work after the bootstrap.
 func TestACLCallsNeedTheBootstrap(t *testing.T) {
 	for _, name := range []string{"IntroToken", "CreateToken", "Nodes", "Health", "Peers", "KeyringReady",
-		"MarkIneligible", "Drain", "Purge"} {
+		"MarkIneligible", "Drain", "Purge", "TransferLeadership", "RemovePeer"} {
 		t.Run(name, func(t *testing.T) {
 			f, a := newAPI()
 			var call apiCall

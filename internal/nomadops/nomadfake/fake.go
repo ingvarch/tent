@@ -35,10 +35,15 @@ import (
 // The fake is simpler than Nomad in these ways:
 //   - It checks no ACL token: each call succeeds whatever token its client holds. Tokens tells which tokens the
 //     clients got. Only before the bootstrap does a call fail: Nodes, Health, Peers, KeyringReady, IntroToken,
-//     CreateToken, MarkIneligible, Drain and Purge fail for good, as Nomad's 403, until a Bootstrap succeeds; Leader
-//     and Bootstrap work. Peers fails so, since Nomad answers the Raft configuration to a management token alone.
+//     CreateToken, MarkIneligible, Drain, Purge, TransferLeadership and RemovePeer fail for good, as Nomad's 403, until
+//     a Bootstrap succeeds; Leader and Bootstrap work. Peers fails so, since Nomad answers the Raft configuration to a
+//     management token alone.
 //   - MarkIneligible, Drain and Purge change a node as their docs say, and nothing else happens to a node over time:
 //     it goes down, registers again or comes back after a purge only when a test says so with Register.
+//   - TransferLeadership changes the peers, the leader's address and the Health, and RemovePeer the peers alone, as
+//     their docs say, and nothing else happens to a server over time: the cluster re-adds a peer, promotes a server
+//     or removes a dead one only when a test says so with SetPeers, SetHealth and SetLeader, which stay independent:
+//     a test keeps them in step.
 //   - Its keyring has an active key as soon as the ACL system is bootstrapped, unless SetKeyringDelay holds it back;
 //     meanwhile KeyringReady is false and IntroToken fails as Nomad's 500 does.
 //
@@ -149,7 +154,8 @@ func (f *Fake) SetHealth(h nomadops.Health) {
 	f.health = h
 }
 
-// SetPeers makes a copy of peers the servers of the Raft configuration. It does not change the Health.
+// SetPeers makes a copy of peers the servers of the Raft configuration. It does not change the Health or the leader's
+// address. The Raft IDs and the leader flags are the test's: a call that names a server by its Raft ID finds it here.
 func (f *Fake) SetPeers(peers []nomadops.Peer) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -189,7 +195,7 @@ type Call struct {
 	// Arg is the call's argument without a secret: the size of the secret for Bootstrap, such as [secret, 36 bytes];
 	// the node's name, the pool and the TTL for IntroToken, such as "prod-workers-1 default 30m0s"; the name and the TTL
 	// for CreateToken, such as "tent export nomad ana@laptop 24h0m0s"; the node ID for MarkIneligible and Purge; DrainArg
-	// for Drain; empty for the others.
+	// for Drain; the Raft ID for TransferLeadership and RemovePeer; empty for the others.
 	Arg string
 }
 
@@ -462,7 +468,8 @@ func result[T any](v T, err error) (T, error) {
 	return v, nil
 }
 
-// goneError is a cause that matches nomadops.ErrGone, as Nomad's answer for a node that is not there does.
+// goneError is a cause that matches nomadops.ErrGone, as Nomad's answer for a node or a Raft peer that is not there
+// does.
 type goneError string
 
 func (e goneError) Error() string { return string(e) }
@@ -555,6 +562,84 @@ func (c client) Purge(ctx context.Context, nodeID string) error {
 			return errDenied
 		}
 		c.f.nodes = slices.DeleteFunc(c.f.nodes, func(n fakeNode) bool { return n.ID == nodeID })
+		return nil
+	})
+}
+
+// peerIndex returns the index of the peer with the Raft ID, or -1. The caller holds the lock.
+func (f *Fake) peerIndex(raftID string) int {
+	return slices.IndexFunc(f.peers, func(p nomadops.Peer) bool { return p.ID == raftID })
+}
+
+// notInRaft is Nomad's answer for a Raft ID that is not in the Raft configuration.
+func notInRaft(raftID string) goneError {
+	return goneError(fmt.Sprintf("id %q was not found in the Raft configuration", raftID))
+}
+
+// moveLeadership makes the peer at index i lead, as a transfer does: the leader flags of the peers and of the report,
+// the leader's address, and the stable time of every server in the report, which a new leader resets. It does nothing
+// when the peer leads already. A peer that does not vote cannot lead: the first voter other than the leader takes the
+// leadership instead, and when there is none the leader stays. The caller holds the lock.
+func (f *Fake) moveLeadership(i int) {
+	if f.peers[i].Leader {
+		return
+	}
+	if !f.peers[i].Voter {
+		i = slices.IndexFunc(f.peers, func(p nomadops.Peer) bool { return p.Voter && !p.Leader })
+		if i < 0 {
+			return
+		}
+	}
+	for k := range f.peers {
+		f.peers[k].Leader = k == i
+	}
+	f.leader = f.peers[i].Address.String()
+	now := time.Now()
+	for k := range f.health.Servers {
+		f.health.Servers[k].Leader = f.health.Servers[k].ID == f.peers[i].ID
+		f.health.Servers[k].StableSince = now
+	}
+}
+
+// TransferLeadership hands the leadership to the voter with the Raft ID, or to the first other voter when the server
+// does not vote, as moveLeadership says; to the leader it changes nothing. It fails with an error that matches
+// nomadops.ErrGone when no peer has the ID, and refuses an ID that the client refuses before any call.
+func (c client) TransferLeadership(ctx context.Context, raftID string) error {
+	if err := nomadops.CheckRaftID(raftID); err != nil {
+		return &callError{name: "TransferLeadership", cause: err}
+	}
+	return c.f.call(ctx, c.server, "TransferLeadership", raftID, func() error {
+		if c.f.bootstrapped == nil {
+			return errDenied
+		}
+		i := c.f.peerIndex(raftID)
+		if i < 0 {
+			return notInRaft(raftID)
+		}
+		c.f.moveLeadership(i)
+		return nil
+	})
+}
+
+// RemovePeer removes the peer from the Raft configuration and leaves the Health as it is; a peer that is not there
+// counts as removed. It fails with a permanent error for the leader's own peer, which tent never asks and Nomad's
+// answer to which is not known, and refuses an ID that the client refuses before any call.
+func (c client) RemovePeer(ctx context.Context, raftID string) error {
+	if err := nomadops.CheckRaftID(raftID); err != nil {
+		return &callError{name: "RemovePeer", cause: err}
+	}
+	return c.f.call(ctx, c.server, "RemovePeer", raftID, func() error {
+		if c.f.bootstrapped == nil {
+			return errDenied
+		}
+		i := c.f.peerIndex(raftID)
+		switch {
+		case i < 0:
+			return nil
+		case c.f.peers[i].Leader:
+			return fmt.Errorf("the peer %s leads the cluster", raftID)
+		}
+		c.f.peers = slices.Delete(c.f.peers, i, i+1)
 		return nil
 	})
 }
