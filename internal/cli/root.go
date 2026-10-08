@@ -132,7 +132,7 @@ func newRootCommand(s Streams, opts *globalOptions) *cobra.Command {
 	cmd.AddCommand(
 		newVersionCommand(opts), newCreateCommand(opts), newGetCommand(opts), newReplaceCommand(opts),
 		newDeleteCommand(opts), newStateCommand(opts), newEditCommand(opts), newUpdateCommand(opts),
-		newValidateCommand(opts), newExportCommand(opts), newUICommand(opts),
+		newValidateCommand(opts), newExportCommand(opts), newUICommand(opts), newRollingUpdateCommand(opts),
 	)
 	return cmd
 }
