@@ -61,9 +61,14 @@ type Service struct {
 	// OnDeletePlan, when set, is called with the plan of a delete, made under the cluster's lock, just before the
 	// delete applies it. When it returns an error, the delete stops before it changes anything and returns that error.
 	OnDeletePlan func(DeletePlan) error
+	// OnRollPlan, when set, is called with the plan of a rolling update that has a step to take, made under the
+	// cluster's lock, just before the roll starts. When it returns an error, the roll stops before it changes anything
+	// and returns that error.
+	OnRollPlan func(RollPlan) error
 	// Now, when set, returns the current time for new CA, node and operator certificates, for the mark of the Nomad
-	// bootstrap, for the age of a client's machine that has not joined, for the certificate checks of a validation and,
-	// unless Assets.Now is set, for the signature check of the downloaded files; it defaults to time.Now.
+	// bootstrap, for the age of a client's machine that has not joined, for the certificate checks of a validation, for
+	// the time that the rollout decisions see and, unless Assets.Now is set, for the signature check of the downloaded
+	// files; it defaults to time.Now.
 	Now func() time.Time
 }
 

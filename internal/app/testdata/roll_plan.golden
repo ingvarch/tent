@@ -1,0 +1,4 @@
+node group servers (server, size 3): up to date
+node group workers (client, size 2): 2 outdated: prod-workers-0 (ID instance-4) and prod-workers-1 (ID instance-5)
+
+Next: create node prod-workers-2 (client of workers, ams).

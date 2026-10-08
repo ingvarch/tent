@@ -1,0 +1,35 @@
+{
+  "groups": [
+    {
+      "name": "servers",
+      "role": "server",
+      "size": 3,
+      "outdated": []
+    },
+    {
+      "name": "workers",
+      "role": "client",
+      "size": 2,
+      "outdated": [
+        {
+          "name": "prod-workers-0",
+          "id": "instance-4",
+          "group": "workers",
+          "reason": "spec hash"
+        },
+        {
+          "name": "prod-workers-1",
+          "id": "instance-5",
+          "group": "workers",
+          "reason": "spec hash"
+        }
+      ]
+    }
+  ],
+  "next": {
+    "action": "create",
+    "group": "workers",
+    "node": "prod-workers-2",
+    "text": "create node prod-workers-2 (client of workers, ams)"
+  }
+}
