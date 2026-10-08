@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"slices"
 	"sync"
 	"testing"
@@ -105,6 +106,12 @@ func (s *stub) MarkIneligible(context.Context, string) error { return s.record("
 func (s *stub) Drain(context.Context, string, nomadops.DrainRequest) error { return s.record("Drain") }
 
 func (s *stub) Purge(context.Context, string) error { return s.record("Purge") }
+
+func (s *stub) TransferLeadership(context.Context, string) error {
+	return s.record("TransferLeadership")
+}
+
+func (s *stub) RemovePeer(context.Context, string) error { return s.record("RemovePeer") }
 
 // notReady is an error of the class ErrNotReady, as a server that broke its answer off makes.
 func notReady(path string) error {
@@ -228,6 +235,10 @@ func TestServersEveryMethodMovesOn(t *testing.T) {
 		"MarkIneligible": func(ctx context.Context, a nomadops.API) error { return a.MarkIneligible(ctx, nodeID) },
 		"Drain":          func(ctx context.Context, a nomadops.API) error { return a.Drain(ctx, nodeID, drainReq) },
 		"Purge":          func(ctx context.Context, a nomadops.API) error { return a.Purge(ctx, nodeID) },
+		"TransferLeadership": func(ctx context.Context, a nomadops.API) error {
+			return a.TransferLeadership(ctx, raftID)
+		},
+		"RemovePeer": func(ctx context.Context, a nomadops.API) error { return a.RemovePeer(ctx, raftID) },
 	}
 	for name, call := range calls {
 		t.Run(name, func(t *testing.T) {
@@ -339,6 +350,16 @@ func (r ctxRecorder) Drain(ctx context.Context, nodeID string, req nomadops.Drai
 func (r ctxRecorder) Purge(ctx context.Context, nodeID string) error {
 	r.record(ctx)
 	return r.API.Purge(ctx, nodeID)
+}
+
+func (r ctxRecorder) TransferLeadership(ctx context.Context, raftID string) error {
+	r.record(ctx)
+	return r.API.TransferLeadership(ctx, raftID)
+}
+
+func (r ctxRecorder) RemovePeer(ctx context.Context, raftID string) error {
+	r.record(ctx)
+	return r.API.RemovePeer(ctx, raftID)
 }
 
 // The arguments, the context itself and the values pass through Servers, and a write moves on after a lost answer.
@@ -731,14 +752,18 @@ func TestServersLoseTheAnswerOfANodeWrite(t *testing.T) {
 	}
 }
 
-// TestServersStopAtAGoneNode checks that ErrGone is permanent: no other server is asked, and the error comes back as
+// TestServersStopAtAGoneTarget checks that ErrGone is permanent: no other server is asked, and the error comes back as
 // it is.
-func TestServersStopAtAGoneNode(t *testing.T) {
-	gone := fmt.Errorf("the node: %w", nomadops.ErrGone)
+func TestServersStopAtAGoneTarget(t *testing.T) {
+	gone := fmt.Errorf("the target: %w", nomadops.ErrGone)
 	for name, call := range map[string]func(*nomadops.Servers) error{
 		"MarkIneligible": func(s *nomadops.Servers) error { return s.MarkIneligible(t.Context(), nodeID) },
 		"Drain":          func(s *nomadops.Servers) error { return s.Drain(t.Context(), nodeID, drainReq) },
 		"Purge":          func(s *nomadops.Servers) error { return s.Purge(t.Context(), nodeID) },
+		"TransferLeadership": func(s *nomadops.Servers) error {
+			return s.TransferLeadership(t.Context(), raftID)
+		},
+		"RemovePeer": func(s *nomadops.Servers) error { return s.RemovePeer(t.Context(), raftID) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			a, b := &stub{err: gone}, &stub{}
@@ -750,6 +775,108 @@ func TestServersStopAtAGoneNode(t *testing.T) {
 			}
 			wantStubCalls(t, a, name)
 			wantStubCalls(t, b)
+		})
+	}
+}
+
+// raftFixture is a cluster of three servers, p-1 leading, and Servers over two clients of it, which record the
+// contexts they get.
+func raftFixture(t *testing.T, seen *[]context.Context) (*nomadfake.Fake, *nomadops.Servers) {
+	t.Helper()
+	f := nomadfake.New()
+	f.SetLeader("10.0.0.1:4647")
+	f.SetBootstrapped(pki.NewBootstrapSecret())
+	f.SetPeers([]nomadops.Peer{
+		{ID: "p-1", Name: "s1", Address: netip.MustParseAddrPort("10.0.0.1:4647"), Voter: true, Leader: true},
+		{ID: "p-2", Name: "s2", Address: netip.MustParseAddrPort("10.0.0.2:4647"), Voter: true},
+		{ID: "p-3", Name: "s3", Address: netip.MustParseAddrPort("10.0.0.3:4647"), Voter: true},
+	})
+	return f, fakeServers(t, f, pki.NewBootstrapSecret(), func(a nomadops.API) nomadops.API {
+		return ctxRecorder{API: a, seen: seen}
+	})
+}
+
+// peerIDs returns the Raft IDs of the peers that the cluster lists, with a "*" after the one that leads.
+func peerIDs(t *testing.T, s *nomadops.Servers) []string {
+	t.Helper()
+	peers, err := s.Peers(t.Context())
+	if err != nil {
+		t.Fatalf("Peers: %v", err)
+	}
+	var ids []string
+	for _, p := range peers {
+		if p.Leader {
+			ids = append(ids, p.ID+"*")
+		} else {
+			ids = append(ids, p.ID)
+		}
+	}
+	return ids
+}
+
+// TestServersPassTheRaftWrites checks that the Raft ID reaches the server, with the caller's context, and that the
+// writes change the cluster.
+func TestServersPassTheRaftWrites(t *testing.T) {
+	var seen []context.Context
+	f, s := raftFixture(t, &seen)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	if err := s.TransferLeadership(ctx, "p-2"); err != nil {
+		t.Fatalf("TransferLeadership: %v", err)
+	}
+	if err := s.RemovePeer(ctx, "p-3"); err != nil {
+		t.Fatalf("RemovePeer: %v", err)
+	}
+
+	want := []nomadfake.Call{
+		{Name: "TransferLeadership", Server: addr1, Arg: "p-2"},
+		{Name: "RemovePeer", Server: addr1, Arg: "p-3"},
+	}
+	if diff := cmp.Diff(want, f.Calls()); diff != "" {
+		t.Errorf("calls (-want +got):\n%s", diff)
+	}
+	if len(seen) != 2 || seen[0] != ctx || seen[1] != ctx {
+		t.Errorf("the calls got %d contexts, want the caller's twice", len(seen))
+	}
+	if got, want := peerIDs(t, s), []string{"p-1", "p-2*"}; !slices.Equal(got, want) {
+		t.Errorf("peers = %v, want %v", got, want)
+	}
+}
+
+// TestServersLoseTheAnswerOfARaftWrite checks that each write moves on to the next server after an answer that was
+// lost, and that the repeat succeeds: the server leads already (Nomad's Noop), or its peer is gone.
+func TestServersLoseTheAnswerOfARaftWrite(t *testing.T) {
+	for name, tc := range map[string]struct {
+		call func(*nomadops.Servers) error
+		want []string // the peers afterwards
+	}{
+		"TransferLeadership": {
+			call: func(s *nomadops.Servers) error { return s.TransferLeadership(t.Context(), "p-2") },
+			want: []string{"p-1", "p-2*", "p-3"},
+		},
+		"RemovePeer": {
+			call: func(s *nomadops.Servers) error { return s.RemovePeer(t.Context(), "p-3") },
+			want: []string{"p-1*", "p-2"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, s := raftFixture(t, new([]context.Context))
+			f.LoseResponse(t, name)
+
+			if err := tc.call(s); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+
+			if want := []string{addr1, addr2}; !slices.Equal(callServers(f, name), want) {
+				t.Errorf("servers of the %s calls = %v, want %v", name, callServers(f, name), want)
+			}
+			if last := s.Last(); last != addr2 {
+				t.Errorf("Last() = %q, want %s", last, addr2)
+			}
+			if got := peerIDs(t, s); !slices.Equal(got, tc.want) {
+				t.Errorf("peers = %v, want %v", got, tc.want)
+			}
 		})
 	}
 }

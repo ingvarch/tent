@@ -24,8 +24,10 @@ type Server struct {
 // Writes move on too, since each is safe to repeat after an answer that was lost. Bootstrap is safe to repeat, and an
 // IntroToken or CreateToken whose answer was lost leaves a token that nothing uses. A node that MarkIneligible made
 // ineligible stays so. A repeated Drain moves the deadline of the drain that runs to the time of the repeat plus the
-// deadline. A node that the first server purged is gone on the next one, which counts as purged. ErrGone ends a call
-// at once, like any error that is not ErrNotReady.
+// deadline. A node that the first server purged is gone on the next one, which counts as purged. A
+// TransferLeadership to the server that leads by then is answered 200 and changes nothing. A peer that the first
+// server removed is gone on the next one, which counts as removed. ErrGone ends a call at once, like any error that
+// is not ErrNotReady.
 //
 // When no server answers, the error matches ErrNotReady and names each server with its cause, so the waits go on
 // polling over Servers and show the last causes when they end. Servers is safe for concurrent use.
@@ -156,5 +158,17 @@ func (s *Servers) Drain(ctx context.Context, nodeID string, req DrainRequest) er
 // Purge removes the client node from Nomad.
 func (s *Servers) Purge(ctx context.Context, nodeID string) error {
 	_, err := try(ctx, s, func(a API) (struct{}, error) { return struct{}{}, a.Purge(ctx, nodeID) })
+	return err
+}
+
+// TransferLeadership asks the leader to hand the leadership to the server with the Raft ID.
+func (s *Servers) TransferLeadership(ctx context.Context, raftID string) error {
+	_, err := try(ctx, s, func(a API) (struct{}, error) { return struct{}{}, a.TransferLeadership(ctx, raftID) })
+	return err
+}
+
+// RemovePeer removes the server with the Raft ID from the Raft configuration.
+func (s *Servers) RemovePeer(ctx context.Context, raftID string) error {
+	_, err := try(ctx, s, func(a API) (struct{}, error) { return struct{}{}, a.RemovePeer(ctx, raftID) })
 	return err
 }

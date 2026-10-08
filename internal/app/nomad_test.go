@@ -503,6 +503,17 @@ func (c *worldClient) Purge(ctx context.Context, nodeID string) error {
 	})
 }
 
+func (c *worldClient) TransferLeadership(ctx context.Context, raftID string) error {
+	call := nomadfake.Call{Name: "TransferLeadership", Arg: raftID}
+	return c.do(ctx, call, func(ctx context.Context) error { return c.inner.TransferLeadership(ctx, raftID) })
+}
+
+func (c *worldClient) RemovePeer(ctx context.Context, raftID string) error {
+	return c.do(ctx, nomadfake.Call{Name: "RemovePeer", Arg: raftID}, func(ctx context.Context) error {
+		return c.inner.RemovePeer(ctx, raftID)
+	})
+}
+
 // shapeNodes returns the nodes without those that a test dropped, and with the edits of the test.
 func (w *nomadWorld) shapeNodes(nodes []nomadops.Node) []nomadops.Node {
 	w.mu.Lock()
@@ -549,10 +560,10 @@ func (w *nomadWorld) shapeHealth(h nomadops.Health) nomadops.Health {
 	return h
 }
 
-// TestWorldClientPassesTheNodeWritesThroughItsHook checks that MarkIneligible, Drain and Purge of a client of the
-// world go through the world's hook with the Call that the Nomad fake logs, reach the fake when the hook calls next,
-// and return the hook's error, without reaching the fake, when it does not.
-func TestWorldClientPassesTheNodeWritesThroughItsHook(t *testing.T) {
+// TestWorldClientPassesTheWritesThroughItsHook checks that MarkIneligible, Drain, Purge, TransferLeadership and
+// RemovePeer of a client of the world go through the world's hook with the Call that the Nomad fake logs, reach the
+// fake when the hook calls next, and return the hook's error, without reaching the fake, when it does not.
+func TestWorldClientPassesTheWritesThroughItsHook(t *testing.T) {
 	svc, _, w := newRelease(t)
 	errStopped := errors.New("the hook stopped the call")
 	var hooked []nomadfake.Call
@@ -571,15 +582,20 @@ func TestWorldClientPassesTheNodeWritesThroughItsHook(t *testing.T) {
 	}
 	req := nomadops.DrainRequest{Deadline: time.Hour, Meta: map[string]string{"tent_machine": "m-1"}}
 	calls := map[string]func() error{
-		"MarkIneligible": func() error { return api.MarkIneligible(t.Context(), "n-1") },
-		"Drain":          func() error { return api.Drain(t.Context(), "n-1", req) },
-		"Purge":          func() error { return api.Purge(t.Context(), "n-1") },
+		"MarkIneligible":     func() error { return api.MarkIneligible(t.Context(), "n-1") },
+		"Drain":              func() error { return api.Drain(t.Context(), "n-1", req) },
+		"Purge":              func() error { return api.Purge(t.Context(), "n-1") },
+		"TransferLeadership": func() error { return api.TransferLeadership(t.Context(), "raft-1") },
+		"RemovePeer":         func() error { return api.RemovePeer(t.Context(), "raft-1") },
 	}
 	wantCalls := []nomadfake.Call{
 		{Name: "MarkIneligible", Server: server, Arg: "n-1"},
 		{Name: "Drain", Server: server, Arg: "n-1 1h0m0s tent_machine=m-1"},
 		{Name: "Purge", Server: server, Arg: "n-1"},
+		{Name: "TransferLeadership", Server: server, Arg: "raft-1"},
+		{Name: "RemovePeer", Server: server, Arg: "raft-1"},
 	}
+	names := []string{"MarkIneligible", "Drain", "Purge", "TransferLeadership", "RemovePeer"}
 	logged := func() []nomadfake.Call {
 		var out []nomadfake.Call
 		for _, c := range w.Log() {
@@ -588,7 +604,7 @@ func TestWorldClientPassesTheNodeWritesThroughItsHook(t *testing.T) {
 		return out
 	}
 
-	for _, name := range []string{"MarkIneligible", "Drain", "Purge"} {
+	for _, name := range names {
 		// The world has no instances yet, so it has no leader and a call that reaches the fake fails as Nomad's does.
 		if err := calls[name](); !errors.Is(err, nomadops.ErrNotReady) {
 			t.Errorf("%s error = %v, want the error of the fake, ErrNotReady", name, err)
@@ -602,7 +618,7 @@ func TestWorldClientPassesTheNodeWritesThroughItsHook(t *testing.T) {
 	}
 
 	stop = true
-	for _, name := range []string{"MarkIneligible", "Drain", "Purge"} {
+	for _, name := range names {
 		if err := calls[name](); !errors.Is(err, errStopped) {
 			t.Errorf("%s error = %v, want the error of the hook", name, err)
 		}
