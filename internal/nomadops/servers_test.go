@@ -100,6 +100,12 @@ func (s *stub) KeyringReady(context.Context) (bool, error) {
 	return true, nil
 }
 
+func (s *stub) MarkIneligible(context.Context, string) error { return s.record("MarkIneligible") }
+
+func (s *stub) Drain(context.Context, string, nomadops.DrainRequest) error { return s.record("Drain") }
+
+func (s *stub) Purge(context.Context, string) error { return s.record("Purge") }
+
 // notReady is an error of the class ErrNotReady, as a server that broke its answer off makes.
 func notReady(path string) error {
 	return nomadops.NewCallError("GET", path, io.ErrUnexpectedEOF)
@@ -219,6 +225,9 @@ func TestServersEveryMethodMovesOn(t *testing.T) {
 			}
 			return err
 		},
+		"MarkIneligible": func(ctx context.Context, a nomadops.API) error { return a.MarkIneligible(ctx, nodeID) },
+		"Drain":          func(ctx context.Context, a nomadops.API) error { return a.Drain(ctx, nodeID, drainReq) },
+		"Purge":          func(ctx context.Context, a nomadops.API) error { return a.Purge(ctx, nodeID) },
 	}
 	for name, call := range calls {
 		t.Run(name, func(t *testing.T) {
@@ -315,6 +324,21 @@ func (r ctxRecorder) KeyringReady(ctx context.Context) (bool, error) {
 func (r ctxRecorder) Health(ctx context.Context) (nomadops.Health, error) {
 	r.record(ctx)
 	return r.API.Health(ctx)
+}
+
+func (r ctxRecorder) MarkIneligible(ctx context.Context, nodeID string) error {
+	r.record(ctx)
+	return r.API.MarkIneligible(ctx, nodeID)
+}
+
+func (r ctxRecorder) Drain(ctx context.Context, nodeID string, req nomadops.DrainRequest) error {
+	r.record(ctx)
+	return r.API.Drain(ctx, nodeID, req)
+}
+
+func (r ctxRecorder) Purge(ctx context.Context, nodeID string) error {
+	r.record(ctx)
+	return r.API.Purge(ctx, nodeID)
 }
 
 // The arguments, the context itself and the values pass through Servers, and a write moves on after a lost answer.
@@ -628,5 +652,104 @@ func TestServersPrintOnlyAddresses(t *testing.T) {
 	secrettest.CheckHidden(t, secrettest.Printed(t, *s), map[string][]byte{"the token": token}, "")
 	if got, want := fmt.Sprint(s), "nomadops.Servers("+addr1+", "+addr2+")"; got != want {
 		t.Errorf("Sprint = %q, want %q", got, want)
+	}
+}
+
+// TestServersPassTheNodeWrites checks that the node ID and the drain request reach the server, with the caller's
+// context, and that the writes change the cluster.
+func TestServersPassTheNodeWrites(t *testing.T) {
+	f := nomadfake.New()
+	f.SetLeader(leaderAddr)
+	f.SetBootstrapped(pki.NewBootstrapSecret())
+	f.Register(nomadops.Node{ID: nodeID, Name: "prod-workers-1", Status: "ready", Eligible: true})
+	var seen []context.Context
+	s := fakeServers(t, f, pki.NewBootstrapSecret(), func(a nomadops.API) nomadops.API {
+		return ctxRecorder{API: a, seen: &seen}
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	for name, err := range map[string]error{
+		"MarkIneligible": s.MarkIneligible(ctx, nodeID),
+		"Drain":          s.Drain(ctx, nodeID, drainReq),
+		"Purge":          s.Purge(ctx, nodeID),
+	} {
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+
+	want := []nomadfake.Call{
+		{Name: "MarkIneligible", Server: addr1, Arg: nodeID},
+		{Name: "Drain", Server: addr1, Arg: nodeID + " 1h0m0s tent_machine=m-1"},
+		{Name: "Purge", Server: addr1, Arg: nodeID},
+	}
+	if diff := cmp.Diff(want, f.Calls()); diff != "" {
+		t.Errorf("calls (-want +got):\n%s", diff)
+	}
+	if len(seen) != 3 {
+		t.Fatalf("%d calls seen, want 3", len(seen))
+	}
+	for i, c := range seen {
+		if c != ctx {
+			t.Errorf("call %d got another context than the caller's", i)
+		}
+	}
+	if nodes, err := s.Nodes(t.Context()); err != nil || len(nodes) != 0 {
+		t.Errorf("Nodes() after the purge = %+v, %v; want none", nodes, err)
+	}
+}
+
+// TestServersLoseTheAnswerOfANodeWrite checks that each write moves on to the next server after an answer that was
+// lost, and that the repeat succeeds: the node is ineligible or draining already, or gone.
+func TestServersLoseTheAnswerOfANodeWrite(t *testing.T) {
+	for _, name := range []string{"MarkIneligible", "Drain", "Purge"} {
+		t.Run(name, func(t *testing.T) {
+			f := nomadfake.New()
+			f.SetLeader(leaderAddr)
+			f.SetBootstrapped(pki.NewBootstrapSecret())
+			f.Register(nomadops.Node{ID: nodeID, Name: "prod-workers-1", Status: "ready", Eligible: true})
+			s := fakeServers(t, f, pki.NewBootstrapSecret(), nil)
+			f.LoseResponse(t, name)
+			call := map[string]func() error{
+				"MarkIneligible": func() error { return s.MarkIneligible(t.Context(), nodeID) },
+				"Drain":          func() error { return s.Drain(t.Context(), nodeID, drainReq) },
+				"Purge":          func() error { return s.Purge(t.Context(), nodeID) },
+			}[name]
+
+			if err := call(); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+
+			if want := []string{addr1, addr2}; !slices.Equal(callServers(f, name), want) {
+				t.Errorf("servers of the %s calls = %v, want %v", name, callServers(f, name), want)
+			}
+			if last := s.Last(); last != addr2 {
+				t.Errorf("Last() = %q, want %s", last, addr2)
+			}
+		})
+	}
+}
+
+// TestServersStopAtAGoneNode checks that ErrGone is permanent: no other server is asked, and the error comes back as
+// it is.
+func TestServersStopAtAGoneNode(t *testing.T) {
+	gone := fmt.Errorf("the node: %w", nomadops.ErrGone)
+	for name, call := range map[string]func(*nomadops.Servers) error{
+		"MarkIneligible": func(s *nomadops.Servers) error { return s.MarkIneligible(t.Context(), nodeID) },
+		"Drain":          func(s *nomadops.Servers) error { return s.Drain(t.Context(), nodeID, drainReq) },
+		"Purge":          func(s *nomadops.Servers) error { return s.Purge(t.Context(), nodeID) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, b := &stub{err: gone}, &stub{}
+
+			err := call(servers(t, a, b))
+
+			if !errors.Is(err, nomadops.ErrGone) || errors.Is(err, nomadops.ErrNotReady) || err.Error() != gone.Error() {
+				t.Errorf("%s() error = %v, want the ErrGone error as it is", name, err)
+			}
+			wantStubCalls(t, a, name)
+			wantStubCalls(t, b)
+		})
 	}
 }

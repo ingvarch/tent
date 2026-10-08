@@ -2,11 +2,16 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/netip"
 	"slices"
 	"strings"
 	"sync"
+	"testing"
+	"time"
+
+	"github.com/google/go-cmp/cmp"
 
 	"github.com/ingvarch/tent/internal/app"
 	"github.com/ingvarch/tent/internal/assets"
@@ -481,6 +486,23 @@ func (c *worldClient) KeyringReady(ctx context.Context) (v bool, err error) {
 	return v, nil
 }
 
+func (c *worldClient) MarkIneligible(ctx context.Context, nodeID string) error {
+	return c.do(ctx, nomadfake.Call{Name: "MarkIneligible", Arg: nodeID}, func(ctx context.Context) error {
+		return c.inner.MarkIneligible(ctx, nodeID)
+	})
+}
+
+func (c *worldClient) Drain(ctx context.Context, nodeID string, req nomadops.DrainRequest) error {
+	call := nomadfake.Call{Name: "Drain", Arg: nomadfake.DrainArg(nodeID, req)}
+	return c.do(ctx, call, func(ctx context.Context) error { return c.inner.Drain(ctx, nodeID, req) })
+}
+
+func (c *worldClient) Purge(ctx context.Context, nodeID string) error {
+	return c.do(ctx, nomadfake.Call{Name: "Purge", Arg: nodeID}, func(ctx context.Context) error {
+		return c.inner.Purge(ctx, nodeID)
+	})
+}
+
 // shapeNodes returns the nodes without those that a test dropped, and with the edits of the test.
 func (w *nomadWorld) shapeNodes(nodes []nomadops.Node) []nomadops.Node {
 	w.mu.Lock()
@@ -525,4 +547,70 @@ func (w *nomadWorld) shapeHealth(h nomadops.Health) nomadops.Health {
 	}
 	h.Servers = servers
 	return h
+}
+
+// TestWorldClientPassesTheNodeWritesThroughItsHook checks that MarkIneligible, Drain and Purge of a client of the
+// world go through the world's hook with the Call that the Nomad fake logs, reach the fake when the hook calls next,
+// and return the hook's error, without reaching the fake, when it does not.
+func TestWorldClientPassesTheNodeWritesThroughItsHook(t *testing.T) {
+	svc, _, w := newRelease(t)
+	errStopped := errors.New("the hook stopped the call")
+	var hooked []nomadfake.Call
+	var stop bool
+	w.SetHook(func(ctx context.Context, c nomadfake.Call, next func(context.Context) error) error {
+		hooked = append(hooked, c)
+		if stop {
+			return errStopped
+		}
+		return next(ctx)
+	})
+	const server = "198.51.100.1:4646"
+	api, err := svc.Nomad(nomadops.Config{Address: server})
+	if err != nil {
+		t.Fatalf("Nomad: %v", err)
+	}
+	req := nomadops.DrainRequest{Deadline: time.Hour, Meta: map[string]string{"tent_machine": "m-1"}}
+	calls := map[string]func() error{
+		"MarkIneligible": func() error { return api.MarkIneligible(t.Context(), "n-1") },
+		"Drain":          func() error { return api.Drain(t.Context(), "n-1", req) },
+		"Purge":          func() error { return api.Purge(t.Context(), "n-1") },
+	}
+	wantCalls := []nomadfake.Call{
+		{Name: "MarkIneligible", Server: server, Arg: "n-1"},
+		{Name: "Drain", Server: server, Arg: "n-1 1h0m0s tent_machine=m-1"},
+		{Name: "Purge", Server: server, Arg: "n-1"},
+	}
+	logged := func() []nomadfake.Call {
+		var out []nomadfake.Call
+		for _, c := range w.Log() {
+			out = append(out, c.Call)
+		}
+		return out
+	}
+
+	for _, name := range []string{"MarkIneligible", "Drain", "Purge"} {
+		// The world has no instances yet, so it has no leader and a call that reaches the fake fails as Nomad's does.
+		if err := calls[name](); !errors.Is(err, nomadops.ErrNotReady) {
+			t.Errorf("%s error = %v, want the error of the fake, ErrNotReady", name, err)
+		}
+	}
+	if diff := cmp.Diff(wantCalls, hooked); diff != "" {
+		t.Errorf("hooked calls (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(wantCalls, logged()); diff != "" {
+		t.Errorf("logged calls (-want +got):\n%s", diff)
+	}
+
+	stop = true
+	for _, name := range []string{"MarkIneligible", "Drain", "Purge"} {
+		if err := calls[name](); !errors.Is(err, errStopped) {
+			t.Errorf("%s error = %v, want the error of the hook", name, err)
+		}
+	}
+	if diff := cmp.Diff(append(wantCalls, wantCalls...), hooked); diff != "" {
+		t.Errorf("hooked calls after the stop (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(wantCalls, logged()); diff != "" {
+		t.Errorf("logged calls after the stop (-want +got):\n%s", diff)
+	}
 }
