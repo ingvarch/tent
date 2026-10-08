@@ -1,0 +1,48 @@
+# mode roll
+# a new node runs Nomad 2.0.7
+# group control: combined, size 3, zones ams and fra, drain 1h0m0s
+# machine prod-control-0 (m-1) in ams runs Nomad 2.0.6, outdated
+# machine prod-control-1 (m-2) in fra runs Nomad 2.0.6, outdated
+# machine prod-control-2 (m-3) in ams runs Nomad 2.0.6, outdated
+# leader prod-control-0
+create node prod-control-3 (combined of control, ams)
+wait until node prod-control-3 joins
+wait until 12:01:30 for the servers to be stable
+mark node prod-control-2 ineligible
+drain node prod-control-2 within 1h0m0s
+wait until node prod-control-2 is drained
+stop node prod-control-2 (ID m-3)
+wait until autopilot no longer counts prod-control-2 as a healthy voter
+remove prod-control-2 from the Raft configuration
+force prod-control-2.global out of the gossip pool
+delete node prod-control-2 (ID m-3)
+wait until Nomad lists node prod-control-2 at 10.64.0.5 as down
+purge node prod-control-2 at 10.64.0.5 from Nomad
+create node prod-control-2 (combined of control, fra)
+wait until node prod-control-2 joins
+wait until 12:04:20 for the servers to be stable
+mark node prod-control-1 ineligible
+drain node prod-control-1 within 1h0m0s
+wait until node prod-control-1 is drained
+stop node prod-control-1 (ID m-2)
+wait until autopilot no longer counts prod-control-1 as a healthy voter
+remove prod-control-1 from the Raft configuration
+force prod-control-1.global out of the gossip pool
+delete node prod-control-1 (ID m-2)
+wait until Nomad lists node prod-control-1 at 10.64.0.4 as down
+purge node prod-control-1 at 10.64.0.4 from Nomad
+create node prod-control-1 (combined of control, ams)
+wait until node prod-control-1 joins
+wait until 12:07:10 for the servers to be stable
+mark node prod-control-0 ineligible
+drain node prod-control-0 within 1h0m0s
+wait until node prod-control-0 is drained
+move the leadership from prod-control-0 to prod-control-1
+stop node prod-control-0 (ID m-1)
+wait until autopilot no longer counts prod-control-0 as a healthy voter
+remove prod-control-0 from the Raft configuration
+force prod-control-0.global out of the gossip pool
+delete node prod-control-0 (ID m-1)
+wait until Nomad lists node prod-control-0 at 10.64.0.3 as down
+purge node prod-control-0 at 10.64.0.3 from Nomad
+done

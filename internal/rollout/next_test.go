@@ -37,12 +37,12 @@ func TestNextRejectsModesItCannotRun(t *testing.T) {
 	}
 }
 
-func TestNextCannotRollCombinedGroupsYet(t *testing.T) {
+func TestNextRejectsARoleItDoesNotKnow(t *testing.T) {
 	s := baseState()
-	s.Groups = append(s.Groups, rollout.Group{Name: "control", Role: v1alpha1.RoleCombined, Size: 3})
+	s.Groups = append(s.Groups, rollout.Group{Name: "control", Role: "bogus", Size: 3})
 	_, err := rollout.Next(s, rollout.Roll)
-	if err == nil || err.Error() != "rollout cannot roll combined groups yet" {
-		t.Errorf("Next error = %v, want the error for combined groups", err)
+	if err == nil || err.Error() != `rollout: unknown role "bogus"` {
+		t.Errorf("Next error = %v, want the error for an unknown role", err)
 	}
 	if errors.Is(err, rollout.ErrRefused) {
 		t.Errorf("error %q matches ErrRefused, want a plain error", err)

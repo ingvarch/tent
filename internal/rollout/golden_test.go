@@ -32,12 +32,30 @@ func serversGroup(size int) rollout.Group {
 	}
 }
 
+// combinedGroup is the combined group control: new hash, zones ams and fra, a drain deadline of an hour.
+func combinedGroup(size int) rollout.Group {
+	return rollout.Group{
+		Name: "control", Role: v1alpha1.RoleCombined, Size: size, Zones: []string{"ams", "fra"}, SpecHash: newHash,
+		DrainTimeout: time.Hour,
+	}
+}
+
 // outdatedServers is a cluster of n outdated servers, the first leading, that run the old Nomad.
 func outdatedServers(n int) *world {
 	w := newWorld(curVersion)
 	w.addGroup(serversGroup(n))
 	for range n {
 		w.addServer(oldHash, oldVersion)
+	}
+	return w
+}
+
+// outdatedCombined is a cluster of n outdated combined machines that run the old Nomad, the first leading.
+func outdatedCombined(n int) *world {
+	w := newWorld(curVersion)
+	w.addGroup(combinedGroup(n))
+	for range n {
+		w.addCombined(oldHash, oldVersion)
 	}
 	return w
 }
@@ -49,6 +67,17 @@ func outdatedWorkers(surge, unavailable int) *world {
 	w.addGroup(workersGroup(surge, unavailable))
 	w.addClients("workers", 3, oldHash, oldVersion)
 	return w
+}
+
+// countServers returns how many machines run a server.
+func (w *world) countServers() int {
+	n := 0
+	for _, m := range w.machines {
+		if m.Role.RunsServer() {
+			n++
+		}
+	}
+	return n
 }
 
 type scenario struct {
@@ -90,6 +119,7 @@ var scenarios = []scenario{
 	{"servers3", rollout.Roll, func() *world { return outdatedServers(3) }},
 	{"servers5", rollout.Roll, func() *world { return outdatedServers(5) }},
 	{"server1", rollout.Roll, func() *world { return outdatedServers(1) }},
+	{"combined3", rollout.Roll, func() *world { return outdatedCombined(3) }},
 	{"cluster", rollout.Roll, func() *world {
 		w := outdatedServers(3)
 		g := workersGroup(1, 0)
@@ -123,8 +153,11 @@ func (w *world) describe(mode rollout.Mode) []string {
 	}
 	for _, g := range w.groups {
 		line := fmt.Sprintf("group %s: %s, size %d, zones %s", g.Name, g.Role, g.Size, strings.Join(g.Zones, " and "))
-		if g.Role == v1alpha1.RoleClient {
+		switch g.Role {
+		case v1alpha1.RoleClient:
 			line += fmt.Sprintf(", maxSurge %d, maxUnavailable %d, drain %s", g.MaxSurge, g.MaxUnavailable, g.DrainTimeout)
+		case v1alpha1.RoleCombined:
+			line += fmt.Sprintf(", drain %s", g.DrainTimeout)
 		}
 		lines = append(lines, line)
 	}
@@ -223,7 +256,7 @@ func TestRollsEndUpToDate(t *testing.T) {
 				}
 			}
 			voters, _ := w.voterCounts()
-			if got, want := len(w.servers), w.countOf("servers"); got != want || voters != want {
+			if got, want := len(w.servers), w.countServers(); got != want || voters != want {
 				t.Errorf("the Raft configuration has %d servers and %d voters, want %d of each", got, voters, want)
 			}
 			for _, mem := range w.members {

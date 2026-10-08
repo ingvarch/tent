@@ -1,10 +1,7 @@
 package rollout
 
 import (
-	"cmp"
-	"fmt"
 	"slices"
-	"strings"
 
 	"golang.org/x/mod/semver"
 
@@ -28,8 +25,9 @@ func nextClient(s State, g Group) (Step, bool, error) {
 		}
 	}
 	rules := []func() (Step, bool, error){
-		c.purgeOrphan, c.deleteRemoved, c.create, c.startRemoval, c.drain, c.waitDrained,
-		func() (Step, bool, error) { return waitJoined(c.g, c.ms) }, c.waitOrphan,
+		func() (Step, bool, error) { return purgeOrphan(c.s, c.g) }, c.deleteRemoved, c.create, c.startRemoval, c.drain,
+		c.waitDrained, func() (Step, bool, error) { return waitJoined(c.g, c.ms) },
+		func() (Step, bool, error) { return waitOrphan(c.s, c.g) },
 	}
 	for _, rule := range rules {
 		if step, found, err := rule(); err != nil || found {
@@ -50,45 +48,7 @@ func (c *clientGroup) removing(m Machine) bool {
 // eligible and not draining. (A machine under removal has an ineligible or draining node, or is deleted at once.)
 func (c *clientGroup) available(m Machine) bool {
 	n, ok := c.nodes[m.ID]
-	return ok && m.Joined && m.Ready && n.Status == nodeReady && n.Eligible && !n.Draining
-}
-
-// orphans returns the nodes of the group's name pattern that no machine of the cluster has, by name and ID.
-func (c *clientGroup) orphans() []Node {
-	var orphans []Node
-	for _, n := range c.s.Nomad.Nodes {
-		if isNodeOf(c.s.Cluster, c.g.Name, n.Name) && !c.hasMachine(n) {
-			orphans = append(orphans, n)
-		}
-	}
-	slices.SortStableFunc(orphans, func(a, b Node) int {
-		return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.ID, b.ID))
-	})
-	return orphans
-}
-
-// hasMachine reports whether a listed machine of the cluster has the node's name and address, or a machine of the
-// group of that name lacks an address, so that its node cannot be told from an orphan.
-func (c *clientGroup) hasMachine(n Node) bool {
-	return slices.ContainsFunc(c.s.Machines, func(m Machine) bool {
-		return at(m, n) || (m.Group == c.g.Name && m.Name == n.Name && !m.PrivateIP.IsValid())
-	})
-}
-
-// isNodeOf reports whether name is <cluster>-<group>-<digits>.
-func isNodeOf(cluster, group, name string) bool {
-	index, ok := strings.CutPrefix(name, cluster+"-"+group+"-")
-	return ok && index != "" && strings.Trim(index, "0123456789") == ""
-}
-
-// purgeOrphan purges a node that is down and that no machine has.
-func (c *clientGroup) purgeOrphan() (Step, bool, error) {
-	for _, n := range c.orphans() {
-		if n.Status == nodeDown {
-			return Step{Action: Purge, Group: c.g.Name, Node: n}, true, nil
-		}
-	}
-	return Step{}, false, nil
+	return m.Joined && nodeWhy(m, n, ok) == ""
 }
 
 // deleteRemoved deletes a machine under removal whose node is down or whose drain has completed.
@@ -179,14 +139,6 @@ func (c *clientGroup) waitDrained() (Step, bool, error) {
 	return Step{}, false, nil
 }
 
-// waitOrphan waits for a node that no machine has to go down.
-func (c *clientGroup) waitOrphan() (Step, bool, error) {
-	if orphans := c.orphans(); len(orphans) > 0 {
-		return Step{Action: WaitNodeDown, Group: c.g.Name, Node: orphans[0]}, true, nil
-	}
-	return Step{}, false, nil
-}
-
 // finish ends the group when no machine is outdated, and refuses it otherwise: no rule found a step to take.
 func (c *clientGroup) finish() (Step, bool, error) {
 	if !slices.ContainsFunc(c.ms, func(m Machine) bool { return outdated(c.s, c.g, m) }) {
@@ -195,7 +147,8 @@ func (c *clientGroup) finish() (Step, bool, error) {
 	var why []string
 	for _, m := range c.ms {
 		if !c.available(m) {
-			why = append(why, m.Name+" "+c.unavailableWhy(m))
+			n, ok := c.nodes[m.ID]
+			why = append(why, m.Name+" "+nodeWhy(m, n, ok))
 		}
 	}
 	reasons := ""
@@ -205,25 +158,6 @@ func (c *clientGroup) finish() (Step, bool, error) {
 	return Step{}, false, refuse(
 		"node group %s: cannot go on: %swith maxSurge %d and maxUnavailable %d no outdated node can be replaced",
 		c.g.Name, reasons, c.g.MaxSurge, c.g.MaxUnavailable)
-}
-
-// unavailableWhy says why a machine of the group is not available.
-func (c *clientGroup) unavailableWhy(m Machine) string {
-	n, ok := c.nodes[m.ID]
-	switch {
-	case !m.Ready:
-		return "is not running"
-	case !ok && !m.PrivateIP.IsValid():
-		return "has no node in Nomad: the cloud reports no private address for it"
-	case !ok:
-		return "has no node in Nomad"
-	case n.Status != nodeReady:
-		return fmt.Sprintf("is %s in Nomad", n.Status)
-	case !n.Eligible:
-		return "is not eligible"
-	default:
-		return "is draining"
-	}
 }
 
 // requireServersAtVersion refuses while a server runs an older Nomad than a new node would.
