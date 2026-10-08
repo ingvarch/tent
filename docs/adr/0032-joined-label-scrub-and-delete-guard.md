@@ -1,7 +1,9 @@
 # ADR-0032: The joined label, the scrub and the delete guard
 
 - **Status:** Accepted; amended by [ADR-0033](0033-operator-commands.md) (the M2.8 follow-up is built: `validate
-  cluster` finds a labelled node that died)
+  cluster` finds a labelled node that died) and by [ADR-0037](0037-rolling-update-of-client-groups.md) (since M3.3 the
+  guard's text names `rolling-update` and no longer says that tent cannot drain a node; M3.6 lifts the guard where
+  tent drains or removes a node safely, decision 34)
 - **Date:** 2026-10-06
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),

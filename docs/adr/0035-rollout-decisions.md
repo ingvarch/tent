@@ -2,7 +2,11 @@
 
 - **Status:** Accepted; the refusal of two voters and of single-server groups is **provisional** (see
   [Server removal](#server-removal)); amended by [ADR-0036](0036-nomad-calls-of-a-roll.md) (the M3.2 follow-up is
-  built: `nomadops` reads the Raft IDs, `StableSince`, the failure tolerance, the gossip members and the drain state)
+  built: `nomadops` reads the Raft IDs, `StableSince`, the failure tolerance, the gossip members and the drain state);
+  amended by [ADR-0037](0037-rolling-update-of-client-groups.md) (a new node never takes a name that Nomad lists a
+  node of, in any status, which changes the name that a roll's create takes), and the maintainer answered the two open
+  questions on 2026-10-08 (decisions 37 and 38, item 15): M3.4 builds the answer, and item 15's refusals stand until
+  then
 - **Date:** 2026-10-08
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0004](0004-layered-architecture.md),
@@ -128,6 +132,10 @@ last run did.
     - A roll of a group of one server is refused: `a group of one server cannot roll: its failure tolerance is 0`.
     - Open for the maintainer: the order of a removal from two voters, and whether single servers may roll. The other
       answer is in Alternatives.
+    - **Answered on 2026-10-08** (decisions 37 and 38 of [architecture §18](../architecture.md#18-open-questions)): the
+      other answer. With two voters the live server's peer is removed first and the machine is stopped at once; a group
+      of one server rolls without the failure-tolerance check, through two voters, with `--allow-single-server`. M3.4
+      builds it and changes the two refusals and the goldens `server1` and `shrink_servers_3_1`; until then they stand.
 16. **A combined group rolls like servers and is drained first.** The victim's node is marked ineligible (or drained at
     once when its drain meta already holds the machine's ID), drained with the group's `drainTimeout` and waited for,
     then the machine is removed as a server. A combined victim that leads hands the leadership over after the drain.
@@ -199,8 +207,8 @@ last run did.
 
 ### Negative / trade-offs
 
-- **A shrink from three servers to one and a roll of a single server are refused** until the maintainer chooses the
-  other answer.
+- **A shrink from three servers to one and a roll of a single server are refused** until M3.4 builds the maintainer's
+  answer (decisions 37 and 38).
 - **A roll is slow per server.** The window is at least 70 s after a change, and `WaitServerDown` costs about 36 to
   66 s ([platform notes §1.2](../platform-notes.md#12-features-tent-relies-on)): Serf marked a killed server failed
   after 36.7 s, 41.2 s and 65.7 s. The wait proves that the machine stopped before its peer goes.
@@ -214,11 +222,9 @@ last run did.
   drains or removes safely.
 - The loop of M3.3 calls `Next` at every poll of a wait, never only once per wait: the voters that a `WaitHealthy`
   names can drop while it waits, when autopilot removes the peer of a dead server.
-- When the maintainer answers the two questions, change the two rules and the goldens `server1` and
-  `shrink_servers_3_1`. A group of one server would then roll without the tolerance check, with
-  `--allow-single-server`, and ADR-0017's order for two voters changes. If single servers are refused for good, refuse a
-  shrink to one server before it starts, since stopping at two servers leaves the cluster weaker than it was with
-  three.
+- The maintainer answered the two questions (item 15). M3.4 changes the two rules and the goldens `server1` and
+  `shrink_servers_3_1`. A group of one server then rolls without the tolerance check, with `--allow-single-server`,
+  and ADR-0017's order for two voters changes.
 
 ## Alternatives considered
 
@@ -230,11 +236,12 @@ last run did.
 - **Marking and draining one victim at a time:** see item 9.
 - **Stop first with two voters, as ADR-0017 orders.** It leaves one of two voters alive, so no leader can remove the
   peer, and the cluster has no quorum.
-- **Remove the peer before the stop with two voters.** It kept the quorum on 2026-10-07, and it is the answer that
-  would let single servers roll. It is not built until the maintainer chooses it: the leader re-adds the removed live
-  server as a nonvoter, and autopilot promotes it 18 s (2026-10-08) and 49 s (2026-10-07) after the removal. If the
-  promotion lands between the observation and the stop, two voters remain with one of them stopped and the quorum is
-  lost. The stop must come before the shortest time seen, or a guard must see the promotion.
+- **Remove the peer before the stop with two voters.** It kept the quorum on 2026-10-07, and it is the answer that would
+  let single servers roll. It is the maintainer's answer of 2026-10-08 (decisions 37 and 38), which M3.4 builds; until
+  then item 15 refuses it. The leader re-adds the removed live server as a nonvoter, and autopilot promotes it 18 s
+  (2026-10-08) and 49 s (2026-10-07) after the removal. If the promotion lands between the observation and the stop, two
+  voters remain with one of them stopped and the quorum is lost. The stop must come before the shortest time seen, or a
+  guard must see the promotion.
 - **Purge a node that is not down.** Without client introduction a purged live node registers again, so the purge
   would not remove it. Under strict introduction, once its introduction token had expired, it could not register
   again (2026-10-08), so the purge would cut off a node whose agent still runs.

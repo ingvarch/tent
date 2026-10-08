@@ -1606,8 +1606,9 @@ VM check and its rerun, one M2.6b VM check and its rerun, and the second cluster
 26.04 (`os_id` 2760). Runs 1 to 3 ran
 on 2026-09-25, run 4 on 2026-09-27, run 5 on 2026-09-28, the M2.5 VM checks on 2026-09-29, the M2.6a VM checks and
 their reruns on 2026-09-30, the M2.6b VM checks, their reruns and the M2.7a cluster check on 2026-10-05, and the
-three M2.7b cluster runs below, all on 2026-10-06, and the M2.8 cluster check on 2026-10-07. The six E2E runs of M2.9
-(2026-10-07, below) ran the `smoke` scenario of `test/e2e` on Ubuntu 24.04 and 26.04 at once. Reports are in
+three M2.7b cluster runs below, all on 2026-10-06, the M2.8 cluster check on 2026-10-07, and the M3.3 roll check on
+2026-10-08. The six E2E runs of M2.9 (2026-10-07, below) ran the `smoke` scenario of `test/e2e` on Ubuntu 24.04 and
+26.04 at once. Reports are in
 `hack/vultr-spike/results/` (git-ignored), and the E2E runs' results in `test/e2e/results/` (git-ignored). The M1 exit
 run below was not a spike run.
 
@@ -1961,6 +1962,31 @@ at once ([ADR-0034](adr/0034-e2e-suite-on-vultr.md)):
   of a Vultr call was printed. The times fit one list request that
   waits out its 30 s timeout per failed poll (by the timing only); the suite now logs a poll whose lists fail, with
   the error and the time they took.
+
+**M3.3 roll check (2026-10-08)**, a fish script run by the maintainer's session (not a `hack/` spike run; its logs are
+not in the repo), tent `v0.1.0-27-g5893420` with the tent-node of the same build, Nomad 2.0.7: a cluster of one server
+and two workers, a job of two allocations (`distinct_hosts`, `migrate { max_parallel = 1, health_check = "checks",
+min_healthy_time = "10s" }`, an HTTP check every 5 s), the workers made outdated by a change of `spec.nomad.meta`, then
+`tent rolling-update cluster --yes` under a poller that read the job's allocations with their checks and the cluster's
+instances with a 2 s pause between polls (about every 3 s). A second roll was cut with Ctrl-C during its first drain
+wait and run again. Both rolls passed every check of the plan, and the cluster was deleted with nothing left by its tag.
+Times are the progress lines' and the poller's (UTC, to the second).
+- **The job:** at each of the 233 polls of the two rolls at least one allocation ran with its check passing.
+- **A new machine:** Vultr listed it with status `pending` at once, then `active` with power_status `stopped` 3 to 7 s
+  later; tent had its private address after 52 s; Nomad listed its node 82 to 91 s after that (three creates).
+- **A drain** of a node with one allocation took 7 s (three drains).
+- **A deleted instance** was gone from `GET /v2/instances?tag=...` at the next poll, within 2 s of the delete's answer
+  (three deletes; the fourth fell into the API's errors below).
+- **Private addresses:** a machine whose create was sent 1 s after a delete got a fresh address (10.64.0.7, while
+  10.64.0.4 had been freed); machines created about 5 minutes after deletes got the addresses of the deleted machines
+  (10.64.0.4 and 10.64.0.5).
+- **The node of a deleted machine** read `down` in Nomad 24 s after the delete's answer (one server, one measurement).
+- **Vultr's API** answered 502 and timed out from 20:22:23 to 20:24:09 UTC during the first roll (about 110 s, with one
+  answer at 20:23:33); tent's delete in that time took 22 s, and the roll went on.
+- **The cut:** the cut run printed `failed to wait for node e2e-m33roll-workers-2 to drain: context canceled` and
+  `Error: interrupted`; Nomad finished the drain meanwhile, and the next run's first step deleted the drained machine.
+- **Run times:** the cluster's create 7 minutes; the first roll of two workers with `maxSurge` 1 429 s (with the API's
+  errors); the run after the cut 182 s; the whole check 21 minutes.
 
 **Still open:**
 - Object Storage conditional writes ([3.12](#312-object-storage-)).

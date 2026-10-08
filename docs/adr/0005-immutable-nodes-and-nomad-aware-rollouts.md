@@ -11,7 +11,9 @@
   refused for now; a server is removed only after the stability window, the refresh interval plus 10 s read from
   autopilot's `StableSince`; clients: every victim of a batch is marked ineligible before any drain, the VM is
   deleted without a shutdown, its node is purged only once Nomad lists it down, and no validate step runs between
-  batches)
+  batches) and by [ADR-0037](0037-rolling-update-of-client-groups.md) (clients as built in M3.3: the new nodes first
+  when `maxSurge` allows (the default 1), a drain with the meta `tent_machine` within `drainTimeout`, a limit on every
+  wait; it refuses until `update` has applied the specs; server groups wait for M3.4 and combined groups for M3.5)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0004](0004-layered-architecture.md), [ADR-0009](0009-server-discovery-fixed-ip-slots.md),
