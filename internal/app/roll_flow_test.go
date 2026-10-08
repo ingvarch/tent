@@ -515,33 +515,45 @@ func TestRollFlowPlansAgainUnderTheLock(t *testing.T) {
 	})
 }
 
-// TestRollFlowStopsWhenOnRollPlanFails returns the error of OnRollPlan before the roll changes anything, and releases
-// the lock.
+// TestRollFlowStopsWhenOnRollPlanFails returns the error of OnRollPlan before the roll changes anything, writes no
+// replace label also with Force, and releases the lock.
 func TestRollFlowStopsWhenOnRollPlanFails(t *testing.T) {
 	t.Parallel()
-	synctest.Test(t, func(t *testing.T) {
-		svc, f, w := outdatedWorld(t)
-		cloudCalls, nomadCalls := len(f.Calls()), len(w.Log())
-		declined := errors.New("declined")
-		svc.OnRollPlan = func(app.RollPlan) error { return declined }
-		var events []string
-		svc.OnWarning = func(string) { events = append(events, "warning") }
-		svc.OnProgress = func(p app.Progress) { events = append(events, progressLine(p)) }
+	for name, opts := range map[string]app.RollOptions{
+		"plain":  {},
+		"forced": {NodeGroups: []string{"workers"}, Force: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				svc, f, w := outdatedWorld(t)
+				cloudCalls, nomadCalls := len(f.Calls()), len(w.Log())
+				declined := errors.New("declined")
+				svc.OnRollPlan = func(app.RollPlan) error { return declined }
+				var events []string
+				svc.OnWarning = func(string) { events = append(events, "warning") }
+				svc.OnProgress = func(p app.Progress) { events = append(events, progressLine(p)) }
 
-		plan, err := applyRoll(svc, app.RollOptions{})
+				plan, err := applyRoll(svc, opts)
 
-		if !errors.Is(err, declined) {
-			t.Errorf("error = %v, want the error of OnRollPlan", err)
-		}
-		wantNoWrites(t, f.Calls()[cloudCalls:])
-		if got := nomadWrites(w, nomadCalls); len(got) > 0 {
-			t.Errorf("the roll wrote to Nomad before it started: %q", got)
-		}
-		if len(events) > 0 || plan.Applied || plan.Rolled != (app.RollCounts{}) {
-			t.Errorf("events %q, applied %v, rolled %+v; want nothing after the refusal", events, plan.Applied, plan.Rolled)
-		}
-		wantLockFree(t, svc.Store)
-	})
+				if !errors.Is(err, declined) {
+					t.Errorf("error = %v, want the error of OnRollPlan", err)
+				}
+				wantNoWrites(t, f.Calls()[cloudCalls:])
+				if got := labelled(f); len(got) != 0 {
+					t.Errorf("machines with the replace label = %q, want none", got)
+				}
+				if got := nomadWrites(w, nomadCalls); len(got) > 0 {
+					t.Errorf("the roll wrote to Nomad before it started: %q", got)
+				}
+				if len(events) > 0 || plan.Applied || plan.Rolled != (app.RollCounts{}) {
+					t.Errorf("events %q, applied %v, rolled %+v; want nothing after the refusal", events, plan.Applied,
+						plan.Rolled)
+				}
+				wantLockFree(t, svc.Store)
+			})
+		})
+	}
 }
 
 // TestRollFlowTellsTheWarningsOnceBeforeTheFirstStep tells OnWarning the warnings of the cluster after OnRollPlan and

@@ -25,6 +25,8 @@ const (
 	// LabelJoined is "true" on a machine whose node has joined its cluster. Where the cloud lets user data change, the
 	// user data holds no secrets any more.
 	LabelJoined = "tent/joined"
+	// LabelReplace is "true" on a machine that a forced rolling update replaces, whatever its spec hash.
+	LabelReplace = "tent/replace"
 )
 
 // Labels maps canonical label keys to their values.

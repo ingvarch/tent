@@ -132,7 +132,8 @@ func onVultr(m *model.Cluster) error {
 	return nil
 }
 
-// Nodes returns the provider itself: its List, Create, Stop, Delete and MarkJoined are the machine primitives.
+// Nodes returns the provider itself: its List, Create, Stop, Delete, MarkJoined and MarkReplace are the machine
+// primitives.
 func (p *Provider) Nodes() cloud.Nodes { return p }
 
 // Arch returns cloud.ArchAMD64 for every plan without a call: Vultr has no arm64 Cloud Compute plan. Validate has

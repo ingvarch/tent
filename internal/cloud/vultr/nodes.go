@@ -23,6 +23,9 @@ var _ cloud.Nodes = (*Provider)(nil)
 // joinedTag is the tag of a machine whose node has joined the cluster.
 const joinedTag = cloud.LabelJoined + "=true"
 
+// replaceTag is the tag of a machine that a rolling update replaces.
+const replaceTag = cloud.LabelReplace + "=true"
+
 // taggedInstance is an instance with the canonical labels that its tags hold.
 type taggedInstance struct {
 	govultr.Instance
@@ -420,6 +423,7 @@ func (n taggedInstance) cloudInstance(addr netip.Addr) cloud.Instance {
 		PublicIP:  parseAddr(n.MainIP),
 		Ready:     ready(n.Instance),
 		Joined:    n.labels[cloud.LabelJoined] == "true",
+		Replace:   n.labels[cloud.LabelReplace] == "true",
 		Created:   createdAt(n.DateCreated),
 	}
 }
@@ -462,19 +466,36 @@ const scrubbedUserData = "#cloud-config\n# tent removed this node's user data af
 // changes between the read and the update, about a second, is lost. It is safe to repeat. A machine that is gone
 // counts as marked. After an error that matches ErrUnavailable the caller may call again.
 func (p *Provider) MarkJoined(ctx context.Context, node cloud.Instance) error {
+	return p.setTag(ctx, node, cloud.LabelJoined, joinedTag, encodeUserData([]byte(scrubbedUserData)),
+		"scrub the user data of")
+}
+
+// MarkReplace records on the machine node that a rolling update replaces it. It reads the instance, then sends its
+// tags in their order, with the tag tent/replace=true added at the end when it is missing, in one update that leaves
+// the user data as it is. A tent/replace tag with another value is replaced, and every other tag stays. A tag that an
+// operator changes between the read and the update, about a second, is lost. It is safe to repeat. A machine that is
+// gone counts as marked. After an error that matches ErrUnavailable the caller may call again.
+func (p *Provider) MarkReplace(ctx context.Context, node cloud.Instance) error {
+	return p.setTag(ctx, node, cloud.LabelReplace, replaceTag, "", "label")
+}
+
+// setTag reads the instance node and updates it once: its tags in their order, without the other values of label, with
+// tag added at the end when it is missing, and with the user data userData when it is not empty. A machine that is gone
+// counts as updated. The error says action.
+func (p *Provider) setTag(ctx context.Context, node cloud.Instance, label, tag, userData, action string) error {
 	in, err := p.api.GetInstance(ctx, node.ID)
 	if err != nil {
-		return nodeResult(err, "scrub the user data of", node)
+		return nodeResult(err, action, node)
 	}
-	tags := slices.DeleteFunc(slices.Clone(in.Tags), func(tag string) bool {
-		return tag != joinedTag && strings.HasPrefix(tag, cloud.LabelJoined+"=")
+	tags := slices.DeleteFunc(slices.Clone(in.Tags), func(t string) bool {
+		return t != tag && strings.HasPrefix(t, label+"=")
 	})
-	if !slices.Contains(tags, joinedTag) {
-		// The list holds the joined tag at least, so it is never nil and Vultr replaces the tags.
-		tags = append(tags, joinedTag)
+	if !slices.Contains(tags, tag) {
+		// The list holds the tag at least, so it is never nil and Vultr replaces the tags.
+		tags = append(tags, tag)
 	}
-	req := &govultr.InstanceUpdateReq{Tags: tags, UserData: encodeUserData([]byte(scrubbedUserData))}
-	return nodeResult(p.api.UpdateInstance(ctx, node.ID, req), "scrub the user data of", node)
+	req := &govultr.InstanceUpdateReq{Tags: tags, UserData: userData}
+	return nodeResult(p.api.UpdateInstance(ctx, node.ID, req), action, node)
 }
 
 // nodeResult returns the outcome of a call that acts on the machine node: nil when the call succeeded or the machine

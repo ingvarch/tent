@@ -14,12 +14,13 @@ import (
 // of the node groups could not be read.
 const couldNotTellOutdated = "tent could not tell which nodes are outdated: "
 
-// outdatedNodes returns the machines among stays that a rolling update replaces, group by group in the order of m, by
-// the spec hashes that the builder b gives.
+// outdatedNodes returns the machines among stays that a rolling update replaces, group by group in the order of m:
+// those without a spec hash or with another one than the builder b gives, and those with the replace label.
 func outdatedNodes(m *model.Cluster, b *nodeBuilder, stays []cloud.Instance) []OutdatedNode {
 	var out []OutdatedNode
 	for _, g := range m.Groups {
-		out = append(out, outdatedOf(stays, rollout.Group{Name: g.Name, SpecHash: b.specHash(g.Name)}, nil)...)
+		group := rollout.Group{Name: g.Name, SpecHash: b.specHash(g.Name)}
+		out = append(out, outdatedOf(stays, group, forcedMachines(stays, []rollout.Group{group}, false))...)
 	}
 	return out
 }

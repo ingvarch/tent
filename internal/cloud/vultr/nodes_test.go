@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -1101,34 +1102,45 @@ func TestMarkJoinedReplacesAnotherValueOfTheTag(t *testing.T) {
 	}
 }
 
-func TestMarkJoinedOfAGoneInstance(t *testing.T) {
-	t.Run("at the read", func(t *testing.T) {
-		f := vultrfake.New()
-		in := seededNode(t, f)
-		if err := f.DeleteInstance(t.Context(), in.ID); err != nil {
-			t.Fatalf("DeleteInstance: %v", err)
-		}
-		before := len(f.Calls())
+// markCalls are the calls of cloud.Nodes that read an instance and then update its tags.
+var markCalls = []struct {
+	name string // the method of cloud.Nodes
+	call func(cloud.Nodes, context.Context, cloud.Instance) error
+}{
+	{"MarkJoined", cloud.Nodes.MarkJoined},
+	{"MarkReplace", cloud.Nodes.MarkReplace},
+}
 
-		if err := opProvider(f).MarkJoined(t.Context(), in); err != nil {
-			t.Errorf("MarkJoined of an instance that is gone: %v, want success", err)
-		}
-
-		wantCallsSince(t, f, before, vultrfake.Call{Name: "GetInstance", Arg: in.ID})
-	})
-	t.Run("at the update", func(t *testing.T) {
-		f := vultrfake.New()
-		in := seededNode(t, f)
-		p := opProvider(&afterGet{Fake: f, hook: func() {
+func TestMarkOfAGoneInstance(t *testing.T) {
+	for _, mc := range markCalls {
+		t.Run(mc.name+" at the read", func(t *testing.T) {
+			f := vultrfake.New()
+			in := seededNode(t, f)
 			if err := f.DeleteInstance(t.Context(), in.ID); err != nil {
-				t.Errorf("DeleteInstance: %v", err)
+				t.Fatalf("DeleteInstance: %v", err)
 			}
-		}})
+			before := len(f.Calls())
 
-		if err := p.MarkJoined(t.Context(), in); err != nil {
-			t.Errorf("MarkJoined of an instance deleted after the read: %v, want success", err)
-		}
-	})
+			if err := mc.call(opProvider(f), t.Context(), in); err != nil {
+				t.Errorf("%s of an instance that is gone: %v, want success", mc.name, err)
+			}
+
+			wantCallsSince(t, f, before, vultrfake.Call{Name: "GetInstance", Arg: in.ID})
+		})
+		t.Run(mc.name+" at the update", func(t *testing.T) {
+			f := vultrfake.New()
+			in := seededNode(t, f)
+			p := opProvider(&afterGet{Fake: f, hook: func() {
+				if err := f.DeleteInstance(t.Context(), in.ID); err != nil {
+					t.Errorf("DeleteInstance: %v", err)
+				}
+			}})
+
+			if err := mc.call(p, t.Context(), in); err != nil {
+				t.Errorf("%s of an instance deleted after the read: %v, want success", mc.name, err)
+			}
+		})
+	}
 }
 
 func TestMarkJoinedFails(t *testing.T) {
@@ -1157,6 +1169,141 @@ func TestMarkJoinedFails(t *testing.T) {
 			}
 			if tags := instanceOf(t, f, in.ID).Tags; slices.Contains(tags, "tent/joined=true") {
 				t.Errorf("tags %v hold the joined tag after a failed call", tags)
+			}
+		})
+	}
+}
+
+// TestListReadsTheReplaceLabel checks that a machine is listed as marked for replacement only for the tag
+// tent/replace=true.
+func TestListReadsTheReplaceLabel(t *testing.T) {
+	for _, tc := range []struct {
+		tags []string
+		want bool
+	}{
+		{[]string{"tent/cluster=prod", "tent/replace=true"}, true},
+		{[]string{"tent/cluster=prod", "tent/replace=false"}, false},
+		{[]string{"tent/cluster=prod"}, false},
+	} {
+		t.Run(strings.Join(tc.tags, ","), func(t *testing.T) {
+			f := vultrfake.New()
+			f.AddInstance(t, govultr.Instance{ID: "node", Label: "prod-workers-0", Tags: tc.tags})
+
+			listed, err := opProvider(f).List(t.Context(), "prod")
+
+			if err != nil || len(listed) != 1 || listed[0].Replace != tc.want {
+				t.Errorf("List = %+v, %v; want one node with Replace %v", listed, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestMarkReplace checks that one update adds the tag after the other tags, in their order, and sends no user data:
+// the stub of a node that joined stays.
+func TestMarkReplace(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		x, _ := newNodesFixture(t, opsKey)
+		in := createNode(t, x.p, serverRequest(opA))
+		if err := x.p.MarkJoined(t.Context(), in); err != nil {
+			t.Fatalf("MarkJoined: %v", err)
+		}
+		tags := append([]string{"web"}, instanceOf(t, x.f, in.ID).Tags...)
+		if err := x.f.UpdateInstance(t.Context(), in.ID, &govultr.InstanceUpdateReq{Tags: tags}); err != nil {
+			t.Fatalf("UpdateInstance: %v", err)
+		}
+		rec := &recordUpdates{Fake: x.f}
+		p := opProvider(rec)
+		before := len(x.f.Calls())
+
+		if err := p.MarkReplace(t.Context(), in); err != nil {
+			t.Fatalf("MarkReplace: %v", err)
+		}
+
+		wantCallsSince(t, x.f, before, vultrfake.Call{Name: "GetInstance", Arg: in.ID},
+			vultrfake.Call{Name: "UpdateInstance", Arg: in.ID})
+		want := []govultr.InstanceUpdateReq{{Tags: append(slices.Clone(tags), "tent/replace=true")}}
+		if diff := cmp.Diff(want, rec.reqs); diff != "" {
+			t.Errorf("update requests (-want +got):\n%s", diff)
+		}
+		if got, err := base64.StdEncoding.DecodeString(x.f.UserData(in.ID)); err != nil || string(got) != scrubbedUserData {
+			t.Errorf("the user data decodes to %q (%v), want the stub %q", got, err, scrubbedUserData)
+		}
+		listed, err := p.List(t.Context(), "prod")
+		if err != nil || len(listed) != 1 || !listed[0].Replace || !listed[0].Joined {
+			t.Errorf("List = %+v, %v; want the node, joined and marked for replacement", listed, err)
+		}
+	})
+}
+
+func TestMarkReplaceTwice(t *testing.T) {
+	f := vultrfake.New()
+	in := seededNode(t, f)
+	p := opProvider(f)
+	if err := p.MarkReplace(t.Context(), in); err != nil {
+		t.Fatalf("MarkReplace: %v", err)
+	}
+	tags := instanceOf(t, f, in.ID).Tags
+	before := len(f.Calls())
+
+	if err := p.MarkReplace(t.Context(), in); err != nil {
+		t.Fatalf("second MarkReplace: %v", err)
+	}
+
+	wantCallsSince(t, f, before, vultrfake.Call{Name: "GetInstance", Arg: in.ID},
+		vultrfake.Call{Name: "UpdateInstance", Arg: in.ID})
+	if diff := cmp.Diff(tags, instanceOf(t, f, in.ID).Tags); diff != "" {
+		t.Errorf("tags after the second call (-first +second):\n%s", diff)
+	}
+}
+
+func TestMarkReplaceReplacesAnotherValueOfTheTag(t *testing.T) {
+	for _, other := range []string{"tent/replace=yes", "tent/replace=false"} {
+		t.Run(other, func(t *testing.T) {
+			f := vultrfake.New()
+			in := seededNode(t, f)
+			tags := []string{"tent/cluster=prod", other, "tent/joined=true"}
+			if err := f.UpdateInstance(t.Context(), in.ID, &govultr.InstanceUpdateReq{Tags: tags}); err != nil {
+				t.Fatalf("UpdateInstance: %v", err)
+			}
+
+			if err := opProvider(f).MarkReplace(t.Context(), in); err != nil {
+				t.Fatalf("MarkReplace: %v", err)
+			}
+
+			want := []string{"tent/cluster=prod", "tent/joined=true", "tent/replace=true"}
+			if diff := cmp.Diff(want, instanceOf(t, f, in.ID).Tags); diff != "" {
+				t.Errorf("tags (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestMarkReplaceFails(t *testing.T) {
+	for _, tc := range []struct {
+		name, api, method string
+	}{
+		{"read", "GetInstance", http.MethodGet},
+		{"update", "UpdateInstance", http.MethodPatch},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := vultrfake.New()
+			in := seededNode(t, f)
+			// No answer that the transport's retries could get: the caller may call again.
+			f.Fail(t, tc.api, vultr.NewAPIError(tc.method, "/v2/instances/node", http.StatusServiceUnavailable,
+				"Try again later", 0), 1)
+
+			err := opProvider(f).MarkReplace(t.Context(), in)
+
+			want := "label node prod-servers-0 (node): vultr: " + tc.method +
+				" /v2/instances/node: 503 Service Unavailable: Try again later"
+			if errText(err) != want {
+				t.Errorf("MarkReplace = %v, want %q", err, want)
+			}
+			if !errors.Is(err, vultr.ErrUnavailable) {
+				t.Errorf("errors.Is(%v, vultr.ErrUnavailable) = false", err)
+			}
+			if tags := instanceOf(t, f, in.ID).Tags; slices.Contains(tags, "tent/replace=true") {
+				t.Errorf("tags %v hold the replace tag after a failed call", tags)
 			}
 		})
 	}

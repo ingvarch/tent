@@ -31,6 +31,9 @@ type Nodes interface {
 	// metadata service stops serving them. The core calls it once the node has joined. It is safe to repeat. A machine
 	// that is gone counts as marked.
 	MarkJoined(ctx context.Context, node Instance) error
+	// MarkReplace records on the machine that a rolling update replaces it, so that a later run replaces it too. It
+	// changes nothing else. It is safe to repeat. A machine that is gone counts as marked.
+	MarkReplace(ctx context.Context, node Instance) error
 }
 
 // Instance is one machine of a cluster as the cloud reports it.
@@ -47,6 +50,7 @@ type Instance struct {
 	PublicIP  netip.Addr    // its public IPv4 address; the invalid Addr until the cloud reports one
 	Ready     bool          // the cloud reports it running and booted
 	Joined    bool          // it carries the label LabelJoined with the value true
+	Replace   bool          // it carries the label LabelReplace with the value true
 	Created   time.Time     // when the cloud created it; the zero time when the cloud gives none that parses
 }
 

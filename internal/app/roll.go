@@ -24,17 +24,19 @@ type RollOptions struct {
 	Apply bool
 	// NodeGroups are the groups to roll, by name; every group of the specs when empty.
 	NodeGroups []string
-	// Force replaces every machine of those groups that the cloud lists when the run starts, whatever its hash.
+	// Force replaces every machine of those groups that the cloud lists when the run starts, whatever its hash. With
+	// Apply, the run first labels each of them for replacement, so that a run that starts again replaces each labelled
+	// machine, with or without Force.
 	Force bool
 }
 
 // RollingUpdate plans the replacement of the outdated machines of the cluster's node groups. A machine is outdated
-// when its spec hash is not its group's, when it carries none, or, with Force, whatever its hash. It fails when the
-// store's layout needs a newer tent. It loads the specs as an update does, and then fails, in this order, unless: the
-// selected node groups are in the specs; the cloud's live API accepts the specs; the store holds the mark of the Nomad
-// bootstrap, then the completed spec as the specs make it now, then the cluster's secrets; and a server of the cluster
-// has joined. The completed spec and the infrastructure are the business of tent update cluster, so specs that it has
-// not applied fail the plan.
+// when its spec hash is not its group's, when it carries none, when it carries the replace label, or, with Force,
+// whatever its hash. It fails when the store's layout needs a newer tent. It loads the specs as an update does, and
+// then fails, in this order, unless: the selected node groups are in the specs; the cloud's live API accepts the
+// specs; the store holds the mark of the Nomad bootstrap, then the completed spec as the specs make it now, then the
+// cluster's secrets; and a server of the cluster has joined. The completed spec and the infrastructure are the
+// business of tent update cluster, so specs that it has not applied fail the plan.
 //
 // Each plan lists the machines once and reads Nomad's Raft configuration, autopilot's report, gossip members and nodes,
 // in that order. The plan holds the selected groups with their outdated machines, and in Next the step that comes next.
@@ -46,9 +48,10 @@ type RollOptions struct {
 // With Apply, a plan that has no next step or an error ends the run as it is, without a lock; a plan without a next
 // step comes back applied. Otherwise it takes the cluster's lock and plans again under it. When that plan has a next
 // step, it calls OnRollPlan with it, then OnWarning with each warning about the cluster, such as a Nomad API that the
-// whole internet may reach, and carries the steps out until none is left. The plan that it returns is the one under
-// the lock, or the one made without it when it cannot take the lock, with Rolled holding what the roll did, also when
-// it stopped, and Applied set once it reached its end.
+// whole internet may reach, and, with Force, writes the replace label to each machine of the selected groups that lacks
+// it, one write each, and ends with the error of the first that fails. Then it carries the steps out until none is
+// left. The plan that it returns is the one under the lock, or the one made without it when it cannot take the lock,
+// with Rolled holding what the roll did, also when it stopped, and Applied set once it reached its end.
 func (s *Service) RollingUpdate(ctx context.Context, cluster string, opts RollOptions) (_ RollPlan, err error) {
 	defer func() { err = stopped(ctx, err) }()
 	l, err := s.layout(ctx, cluster)
@@ -74,6 +77,9 @@ func (s *Service) RollingUpdate(ctx context.Context, cluster string, opts RollOp
 			if err := s.beginRoll(r, plan); err != nil {
 				return err
 			}
+			if err := r.labelForced(ctx); err != nil {
+				return err
+			}
 			if plan.Rolled, err = r.run(ctx); err != nil {
 				return err
 			}
@@ -82,6 +88,18 @@ func (s *Service) RollingUpdate(ctx context.Context, cluster string, opts RollOp
 		return nil
 	})
 	return plan, err
+}
+
+// labelForced writes the replace label to each machine that a forced run found without it, in the order of the list,
+// and stops at the first write that fails. A run that starts again then replaces the labelled machines whether or not
+// it is forced.
+func (r *rollRun) labelForced(ctx context.Context) error {
+	for _, in := range r.unlabelled {
+		if err := r.kit.nodes.MarkReplace(ctx, in); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // planRoll prepares the run, as prepareRoll does, and plans it. A failed check returns no run and no plan; after that
@@ -115,9 +133,11 @@ type rollRun struct {
 	model   *model.Cluster
 	groups  []rollout.Group  // the selected groups, by name
 	version string           // the Nomad version that a new node runs
-	forced  map[string]bool  // the machines to replace whatever their hash, by ID
+	forced  map[string]bool  // the machines to replace whatever their hash, by ID; those with the label, or all with Force
 	listed  []cloud.Instance // the last list of the machines
 	api     nomadops.API     // over the servers that have joined
+	// unlabelled are the machines of a forced run that lack the replace label when it lists them.
+	unlabelled []cloud.Instance
 	// warnings are about the cluster, for the run to tell before its first step.
 	warnings []string
 	rollLoop
@@ -176,8 +196,9 @@ func (s *Service) prepareRoll(ctx context.Context, l statestore.Layout, opts Rol
 		s: s, kit: kit, model: c.m, groups: groups, version: c.objs.Cluster.Spec.Nomad.Version, listed: listed, api: api,
 		warnings: s.updateWarnings(c.objs.Cluster, c.objs.NodeGroups, c.ch),
 	}
+	r.forced = forcedMachines(listed, groups, opts.Force)
 	if opts.Force {
-		r.forced = forcedMachines(listed, groups)
+		r.unlabelled = unlabelled(listed, groups)
 	}
 	return r, nil
 }

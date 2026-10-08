@@ -304,6 +304,45 @@ func TestValidateWarnsAboutTheOutdatedNodes(t *testing.T) {
 	})
 }
 
+// TestUpdatePlanListsAMachineWithTheReplaceLabel plans an update of up-to-date workers, one of which carries the
+// replace label: the plan names it as forced.
+func TestUpdatePlanListsAMachineWithTheReplaceLabel(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, _ := rollWorld(t)
+		labelReplace(t, f, "prod-workers-0")
+
+		plan, err := svc.Update(t.Context(), "prod", false)
+
+		if err != nil {
+			t.Fatalf("Update without apply: %v", err)
+		}
+		want := []app.OutdatedNode{
+			{Name: "prod-workers-0", ID: instanceNamed(t, f, "prod-workers-0"), Group: "workers", Reason: "forced"},
+		}
+		if diff := cmp.Diff(want, plan.Outdated); diff != "" {
+			t.Errorf("Outdated (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// TestValidateWarnsAboutAMachineWithTheReplaceLabel validates a cluster of up-to-date workers, one of which carries
+// the replace label: it warns that a rolling update replaces it.
+func TestValidateWarnsAboutAMachineWithTheReplaceLabel(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, _ := rollWorld(t)
+		labelReplace(t, f, "prod-workers-0")
+
+		v := mustValidate(t, svc)
+
+		want := "1 node is outdated: prod-workers-0; tent rolling-update cluster replaces it"
+		if !slices.Contains(v.Warnings, want) {
+			t.Errorf("warnings = %q, want %q", v.Warnings, want)
+		}
+	})
+}
+
 // TestValidateReportsOnlyTheOutdatedNodesThatStay validates a cluster that has one worker too many: the surplus worker
 // is a failure and is not named as outdated, and the warning is in the singular.
 func TestValidateReportsOnlyTheOutdatedNodesThatStay(t *testing.T) {

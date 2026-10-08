@@ -263,23 +263,36 @@ func TestRolloutGroupsFailures(t *testing.T) {
 	}
 }
 
-// TestForcedMachines holds the machines of the selected groups, by ID, and no machine of another group or of none.
+// TestForcedMachines holds the machines of the selected groups that carry the replace label, by ID, and with force
+// every machine of the selected groups; no machine of another group or of none.
 func TestForcedMachines(t *testing.T) {
 	t.Parallel()
 	listed := []cloud.Instance{
-		{ID: "instance-1", Group: "servers"},
-		{ID: "instance-2", Group: "workers"},
+		{ID: "instance-1", Group: "servers", Replace: true},
+		{ID: "instance-2", Group: "workers", Replace: true},
 		{ID: "instance-3", Group: "workers"},
-		{ID: "instance-4", Group: "batch"},
-		{ID: "instance-5"},
+		{ID: "instance-4", Group: "batch", Replace: true},
+		{ID: "instance-5", Replace: true},
 	}
-	got := forcedMachines(listed, []rollout.Group{{Name: "workers"}, {Name: "gone"}})
-	want := map[string]bool{"instance-2": true, "instance-3": true}
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("forced mismatch (-want +got):\n%s", diff)
+	groups := []rollout.Group{{Name: "workers"}, {Name: "gone"}}
+	for _, tc := range []struct {
+		name  string
+		force bool
+		want  map[string]bool
+	}{
+		{"labelled", false, map[string]bool{"instance-2": true}},
+		{"forced", true, map[string]bool{"instance-2": true, "instance-3": true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if diff := cmp.Diff(tc.want, forcedMachines(listed, groups, tc.force)); diff != "" {
+				t.Errorf("forced mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
-	if got := forcedMachines(listed, nil); len(got) != 0 {
-		t.Errorf("forced for no group = %v, want none", got)
+	for _, force := range []bool{false, true} {
+		if got := forcedMachines(listed, nil, force); len(got) != 0 {
+			t.Errorf("forced for no group (force %v) = %v, want none", force, got)
+		}
 	}
 }
 
