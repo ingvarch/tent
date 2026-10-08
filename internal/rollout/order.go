@@ -2,6 +2,7 @@ package rollout
 
 import (
 	"cmp"
+	"fmt"
 	"slices"
 )
 
@@ -35,6 +36,27 @@ func nodeOf(nodes []Node, m Machine) (Node, bool) {
 		}
 	}
 	return found, ok
+}
+
+// nodeWhy says why the node of a machine cannot take work, and "" when it can; ok is false when Nomad lists no node
+// for the machine.
+func nodeWhy(m Machine, n Node, ok bool) string {
+	switch {
+	case !m.Ready:
+		return "is not running"
+	case !ok && !m.PrivateIP.IsValid():
+		return "has no node in Nomad: the cloud reports no private address for it"
+	case !ok:
+		return "has no node in Nomad"
+	case n.Status != nodeReady:
+		return fmt.Sprintf("is %s in Nomad", n.Status)
+	case !n.Eligible:
+		return "is not eligible"
+	case n.Draining:
+		return "is draining"
+	default:
+		return ""
+	}
 }
 
 // victimOrder sorts machines in the order in which a group loses them. A machine for which a later predicate holds

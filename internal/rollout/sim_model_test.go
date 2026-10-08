@@ -9,6 +9,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 
+	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/rollout"
 )
 
@@ -460,5 +461,102 @@ func TestSimAutopilotKeepsTheLeadersPeerWhateverItsMember(t *testing.T) {
 	w.ticks(3)
 	if got := len(w.observe().Nomad.Servers); got != 3 {
 		t.Errorf("servers = %d, want 3: autopilot does not remove the leader", got)
+	}
+}
+
+// combinedWorld is a cluster of n up to date combined machines of the group control, the first leading.
+func combinedWorld(n int) *world {
+	w := newWorld(curVersion)
+	w.addGroup(combinedGroup(n))
+	for range n {
+		w.addCombined(newHash, curVersion)
+	}
+	return w
+}
+
+func TestSimCombinedMachinesHaveAServerAndANode(t *testing.T) {
+	w := combinedWorld(3)
+	s := w.observe()
+	if len(s.Nomad.Servers) != 3 || len(s.Nomad.Members) != 3 || len(s.Nomad.Nodes) != 3 {
+		t.Fatalf("Nomad = %+v, want 3 servers, 3 members and 3 nodes", s.Nomad)
+	}
+	for i, m := range s.Machines {
+		n := s.Nomad.Nodes[i]
+		if m.Role != v1alpha1.RoleCombined || m.Group != "control" || n.Name != m.Name || n.Address != m.PrivateIP ||
+			n.Status != "ready" || !n.Eligible {
+			t.Errorf("machine %+v and node %+v, want a combined machine and its ready, eligible node", m, n)
+		}
+	}
+	if !s.Nomad.Servers[0].Leader {
+		t.Error("the first combined machine does not lead")
+	}
+}
+
+func TestSimNewCombinedNodeRegistersAtTwoTicksAndIsLabelledWhenItVotes(t *testing.T) {
+	w := combinedWorld(3)
+	create := rollout.Step{Action: rollout.Create, Group: "control", Machine: rollout.Machine{
+		Name: "prod-control-3", Zone: "ams"}}
+	if err := w.apply(create); err != nil {
+		t.Fatal(err)
+	}
+	newest := func() rollout.Machine { return w.observe().Machines[3] }
+	counts := func() (servers, nodes int) {
+		n := w.observe().Nomad
+		return len(n.Servers), len(n.Nodes)
+	}
+	if m := newest(); m.Role != v1alpha1.RoleCombined || m.Ready || m.Joined {
+		t.Errorf("a created machine = %+v, want a combined machine, not ready, not joined", m)
+	}
+	if servers, nodes := counts(); servers != 3 || nodes != 3 {
+		t.Errorf("after the create: %d servers and %d nodes, want 3 and 3", servers, nodes)
+	}
+	w.ticks(1)
+	if servers, nodes := counts(); servers != 3 || nodes != 3 || !newest().Ready {
+		t.Errorf("after 1 tick: %d servers and %d nodes, want 3 and 3", servers, nodes)
+	}
+	w.ticks(1)
+	s := w.observe()
+	if len(s.Nomad.Nodes) != 4 {
+		t.Fatalf("after 2 ticks: %d nodes, want 4: the new node registers", len(s.Nomad.Nodes))
+	}
+	node := s.Nomad.Nodes[3]
+	if srv := serverOf(t, s, "prod-control-3"); srv.Voter || !srv.Healthy || newest().Joined {
+		t.Errorf("after 2 ticks: server %+v and machine %+v, want a healthy nonvoter, not labelled", srv, newest())
+	}
+	if node.Name != "prod-control-3" || node.Address != newest().PrivateIP || node.Status != "ready" || !node.Eligible {
+		t.Errorf("after 2 ticks: node %+v, want it registered ready and eligible", node)
+	}
+	w.ticks(1)
+	if got := len(w.observe().Nomad.Nodes); got != 4 || newest().Joined {
+		t.Errorf("after 3 ticks: %d nodes, joined %t, want 4 nodes and not labelled", got, newest().Joined)
+	}
+	w.ticks(1)
+	if srv := serverOf(t, w.observe(), "prod-control-3"); !srv.Voter || !newest().Joined {
+		t.Errorf("after 4 ticks: server %+v and machine %+v, want a voter, labelled", srv, newest())
+	}
+	if got := len(w.observe().Nomad.Nodes); got != 4 {
+		t.Errorf("after 4 ticks: %d nodes, want the one that registered at 2 ticks", got)
+	}
+}
+
+func TestSimCombinedCreateIgnoresTheVersionOfOlderServers(t *testing.T) {
+	w := combinedWorld(3)
+	w.version = "2.0.8"
+	create := rollout.Step{Action: rollout.Create, Group: "control", Machine: rollout.Machine{
+		Name: "prod-control-3", Zone: "ams"}}
+	if err := w.apply(create); err != nil {
+		t.Errorf("creating a combined node that runs a newer Nomad than the others: %v", err)
+	}
+}
+
+func TestSimDrainOfACombinedNodeMovesItsAllocations(t *testing.T) {
+	w := combinedWorld(3)
+	if err := w.apply(w.machineStep(rollout.Drain, "prod-control-1")); err != nil {
+		t.Fatal(err)
+	}
+	w.ticks(2)
+	if w.nodes[1].allocs != 0 || w.nodes[0].allocs != 2*allocsOfNode || w.unplaced != 0 {
+		t.Errorf("allocations = %d, %d, unplaced %d, want 0, %d, 0", w.nodes[1].allocs, w.nodes[0].allocs, w.unplaced,
+			2*allocsOfNode)
 	}
 }

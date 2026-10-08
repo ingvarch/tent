@@ -123,6 +123,15 @@ func TestRunBreaksOnInvariants(t *testing.T) {
 				return []rollout.Step{create, second}
 			},
 			"group servers has 5 machines, more than its size 3 plus 1"},
+		{"a combined group has more machines than size plus one", func() *world { return combinedWorld(3) },
+			func(*world) []rollout.Step {
+				create := rollout.Step{Action: rollout.Create, Group: "control", Machine: rollout.Machine{
+					Name: "prod-control-3", Zone: "ams"}}
+				second := create
+				second.Machine.Name = "prod-control-4"
+				return []rollout.Step{create, second}
+			},
+			"group control has 5 machines, more than its size 3 plus 1"},
 		{"a client step comes before the server group is done", func() *world {
 			w := outdatedServers(3)
 			w.addGroup(workersGroup(1, 0))

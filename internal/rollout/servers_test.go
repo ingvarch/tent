@@ -34,11 +34,14 @@ func serversState(size int) rollout.State {
 	return s
 }
 
+// machineIDOf is the ID of server machine i.
+func machineIDOf(i int) string { return fmt.Sprintf("m-%d", i+1) }
+
 // addServerNode adds server i: machine m-<i+1>, its Raft server r-<i+1> and its alive member.
 func addServerNode(s *rollout.State, i int, hash string) {
 	zones := []string{"ams", "fra"}
 	m := rollout.Machine{
-		ID: "m-" + string(rune('1'+i)), Name: serverName(i), Group: "servers", Role: v1alpha1.RoleServer,
+		ID: machineIDOf(i), Name: serverName(i), Group: "servers", Role: v1alpha1.RoleServer,
 		Zone: zones[i%2], SpecHash: hash, PrivateIP: ip(10 + i), Ready: true, Joined: true,
 		Created: epoch.Add(time.Duration(i-10) * time.Hour),
 	}
@@ -110,16 +113,20 @@ func dropMember(t *testing.T, s *rollout.State, i int) {
 
 // serverOutcome is what a test checks of a step on servers.
 type serverOutcome struct {
-	Action  rollout.Action
-	Machine string // the machine's name
-	Server  string // the server's Raft ID
-	Member  string // the member's name
-	Voters  int
-	Until   time.Time
+	Action   rollout.Action
+	Machine  string // the machine's name
+	Server   string // the server's Raft ID
+	Member   string // the member's name
+	Node     string // the client node's ID
+	Voters   int
+	Deadline time.Duration
+	Until    time.Time
 }
 
 func serverOutcomeOf(s rollout.Step) serverOutcome {
-	return serverOutcome{s.Action, s.Machine.Name, s.Server.ID, s.Member.Name, s.Voters, s.Until}
+	return serverOutcome{
+		s.Action, s.Machine.Name, s.Server.ID, s.Member.Name, s.Node.ID, s.Voters, s.Deadline, s.Until,
+	}
 }
 
 func checkServerStep(t *testing.T, got rollout.Step, want serverOutcome) {
@@ -496,8 +503,8 @@ func TestServerLineETransfersTheLeadership(t *testing.T) {
 		for i := 1; i <= 3; i++ {
 			serverNode(t, &s, i).Healthy = false
 		}
-		checkRefused(t, s, "node group servers: prod-servers-0 leads, and no healthy server of the group can take "+
-			"the leadership")
+		checkRefused(t, s, "node group servers: prod-servers-0 leads, and no healthy voter of the group that is up to date "+
+			"can take the leadership")
 	})
 }
 

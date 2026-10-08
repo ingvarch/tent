@@ -17,7 +17,8 @@ import (
 // moves 10 s at every tick. Machine IDs are m-1, m-2, ..., private addresses start at 10.64.0.3, node IDs are n-1, ....
 //
 //   - A created machine is listed not ready, is ready after 1 tick, and after 2 a client registers ready and eligible
-//     with two allocations and is labelled.
+//     with two allocations and is labelled. A combined machine registers its node then too, and its server is modelled
+//     as the servers are: it is labelled when it votes.
 //   - A drain makes the node ineligible and draining; after 2 ticks it completes with the machine ID of its meta in
 //     DrainedFor, and the allocations go to the first available node.
 //   - The node of a deleted machine stays ready for 2 ticks, then reads down.
@@ -104,22 +105,35 @@ func (w *world) newMachineID() string {
 func newAddress(number int) netip.Addr { return ip(2 + number) }
 
 // addServer adds a running server machine to the group servers, with its peer and member; the first one leads.
-func (w *world) addServer(hash, version string) {
+func (w *world) addServer(hash, version string) { w.addControl("servers", hash, version) }
+
+// addCombined adds a running combined machine to the group control: a server as addServer adds it, and a client with
+// a registered node.
+func (w *world) addCombined(hash, version string) { w.addControl("control", hash, version) }
+
+// addControl adds a running machine that runs a server to a group of server or combined role, with its peer and
+// member, and with a node when it runs a client too. A group that the world does not know has the role server. The
+// first server leads.
+func (w *world) addControl(group, hash, version string) {
 	id := w.newMachineID()
-	index := w.countOf("servers")
-	zone := "ams"
-	if g, ok := w.group("servers"); ok {
-		zone = g.Zones[index%len(g.Zones)]
+	index := w.countOf(group)
+	zone, role := "ams", v1alpha1.RoleServer
+	if g, ok := w.group(group); ok {
+		zone, role = g.Zones[index%len(g.Zones)], g.Role
 	}
-	w.machines = append(w.machines, simMachine{
+	m := simMachine{
 		Machine: rollout.Machine{
-			ID: id, Name: rollout.NodeName(w.cluster, "servers", index), Group: "servers", Role: v1alpha1.RoleServer,
+			ID: id, Name: rollout.NodeName(w.cluster, group, index), Group: group, Role: role,
 			Zone: zone, SpecHash: hash, PrivateIP: newAddress(w.nextMachine), Ready: true, Joined: true,
 			Created: w.now.Add(-time.Duration(1000-w.nextMachine) * time.Hour),
 		},
 		age: 100, version: version,
-	})
+	}
+	w.machines = append(w.machines, m)
 	w.joinRaft(id, w.newRaftID(), len(w.servers) == 0, true, w.now.Add(-time.Hour))
+	if role.RunsClient() {
+		w.register(m)
+	}
 }
 
 func (w *world) addGroup(g rollout.Group) { w.groups = append(w.groups, g) }
@@ -253,11 +267,14 @@ func (w *world) tick() {
 		m := &w.machines[i]
 		m.age++
 		m.Ready = !m.stopped && (m.Ready || m.age >= 1)
-		if m.Role == v1alpha1.RoleClient && !m.Joined && m.age >= 2 {
-			m.Joined = true
+		if m.Role.RunsClient() && m.age == 2 {
 			w.register(*m)
+			// a combined machine is labelled when its server votes
+			if m.Role == v1alpha1.RoleClient {
+				m.Joined = true
+			}
 		}
-		if m.Role == v1alpha1.RoleServer && m.age == 2 {
+		if m.Role.RunsServer() && m.age == 2 {
 			w.joinRaft(m.ID, w.newRaftID(), false, false, w.now)
 			w.changed()
 		}
@@ -402,12 +419,12 @@ func (w *world) check() error {
 	}
 	for _, g := range w.groups {
 		n := w.countOf(g.Name)
-		switch g.Role {
-		case v1alpha1.RoleServer:
+		switch {
+		case g.Role.RunsServer():
 			if n > g.Size+1 {
 				return violated("group %s has %d machines, more than its size %d plus 1", g.Name, n, g.Size)
 			}
-		case v1alpha1.RoleClient:
+		case g.Role == v1alpha1.RoleClient:
 			if n > g.Size+g.MaxSurge {
 				return violated("group %s has %d machines, more than its size %d plus surge %d", g.Name, n, g.Size,
 					g.MaxSurge)

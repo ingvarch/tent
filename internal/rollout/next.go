@@ -40,12 +40,13 @@ func Next(s State, mode Mode) (Step, error) {
 	}
 	groups := sortedGroups(s.Groups)
 	next := map[v1alpha1.Role]func(State, Group) (Step, bool, error){
-		v1alpha1.RoleServer: nextServer,
-		v1alpha1.RoleClient: nextClient,
+		v1alpha1.RoleServer:   nextServer,
+		v1alpha1.RoleCombined: nextServer,
+		v1alpha1.RoleClient:   nextClient,
 	}
 	for _, g := range groups {
 		if next[g.Role] == nil {
-			return Step{}, fmt.Errorf("rollout cannot roll %s groups yet", g.Role)
+			return Step{}, fmt.Errorf("rollout: unknown role %q", g.Role)
 		}
 	}
 	if err := checkDuplicates(s, groups); err != nil {
