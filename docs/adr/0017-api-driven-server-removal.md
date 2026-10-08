@@ -9,7 +9,8 @@
   with two voters a stop would leave no quorum, so tent refuses the removal for now, and the other answer, to remove
   the live server's peer before its stop, is not built; a server is stopped only after the stability window; the
   leadership goes to a healthy, up-to-date voter; a client's VM is deleted after its drain and its node purged only
-  once Nomad lists it down)
+  once Nomad lists it down) and by [ADR-0036](0036-nomad-calls-of-a-roll.md) (the `nomadops` calls are built; a peer
+  that is gone counts as removed; the force-leave name is `<node name>.<region>`)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md); [ADR-0016](0016-server-discovery-seed-and-refresh.md),

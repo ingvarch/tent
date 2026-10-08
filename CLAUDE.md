@@ -101,6 +101,10 @@ packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries that
     `maxUnavailable`, `drainTimeout`), which never changes the spec hash. Nothing calls the decisions yet: M3.3 wires
     them into `tent rolling-update cluster`. Two voters and a single server are refused until the maintainer chooses
     (ADR-0035).
+  - M3.2 added the Nomad calls of a roll (`internal/nomadops`, `nomadfake`, ADR-0036): nine calls, reads with the Raft
+    IDs, the failure tolerance, `StableSince` and the drain state, and a third error class, `ErrGone`. Snapshots are
+    `secret.Secret` with a 5-minute bound. Nothing calls them yet: M3.3 and M3.4 wire the node, Raft and gossip calls
+    into `tent rolling-update cluster`, and M3.8 the snapshots into `tent backup`.
 
 ## Read before changing anything
 

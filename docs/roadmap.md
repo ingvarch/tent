@@ -37,8 +37,10 @@
 > M3 is in progress, in parts M3.1 to M3.9. M3.1 built the rollout decisions
 > ([ADR-0035](adr/0035-rollout-decisions.md)): `internal/rollout` returns the next step of a rolling update or of a
 > removal of nodes from what the cloud and Nomad report, and a simulator proves it from every state a roll passes
-> through. It also added the `rollingUpdate` settings of a node group. Nothing calls the decisions yet, and nothing
-> of M3 runs against a cloud: M3.3 wires them into `tent rolling-update cluster`.
+> through. It also added the `rollingUpdate` settings of a node group. M3.2 built the Nomad calls of a roll
+> ([ADR-0036](adr/0036-nomad-calls-of-a-roll.md)) and the matching model in `nomadfake`. Nothing calls the decisions
+> or the calls yet, and nothing of M3 runs against a cloud: M3.3 and M3.4 wire the node, Raft and gossip calls into
+> `tent rolling-update cluster`, and M3.8 the snapshots into `tent backup`.
 >
 > **Work items live in GitHub:** each milestone below links to its GitHub milestone, and the
 > [tent roadmap project][project] shows the open issues. This file keeps the goals and exit criteria; close issues as
@@ -239,6 +241,10 @@ Work after M6 or not scheduled yet: [issues with the `later` label][later].
   functions, and a simulator with golden step sequences, invariants and a resume test proves them. A node group gets
   the `rollingUpdate` settings (decision 33); decisions 33 to 35 are recorded with
   [ADR-0035](adr/0035-rollout-decisions.md). Closes #99.
+- 2026-10-08: M3.2 is built: the nine Nomad calls of a roll, the reads they need, `ErrGone`, and `nomadfake` that
+  carries out each write. Facts measured on a local Nomad 2.0.7
+  ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)); the calls are recorded in
+  [ADR-0036](adr/0036-nomad-calls-of-a-roll.md). Part of #101 to #105; closes none.
 
 [project]: https://github.com/users/ingvarch/projects/2
 [later]: https://github.com/ingvarch/tent/issues?q=is%3Aissue%20label%3Alater

@@ -142,8 +142,9 @@ in the source at that tag):
 with `bootstrap_expect = 3`, `leave_on_terminate = false` and one client, **without ACL and TLS**; the reads came every
 0.5 s; times are from the start of each step). The rollout decisions rest on them
 ([ADR-0035](adr/0035-rollout-decisions.md)). A run on 2026-10-08 (local Nomad 2.0.7, five servers, with ACL, mTLS,
-gossip encryption and strict client introduction) repeated most of them; of it, only the facts the decisions use are
-recorded here so far, each dated.
+gossip encryption and strict client introduction) repeated most of them; its facts are dated in this list, and the
+block that follows it holds the answers of the calls that `internal/nomadops` makes
+([ADR-0036](adr/0036-nomad-calls-of-a-roll.md)).
 - **Raft IDs** are UUIDs (`7f3d49f3-2757-a5a3-ff6d-f85e459bcdc7`), not addresses. The comment of `api.RaftServer.ID` in
   the pinned module ("currently the same as the address") is out of date. Autopilot reported `FailureTolerance` 1 with
   3 healthy voters and with 4, and 0 with 2 and with 1.
@@ -186,6 +187,96 @@ recorded here so far, each dated.
   eligible (no ACL, no client introduction). Under strict client introduction (2026-10-08) a purged live client whose
   introduction token had expired (TTL 1 minute, purged after the leeway) was refused at every try to register again
   (`rpc error: rpc error: Permission denied`) and was not listed again in the 2 minutes watched.
+
+**The calls of a roll with ACL, mTLS and strict client introduction** (v2.0.7, run on 2026-10-08 on a local cluster:
+servers `s1` to `s5` with `bootstrap_expect = 3`, `leave_on_terminate = false`, `cleanup_dead_servers = true`, gossip
+encryption and `client_introduction { enforcement = "strict" }`; clients `c1` to `c4` with `leave_on_terminate = true`
+and `raw_exec` only; TLS on HTTP and RPC with `verify_server_hostname` and `verify_https_client`; ACL bootstrapped with
+a UUID secret. Every call used the management token and the operator certificate. A job of two `raw_exec` allocations
+with `migrate { max_parallel = 1, health_check = "task_states", min_healthy_time = "10s" }` ran on the clients). The
+facts of 2026-10-07 above ran without ACL and TLS. The calls are recorded in
+[ADR-0036](adr/0036-nomad-calls-of-a-roll.md). Each write but the force-leave was also sent through a follower, and
+Nomad forwarded it to the leader, which did what it does when asked directly.
+- **Eligibility** (`PUT /v1/node/<id>/eligibility {"Eligibility": "ineligible"}`): 200
+  `{"NodeModifyIndex":0,"EvalIDs":null,"EvalCreateIndex":0,"Index":<n>}`. The same value again: 200 with `Index` 0. A
+  `down` node: 200 either way. An unknown ID, through a follower: 500 `rpc error: node not found`. The value `maybe`:
+  500 `rpc error: invalid scheduling eligibility "maybe"`.
+- **A drain with meta** (`PUT /v1/node/<id>/drain {"DrainSpec": {"Deadline": 120000000000, "IgnoreSystemJobs": false},
+  "Meta": {"tent_machine": "m-1"}}`) of a client with two allocations: 200
+  `{"NodeModifyIndex":34,"EvalIDs":null,"EvalCreateIndex":0,"Index":34}`.
+  - At once `GET /v1/nodes` showed `Drain` true, `ineligible` and `LastDrain {Status: draining, Meta:
+    {tent_machine: m-1}}`, and `GET /v1/node/<id>` a `DrainStrategy` with `ForceDeadline` = `StartedAt` plus 120 s.
+  - **The same drain again** 6 s later: 200, `ForceDeadline` moved to the time of the repeat plus 120 s, and `StartedAt`
+    and the start of the last drain unchanged. A repeat with other meta was not run.
+  - **It completed on its own** after 14.4 s, with both allocations moved to another client one at a time (the
+    `migrate` block): `DrainStrategy` null, `Drain` false, `LastDrain.Status` `complete` with the meta kept, and the
+    node still `ineligible`. `LastDrain` is `null` for a node that was never drained, and its `StartedAt` has whole
+    seconds.
+- **A client that is down:** a SIGKILLed client read `down` after 19 s (17 s on 2026-10-07).
+  - **Its drain** (meta `m-1b`): 200, and within 2 s `LastDrain` was `complete` with the new meta, and `StartedAt`
+    equal to `UpdatedAt`.
+  - **Its purge:** 200 with a body (`NodeModifyIndex`, `EvalCreateIndex`, and more). The purge again, through the
+    leader: 500 `node not found`. A drain of it then: 500 `node not found`. `GET /v1/node/<id>`: 404 `node not found`.
+    Through a follower an unknown ID answered 500 `rpc error: node not found` to the eligibility, the drain and the
+    purge.
+- **Members** (`GET /v1/agent/members` on a server): 200 `{"ServerName": "s1", "ServerRegion": "global", "ServerDC":
+  "dc1", "Members": [{"Name": "s2.global", "Addr": "127.0.0.1", "Port": 18022, "Tags": {"id": "<the Raft ID>", "role":
+  "nomad", "region": "global", "dc": "dc1", "build": "2.0.7", "rpc_addr": "127.0.0.1", "port": "18012", "expect": "3",
+  "raft_vsn": "3", ...}, "Status": "alive", ...}, ...]}`. Servers only: clients are not members. `Addr` and `Port` are
+  the Serf address, and `Tags.id` is the Raft ID. The answers of two servers agreed at every poll.
+- **The report and the Raft configuration.** The report's `Leader` is a Raft ID, its `Voters` a list of Raft IDs, and
+  `StableSince` has whole seconds (`2026-10-08T01:12:25Z`). `FailureTolerance` was 1 with 3 voters, 1 with 4 and 2 with
+  5.
+- **Force-leave** of a failed member:
+  - Without the region (`?node=s5&prune=1`): 200 with an empty body, and `s5.global` stayed `failed`.
+  - With it (`?node=s5.global&prune=true`): 200 with an empty body, and both servers polled listed `s5.global` no more
+    0.4 s and 0.6 s later. The log said `EventMemberLeave (forced)` and `EventMemberReap (forced)`.
+- **A leadership transfer** (`PUT /v1/operator/raft/transfer-leadership?id=<raft id>`), sent to a follower, to a voter:
+  200 `{"From": {"Address": "127.0.0.1:18013", "ID": ...}, "To": {"Address": "127.0.0.1:18011", "ID": ...}, "Noop":
+  false, "Err": null}`; the new leader led at the next poll and every `StableSince` read the second in which the
+  leadership moved.
+  - To the leader again: 200 with `"Noop": true`.
+  - To an unknown ID: 400 `id "<id>" was not found in the Raft configuration`. To a peer that autopilot had removed,
+    through the leader: the same 400. Without an ID: 400 `must specify id or address`.
+  - **To a nonvoter** (a server whose peer had been removed and re-added): 200 with `To` the nonvoter and `"Noop":
+    false`, but another server took the leadership 1.2 s later, and every `StableSince` read the second of that
+    takeover. So a 200 does not show that the server leads.
+- **A server killed at five voters** (SIGKILL): Serf marked it failed after 37 s. By then autopilot had removed its
+  peer, and the report answered 429 with `FailureTolerance` 1, listing the server with `SerfStatus` `left`, `Voter`
+  true and unhealthy. It was healthy with four voters 2 s later. Its member stayed `failed` in
+  `GET /v1/agent/members` until the force-leave.
+- **Removing a peer that is gone** (`DELETE /v1/operator/raft/peer?id=<the killed server's ID>`): through the leader 500
+  `id "<id>" was not found in the Raft configuration`, through a follower 500 `rpc error: id "<id>" was not found in
+  the Raft configuration`.
+- **Removing the peer of a live follower** (through a follower): 200 with an empty body.
+- **A snapshot save** (`GET /v1/operator/snapshot`).
+  - For 11 s after the servers changed (a server had been re-added), every try, through a follower and through the
+    leader, answered 500 `Raft error when taking snapshot: cannot take snapshot now, wait until the configuration entry
+    at 78 has been applied (have applied 77)`. After one write (`PUT /v1/var/before`) the next saves answered 200.
+  - The answer has `Content-Type: application/x-gzip`, a `Digest` header (`sha-256=<base64>`) and no
+    `Content-Encoding`. It took 0.02 s and held 11071 bytes through a follower and 11084 through the leader.
+  - The body is a gzip tar of `meta.json` (574 bytes), `state.bin` (41359) and `SHA256SUMS` (152), for four servers,
+    one node, one job, one variable and the bootstrap token.
+- **A snapshot restore into the running cluster** (`PUT /v1/operator/snapshot` with the saved bytes, through a
+  follower): 200 with an empty body, in 0.19 s.
+  - Before it, after the save, the run made a management token `T` (TTL 1 h), a job `after`, a client `c4` with a new
+    introduction token (TTL 30 minutes), and rotated the keyring.
+  - After it: the leader and the Raft configuration (four voters) stayed, and every `StableSince` read the second of
+    the restore. The keyring had the one key of the save, active, and the rotated key was gone. `T` got 403
+    `Permission denied` on `GET /v1/acl/token/self`. The job `after` was gone and the job `sleepers` stayed. The
+    variable written before the save stayed, and the bootstrap token worked.
+  - **`c4` was gone from `GET /v1/nodes` at the first poll.** Its agent got `node not found`, registered again with its
+    node identity and got `rpc error: Permission denied`, and was not listed again in the 75 s watched, with its valid
+    introduction token still on disk. `c4` registered after the rotation, so its node identity was probably signed by
+    the key that the restore removed (an inference). The allocation of `after` kept running on its client while the
+    servers no longer knew the job.
+  - **Restores that Nomad refuses** (through a follower): 14 bytes of text: 500 `failed to restore from snapshot:
+    failed to decompress snapshot: gzip: invalid header`. The first 5000 bytes of a snapshot: 500 `failed to restore
+    from snapshot: failed to read snapshot file: failed to read or write snapshot data: unexpected EOF`. The leader and
+    the Raft configuration stayed as they were.
+- **Not settled:** a purge of a live node under `warn` (combined clusters), the removal of the leader's own peer, a
+  restore into a cluster that was rebuilt from the same state store, the size of a snapshot of a large cluster,
+  `prune=false`, and tokens narrower than management.
 
 **ACL tokens that expire** (v2.0.7, run on 2026-10-06 with curl and the operator certificate; source at the tag):
 - **The create.** `PUT /v1/acl/token {"Name", "Type": "management", "ExpirationTTL": "24h"}` with the bootstrap secret
@@ -386,8 +477,9 @@ through Playwright, with a throwaway `httputil.ReverseProxy`, and read in the so
 - **`PUT /v1/agent/servers?address=…`** (`agent:write`) replaces that list. Whether this survives a restart is not
   documented.
 - **There is no `/v1/agent/leave`.** No endpoint makes an agent leave gracefully.
-- **`PUT /v1/agent/force-leave?node=<name>&prune=true`** (`agent:write`) removes a failed or left member from the Serf
-  member list immediately. A member that is still alive rejoins.
+- **`PUT /v1/agent/force-leave?node=<node name>.<region>&prune=true`** (`agent:write`) removes a failed or left member
+  from the Serf member list immediately; a name without its region answers 200 and changes nothing (2026-10-08,
+  above). A member that is still alive rejoins.
 
 **Without a leader:**
 - A server that knows no leader holds each request that needs one for the RPC hold timeout, 5 s by default
