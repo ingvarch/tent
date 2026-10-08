@@ -14,7 +14,6 @@ import (
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/model"
-	"github.com/ingvarch/tent/internal/nodeconfig"
 	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/pki"
 	"github.com/ingvarch/tent/internal/statestore"
@@ -30,9 +29,6 @@ const operatorCertTTL = 24 * time.Hour
 
 // errNoNomad is why an update or a validation fails when the service has no way to reach Nomad.
 var errNoNomad = errors.New("no Nomad client is set up")
-
-// scrubTimeout is how long the scrub of one node may take.
-const scrubTimeout = 5 * time.Minute
 
 // bootsMachine reports whether the change makes or finds a machine with user data: a create, or a wait that repeats a
 // create with its operation id. Other waits call no cloud and need no user data.
@@ -96,24 +92,6 @@ func (u *updateRun) prepareNodes(m *model.Cluster, now time.Time) error {
 		}
 	}
 	return nil
-}
-
-// userData returns the user data of the node that the change c creates or waits for: the NodeConfig of its group with
-// the node's name, a certificate issued at now, the seed and the intro token.
-func (u updateRun) userData(c NodeChange, now time.Time, seed []netip.Addr, intro pki.Secret) (cloud.UserData, error) {
-	cert, err := u.secrets.ca.IssueNode(u.builder.role(c.Group), u.region, now)
-	if err != nil {
-		return nil, fmt.Errorf("node %s: %w", c.Name, err)
-	}
-	nc, err := u.builder.node(c.Group, c.Name, c.Zone, cert, seed, intro)
-	if err != nil {
-		return nil, err
-	}
-	data, err := nodeconfig.UserData(nc)
-	if err != nil {
-		return nil, err
-	}
-	return cloud.UserData(data), nil
 }
 
 // lastAddresses returns n addresses of the IPv4 prefix p, from its last one down: the longest texts that a seed can
@@ -214,35 +192,14 @@ func (a *applier) applyClient(ctx context.Context, c NodeChange) error {
 	in := a.machineOf(c)
 	if bootsMachine(c) {
 		var err error
-		if in, err = a.bootClient(ctx, c); err != nil {
+		if in, err = a.s.bootClient(ctx, a.u.nodeKit, a, c); err != nil {
 			return err
 		}
 	}
 	if err := a.register(ctx, in); err != nil {
 		return err
 	}
-	return a.markJoined(ctx, in)
-}
-
-// bootClient creates the client node of c, or repeats its create, with an intro token, and returns its machine.
-func (a *applier) bootClient(ctx context.Context, c NodeChange) (cloud.Instance, error) {
-	return a.s.applyNodeWith(ctx, a.u.nodes, a.u.cluster, c, func(ctx context.Context) (cloud.UserData, error) {
-		api, err := a.nomadAPI()
-		if err != nil {
-			return nil, err
-		}
-		seed, err := a.seed(c.Name, true)
-		if err != nil {
-			return nil, err
-		}
-		intro, err := api.IntroToken(ctx, nomadops.IntroRequest{
-			NodeName: c.Name, NodePool: a.u.builder.nodePool(c.Group), TTL: nomadops.MaxIntroTTL,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("intro token for node %s: %w", c.Name, err)
-		}
-		return a.u.userData(c, a.s.now(), seed, intro)
-	})
+	return a.s.markJoined(ctx, a.u.nodeKit, in)
 }
 
 // seed returns the private addresses of the known servers other than the node called name, in the order of their
@@ -300,11 +257,6 @@ type nomadAccess struct {
 	cluster string
 	region  string // the Nomad region
 	secrets clusterSecrets
-}
-
-// nomad returns what the run needs to call the cluster's servers.
-func (u updateRun) nomad() nomadAccess {
-	return nomadAccess{cluster: u.cluster, region: u.region, secrets: u.secrets}
 }
 
 // apiAddress returns the address of the Nomad API of the machine in, as host:port, at its public address.
@@ -427,7 +379,7 @@ func (a *applier) scrubServers(ctx context.Context, api nomadops.API, servers []
 		if err := checkVote(peers, in, voters); err != nil {
 			return err
 		}
-		if err := a.markJoined(ctx, in); err != nil {
+		if err := a.s.markJoined(ctx, a.u.nodeKit, in); err != nil {
 			return err
 		}
 	}
@@ -453,21 +405,6 @@ func voterNoun(n int) string {
 		return "voter"
 	}
 	return "voters"
-}
-
-// markJoined replaces the user data of the machine in with the stub and labels the machine as joined, and reports the
-// scrub as a step. A failure stops the run with the provider's error; the next run plans the wait again.
-func (a *applier) markJoined(ctx context.Context, in cloud.Instance) error {
-	step := NodeChange{Action: NodeScrub, Name: in.Name, ID: in.ID}
-	a.s.progress(Progress{Node: step, Step: NodeStarted})
-	ctx, cancel := context.WithTimeout(ctx, scrubTimeout)
-	defer cancel()
-	if err := a.u.nodes.MarkJoined(ctx, in); err != nil {
-		a.s.progress(Progress{Node: step, Step: NodeFailed, Err: err})
-		return err
-	}
-	a.s.progress(Progress{Node: step, Step: NodeDone})
-	return nil
 }
 
 // markBootstrapped stores the mark that the ACL system was bootstrapped.

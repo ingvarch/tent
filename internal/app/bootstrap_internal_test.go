@@ -100,7 +100,7 @@ func TestSeed(t *testing.T) {
 				"run the command again"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			a := &applier{u: updateRun{cluster: "prod"}, known: tc.known}
+			a := &applier{u: updateRun{nodeKit: nodeKit{cluster: "prod"}}, known: tc.known}
 
 			got, err := a.seed(tc.node, tc.client)
 

@@ -198,21 +198,15 @@ func (s *Service) beginUpdate(u updateRun) error {
 
 // updateRun is the plan of an update, with what applying it needs.
 type updateRun struct {
-	plan      UpdatePlan
-	cluster   string
+	plan UpdatePlan
+	nodeKit
 	layout    statestore.Layout
-	region    string // the Nomad region
-	nodes     cloud.Nodes
-	secrets   clusterSecrets
 	completed []byte           // the completed spec
 	warnings  []string         // about the cluster
 	servers   []cloud.Instance // the machines of the server and combined groups that stay, by name
 	listed    []cloud.Instance // every machine the cloud listed, for the machine that a wait names by ID
 	// staleMark is set when the store holds the mark of a bootstrap that the servers of the plan do not stand behind.
 	staleMark bool
-	// builder makes the NodeConfig of the nodes that the plan creates, or waits for with an operation id; it is nil when
-	// the plan has none.
-	builder *nodeBuilder
 }
 
 // loadedCluster is a cluster's stored specs with their defaults, checked against the channel, with the Nomad version
@@ -287,9 +281,11 @@ func (s *Service) planUpdate(ctx context.Context, l statestore.Layout, cache ass
 	plan.Secrets, plan.Completed = relativePaths(l, secrets.writes), !bytes.Equal(stored, completed)
 	plan.Nomad = planNomad(m, plan.Nodes, found.servers, marked)
 	u := updateRun{
-		plan: plan, cluster: m.Name, layout: l, region: objs.Cluster.Spec.Nomad.Region, nodes: p.Nodes(),
-		secrets: secrets, completed: completed, warnings: s.updateWarnings(objs.Cluster, objs.NodeGroups, ch),
+		plan: plan, layout: l, completed: completed, warnings: s.updateWarnings(objs.Cluster, objs.NodeGroups, ch),
 		servers: found.servers, listed: found.listed, staleMark: marked && plan.Nomad != nil && plan.Nomad.Bootstrap,
+		nodeKit: nodeKit{
+			cluster: m.Name, region: objs.Cluster.Spec.Nomad.Region, nodes: p.Nodes(), secrets: secrets,
+		},
 	}
 	if !changesNodes(plan.Nodes) {
 		return u, nil
@@ -490,14 +486,19 @@ func (s *Service) applyNodeWith(ctx context.Context, nodes cloud.Nodes, cluster 
 	return in, nil
 }
 
-// changeNode carries out the node change c of the cluster: a create with a new operation id; a wait, which repeats
-// the create of the machine with its operation id; or a delete. It returns the machine of a create or a wait.
+// changeNode carries out the node change c of the cluster: a create with its operation id, or with a new one when it
+// has none; a wait, which repeats the create of the machine with its operation id; or a delete. It returns the machine
+// of a create or a wait.
 func changeNode(ctx context.Context, nodes cloud.Nodes, cluster string, c NodeChange,
 	prepare func(context.Context) (cloud.UserData, error),
 ) (cloud.Instance, error) {
 	switch c.Action {
 	case NodeCreate:
-		return createNode(ctx, nodes, cluster, c, cloud.NewOpID(), prepare)
+		op := c.Op
+		if op == "" {
+			op = cloud.NewOpID()
+		}
+		return createNode(ctx, nodes, cluster, c, op, prepare)
 	case NodeWait:
 		return createNode(ctx, nodes, cluster, c, c.Op, prepare)
 	case NodeDelete:
@@ -509,7 +510,7 @@ func changeNode(ctx context.Context, nodes cloud.Nodes, cluster string, c NodeCh
 // createNode creates the machine of the node change c with the operation id op and the user data that prepare
 // returns, or finds the one that an earlier call with op created, waits until it is ready and returns it. It gives the
 // call nodeTimeout, which the preparation does not use. Without prepare it fails before it calls the cloud: a machine
-// without user data would never join the cluster.
+// without user data would never join the cluster. A failure of the preparation matches errNotSent and keeps its text.
 func createNode(ctx context.Context, nodes cloud.Nodes, cluster string, c NodeChange, op string,
 	prepare func(context.Context) (cloud.UserData, error),
 ) (cloud.Instance, error) {
@@ -518,7 +519,7 @@ func createNode(ctx context.Context, nodes cloud.Nodes, cluster string, c NodeCh
 	}
 	userData, err := prepare(ctx)
 	if err != nil {
-		return cloud.Instance{}, err
+		return cloud.Instance{}, notSentError{err}
 	}
 	ctx, cancel := context.WithTimeout(ctx, nodeTimeout)
 	defer cancel()
