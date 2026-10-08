@@ -111,7 +111,7 @@ var testNow = assetstest.Now()
 func at(t time.Time) func() time.Time { return func() time.Time { return t } }
 
 // equateNetip lets cmp compare netip values, whose fields are unexported.
-var equateNetip = cmpopts.EquateComparable(netip.Prefix{}, netip.Addr{})
+var equateNetip = cmpopts.EquateComparable(netip.Prefix{}, netip.Addr{}, netip.AddrPort{})
 
 // nodeSpecs decodes the docs, fills in the defaults, as the completed spec holds them, and returns the model with the
 // specs.
