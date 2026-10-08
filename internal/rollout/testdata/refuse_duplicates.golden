@@ -1,0 +1,10 @@
+# mode roll
+# a new node runs Nomad 2.0.7
+# group workers: client, size 3, zones ams and fra, maxSurge 1, maxUnavailable 0, drain 1h0m0s
+# machine prod-servers-0 (m-1) in ams runs Nomad 2.0.7
+# machine prod-workers-0 (m-2) in ams runs Nomad 2.0.6, outdated
+# machine prod-workers-1 (m-3) in fra runs Nomad 2.0.6, outdated
+# machine prod-workers-2 (m-4) in ams runs Nomad 2.0.6, outdated
+# machine prod-workers-1 (m-5) in fra runs Nomad 2.0.6, outdated
+# leader prod-servers-0
+refused: node group workers: machines m-3 and m-5 share the name prod-workers-1; run tent update cluster first
