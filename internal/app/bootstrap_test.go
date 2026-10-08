@@ -837,8 +837,8 @@ func TestUpdateRepeatsAHealthWaitThatStopped(t *testing.T) {
 		if diff := cmp.Diff(wantProgress, onlyNomadAndNodes(*progress)); diff != "" {
 			t.Errorf("the progress of the run (-want +got):\n%s", diff)
 		}
-		if urls := sites.URLs(); len(urls) != 0 {
-			t.Errorf("the run read release files: %v", urls)
+		if n := nomadSumsRead(sites); n != 1 {
+			t.Errorf("the run read Nomad's checksums %d times, want once, for the report of the outdated nodes", n)
 		}
 		var writes []string
 		for _, c := range f.Calls()[cloudBefore:] {
@@ -1399,8 +1399,8 @@ func TestUpdateLabelsABuiltCluster(t *testing.T) {
 				t.Errorf("the run called %s %s", c.Name, c.Arg)
 			}
 		}
-		if urls := sites.URLs(); len(urls) != 0 {
-			t.Errorf("the run read release files: %v", urls)
+		if n := nomadSumsRead(sites); n != 1 {
+			t.Errorf("the run read Nomad's checksums %d times, want once, for the report of the outdated nodes", n)
 		}
 		wantNodes(t, f, allNodes...)
 		wantJoined(t, f, allNames...)
@@ -1518,34 +1518,40 @@ func TestUpdateGivesTheAssetsItsClock(t *testing.T) {
 	})
 }
 
-// TestUpdateReadsReleaseFilesOnlyForNodes reads Nomad's release files once for an update that creates nodes, and not at
-// all for one that creates none.
-func TestUpdateReadsReleaseFilesOnlyForNodes(t *testing.T) {
+// nomadSumsRead returns how many times the sites were asked for the checksums of a Nomad release.
+func nomadSumsRead(sites *assetstest.Sites) int {
+	n := 0
+	for _, u := range sites.URLs() {
+		if strings.Contains(u, "SHA256SUMS") && !strings.HasSuffix(u, ".sig") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestUpdateReadsNomadsReleaseFilesOncePerRun reads Nomad's release files once for an update that creates nodes, and
+// once for each later run, which creates none and reports the outdated nodes: not again for its second plan.
+func TestUpdateReadsNomadsReleaseFilesOncePerRun(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := newRelease(t)
 		sites := withAssets(svc)
-
 		mustUpdate(t, svc)
 
-		sums := 0
-		for _, u := range sites.URLs() {
-			if strings.Contains(u, "SHA256SUMS") && !strings.HasSuffix(u, ".sig") {
-				sums++
-			}
+		if got := nomadSumsRead(sites); got != 1 {
+			t.Errorf("Nomad's SHA256SUMS was read %d times by an update that made 5 nodes, want once", got)
 		}
-		if sums != 1 {
-			t.Errorf("Nomad's SHA256SUMS was read %d times by an update that made 5 nodes, want once", sums)
-		}
-		read := len(sites.URLs())
 		wantConverged(t, svc)
-		mustUpdate(t, svc)
-		if n := len(sites.URLs()); n != read {
-			t.Errorf("%d release files were read for a cluster that needs no node", n-read)
+		if got := nomadSumsRead(sites); got != 2 {
+			t.Errorf("Nomad's SHA256SUMS was read %d times after a plan of a cluster that needs no node, want 2", got)
 		}
-		unmark(t, f, "instance-4") // a wait without an operation id needs no user data either
 		mustUpdate(t, svc)
-		if n := len(sites.URLs()); n != read {
-			t.Errorf("%d release files were read for the wait for a client that had not joined", n-read)
+		if got := nomadSumsRead(sites); got != 3 {
+			t.Errorf("Nomad's SHA256SUMS was read %d times after an update of a cluster that needs no node, want 3", got)
+		}
+		unmark(t, f, "instance-4") // a wait without an operation id needs no user data
+		mustUpdate(t, svc)
+		if got := nomadSumsRead(sites); got != 4 {
+			t.Errorf("Nomad's SHA256SUMS was read %d times after the wait for a client that had not joined, want 4", got)
 		}
 		wantNodes(t, f, allNodes...)
 		wantJoined(t, f, allNames...)

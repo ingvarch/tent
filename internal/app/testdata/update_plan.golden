@@ -14,3 +14,4 @@ Plan: 2 to create, 1 to update, 0 to replace, 1 to delete.
 Nodes: 2 to create, 1 to wait for, 3 to delete.
 Nomad: bootstrap the ACL system and wait for 3 healthy servers.
 State: pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token, cluster.completed.yaml and nomad/bootstrapped will be written.
+Outdated: prod-servers-0 and prod-workers-2; tent rolling-update cluster replaces them.

@@ -575,3 +575,18 @@ func TestValidateHelp(t *testing.T) {
 		t.Errorf("validate alone: exit code = %d, stdout\n%s\nwant 0 and its help", group.code, group.out)
 	}
 }
+
+// TestValidateClusterWarnsAboutOutdatedNodes warns on stderr about the nodes that tent rolling-update cluster replaces,
+// and finds the cluster valid.
+func TestValidateClusterWarnsAboutOutdatedNodes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, f := outdatedCluster(t)
+
+		got := runWithNomad(t, onVultr(f), staticNomad(), validateArgs(s)...)
+
+		const warning = "WARNING: 3 nodes are outdated: prod-workers-0, prod-workers-1 and prod-workers-2; " +
+			"tent rolling-update cluster replaces them\n"
+		wantResult(t, got, 0, "cluster prod is valid: 3 servers and 3 clients run Nomad 2.0.7\n",
+			openAPIWarning+oneZoneWarning+warning)
+	})
+}

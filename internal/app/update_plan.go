@@ -24,6 +24,10 @@ type UpdatePlan struct {
 	// Completed reports that the completed spec, the specs with every default as last applied, will be written:
 	// the stored one is missing or differs.
 	Completed bool
+	// Outdated are the machines that stay and that a rolling update replaces, by node group and name; they are no
+	// change of the update. It is empty when none is outdated, and when the release files that tell the node groups'
+	// spec hashes could not be read.
+	Outdated []OutdatedNode
 	// Applied reports that Update made every change of the plan; a plan without changes that Update was asked to
 	// apply counts as applied too.
 	Applied bool
@@ -62,7 +66,9 @@ func (p UpdatePlan) stateWrites() []string {
 // Nomad step, such as "Nomad: bootstrap the ACL system and wait for 3 healthy servers.", and last a line that names
 // the objects it writes to the state store in the order they are written, such as "State: secrets/gossip.key and
 // cluster.completed.yaml will be written.". A plan that changes only the state store is that line alone, and a plan
-// without changes is the line "No changes.". Operation ids and the secrets' contents do not show.
+// without changes is the line "No changes.". When machines are outdated, a last line names them, such as "Outdated:
+// prod-workers-0 and prod-workers-1; tent rolling-update cluster replaces them.". Operation ids and the secrets'
+// contents do not show.
 func (p UpdatePlan) WriteText(w io.Writer) error {
 	var lines, counts strings.Builder
 	if p.infraChanges() {
@@ -89,7 +95,18 @@ func (p UpdatePlan) WriteText(w io.Writer) error {
 	if text == "" {
 		text = "No changes.\n"
 	}
+	if len(p.Outdated) > 0 {
+		text += outdatedPlanLine(p.Outdated)
+	}
 	return writeText(w, "the plan", text)
+}
+
+// WriteOutdated writes the line that names the outdated machines, and nothing when there are none.
+func (p UpdatePlan) WriteOutdated(w io.Writer) error {
+	if len(p.Outdated) == 0 {
+		return nil
+	}
+	return writeText(w, "the outdated machines", outdatedPlanLine(p.Outdated))
 }
 
 // planLine returns the step's line in a text plan, without its newline.
@@ -207,20 +224,22 @@ func writeSummary(w io.Writer, parts []string) error {
 }
 
 // MarshalJSON encodes the plan as {"applied": true, "infrastructure": <the engine's plan>, "nodes": [...],
-// "nomad": {"bootstrap": true, "servers": 3}, "secrets": ["pki/private/ca.key", ...], "completedSpec": true}, the
-// node changes in the order they run and the secrets in the order they are written. Nodes is [] when nothing changes,
+// "outdated": [{"name": "prod-workers-0", "id": "instance-4", "group": "workers", "reason": "spec hash"}], "nomad":
+// {"bootstrap": true, "servers": 3}, "secrets": ["pki/private/ca.key", ...], "completedSpec": true}, the node changes
+// in the order they run and the secrets in the order they are written. Nodes and outdated are [] when there are none,
 // infrastructure is null when the plan has no infrastructure plan, and applied, nomad, secrets and completedSpec are
 // left out when they are false, nil or empty. It leaves HTML characters such as < and & as they are, so the caller's
 // encoder decides whether to escape them.
 func (p UpdatePlan) MarshalJSON() ([]byte, error) {
 	return marshalJSON("the plan", struct {
-		Applied        bool         `json:"applied,omitempty"`
-		Infrastructure *engine.Plan `json:"infrastructure"`
-		Nodes          []NodeChange `json:"nodes"`
-		Nomad          *NomadStep   `json:"nomad,omitempty"`
-		Secrets        []string     `json:"secrets,omitempty"`
-		CompletedSpec  bool         `json:"completedSpec,omitempty"`
-	}{p.Applied, p.Infra, orEmpty(p.Nodes), p.Nomad, p.Secrets, p.Completed})
+		Applied        bool           `json:"applied,omitempty"`
+		Infrastructure *engine.Plan   `json:"infrastructure"`
+		Nodes          []NodeChange   `json:"nodes"`
+		Outdated       []OutdatedNode `json:"outdated"`
+		Nomad          *NomadStep     `json:"nomad,omitempty"`
+		Secrets        []string       `json:"secrets,omitempty"`
+		CompletedSpec  bool           `json:"completedSpec,omitempty"`
+	}{p.Applied, p.Infra, orEmpty(p.Nodes), orEmpty(p.Outdated), p.Nomad, p.Secrets, p.Completed})
 }
 
 // marshalJSON encodes v, which is what, as JSON on one line, and leaves HTML characters such as < and & as they are.

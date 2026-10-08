@@ -31,7 +31,8 @@ func newValidateClusterCommand(opts *globalOptions) *cobra.Command {
 			"joined Nomad, that Nomad has a leader, that the servers vote, are alive and healthy, that the clients " +
 			"are registered, ready and eligible, that every node runs the pinned Nomad version, and that no " +
 			"certificate has ended. It prints what differs, and warns about an open spec.access.api, a combined node " +
-			"group, a cluster in one failure domain and certificates that end within 30 days. " +
+			"group, a cluster in one failure domain, certificates that end within 30 days and nodes that tent " +
+			"rolling-update cluster replaces. " +
 			"The command exits with 0 when the cluster is valid, with 2 when it is not, and with 1 when tent could " +
 			"not check it: for a spec or a stored secret that does not load, or a cloud that does not answer. " +
 			"With --wait it checks every 10 seconds until the cluster is valid or the duration has passed, and " +

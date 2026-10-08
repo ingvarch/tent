@@ -25,7 +25,7 @@ type nodeKit struct {
 	nodes   cloud.Nodes
 	secrets clusterSecrets
 	// builder makes the NodeConfig of the nodes that the run creates, or waits for with an operation id; it is nil when
-	// the run has none.
+	// the run could not make it, which only a run that creates no node may do.
 	builder *nodeBuilder
 }
 

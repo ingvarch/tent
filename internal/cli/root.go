@@ -57,20 +57,20 @@ func WithNomadProxy(proxy func(nomadops.ProxyConfig) (http.Handler, error)) Opti
 	return func(o *globalOptions) { o.nomadProxy = proxy }
 }
 
-// exitChanges is tent's exit code when --exit-code finds a plan with changes, and when validate finds that the cluster
-// is not valid.
+// exitChanges is tent's exit code when --exit-code finds a plan with changes or a roll that is due, and when validate
+// finds that the cluster is not valid.
 const exitChanges = 2
 
-// errPlanHasChanges ends a command whose plan has changes under --exit-code: tent exits with exitChanges and prints
-// no error.
+// errPlanHasChanges ends a command whose plan has changes, or a roll that is due, under --exit-code: tent exits with
+// exitChanges and prints no error.
 var errPlanHasChanges = errors.New("the plan has changes")
 
 // errNotValid ends validate cluster when the cluster is not valid: tent exits with exitChanges and prints no error.
 var errNotValid = errors.New("the cluster is not valid")
 
 // Execute runs tent with args and returns the process exit code: 0 on success, 1 on an error, and 2 when --exit-code
-// finds a plan with changes or validate cluster finds the cluster not valid. The first Ctrl-C or SIGTERM cancels the
-// command's context; a second ends tent at once with exit code 130.
+// finds a plan with changes or a roll that is due, or validate cluster finds the cluster not valid. The first Ctrl-C
+// or SIGTERM cancels the command's context; a second ends tent at once with exit code 130.
 func Execute(ctx context.Context, args []string, s Streams, opts ...Option) int {
 	sigs, stop := notifyStopSignals()
 	defer stop()

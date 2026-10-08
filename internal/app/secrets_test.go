@@ -195,7 +195,8 @@ func TestUpdateCompletesTheCA(t *testing.T) {
 
 		plan := mustUpdate(t, svc)
 
-		if got, want := planText(t, plan), "State: pki/ca-bundle.pem will be written.\n"; got != want {
+		// The CA bundle is a file of every group's NodeConfig, so the new bundle outdates every node.
+		if got, want := planText(t, plan), "State: pki/ca-bundle.pem will be written.\n"+allOutdatedLine; got != want {
 			t.Errorf("the plan is\n%s\nwant\n%s", got, want)
 		}
 		if diff := cmp.Diff([]string{"create " + caBundlePath}, rec.puts); diff != "" {

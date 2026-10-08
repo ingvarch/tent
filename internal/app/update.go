@@ -128,7 +128,10 @@ func (s NodeStep) String() string {
 //
 // A node that is created or waited for with an operation id boots with the NodeConfig of its group. A plan that does so
 // reads the release files that the nodes download, and fails when a node's user data does not fit what a provider
-// takes. A machine of any role without the joined label counts as not joined, and is waited for until its node joins
+// takes. Every plan reads them, to name the machines that stay and whose spec hash is not their group's, or is missing,
+// in Outdated: they are no change, and an update replaces none of them. A plan that creates no node and cannot read the
+// release files has no Outdated and goes on, and Update tells OnWarning once that it could not tell which nodes are
+// outdated. A machine of any role without the joined label counts as not joined, and is waited for until its node joins
 // and its user data is scrubbed; the wait repeats the create only for a machine that the cloud reports not ready. A
 // client that has not joined and is older than the lifetime of its intro token, 31 minutes, may never have
 // registered: when a server that stays has joined, the plan asks Nomad once, through those servers, about every such
@@ -173,6 +176,9 @@ func (s *Service) Update(ctx context.Context, cluster string, apply bool) (_ Upd
 	}
 	cache := assetCache{} // both plans of this run find the release files once
 	u, err := s.planUpdate(ctx, l, cache)
+	if err == nil && u.reportWarning != "" {
+		s.warn(u.reportWarning)
+	}
 	switch {
 	case err != nil || !apply:
 		return u.plan, err
@@ -220,6 +226,8 @@ type updateRun struct {
 	warnings  []string         // about the cluster
 	servers   []cloud.Instance // the machines of the server and combined groups that stay, by name
 	listed    []cloud.Instance // every machine the cloud listed, for the machine that a wait names by ID
+	// reportWarning says why the plan has no report of the outdated machines, or is empty.
+	reportWarning string
 	// staleMark is set when the store holds the mark of a bootstrap that the servers of the plan do not stand behind.
 	staleMark bool
 }
@@ -258,8 +266,8 @@ func (s *Service) loadCluster(ctx context.Context, l statestore.Layout) (loadedC
 	return loadedCluster{objs: objs, ch: ch, stored: stored, m: m}, nil
 }
 
-// planUpdate loads and checks a cluster's specs, as Update says, and plans the changes that bring the cloud to them.
-// The release files that it finds go into cache.
+// planUpdate loads and checks a cluster's specs, as Update says, and plans the changes that bring the cloud to them and
+// the report of the outdated machines. The release files that it finds go into cache.
 func (s *Service) planUpdate(ctx context.Context, l statestore.Layout, cache assetCache) (updateRun, error) {
 	c, err := s.loadCluster(ctx, l)
 	if err != nil {
@@ -302,15 +310,22 @@ func (s *Service) planUpdate(ctx context.Context, l statestore.Layout, cache ass
 			cluster: m.Name, region: objs.Cluster.Spec.Nomad.Region, nodes: p.Nodes(), secrets: secrets,
 		},
 	}
-	if !changesNodes(plan.Nodes) {
+	changes := changesNodes(plan.Nodes)
+	builder, err := s.planBuilder(ctx, p, m, objs, ch, secrets, cache)
+	switch {
+	case err != nil && (changes || ctx.Err() != nil):
+		return updateRun{}, err
+	case err != nil:
+		u.reportWarning = couldNotTellOutdated + err.Error()
 		return u, nil
 	}
-	if u.builder, err = s.planBuilder(ctx, p, m, objs, ch, secrets, cache); err != nil {
-		return updateRun{}, err
+	u.builder = builder
+	if changes {
+		if err := u.prepareNodes(m, s.now()); err != nil {
+			return updateRun{}, err
+		}
 	}
-	if err := u.prepareNodes(m, s.now()); err != nil {
-		return updateRun{}, err
-	}
+	u.plan.Outdated = outdatedNodes(m, builder, staying(found.listed, plan.Nodes))
 	return u, nil
 }
 

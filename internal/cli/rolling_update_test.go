@@ -541,12 +541,57 @@ func TestRollingUpdateClusterHelp(t *testing.T) {
 	got := runOnCloud(t, "rolling-update", "cluster", "--help")
 	for _, want := range []string{
 		"Usage:\n  tent rolling-update cluster [NAME] [flags]\n",
-		"--yes", "--nodegroups", "--force", "--allow-single-server", "VULTR_API_KEY",
+		"--yes", "--nodegroups", "--force", "--exit-code", "--allow-single-server", "VULTR_API_KEY",
 		"Replace the outdated nodes of the cluster named by NAME or --name.",
 		"tent cannot roll server groups yet",
 	} {
 		if got.code != 0 || !strings.Contains(got.out, want) {
 			t.Errorf("exit code = %d, stdout\n%s\nwant 0 and it to hold %q", got.code, got.out, want)
 		}
+	}
+}
+
+// TestRollingUpdateClusterExitCode exits with 2 under --exit-code while a roll is due, and with 0 when nothing is left
+// to roll; the plan prints as without the flag.
+func TestRollingUpdateClusterExitCode(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, f := outdatedCluster(t)
+		tent := rollRunner(t, f)
+
+		wantResult(t, tent(roll(s, "--exit-code")...), 2, rollPlan, rollHint)
+
+		clean, g := builtCluster(t)
+		const plan = upToDateServersLine + "node group workers (client, size 3): up to date\n\nNothing to roll.\n"
+		wantResult(t, rollRunner(t, g)(roll(clean, "--exit-code")...), 0, plan, "")
+	})
+}
+
+// TestRollingUpdateClusterExitCodeKeepsTheRefusalAnError exits with 1, not 2, when the decisions refuse the roll.
+func TestRollingUpdateClusterExitCodeKeepsTheRefusalAnError(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, f := builtCluster(t)
+		tent := rollRunner(t, f)
+		s.put(t, clusterPath, slowServersYAML)
+		if got := runOn(t, f, update(s, "--yes")...); got.code != 0 {
+			t.Fatalf("update --yes: exit code %d\n%s", got.code, got.errOut)
+		}
+
+		got := tent(roll(s, "--exit-code")...)
+
+		if got.code != 1 || !strings.HasSuffix(got.errOut, "Error: "+serverRefusal+"\n") {
+			t.Errorf("exit code = %d, stderr\n%s\nwant 1 and the refusal", got.code, got.errOut)
+		}
+	})
+}
+
+// TestRollingUpdateClusterExitCodeNeedsAPlan refuses --exit-code with --yes before it calls the cloud, as update does.
+func TestRollingUpdateClusterExitCodeNeedsAPlan(t *testing.T) {
+	s := withCluster(t)
+	f := vultrfake.New()
+
+	wantError(t, rollRunner(t, f)(roll(s, "--yes", "--exit-code")...), "Error: --exit-code works only without --yes\n")
+
+	if calls := f.Calls(); len(calls) != 0 {
+		t.Errorf("calls to the cloud: %v", calls)
 	}
 }

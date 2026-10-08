@@ -142,8 +142,11 @@ func (v Validation) MarshalJSON() ([]byte, error) {
 // service without a Nomad client fails with an error.
 //
 // The warnings are those that every change of the cluster gives, the one about a cluster that runs in a single failure
-// domain, those about certificates that end within 30 days, and the one about a lock that cannot be read. They are
-// returned, and told to OnWarning. They never make the cluster invalid.
+// domain, those about certificates that end within 30 days, the one that names the machines that stay and that a
+// rolling update replaces, or says that tent could not tell which they are, and the one about a lock that cannot be
+// read. They are returned, and told to OnWarning. They never make the cluster invalid. Telling which machines are
+// outdated reads the release files that the nodes download, unless no machine stays or the store lacks the cluster's
+// secrets.
 func (s *Service) ValidateCluster(ctx context.Context, cluster string) (_ Validation, err error) {
 	defer func() { err = stopped(ctx, err) }()
 	l, err := s.layout(ctx, cluster)
@@ -186,11 +189,38 @@ func (s *Service) ValidateCluster(ctx context.Context, cluster string) (_ Valida
 			": an outage there takes the whole cluster down")
 	}
 	v.Warnings = append(v.Warnings, found.warnings...)
+	outdated, err := s.outdatedFinding(ctx, p, c, set.stays, found.secrets)
+	if err != nil {
+		return Validation{}, err
+	}
+	if outdated != "" {
+		v.Warnings = append(v.Warnings, outdated)
+	}
 	if lockWarning != "" {
 		v.Warnings = append(v.Warnings, lockWarning)
 	}
 	s.warn(v.Warnings...)
 	return v, nil
+}
+
+// outdatedFinding returns the warning about the machines among stays that a rolling update replaces, "" for none, or
+// the warning that tent could not tell which they are when the release files that tell the spec hashes cannot be read.
+// A cluster whose secrets the store lacks (secrets is nil) has the failure nomad-not-set-up and no report. The only
+// error is the end of ctx.
+func (s *Service) outdatedFinding(ctx context.Context, p cloud.Provider, c loadedCluster, stays []cloud.Instance,
+	secrets *clusterSecrets,
+) (string, error) {
+	if len(stays) == 0 || secrets == nil {
+		return "", nil
+	}
+	builder, err := s.planBuilder(ctx, p, c.m, c.objs, c.ch, *secrets, assetCache{})
+	switch {
+	case ctx.Err() != nil && err != nil:
+		return "", err
+	case err != nil:
+		return couldNotTellOutdated + err.Error(), nil
+	}
+	return outdatedWarning(outdatedNodes(c.m, builder, stays)), nil
 }
 
 // lockHolder returns the lease of the cluster's lock without taking it: nil when the lock is free, and the zero lease

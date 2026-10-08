@@ -26,6 +26,7 @@ const noPrivateAddress = "the cloud reports no private address for it"
 type nomadFindings struct {
 	failures []Failure
 	warnings []string
+	secrets  *clusterSecrets // the stored secrets, nil when the store lacks some
 }
 
 // checkNomad makes the checks of Nomad and of the certificates for the cluster c, whose machines are set, at now. The
@@ -41,7 +42,7 @@ func (s *Service) checkNomad(ctx context.Context, l statestore.Layout, c loadedC
 	if err != nil {
 		return nomadFindings{}, err
 	}
-	var found nomadFindings
+	found := nomadFindings{secrets: &secrets}
 	found.failures, found.warnings = certificateFindings(secrets.ca.Certificate().NotAfter, set.stays, now)
 	asked, err := s.askNomad(ctx, l, c, set, secrets)
 	found.failures = append(found.failures, asked...)
