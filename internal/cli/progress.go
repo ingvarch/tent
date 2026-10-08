@@ -11,8 +11,8 @@ import (
 	"github.com/ingvarch/tent/internal/engine"
 )
 
-// printProgress returns what prints each step of an update or a delete on w as it happens: a line of text, such as
-// "created vultr.VPC/prod", or with -o json a JSON object on one line.
+// printProgress returns what prints each step of an update, a rolling update or a delete on w as it happens: a line of
+// text, such as "created vultr.VPC/prod", or with -o json a JSON object on one line.
 func printProgress(w io.Writer, format string) func(app.Progress) {
 	if format != outputJSON {
 		return func(p app.Progress) {
@@ -78,7 +78,8 @@ func progressText(p app.Progress) string {
 	return fmt.Sprintf(lines[2]+": %v", node, p.Err)
 }
 
-// nomadText returns the line of text of the Nomad step p, such as "waiting for 3 healthy Nomad servers".
+// nomadText returns the line of text of the Nomad step p, such as "waiting for 3 healthy Nomad servers" or "draining
+// node prod-workers-0 within 1h0m0s".
 func nomadText(p app.Progress) string {
 	e := p.Nomad
 	var lines [3]string
@@ -109,6 +110,33 @@ func nomadText(p app.Progress) string {
 		lines = [3]string{
 			"waiting for node " + e.Node + " to register", "node " + e.Node + " registered",
 			"failed to wait for node " + e.Node + " to register",
+		}
+	case app.NomadIneligible:
+		lines = [3]string{
+			"marking node " + e.Node + " ineligible", "node " + e.Node + " is ineligible",
+			"failed to mark node " + e.Node + " ineligible",
+		}
+	case app.NomadDrain:
+		lines = [3]string{
+			fmt.Sprintf("draining node %s within %s", e.Node, e.Deadline), "node " + e.Node + " is draining",
+			"failed to drain node " + e.Node,
+		}
+	case app.NomadDrained:
+		lines = [3]string{
+			"waiting for node " + e.Node + " to drain", "node " + e.Node + " is drained",
+			"failed to wait for node " + e.Node + " to drain",
+		}
+	case app.NomadDown:
+		node := e.Node + " (" + e.Address + ")"
+		lines = [3]string{
+			"waiting for Nomad to list node " + node + " as down", "Nomad lists node " + node + " as down",
+			"failed to wait for node " + node + " to go down",
+		}
+	case app.NomadPurge:
+		node := e.Node + " (" + e.Address + ")"
+		lines = [3]string{
+			"purging node " + node + " from Nomad", "purged node " + node + " from Nomad",
+			"failed to purge node " + node + " from Nomad",
 		}
 	default:
 		return fmt.Sprintf("%s %s Nomad", e.Action, p.Step)
@@ -182,16 +210,19 @@ type nodeEvent struct {
 	Error   string         `json:"error,omitempty"`
 }
 
-// nomadEvent is a step of the Nomad step of an update as -o json prints it. Name is the node of a register, Leader the
-// leader of a done leader wait, and Voters the number of servers of a healthy wait.
+// nomadEvent is a step that works on Nomad, as -o json prints it. Name is the node that a step works on, Address its
+// address for a down or purge step, Deadline the deadline of a drain step, Leader the leader of a done leader wait,
+// and Voters the number of servers of a healthy wait.
 type nomadEvent struct {
-	Type   string          `json:"type"` // nomad
-	Step   string          `json:"step"`
-	Action app.NomadAction `json:"action"`
-	Name   string          `json:"name,omitempty"`
-	Leader string          `json:"leader,omitempty"`
-	Voters int             `json:"voters,omitempty"`
-	Error  string          `json:"error,omitempty"`
+	Type     string          `json:"type"` // nomad
+	Step     string          `json:"step"`
+	Action   app.NomadAction `json:"action"`
+	Name     string          `json:"name,omitempty"`
+	Address  string          `json:"address,omitempty"`
+	Deadline string          `json:"deadline,omitempty"`
+	Leader   string          `json:"leader,omitempty"`
+	Voters   int             `json:"voters,omitempty"`
+	Error    string          `json:"error,omitempty"`
 }
 
 // waitEvent is the start of the wait for deleted nodes to go as -o json prints it.
@@ -214,8 +245,12 @@ func jsonEvent(p app.Progress) any {
 		return ev
 	}
 	if e := p.Nomad; e != nil {
-		return nomadEvent{Type: "nomad", Step: p.Step.String(), Action: e.Action, Name: e.Node, Leader: e.Leader,
-			Voters: e.Voters, Error: errorText(p.Err)}
+		ev := nomadEvent{Type: "nomad", Step: p.Step.String(), Action: e.Action, Name: e.Node, Address: e.Address,
+			Leader: e.Leader, Voters: e.Voters, Error: errorText(p.Err)}
+		if e.Deadline > 0 {
+			ev.Deadline = e.Deadline.String()
+		}
+		return ev
 	}
 	ev := nodeEvent{Type: "node", Step: p.Step.String(), Action: p.Node.Action, Name: p.Node.Name,
 		ID: cmp.Or(p.Instance.ID, p.Node.ID), Error: errorText(p.Err)}

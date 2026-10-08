@@ -219,12 +219,13 @@ func testAssets() assets.Options {
 	}
 }
 
-// staticNomad returns the Nomad factory of a cluster that has a leader, three healthy servers that vote, and the three
-// workers of the test cluster registered at 10.64.0.6 to 10.64.0.8. Its Raft peers and the servers that autopilot
-// reports are the servers at 10.64.0.3 to 10.64.0.5, the addresses that the test cluster's machines get on the fake;
-// they and the workers run the Nomad version that the test assets pin. Its ACL system counts as bootstrapped
-// with the token of the first client that is made, which is the secret that tent holds, as that of a cluster that an
-// earlier run built. It does not follow the cloud, and the CLI tests check output, not the order of the calls.
+// staticNomad returns the Nomad factory of a cluster that has a leader, three healthy servers that vote, a failure
+// tolerance of 1, and the three workers of the test cluster registered at 10.64.0.6 to 10.64.0.8. Its Raft peers and
+// the servers that autopilot reports are the servers at 10.64.0.3 to 10.64.0.5, the addresses that the test cluster's
+// machines get on the fake; they and the workers run the Nomad version that the test assets pin. Its ACL system counts
+// as bootstrapped with the token of the first client that is made, which is the secret that tent holds, as that of a
+// cluster that an earlier run built. It does not follow the cloud, and the CLI tests check output, not the order of
+// the calls.
 func staticNomad() func(nomadops.Config) (nomadops.API, error) {
 	return nomadOf("servers", "workers", 6)
 }
@@ -236,7 +237,8 @@ func combinedNomad() func(nomadops.Config) (nomadops.API, error) {
 }
 
 // nomadOf returns the Nomad factory of staticNomad for servers in the node group servers, and three clients of the
-// node group clients that have the private addresses 10.64.0.<first> and the two that follow.
+// node group clients that have the private addresses 10.64.0.<first> and the two that follow. The nodes and the Raft
+// peers have the IDs n-instance-<n> and r-instance-<n> of the machines that update gives those addresses.
 func nomadOf(servers, clients string, first byte) func(nomadops.Config) (nomadops.API, error) {
 	_, factory := nomadWorld(servers, clients, first)
 	return factory
@@ -247,18 +249,20 @@ func nomadOf(servers, clients string, first byte) func(nomadops.Config) (nomadop
 func nomadWorld(servers, clients string, first byte) (*nomadfake.Fake, func(nomadops.Config) (nomadops.API, error)) {
 	f := nomadfake.New()
 	f.SetLeader("10.64.0.3:4647")
-	health := nomadops.Health{Healthy: true, Voters: 3}
+	health := nomadops.Health{Healthy: true, Voters: 3, FailureTolerance: 1}
 	var peers []nomadops.Peer
 	for i := range 3 {
 		f.Register(nomadops.Node{
-			Name: fmt.Sprintf("prod-%s-%d", clients, i), Status: "ready", Eligible: true,
-			Address: netip.AddrFrom4([4]byte{10, 64, 0, first + byte(i)}), Version: assetstest.NomadVersion,
+			ID: fmt.Sprintf("n-instance-%d", int(first)-2+i), Name: fmt.Sprintf("prod-%s-%d", clients, i),
+			Status: "ready", Eligible: true, Address: netip.AddrFrom4([4]byte{10, 64, 0, first + byte(i)}),
+			Version: assetstest.NomadVersion,
 		})
+		id := fmt.Sprintf("r-instance-%d", i+1)
 		name := fmt.Sprintf("prod-%s-%d.global", servers, i)
 		addr := netip.AddrPortFrom(netip.AddrFrom4([4]byte{10, 64, 0, byte(3 + i)}), 4647)
-		peers = append(peers, nomadops.Peer{Name: name, Address: addr, Voter: true})
+		peers = append(peers, nomadops.Peer{ID: id, Name: name, Address: addr, Voter: true})
 		health.Servers = append(health.Servers, nomadops.ServerHealth{
-			Name: name, Address: addr, Serf: "alive", Healthy: true, Voter: true, Leader: i == 0,
+			ID: id, Name: name, Address: addr, Serf: "alive", Healthy: true, Voter: true, Leader: i == 0,
 			Version: assetstest.NomadVersion,
 		})
 	}
@@ -269,6 +273,82 @@ func nomadWorld(servers, clients string, first byte) (*nomadfake.Fake, func(noma
 		once.Do(func() { f.SetBootstrapped(cfg.Token) })
 		return f.Client(cfg), nil
 	}
+}
+
+// followedNomad returns the Nomad factory of staticNomad whose workers follow the machines of the Vultr fake f, as the
+// nodes of a real cluster follow theirs, and the fake behind it. Before each read of the nodes, the node of every
+// ready client machine that never had one registers, with the ID n-<instance ID>, and the node of a machine that is
+// gone reads down, with its drain complete. A node that a client purged does not come back.
+func followedNomad(f *vultrfake.Fake) (*nomadfake.Fake, func(nomadops.Config) (nomadops.API, error)) {
+	world, factory := nomadWorld("servers", "workers", 6)
+	var mu sync.Mutex
+	registered := map[string]bool{}
+	return world, func(cfg nomadops.Config) (nomadops.API, error) {
+		api, err := factory(cfg)
+		return &followingAPI{API: api, world: world, cloud: f, mu: &mu, registered: registered}, err
+	}
+}
+
+// followingAPI is a nomadops.API that makes the nodes of its fake follow the machines before it lists them.
+type followingAPI struct {
+	nomadops.API
+	world      *nomadfake.Fake
+	cloud      *vultrfake.Fake
+	mu         *sync.Mutex
+	registered map[string]bool // the IDs of the nodes that ever were listed, shared by the clients of one factory
+}
+
+func (a *followingAPI) Nodes(ctx context.Context) ([]nomadops.Node, error) {
+	if err := a.follow(ctx); err != nil {
+		return nil, err
+	}
+	return a.API.Nodes(ctx)
+}
+
+// follow registers the nodes of the new ready client machines and turns the nodes of the machines that are gone down.
+func (a *followingAPI) follow(ctx context.Context) error {
+	nodes, err := a.API.Nodes(ctx)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, n := range nodes {
+		a.registered[n.ID] = true
+	}
+	live := map[string]bool{}
+	for _, in := range a.cloud.Instances() {
+		id := "n-" + in.ID
+		live[id] = true
+		if a.registered[id] || !slices.Contains(in.Tags, cloud.LabelRole+"=client") ||
+			in.Status != "active" || in.PowerStatus != "running" || in.ServerStatus != "ok" {
+			continue
+		}
+		vpcs := a.cloud.InstanceVPCs(in.ID)
+		if len(vpcs) == 0 {
+			continue
+		}
+		private, err := netip.ParseAddr(vpcs[0].IPAddress)
+		if err != nil {
+			return err
+		}
+		a.world.Register(nomadops.Node{
+			ID: id, Name: in.Hostname, Status: "ready", Eligible: true, Address: private,
+			Version: assetstest.NomadVersion,
+		})
+		a.registered[id] = true
+	}
+	for _, n := range nodes {
+		if live[n.ID] || n.Status == "down" {
+			continue
+		}
+		n.Status, n.Draining = "down", false
+		if n.LastDrain.Status == "draining" {
+			n.LastDrain.Status = "complete"
+		}
+		a.world.Register(n)
+	}
+	return nil
 }
 
 // runOn executes tent with args as Execute does, its providers reaching the Vultr fake f.

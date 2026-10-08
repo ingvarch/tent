@@ -104,15 +104,15 @@ func applyUpdateText(cmd *cobra.Command, opts *globalOptions, svc *app.Service, 
 	plan, err := applyUpdate(cmd, opts, svc, cluster)
 	return report(err == nil || app.Saved(err), err, func() error {
 		if !plan.HasChanges() {
-			return writeUpToDate(w, cluster)
+			return writeClusterLine(w, cluster, "is up to date")
 		}
 		return writeApplied(w, plan)
 	})
 }
 
-// writeUpToDate writes that the cluster is up to date.
-func writeUpToDate(w io.Writer, cluster string) error {
-	if _, err := fmt.Fprintf(w, "cluster %s is up to date\n", cluster); err != nil {
+// writeClusterLine writes a line that says of the cluster that it is up to date or has nothing to roll.
+func writeClusterLine(w io.Writer, cluster, state string) error {
+	if _, err := fmt.Fprintf(w, "cluster %s %s\n", cluster, state); err != nil {
 		return fmt.Errorf("writing the result: %w", err)
 	}
 	return nil

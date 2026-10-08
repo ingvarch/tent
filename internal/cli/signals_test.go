@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -92,9 +93,19 @@ func TestWatchInterrupts(t *testing.T) {
 // startWithSignals starts tent with args and stdin in another goroutine, stopped by the signals from sigs.
 func startWithSignals(t *testing.T, sigs <-chan os.Signal, ex exits, stdin *os.File, args ...string) *started {
 	t.Helper()
+	return startWithSignalsAndOptions(t, sigs, ex, stdin, args)
+}
+
+// startWithSignalsAndOptions starts tent with args, stdin and opts in another goroutine, stopped by the signals from
+// sigs.
+func startWithSignalsAndOptions(t *testing.T, sigs <-chan os.Signal, ex exits, stdin io.Reader, args []string,
+	opts ...Option,
+) *started {
+	t.Helper()
 	r := &started{code: make(chan int, 1)}
 	go func() {
-		r.code <- executeWithSignals(t.Context(), args, Streams{In: stdin, Out: &r.out, Err: &r.errOut}, sigs, ex.exit)
+		r.code <- executeWithSignals(t.Context(), args, Streams{In: stdin, Out: &r.out, Err: &r.errOut}, sigs, ex.exit,
+			opts...)
 	}()
 	return r
 }
