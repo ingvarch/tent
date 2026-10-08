@@ -398,3 +398,18 @@ func TestDrainArg(t *testing.T) {
 		})
 	}
 }
+
+// TestPurgeBeforeTheBootstrapKeepsTheNode checks that a purge that the fake refuses as Nomad's 403 removes nothing.
+func TestPurgeBeforeTheBootstrapKeepsTheNode(t *testing.T) {
+	f, a := newAPI()
+	f.Register(nomadops.Node{ID: "n-1", Name: "prod-workers-0", Status: "down"})
+
+	checkErr(t, a.Purge(t.Context(), "n-1"), "nomadfake: Purge: permission denied", false)
+
+	if err := a.Bootstrap(t.Context(), bootstrapSecret); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if nodes, err := a.Nodes(t.Context()); err != nil || len(nodes) != 1 {
+		t.Errorf("Nodes() after a refused purge = %+v, %v; want the node", nodes, err)
+	}
+}
