@@ -29,7 +29,7 @@ const (
 	loopPending      = time.Minute
 	loopSlack        = 10 * time.Second // how far past a limit a run may end
 	rollAgain        = "run tent rolling-update cluster again to go on waiting"
-	drainTenMinutes  = "  rollingUpdate:\n    drainTimeout: 10m\n"
+	drainTenMinutes  = "  rollingUpdate:\n" + tenMinuteDrain
 )
 
 // roll runs the loop of a rolling update of the test cluster, without the lock.
@@ -898,12 +898,9 @@ func TestRollLoopReportsAWaitForADrainOnce(t *testing.T) {
 func TestRollLoopGivesUpWaitingForADrain(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := outdatedWith(t, drainTenMinutes)
+		// Nomad's own deadline never ends this drain
 		for _, name := range []string{"prod-workers-0", "prod-workers-1"} {
-			w.ChangeNode(name, func(n *nomadops.Node) {
-				if n.LastDrain.Status == "complete" { // Nomad's own deadline never ends this drain
-					n.Draining, n.LastDrain.Status = true, "draining"
-				}
-			})
+			neverDrained(w, name)
 		}
 		id := instanceNamed(t, f, "prod-workers-0")
 		var drainedAt time.Time
@@ -1136,6 +1133,36 @@ func TestRollLoopCountsEachWaitForTheServersFromItsOwnStart(t *testing.T) {
 		})
 
 		counts, err := roll(svc, app.RollOptions{})
+
+		wantRolled(t, counts, err, app.RollCounts{Created: 2, Drained: 2, Deleted: 2, Purged: 2})
+	})
+}
+
+// TestRollLoopForgetsAWaitForTheServersThatEndedWhileAnotherWaitWasOpen polls the wait for the servers while the wait
+// for a drain is the open one, and again eleven minutes later: the second wait does not inherit the start of the first.
+func TestRollLoopForgetsAWaitForTheServersThatEndedWhileAnotherWaitWasOpen(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, w := outdatedWith(t, "  rollingUpdate:\n    maxSurge: 0\n    maxUnavailable: 2\n    drainTimeout: 1h\n")
+		neverDrained(w, "prod-workers-0")
+		w.SetDrainReads(3)
+		blank := func() {
+			w.ChangeServer("prod-servers-0", func(s *nomadops.ServerHealth) { s.Version = "" })
+			time.AfterFunc(30*time.Second, func() { w.ChangeServer("prod-servers-0", func(*nomadops.ServerHealth) {}) })
+		}
+		deletes := 0
+		f.SetHook(func(ctx context.Context, c vultrfake.Call, next func(context.Context) error) error {
+			err := next(ctx)
+			if c.Name == "DeleteInstance" && err == nil {
+				blank()
+				if deletes++; deletes == 1 {
+					time.AfterFunc(11*time.Minute, func() { w.ChangeNode("prod-workers-0", func(*nomadops.Node) {}) })
+				}
+			}
+			return err
+		})
+
+		counts, err := rollBefore(svc, time.Hour)
 
 		wantRolled(t, counts, err, app.RollCounts{Created: 2, Drained: 2, Deleted: 2, Purged: 2})
 	})
