@@ -116,7 +116,7 @@ func TestWaitNode(t *testing.T) {
 
 		got, err := nomadops.WaitNode(bounded(t), a, "prod-workers-0", addr)
 
-		if err != nil || got != want {
+		if err != nil || !cmp.Equal(got, want, equateAddrs) {
 			t.Errorf("WaitNode() = %+v, %v; want %+v", got, err, want)
 		}
 		wantTook(t, start, 6*time.Second)
@@ -145,7 +145,7 @@ func TestWaitNodeAmongNodesOfTheSameName(t *testing.T) {
 		} {
 			start := time.Now()
 			got, err := nomadops.WaitNode(bounded(t), listed{nodes: nodes}, "prod-workers-0", addr)
-			if err != nil || got != want {
+			if err != nil || !cmp.Equal(got, want, equateAddrs) {
 				t.Errorf("WaitNode() among %+v = %+v, %v; want %+v", nodes, got, err, want)
 			}
 			wantTook(t, start, 0)

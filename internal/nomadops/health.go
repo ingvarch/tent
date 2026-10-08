@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/netip"
+	"time"
 
 	"github.com/hashicorp/nomad/api"
 )
@@ -16,6 +17,8 @@ const healthPath = "/v1/operator/autopilot/health"
 type Health struct {
 	Healthy bool // every server is healthy
 	Voters  int  // how many servers vote in Raft
+	// FailureTolerance is how many voters the cluster can lose, by autopilot.
+	FailureTolerance int
 	// Servers are the report's servers, in the report's order, which Nomad changes between calls: find a server by
 	// its address or name.
 	Servers []ServerHealth
@@ -23,6 +26,7 @@ type Health struct {
 
 // ServerHealth is autopilot's view of one server.
 type ServerHealth struct {
+	ID   string // the Raft ID
 	Name string // as Nomad names it, <name>.<region>
 	// Address is the server's Raft address; invalid when Nomad gives none that parses.
 	Address netip.AddrPort
@@ -31,6 +35,9 @@ type ServerHealth struct {
 	Voter   bool   // the server votes in Raft
 	Leader  bool   // the server leads
 	Version string // the Nomad version the server runs
+	// StableSince is when autopilot last saw the server's health change; Nomad gives whole seconds. The zero time
+	// when the report has none.
+	StableSince time.Time
 }
 
 // Health returns autopilot's view of the servers. An unhealthy cluster is a Health, not an error, although Nomad
@@ -52,11 +59,11 @@ func (c *Client) Health(ctx context.Context) (Health, error) {
 	if err != nil {
 		return Health{}, err
 	}
-	h := Health{Healthy: reply.Healthy, Voters: len(reply.Voters)}
+	h := Health{Healthy: reply.Healthy, Voters: len(reply.Voters), FailureTolerance: reply.FailureTolerance}
 	for _, sv := range reply.Servers {
 		addr, _ := netip.ParseAddrPort(sv.Address) // the invalid AddrPort when it does not parse
-		h.Servers = append(h.Servers, ServerHealth{Name: sv.Name, Address: addr, Serf: sv.SerfStatus,
-			Healthy: sv.Healthy, Voter: sv.Voter, Leader: sv.Leader, Version: sv.Version})
+		h.Servers = append(h.Servers, ServerHealth{ID: sv.ID, Name: sv.Name, Address: addr, Serf: sv.SerfStatus,
+			Healthy: sv.Healthy, Voter: sv.Voter, Leader: sv.Leader, Version: sv.Version, StableSince: sv.StableSince})
 	}
 	return h, nil
 }

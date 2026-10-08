@@ -17,17 +17,25 @@ import (
 var nodesRequest = gotRequest{Method: http.MethodGet, Path: "/v1/nodes", Query: "region=" + region,
 	Token: clientToken, Peer: "cli." + region + ".nomad"}
 
-// nodesJSON is how Nomad lists four client nodes: one that registers, one that is drained, one that is ready, and one
-// of the same name that went down before it, at another address.
+// nodesJSON is how Nomad lists five client nodes: one that registers and was never drained ("LastDrain": null), one
+// that drains, one that is ready after a drain that completed with meta, one of the same name that went down before
+// it, at another address, and one whose drain was canceled.
 const nodesJSON = `[
 {"ID":"4b1e","Name":"prod-workers-2","Address":"10.64.0.8","NodePool":"default","Status":"initializing",
- "SchedulingEligibility":"eligible","Drain":false,"Version":"2.0.7","CreateIndex":40},
+ "SchedulingEligibility":"eligible","Drain":false,"Version":"2.0.7","LastDrain":null,"CreateIndex":40},
 {"ID":"3c2d","Name":"prod-workers-1","Address":"10.64.0.7","NodePool":"default","Status":"ready",
- "SchedulingEligibility":"ineligible","Drain":true,"Version":"2.0.7","CreateIndex":30},
+ "SchedulingEligibility":"ineligible","Drain":true,"Version":"2.0.7","CreateIndex":30,
+ "LastDrain":{"StartedAt":"2026-10-08T01:14:10Z","UpdatedAt":"2026-10-08T01:14:10Z","Status":"draining",
+  "AccessorID":"a-1","Meta":{"tent_machine":"m-1"}}},
 {"ID":"2d3c","Name":"prod-workers-0","Address":"10.64.0.6","NodePool":"default","Status":"ready",
- "SchedulingEligibility":"eligible","Drain":false,"Version":"2.0.7","CreateIndex":20},
+ "SchedulingEligibility":"ineligible","Drain":false,"Version":"2.0.7","CreateIndex":20,
+ "LastDrain":{"StartedAt":"2026-10-08T01:10:00Z","UpdatedAt":"2026-10-08T01:10:14Z","Status":"complete",
+  "AccessorID":"a-1","Meta":{"tent_machine":"m-0","tent_run":"r-9"}}},
 {"ID":"1e4b","Name":"prod-workers-0","Address":"fd00::6","NodePool":"default","Status":"down",
- "SchedulingEligibility":"eligible","Drain":false,"Version":"2.0.7","CreateIndex":10}
+ "SchedulingEligibility":"eligible","Drain":false,"Version":"2.0.7","LastDrain":null,"CreateIndex":10},
+{"ID":"0f5a","Name":"prod-workers-3","Address":"10.64.0.9","NodePool":"default","Status":"ready",
+ "SchedulingEligibility":"eligible","Drain":false,"Version":"2.0.7","CreateIndex":5,
+ "LastDrain":{"Status":"canceled"}}
 ]`
 
 func TestNodes(t *testing.T) {
@@ -39,13 +47,19 @@ func TestNodes(t *testing.T) {
 		t.Fatalf("Nodes: %s", show(t, err, clientTokens(token)))
 	}
 	want := []nomadops.Node{
-		{Name: "prod-workers-2", Status: "initializing", Eligible: true, Address: netip.MustParseAddr("10.64.0.8"),
+		{ID: "4b1e", Name: "prod-workers-2", Status: "initializing", Eligible: true,
+			Address: netip.MustParseAddr("10.64.0.8"), Version: "2.0.7"},
+		{ID: "3c2d", Name: "prod-workers-1", Status: "ready", Eligible: false, Draining: true,
+			LastDrain: nomadops.LastDrain{Status: "draining", Meta: map[string]string{"tent_machine": "m-1"}},
+			Address:   netip.MustParseAddr("10.64.0.7"), Version: "2.0.7"},
+		{ID: "2d3c", Name: "prod-workers-0", Status: "ready", Eligible: false,
+			LastDrain: nomadops.LastDrain{Status: "complete",
+				Meta: map[string]string{"tent_machine": "m-0", "tent_run": "r-9"}},
+			Address: netip.MustParseAddr("10.64.0.6"), Version: "2.0.7"},
+		{ID: "1e4b", Name: "prod-workers-0", Status: "down", Eligible: true, Address: netip.MustParseAddr("fd00::6"),
 			Version: "2.0.7"},
-		{Name: "prod-workers-1", Status: "ready", Eligible: false, Address: netip.MustParseAddr("10.64.0.7"),
-			Version: "2.0.7"},
-		{Name: "prod-workers-0", Status: "ready", Eligible: true, Address: netip.MustParseAddr("10.64.0.6"),
-			Version: "2.0.7"},
-		{Name: "prod-workers-0", Status: "down", Eligible: true, Address: netip.MustParseAddr("fd00::6"),
+		{ID: "0f5a", Name: "prod-workers-3", Status: "ready", Eligible: true,
+			LastDrain: nomadops.LastDrain{Status: "canceled"}, Address: netip.MustParseAddr("10.64.0.9"),
 			Version: "2.0.7"},
 	}
 	if diff := cmp.Diff(want, got, equateAddrs); diff != "" {

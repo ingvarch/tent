@@ -37,10 +37,13 @@ func TestPeers(t *testing.T) {
 		body string
 		want []nomadops.Peer
 	}{
-		{"three servers", peersJSON, []nomadops.Peer{
-			{Name: "prod-servers-0.eu", Address: netip.MustParseAddrPort("10.64.0.3:4647"), Voter: true},
-			{Name: "prod-servers-1.eu", Address: netip.MustParseAddrPort("10.64.0.4:4647"), Voter: false},
-			{Name: "(unknown)", Address: netip.MustParseAddrPort("10.64.0.5:4647"), Voter: true},
+		{"three servers, one leading", peersJSON, []nomadops.Peer{
+			{ID: "6d1f1e2a-9c1b-4d53-8a0e-1b2c3d4e5f60", Name: "prod-servers-0.eu",
+				Address: netip.MustParseAddrPort("10.64.0.3:4647"), Voter: true, Leader: true},
+			{ID: "7e2a2f3b-0d2c-4e64-9b1f-2c3d4e5f6071", Name: "prod-servers-1.eu",
+				Address: netip.MustParseAddrPort("10.64.0.4:4647"), Voter: false},
+			{ID: "8f3b3a4c-1e3d-4f75-ac20-3d4e5f607182", Name: "(unknown)",
+				Address: netip.MustParseAddrPort("10.64.0.5:4647"), Voter: true},
 		}},
 		{"an address that does not parse", `{"Servers":[{"Node":"s","Address":"nonsense","Voter":true},null]}`,
 			[]nomadops.Peer{{Name: "s", Voter: true}}},
