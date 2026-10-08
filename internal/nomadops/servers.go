@@ -21,8 +21,11 @@ type Server struct {
 // answers or every server was tried once. Any other error is returned as it is and no other server is tried: it is
 // permanent, or the caller's context ended.
 //
-// Writes move on too. Bootstrap is safe to repeat, and an IntroToken or CreateToken whose answer was lost leaves a
-// token that nothing uses.
+// Writes move on too, since each is safe to repeat after an answer that was lost. Bootstrap is safe to repeat, and an
+// IntroToken or CreateToken whose answer was lost leaves a token that nothing uses. A node that MarkIneligible made
+// ineligible stays so. A repeated Drain moves the deadline of the drain that runs to the time of the repeat plus the
+// deadline. A node that the first server purged is gone on the next one, which counts as purged. ErrGone ends a call
+// at once, like any error that is not ErrNotReady.
 //
 // When no server answers, the error matches ErrNotReady and names each server with its cause, so the waits go on
 // polling over Servers and show the last causes when they end. Servers is safe for concurrent use.
@@ -136,4 +139,22 @@ func (s *Servers) Peers(ctx context.Context) ([]Peer, error) {
 // KeyringReady reports whether the keyring has an active key.
 func (s *Servers) KeyringReady(ctx context.Context) (bool, error) {
 	return try(ctx, s, func(a API) (bool, error) { return a.KeyringReady(ctx) })
+}
+
+// MarkIneligible marks the client node ineligible for new work.
+func (s *Servers) MarkIneligible(ctx context.Context, nodeID string) error {
+	_, err := try(ctx, s, func(a API) (struct{}, error) { return struct{}{}, a.MarkIneligible(ctx, nodeID) })
+	return err
+}
+
+// Drain drains the client node.
+func (s *Servers) Drain(ctx context.Context, nodeID string, req DrainRequest) error {
+	_, err := try(ctx, s, func(a API) (struct{}, error) { return struct{}{}, a.Drain(ctx, nodeID, req) })
+	return err
+}
+
+// Purge removes the client node from Nomad.
+func (s *Servers) Purge(ctx context.Context, nodeID string) error {
+	_, err := try(ctx, s, func(a API) (struct{}, error) { return struct{}{}, a.Purge(ctx, nodeID) })
+	return err
 }

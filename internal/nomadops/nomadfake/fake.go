@@ -13,6 +13,7 @@ import (
 	"io"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,9 +34,11 @@ import (
 //
 // The fake is simpler than Nomad in these ways:
 //   - It checks no ACL token: each call succeeds whatever token its client holds. Tokens tells which tokens the
-//     clients got. Only before the bootstrap does a call fail: Nodes, Health, Peers, KeyringReady, IntroToken and
-//     CreateToken fail for good, as Nomad's 403, until a Bootstrap succeeds; Leader and Bootstrap work. Peers fails so,
-//     since Nomad answers the Raft configuration to a management token alone.
+//     clients got. Only before the bootstrap does a call fail: Nodes, Health, Peers, KeyringReady, IntroToken,
+//     CreateToken, MarkIneligible, Drain and Purge fail for good, as Nomad's 403, until a Bootstrap succeeds; Leader
+//     and Bootstrap work. Peers fails so, since Nomad answers the Raft configuration to a management token alone.
+//   - MarkIneligible, Drain and Purge change a node as their docs say, and nothing else happens to a node over time:
+//     it goes down, registers again or comes back after a purge only when a test says so with Register.
 //   - Its keyring has an active key as soon as the ACL system is bootstrapped, unless SetKeyringDelay holds it back;
 //     meanwhile KeyringReady is false and IntroToken fails as Nomad's 500 does.
 //
@@ -45,7 +48,8 @@ type Fake struct {
 	mu           sync.Mutex
 	leader       string
 	bootstrapped secret.Secret // the secret of the management token, once the ACL system is bootstrapped
-	nodes        []nomadops.Node
+	nodes        []fakeNode
+	drainReads   int // how many reads of the nodes a new drain stays under way for
 	health       nomadops.Health
 	peers        []nomadops.Peer
 	keyringReads int             // how many reads of the keyring still find no active key
@@ -80,13 +84,13 @@ func (f *Fake) SetLeader(addr string) {
 }
 
 // NewCluster makes the cluster a new one, as New returns it: without a leader, nodes, peers or bootstrap, and with the
-// zero Health and a keyring that is ready at once. The log of calls, the clients' tokens, the issued tokens and the
-// faults stay.
+// zero Health, a keyring that is ready at once and drains that complete at the first read. The log of calls, the
+// clients' tokens, the issued tokens and the faults stay.
 func (f *Fake) NewCluster() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.leader, f.bootstrapped, f.nodes, f.peers, f.health = "", nil, nil, nil, nomadops.Health{}
-	f.keyringReads = 0
+	f.keyringReads, f.drainReads = 0, 0
 }
 
 // SetBootstrapped makes the cluster one whose ACL system was bootstrapped with a copy of bootstrapSecret, without a
@@ -109,22 +113,32 @@ func (f *Fake) SetKeyringDelay(reads int) {
 // Register lists a copy of the node in the place of the node with the same ID when n.ID is set, or, when n.ID is
 // empty, of the node of the same name and address; when there is no such node, after the others. So one name can be
 // listed at two addresses, and with an ID at one address twice, as Nomad lists a node that went down beside its
-// replacement. A test that registers a node again sets every field, the drain state too.
+// replacement. A test that registers a node again sets every field, the drain state too, and the drain that the fake
+// ran for the replaced node ends.
 func (f *Fake) Register(n nomadops.Node) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	n = cloneNode(n)
-	i := slices.IndexFunc(f.nodes, func(o nomadops.Node) bool {
+	i := slices.IndexFunc(f.nodes, func(o fakeNode) bool {
 		if n.ID != "" {
 			return o.ID == n.ID
 		}
 		return o.Name == n.Name && o.Address == n.Address
 	})
 	if i >= 0 {
-		f.nodes[i] = n
+		f.nodes[i] = fakeNode{Node: n}
 		return
 	}
-	f.nodes = append(f.nodes, n)
+	f.nodes = append(f.nodes, fakeNode{Node: n})
+}
+
+// SetDrainReads makes each drain that starts after the call stay under way for n reads of the nodes: the node shows as
+// draining at those reads and as complete at the next one. A drain also completes at the first read at or after its
+// deadline, by time.Now. With 0, the default, a drain is complete at the first read.
+func (f *Fake) SetDrainReads(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.drainReads = n
 }
 
 // SetHealth makes a copy of h autopilot's view of the servers.
@@ -174,7 +188,8 @@ type Call struct {
 	Server string
 	// Arg is the call's argument without a secret: the size of the secret for Bootstrap, such as [secret, 36 bytes];
 	// the node's name, the pool and the TTL for IntroToken, such as "prod-workers-1 default 30m0s"; the name and the TTL
-	// for CreateToken, such as "tent export nomad ana@laptop 24h0m0s"; empty for the others.
+	// for CreateToken, such as "tent export nomad ana@laptop 24h0m0s"; the node ID for MarkIneligible and Purge; DrainArg
+	// for Drain; empty for the others.
 	Arg string
 }
 
@@ -353,9 +368,11 @@ func (c client) Nodes(ctx context.Context) ([]nomadops.Node, error) {
 		if c.f.bootstrapped == nil {
 			return errDenied
 		}
+		now := time.Now()
 		nodes = make([]nomadops.Node, len(c.f.nodes))
-		for i, n := range c.f.nodes {
-			nodes[i] = cloneNode(n)
+		for i := range c.f.nodes {
+			c.f.nodes[i].advanceDrain(now)
+			nodes[i] = cloneNode(c.f.nodes[i].Node)
 		}
 		return nil
 	})
@@ -405,6 +422,31 @@ func (c client) KeyringReady(ctx context.Context) (bool, error) {
 	return result(ready, err)
 }
 
+// fakeNode is a node that the cluster lists, with the drain that the fake runs for it.
+type fakeNode struct {
+	nomadops.Node
+	drain *drain // nil when no drain is under way
+}
+
+// drain is a drain that the fake runs for a node.
+type drain struct {
+	deadline time.Time // the drain completes at the first read at or after it
+	reads    int       // how many more reads show the node as draining
+}
+
+// advanceDrain is a read of the node at now: a drain that is under way stays so for one read fewer, or completes when
+// its reads are used up or its deadline has come. Completion keeps the node ineligible and the meta of the drain.
+func (n *fakeNode) advanceDrain(now time.Time) {
+	if n.drain == nil {
+		return
+	}
+	if n.drain.reads > 0 && now.Before(n.drain.deadline) {
+		n.drain.reads--
+		return
+	}
+	n.Draining, n.LastDrain.Status, n.drain = false, "complete", nil
+}
+
 // cloneNode returns n with a copy of the meta of its last drain.
 func cloneNode(n nomadops.Node) nomadops.Node {
 	n.LastDrain.Meta = maps.Clone(n.LastDrain.Meta)
@@ -418,4 +460,101 @@ func result[T any](v T, err error) (T, error) {
 		return zero, err
 	}
 	return v, nil
+}
+
+// goneError is a cause that matches nomadops.ErrGone, as Nomad's answer for a node that is not there does.
+type goneError string
+
+func (e goneError) Error() string { return string(e) }
+
+// Is makes errors.Is hold for nomadops.ErrGone.
+func (goneError) Is(target error) bool { return target == nomadops.ErrGone }
+
+// errNodeGone is Nomad's answer for a node that is not in the cluster.
+const errNodeGone = goneError("node not found")
+
+// DrainArg is the Arg that Calls logs for a Drain: the node ID, the deadline and the meta as k=v pairs sorted by key,
+// such as "n-1 1h0m0s tent_machine=m-1".
+func DrainArg(nodeID string, req nomadops.DrainRequest) string {
+	parts := []string{nodeID, req.Deadline.String()}
+	for _, k := range slices.Sorted(maps.Keys(req.Meta)) {
+		parts = append(parts, k+"="+req.Meta[k])
+	}
+	return strings.Join(parts, " ")
+}
+
+// node returns the node with the ID, or errDenied before the bootstrap, or errNodeGone when there is none. The caller
+// holds the lock.
+func (f *Fake) node(id string) (*fakeNode, error) {
+	if f.bootstrapped == nil {
+		return nil, errDenied
+	}
+	i := slices.IndexFunc(f.nodes, func(n fakeNode) bool { return n.ID == id })
+	if i < 0 {
+		return nil, errNodeGone
+	}
+	return &f.nodes[i], nil
+}
+
+// MarkIneligible makes the node ineligible. It fails with an error that matches nomadops.ErrGone when no node has the
+// ID, and refuses an ID that the client refuses before any call.
+func (c client) MarkIneligible(ctx context.Context, nodeID string) error {
+	if err := nomadops.CheckNodeID(nodeID); err != nil {
+		return &callError{name: "MarkIneligible", cause: err}
+	}
+	return c.f.call(ctx, c.server, "MarkIneligible", nodeID, func() error {
+		n, err := c.f.node(nodeID)
+		if err != nil {
+			return err
+		}
+		n.Eligible = false
+		return nil
+	})
+}
+
+// Drain starts the drain of the node: it turns ineligible and draining, and its last drain is a copy of req's meta.
+// The drain completes as SetDrainReads says. A node that is down has a complete drain at once. A drain of a node that
+// drains moves the deadline and the meta and keeps the count of reads. It fails with an error that matches
+// nomadops.ErrGone when no node has the ID, and refuses an ID or a request that the client refuses before any call.
+func (c client) Drain(ctx context.Context, nodeID string, req nomadops.DrainRequest) error {
+	if err := nomadops.CheckNodeID(nodeID); err != nil {
+		return &callError{name: "Drain", cause: err}
+	}
+	if err := req.Check(); err != nil {
+		return &callError{name: "Drain", cause: err}
+	}
+	return c.f.call(ctx, c.server, "Drain", DrainArg(nodeID, req), func() error {
+		n, err := c.f.node(nodeID)
+		if err != nil {
+			return err
+		}
+		n.Eligible = false
+		n.LastDrain = nomadops.LastDrain{Meta: maps.Clone(req.Meta)}
+		if n.Status == "down" {
+			n.Draining, n.LastDrain.Status = false, "complete"
+			return nil
+		}
+		reads := c.f.drainReads
+		if n.drain != nil {
+			reads = n.drain.reads
+		}
+		n.Draining, n.LastDrain.Status = true, "draining"
+		n.drain = &drain{deadline: time.Now().Add(req.Deadline), reads: reads}
+		return nil
+	})
+}
+
+// Purge removes the node; a node that is not there counts as purged. The node does not come back unless Register lists
+// it again. It refuses an ID that the client refuses before any call.
+func (c client) Purge(ctx context.Context, nodeID string) error {
+	if err := nomadops.CheckNodeID(nodeID); err != nil {
+		return &callError{name: "Purge", cause: err}
+	}
+	return c.f.call(ctx, c.server, "Purge", nodeID, func() error {
+		if c.f.bootstrapped == nil {
+			return errDenied
+		}
+		c.f.nodes = slices.DeleteFunc(c.f.nodes, func(n fakeNode) bool { return n.ID == nodeID })
+		return nil
+	})
 }

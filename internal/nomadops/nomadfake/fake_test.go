@@ -87,43 +87,68 @@ func checkErr(t *testing.T, err error, want string, notReady bool) {
 	}
 }
 
-// apiCall is a call of one nomadops.API method that succeeds on a fake with a leader.
+// apiCall is a call of one nomadops.API method that succeeds on a fake with a leader, after the bootstrap and after
+// prepare.
 type apiCall struct {
-	name string // the method
-	call func(context.Context, nomadops.API) error
+	name  string // the method
+	call  func(context.Context, nomadops.API) error
+	setup func(*nomadfake.Fake) // what the call needs in the cluster; nil for none
 }
+
+// prepare makes the cluster one where the call succeeds.
+func (c apiCall) prepare(f *nomadfake.Fake) {
+	if c.setup != nil {
+		c.setup(f)
+	}
+}
+
+// tableNode is the node that the calls of apiCalls on a node need.
+var tableNode = nomadops.Node{ID: "n-1", Name: "prod-workers-1", Status: "ready", Eligible: true}
+
+// tableDrain is the drain that the Drain of apiCalls asks for.
+var tableDrain = nomadops.DrainRequest{Deadline: time.Hour, Meta: map[string]string{"tent_machine": "m-1"}}
+
+// registerTableNode lists tableNode.
+func registerTableNode(f *nomadfake.Fake) { f.Register(tableNode) }
 
 // apiCalls holds an apiCall for every nomadops.API method.
 var apiCalls = []apiCall{
 	{"Leader", func(ctx context.Context, a nomadops.API) error {
 		_, err := a.Leader(ctx)
 		return err
-	}},
-	{"Bootstrap", func(ctx context.Context, a nomadops.API) error { return a.Bootstrap(ctx, bootstrapSecret) }},
+	}, nil},
+	{"Bootstrap", func(ctx context.Context, a nomadops.API) error { return a.Bootstrap(ctx, bootstrapSecret) }, nil},
 	{"IntroToken", func(ctx context.Context, a nomadops.API) error {
 		_, err := a.IntroToken(ctx, introRequest)
 		return err
-	}},
+	}, nil},
 	{"CreateToken", func(ctx context.Context, a nomadops.API) error {
 		_, err := a.CreateToken(ctx, tokenRequest)
 		return err
-	}},
+	}, nil},
 	{"Nodes", func(ctx context.Context, a nomadops.API) error {
 		_, err := a.Nodes(ctx)
 		return err
-	}},
+	}, nil},
 	{"Health", func(ctx context.Context, a nomadops.API) error {
 		_, err := a.Health(ctx)
 		return err
-	}},
+	}, nil},
 	{"Peers", func(ctx context.Context, a nomadops.API) error {
 		_, err := a.Peers(ctx)
 		return err
-	}},
+	}, nil},
 	{"KeyringReady", func(ctx context.Context, a nomadops.API) error {
 		_, err := a.KeyringReady(ctx)
 		return err
-	}},
+	}, nil},
+	{"MarkIneligible", func(ctx context.Context, a nomadops.API) error {
+		return a.MarkIneligible(ctx, tableNode.ID)
+	}, registerTableNode},
+	{"Drain", func(ctx context.Context, a nomadops.API) error {
+		return a.Drain(ctx, tableNode.ID, tableDrain)
+	}, registerTableNode},
+	{"Purge", func(ctx context.Context, a nomadops.API) error { return a.Purge(ctx, "n-gone") }, nil},
 }
 
 func TestAPICallsCoverTheAPI(t *testing.T) {
@@ -186,15 +211,22 @@ func argOf(name string) string {
 		return "prod-workers-1 default 30m0s"
 	case "CreateToken":
 		return "tent export nomad ana@laptop 24h0m0s"
+	case "MarkIneligible":
+		return "n-1"
+	case "Drain":
+		return "n-1 1h0m0s tent_machine=m-1"
+	case "Purge":
+		return "n-gone"
 	}
 	return ""
 }
 
 // TestACLCallsNeedTheBootstrap checks that, before the ACL system is bootstrapped, Nodes, Health, Peers, KeyringReady,
-// IntroToken and CreateToken fail for good as Nomad's 403 does, while Leader and Bootstrap work; and that they work
-// after the bootstrap.
+// IntroToken, CreateToken, MarkIneligible, Drain and Purge fail for good as Nomad's 403 does, while Leader and
+// Bootstrap work; and that they work after the bootstrap.
 func TestACLCallsNeedTheBootstrap(t *testing.T) {
-	for _, name := range []string{"IntroToken", "CreateToken", "Nodes", "Health", "Peers", "KeyringReady"} {
+	for _, name := range []string{"IntroToken", "CreateToken", "Nodes", "Health", "Peers", "KeyringReady",
+		"MarkIneligible", "Drain", "Purge"} {
 		t.Run(name, func(t *testing.T) {
 			f, a := newAPI()
 			var call apiCall
@@ -203,6 +235,7 @@ func TestACLCallsNeedTheBootstrap(t *testing.T) {
 					call = c
 				}
 			}
+			call.prepare(f)
 			checkErr(t, call.call(t.Context(), a), "nomadfake: "+name+": permission denied", false)
 			if _, err := a.Leader(t.Context()); err != nil {
 				t.Errorf("Leader before the bootstrap: %v", err)
@@ -964,10 +997,12 @@ func TestConcurrentUse(t *testing.T) {
 			ctx := t.Context()
 			for i := range rounds {
 				f.SetLeader(leader)
-				f.Register(nomadops.Node{Name: "prod-workers-" + strconv.Itoa(w), Status: "ready", Eligible: true})
+				// Not named like tableNode: Register without an ID would replace it under a call that needs it.
+				f.Register(nomadops.Node{Name: "worker-" + strconv.Itoa(w), Status: "ready", Eligible: true})
 				f.SetHealth(nomadops.Health{Healthy: true, Voters: i})
 				a := f.Client(nomadops.Config{Token: pki.NewBootstrapSecret()})
 				for _, c := range apiCalls {
+					c.prepare(f)
 					if err := c.call(ctx, a); err != nil {
 						t.Errorf("%s: %v", c.name, err)
 					}
@@ -984,8 +1019,9 @@ func TestConcurrentUse(t *testing.T) {
 	if got, want := len(f.Tokens()), workers*rounds; got != want {
 		t.Errorf("%d tokens recorded, want %d", got, want)
 	}
-	if nodes, err := f.Client(nomadops.Config{}).Nodes(t.Context()); err != nil || len(nodes) != workers {
-		t.Errorf("Nodes() = %d nodes, %v; want %d", len(nodes), err, workers)
+	// The workers' nodes, and the one that the calls of apiCalls on a node list.
+	if nodes, err := f.Client(nomadops.Config{}).Nodes(t.Context()); err != nil || len(nodes) != workers+1 {
+		t.Errorf("Nodes() = %d nodes, %v; want %d", len(nodes), err, workers+1)
 	}
 }
 
@@ -1002,6 +1038,7 @@ func TestCallsNameTheServerOfTheClient(t *testing.T) {
 			second := f.Client(nomadops.Config{Address: "198.51.100.2:4646", Token: pki.NewBootstrapSecret()})
 			anonymous := f.Client(nomadops.Config{Token: pki.NewBootstrapSecret()})
 
+			c.prepare(f)
 			for _, a := range []nomadops.API{first, second, first, anonymous} {
 				if err := c.call(t.Context(), a); err != nil {
 					t.Fatalf("%s: %v", c.name, err)

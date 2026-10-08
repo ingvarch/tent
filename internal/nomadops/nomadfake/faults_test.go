@@ -20,6 +20,7 @@ func TestEveryCallTakesFaults(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			ctx := t.Context()
 			f, a := newBootstrappedAPI(t)
+			c.prepare(f)
 			f.Fail(t, c.name, errBoom)
 			f.LoseResponse(t, c.name)
 			if err := c.call(ctx, a); !errors.Is(err, errBoom) || err.Error() != errBoom.Error() {

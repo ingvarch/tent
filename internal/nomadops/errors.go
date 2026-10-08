@@ -20,6 +20,9 @@ var (
 	// or a 429, or has no leader. The same call may succeed later, on this server or on another one. For a write the
 	// outcome is unknown: the server may have carried it out.
 	ErrNotReady = errors.New("not ready")
+	// ErrGone means the node or the Raft peer that the call names is not in the cluster. It is permanent: the same
+	// call fails the same way.
+	ErrGone = errors.New("not in the cluster")
 	// ErrBootstrapMismatch means the cluster's ACL system was bootstrapped with a secret other than the one given.
 	ErrBootstrapMismatch = errors.New(
 		"the ACL system was bootstrapped with a secret other than the one in secrets/acl-bootstrap-token")
@@ -37,6 +40,7 @@ type callError struct {
 	status       int    // the status of the answer; 0 when there was none
 	message      string // the answer's body, on one line and cut to maxMessage bytes
 	notReady     bool   // the error matches ErrNotReady
+	gone         bool   // the error matches ErrGone
 	cause        error  // why the call failed without an answer, or why the answer is of no use
 }
 
@@ -54,8 +58,10 @@ func (e *callError) Error() string {
 	return s
 }
 
-// Is makes errors.Is hold for ErrNotReady when the error is of that class.
-func (e *callError) Is(target error) bool { return e.notReady && target == ErrNotReady }
+// Is makes errors.Is hold for ErrNotReady and ErrGone when the error is of that class.
+func (e *callError) Is(target error) bool {
+	return e.notReady && target == ErrNotReady || e.gone && target == ErrGone
+}
 
 // Unwrap returns the cause of the error, such as the error of the caller's context, or nil for an answer with an
 // error status.
@@ -78,6 +84,33 @@ func newCallError(method, path string, err error) error {
 		e.cause = err
 		e.notReady = !tlsFailure(err) && (errors.Is(err, io.ErrUnexpectedEOF) || errors.As(err, &netErr))
 	}
+	return e
+}
+
+// rpcPrefix starts the message of an error that a server got from another server and passes on.
+const rpcPrefix = "rpc error: "
+
+// answeredGone returns the error of a call when it is an answer with the status and the whole message that Nomad gives
+// for a target that is not there, after any number of leading "rpc error: " (a request that is forwarded twice carries
+// two), and nil when it is any other error. Another status or more words in the message do not match.
+func answeredGone(err error, status int, text string) *callError {
+	var e *callError
+	if !errors.As(err, &e) || e.status != status {
+		return nil
+	}
+	msg := e.message
+	for strings.HasPrefix(msg, rpcPrefix) {
+		msg = strings.TrimPrefix(msg, rpcPrefix)
+	}
+	if msg != text {
+		return nil
+	}
+	return e
+}
+
+// asGone returns e, the error that answeredGone found, as an error of the class ErrGone alone. Its text stays.
+func asGone(e *callError) error {
+	e.gone, e.notReady = true, false
 	return e
 }
 
