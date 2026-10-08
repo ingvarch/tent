@@ -23,6 +23,7 @@ import (
 // TestKeyOfKeysACreateByItsName tells two creates of one group apart by the name of their machines, which have no ID
 // yet, and a step on a machine by its ID.
 func TestKeyOfKeysACreateByItsName(t *testing.T) {
+	t.Parallel()
 	create := func(name string) rollout.Step {
 		return rollout.Step{Action: rollout.Create, Group: "workers", Machine: rollout.Machine{Name: name}}
 	}
@@ -55,6 +56,7 @@ func TestKeyOfKeysACreateByItsName(t *testing.T) {
 // TestWaitOfGivesEachWaitItsLimitAndItsEvent holds each wait of a client roll to its limit and tells Nomad's event
 // what the wait waits for.
 func TestWaitOfGivesEachWaitItsLimitAndItsEvent(t *testing.T) {
+	t.Parallel()
 	r := &rollRun{groups: []rollout.Group{{Name: "workers", DrainTimeout: 10 * time.Minute}}}
 	node := rollout.Node{ID: "n-1", Name: "prod-workers-0", Address: netip.MustParseAddr("10.64.0.6")}
 	for _, tc := range []struct {
@@ -89,6 +91,7 @@ func TestWaitOfGivesEachWaitItsLimitAndItsEvent(t *testing.T) {
 // TestWaitOfFailsForAWaitWithoutALimit refuses to poll a wait that has no limit, so that a wait added later cannot
 // run for ever.
 func TestWaitOfFailsForAWaitWithoutALimit(t *testing.T) {
+	t.Parallel()
 	r := &rollRun{}
 	for _, step := range []rollout.Step{
 		{Action: rollout.WaitServerDown, Machine: rollout.Machine{Name: "prod-servers-0"}},
@@ -103,6 +106,7 @@ func TestWaitOfFailsForAWaitWithoutALimit(t *testing.T) {
 
 // TestCarryFailsForAStepOfAServerGroup refuses a step that a client roll never gets from the decisions.
 func TestCarryFailsForAStepOfAServerGroup(t *testing.T) {
+	t.Parallel()
 	r := &rollRun{}
 	step := rollout.Step{Action: rollout.Stop, Machine: rollout.Machine{Name: "prod-servers-0", ID: "i-1"}}
 
@@ -116,6 +120,7 @@ func TestCarryFailsForAStepOfAServerGroup(t *testing.T) {
 // TestTryAgainOnlyAfterAGoneNodeOrNoAnswer tries a write again when the node is gone or no server answered, a create
 // when it failed before it sent anything because no server answered, and nothing else.
 func TestTryAgainOnlyAfterAGoneNodeOrNoAnswer(t *testing.T) {
+	t.Parallel()
 	notReady := fmt.Errorf("no server: %w", nomadops.ErrNotReady)
 	gone := fmt.Errorf("no node: %w", nomadops.ErrGone)
 	denied := errors.New("denied")
@@ -144,6 +149,7 @@ func TestTryAgainOnlyAfterAGoneNodeOrNoAnswer(t *testing.T) {
 
 // TestShowingSaysWhatNomadListsOfTheWait says what Nomad lists of what each wait waits for.
 func TestShowingSaysWhatNomadListsOfTheWait(t *testing.T) {
+	t.Parallel()
 	addr := netip.MustParseAddr("10.64.0.6")
 	nodes := []nomadops.Node{
 		{ID: "n-1", Name: "prod-workers-0", Address: addr, Status: "ready"},
@@ -200,6 +206,7 @@ func (readsNomad) Nodes(context.Context) ([]nomadops.Node, error)     { return n
 // TestObserveCountsTheFailuresOfNomadInARow ends the run when the reads fail for ten minutes in a row, and counts again
 // from the next failure after an answer.
 func TestObserveCountsTheFailuresOfNomadInARow(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		fail := true
 		r := &rollRun{api: readsNomad{fail: &fail}, rollLoop: newRollLoop()}
@@ -230,6 +237,7 @@ func TestObserveCountsTheFailuresOfNomadInARow(t *testing.T) {
 // TestMachinesListsThePendingOnesAfterTheListedOnes adds the machines that no list showed yet to those of the last
 // list, by operation id.
 func TestMachinesListsThePendingOnesAfterTheListedOnes(t *testing.T) {
+	t.Parallel()
 	r := &rollRun{rollLoop: newRollLoop(), listed: []cloud.Instance{{ID: "i-1", Name: "prod-workers-0"}}}
 	r.pending["op-b"] = pendingMachine{in: cloud.Instance{ID: "i-3", Name: "prod-workers-3"}}
 	r.pending["op-a"] = pendingMachine{in: cloud.Instance{ID: "i-2", Name: "prod-workers-2"}}
@@ -254,6 +262,7 @@ func (n listsNodes) List(context.Context, string) ([]cloud.Instance, error) { re
 // TestListDropsWhatTheCloudShows drops the pending machines that the list shows and the deleted machines that it does
 // not, and keeps the others.
 func TestListDropsWhatTheCloudShows(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		nodes := listsNodes{listed: []cloud.Instance{{ID: "i-2"}, {ID: "i-5"}}}
 		r := &rollRun{kit: nodeKit{nodes: nodes}, rollLoop: newRollLoop()}
@@ -291,6 +300,7 @@ func TestListDropsWhatTheCloudShows(t *testing.T) {
 // TestListFailsForAMachineThatItCreatedAndThatTheListsMissForAMinute names the machine that no list showed within the
 // pending time, the first of them by operation id.
 func TestListFailsForAMachineThatItCreatedAndThatTheListsMissForAMinute(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		r := &rollRun{kit: nodeKit{nodes: listsNodes{}}, rollLoop: newRollLoop()}
 		r.pending["op-b"] = pendingMachine{in: cloud.Instance{ID: "i-3", Name: "prod-workers-3"}, since: time.Now()}
@@ -314,6 +324,7 @@ func TestListFailsForAMachineThatItCreatedAndThatTheListsMissForAMinute(t *testi
 // its operation id and with the hash of its group, which a create makes the machine with when the cloud lacks it, and
 // lists the machines at the next observation.
 func TestRepeatCreateCarriesTheGroupsHashAndTheMachinesOperationId(t *testing.T) {
+	t.Parallel()
 	const op = "4f6a2d5e-8c3b-4d1e-9a7f-0b2c3d4e5f60"
 	var steps []string
 	nodes := &recordingNodes{}
@@ -351,6 +362,7 @@ func TestRepeatCreateCarriesTheGroupsHashAndTheMachinesOperationId(t *testing.T)
 // TestScrubMarksOnlyThePendingCopyOfItsMachine labels the machine and replaces its user data once, reports the wait as
 // done, makes the pending copy of that machine joined and no other, and lists at the next observation.
 func TestScrubMarksOnlyThePendingCopyOfItsMachine(t *testing.T) {
+	t.Parallel()
 	var steps []string
 	nodes := &recordingNodes{}
 	svc := &Service{Now: func() time.Time { return testNow }, OnProgress: func(p Progress) {
@@ -391,6 +403,7 @@ func TestScrubMarksOnlyThePendingCopyOfItsMachine(t *testing.T) {
 // TestRollRunSeedHoldsTheServersByName seeds a new node with the private addresses of the listed servers and combined
 // nodes, by name, without the clients.
 func TestRollRunSeedHoldsTheServersByName(t *testing.T) {
+	t.Parallel()
 	m := &model.Cluster{Name: "prod", Groups: []model.NodeGroup{
 		{Name: "servers", Role: v1alpha1.RoleServer}, {Name: "all", Role: v1alpha1.RoleCombined},
 		{Name: "workers", Role: v1alpha1.RoleClient},
@@ -417,6 +430,7 @@ func TestRollRunSeedHoldsTheServersByName(t *testing.T) {
 // TestSeedOfFailsForServersWithoutAddresses names the servers that have no private address, and has an empty seed for a
 // server that is the first.
 func TestSeedOfFailsForServersWithoutAddresses(t *testing.T) {
+	t.Parallel()
 	servers := []cloud.Instance{
 		{Name: "prod-servers-0", PrivateIP: netip.MustParseAddr("10.64.0.3")}, {Name: "prod-servers-1"},
 	}
@@ -447,6 +461,7 @@ func TestSeedOfFailsForServersWithoutAddresses(t *testing.T) {
 // TestOpenWaitIsOverWhenTheReadingShowsWhatItWaitsFor ends each wait only when Nomad or the cloud show its end, not
 // when the decisions give another step.
 func TestOpenWaitIsOverWhenTheReadingShowsWhatItWaitsFor(t *testing.T) {
+	t.Parallel()
 	m := rollout.Machine{ID: "i-1", Name: "prod-workers-0"}
 	node := rollout.Node{ID: "n-1"}
 	drain := func(status, meta string) nomadops.Node {
@@ -504,6 +519,7 @@ func TestOpenWaitIsOverWhenTheReadingShowsWhatItWaitsFor(t *testing.T) {
 // TestCreateChangeCarriesTheGroupsHashAndANewOperationID makes the create of a step from the machine, the group's plan
 // and image, and the group's spec hash, with an operation id of its own each time.
 func TestCreateChangeCarriesTheGroupsHashAndANewOperationID(t *testing.T) {
+	t.Parallel()
 	r := &rollRun{
 		model: &model.Cluster{Groups: []model.NodeGroup{{Name: "workers", MachineType: "vc2-4c-8gb", Image: "ubuntu-24.04"}}},
 	}

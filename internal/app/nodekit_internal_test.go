@@ -109,6 +109,7 @@ func testService(steps *[]string) *Service {
 // TestChangeNodeCreatesWithTheOperationIdOfTheChange checks that a create with an operation id creates with it, that
 // a create without one gets a new valid id each time, and that a wait repeats its create with its id.
 func TestChangeNodeCreatesWithTheOperationIdOfTheChange(t *testing.T) {
+	t.Parallel()
 	const op = "4f6a2d5e-8c3b-4d1e-9a7f-0b2c3d4e5f60"
 	prepare := func(context.Context) (cloud.UserData, error) { return cloud.UserData("data"), nil }
 	create := func(c NodeChange) (string, error) {
@@ -143,6 +144,7 @@ func TestChangeNodeCreatesWithTheOperationIdOfTheChange(t *testing.T) {
 // TestBootClientCreatesTheNodeWithAnIntroToken checks the intro token request, which names the node, its pool and the
 // longest lifetime, the seed request of a client, and the create that follows with the change's operation id.
 func TestBootClientCreatesTheNodeWithAnIntroToken(t *testing.T) {
+	t.Parallel()
 	var steps []string
 	nodes := &recordingNodes{}
 	api := &introStub{}
@@ -182,6 +184,7 @@ func TestBootClientCreatesTheNodeWithAnIntroToken(t *testing.T) {
 // TestBootClientFailsBeforeTheCloudIsAsked checks that a failure of the seed, of the API, of the intro token or of the
 // user data is reported as a failed create with its own text, calls no cloud, and matches errNotSent and its cause.
 func TestBootClientFailsBeforeTheCloudIsAsked(t *testing.T) {
+	t.Parallel()
 	seedErr := errors.New("no server has a private address")
 	apiErr := fmt.Errorf("no server answered: %w", nomadops.ErrNotReady)
 	tokenErr := errors.New("token refused")
@@ -232,6 +235,7 @@ func TestBootClientFailsBeforeTheCloudIsAsked(t *testing.T) {
 // TestBootClientFailedCreateDoesNotMatchErrNotSent checks that a failure of the cloud's create does not match
 // errNotSent, since the request may have reached the cloud, and keeps its text.
 func TestBootClientFailedCreateDoesNotMatchErrNotSent(t *testing.T) {
+	t.Parallel()
 	var steps []string
 	boom := errors.New("the cloud refused")
 	nodes := &recordingNodes{createErr: boom}
@@ -250,6 +254,7 @@ func TestBootClientFailedCreateDoesNotMatchErrNotSent(t *testing.T) {
 // TestMarkJoinedScrubsTheMachineAndReportsIt checks that the machine is marked, the scrub is reported as started and
 // done, and a failure is reported and returned as it is.
 func TestMarkJoinedScrubsTheMachineAndReportsIt(t *testing.T) {
+	t.Parallel()
 	in := cloud.Instance{ID: "id-1", Name: "prod-workers-0"}
 	boom := errors.New("the cloud refused the label")
 	for _, tc := range []struct {

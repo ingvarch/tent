@@ -89,6 +89,7 @@ func (b liveWorld) wantStatus(t *testing.T, id, status string) nomadops.Node {
 // TestWorldRegistersAReadyClientOnceWithItsID checks that each ready client has the ID n-<instance id>, and that a
 // mark, a drain and a purge through a client of the world stay at the next call.
 func TestWorldRegistersAReadyClientOnceWithItsID(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		b := newLiveWorld(t)
 		ids := b.workerIDs(t)
@@ -140,6 +141,7 @@ func TestWorldRegistersAReadyClientOnceWithItsID(t *testing.T) {
 // until 20 s after the world saw the machine gone, and down after, with its drain complete and its ID and meta kept;
 // and that a mark of a down node stays.
 func TestWorldDownsTheNodeOfAGoneMachineAfterTheDelay(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		b := newLiveWorld(t)
 		ids := b.workerIDs(t)
@@ -176,6 +178,7 @@ func TestWorldDownsTheNodeOfAGoneMachineAfterTheDelay(t *testing.T) {
 
 // TestWorldSetDownAfterMovesTheDelay checks that SetDownAfter sets how long a gone machine's node reads ready.
 func TestWorldSetDownAfterMovesTheDelay(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		b := newLiveWorld(t)
 		id := b.workerIDs(t)[0]
@@ -193,6 +196,7 @@ func TestWorldSetDownAfterMovesTheDelay(t *testing.T) {
 // TestWorldKeepsAPurgedNodeGone checks that a purged node does not come back when its machine goes: not when the node
 // was down at the purge, and not when its machine was live and nothing read the nodes since.
 func TestWorldKeepsAPurgedNodeGone(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		b := newLiveWorld(t)
 		ids := b.workerIDs(t)
@@ -223,6 +227,7 @@ func TestWorldKeepsAPurgedNodeGone(t *testing.T) {
 // TestWorldNewClusterRegistersTheNodesAgain checks that the nodes of the live machines register once more, with the
 // same IDs, in a cluster that NewCluster made.
 func TestWorldNewClusterRegistersTheNodesAgain(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		b := newLiveWorld(t)
 		ids := b.workerIDs(t)
@@ -243,6 +248,7 @@ func TestWorldNewClusterRegistersTheNodesAgain(t *testing.T) {
 // r-<instance id>, that one peer leads, that a server's stable time is the time the world first saw it ready, and that
 // the members are the ready servers, alive, at their private addresses.
 func TestWorldGivesServersRaftIDsAndMembers(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		b := newLiveWorld(t)
 		peers, err := b.api.Peers(t.Context())

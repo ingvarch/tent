@@ -203,6 +203,7 @@ func hideNewest(t *testing.T, f *vultrfake.Fake, lists int, created func(id stri
 // the seed of the servers, two drained, deleted and purged nodes, and a cluster with nothing left to roll. Each step
 // reports itself once, and a node is marked, drained, deleted and purged in that order.
 func TestRollLoopReplacesTheOutdatedWorkers(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := outdatedWorld(t)
 		old := []string{instanceNamed(t, f, "prod-workers-0"), instanceNamed(t, f, "prod-workers-1")}
@@ -245,6 +246,7 @@ func TestRollLoopReplacesTheOutdatedWorkers(t *testing.T) {
 // TestRollLoopHasNothingToDoWhenNothingIsOutdated ends at the first decision: one list, one observation of Nomad, no
 // write and no progress.
 func TestRollLoopHasNothingToDoWhenNothingIsOutdated(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := rollWorld(t)
 		cloudCalls, nomadCalls := len(f.Calls()), len(w.Log())
@@ -275,6 +277,7 @@ func TestRollLoopHasNothingToDoWhenNothingIsOutdated(t *testing.T) {
 // TestRollLoopRefusesServerGroups ends with the refusal of the server group and its advice about --nodegroups, and
 // writes nothing to the cloud or to Nomad.
 func TestRollLoopRefusesServerGroups(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := rollWorld(t)
 		withTolerance(svc)
@@ -299,6 +302,7 @@ func TestRollLoopRefusesServerGroups(t *testing.T) {
 // TestRollLoopScrubsAMachineWhoseNodeJoined labels the machine and replaces its user data once Nomad lists its node
 // ready and eligible, and reports the wait and the scrub.
 func TestRollLoopScrubsAMachineWhoseNodeJoined(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := unjoinedWorld(t, func(*vultrfake.Fake, *nomadWorld) {})
 		lines := recordProgress(svc)
@@ -324,6 +328,7 @@ func TestRollLoopScrubsAMachineWhoseNodeJoined(t *testing.T) {
 // TestRollLoopFailsTheWaitForAMachineWithoutAnAddress ends the run at the first poll, with the wait reported failed
 // and nothing written.
 func TestRollLoopFailsTheWaitForAMachineWithoutAnAddress(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := rollWorld(t)
 		id := instanceNamed(t, f, "prod-workers-1")
@@ -357,6 +362,7 @@ func TestRollLoopFailsTheWaitForAMachineWithoutAnAddress(t *testing.T) {
 // TestRollLoopRefusesAClientThatNeverJoined ends the run at the first poll for a client that is older than the life of
 // its intro token and that Nomad does not list, without a write.
 func TestRollLoopRefusesAClientThatNeverJoined(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := unjoinedWorld(t, func(_ *vultrfake.Fake, w *nomadWorld) { w.DropNode("prod-workers-1") })
 		svc.Now = func() time.Time { return time.Now().Add(32 * time.Minute) }
@@ -376,6 +382,7 @@ func TestRollLoopRefusesAClientThatNeverJoined(t *testing.T) {
 // TestRollLoopGivesUpWaitingForANodeToJoin ends the run when a node has not joined within ten minutes, and says what
 // Nomad showed; the wait starts once and fails once.
 func TestRollLoopGivesUpWaitingForANodeToJoin(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := unjoinedWorld(t, func(_ *vultrfake.Fake, w *nomadWorld) { w.DropNode("prod-workers-1") })
 		lines := recordProgress(svc)
@@ -398,6 +405,7 @@ func TestRollLoopGivesUpWaitingForANodeToJoin(t *testing.T) {
 // TestRollLoopEndsWhenInterrupted ends a wait when the context ends, reports the wait failed, and returns the
 // interruption.
 func TestRollLoopEndsWhenInterrupted(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _ := unjoinedWorld(t, func(_ *vultrfake.Fake, w *nomadWorld) { w.DropNode("prod-workers-1") })
 		lines := recordProgress(svc)
@@ -423,6 +431,7 @@ func TestRollLoopEndsWhenInterrupted(t *testing.T) {
 // the machine not ready, the wait repeats its create with its operation id, and the roll makes no machine beyond the
 // two that an uninterrupted roll makes.
 func TestRollLoopRepeatsTheCreateOfAMachineThatIsNotReady(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := outdatedWorld(t)
 		ctx, cancel := context.WithCancel(t.Context())
@@ -460,6 +469,7 @@ func TestRollLoopRepeatsTheCreateOfAMachineThatIsNotReady(t *testing.T) {
 // the decisions' machines, and its scrub, which falls in the hidden lists, marks it joined. A create beyond the second
 // ends the run at once, so that a regression does not make an endless roll.
 func TestRollLoopKeepsAMachineItCreatedUntilTheCloudListsIt(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := outdatedWorld(t)
 		w.SetDownAfter(0)
@@ -521,6 +531,7 @@ func TestRollLoopKeepsAMachineItCreatedUntilTheCloudListsIt(t *testing.T) {
 // TestRollLoopEndsWhenTheCloudNeverListsAMachineItCreated fails with the machine's name and ID after a minute of lists
 // that miss it, and makes no second machine.
 func TestRollLoopEndsWhenTheCloudNeverListsAMachineItCreated(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := outdatedWorld(t)
 		var id string
@@ -543,6 +554,7 @@ func TestRollLoopEndsWhenTheCloudNeverListsAMachineItCreated(t *testing.T) {
 // TestRollLoopStopsAStepThatHasNoEffect ends the run when the third try of a step still leaves the same next step: a
 // mark that Nomad drops. Each try comes a poll after the one before.
 func TestRollLoopStopsAStepThatHasNoEffect(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w := outdatedWorld(t)
 		var times []time.Time
@@ -567,6 +579,7 @@ func TestRollLoopStopsAStepThatHasNoEffect(t *testing.T) {
 // TestRollLoopForgetsAnEarlierFailureOfAStep ends a step that has no effect with that, not with the answer of a try
 // that failed before: the first try finds the node gone, the next two do nothing.
 func TestRollLoopForgetsAnEarlierFailureOfAStep(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w := outdatedWorld(t)
 		marks := 0
@@ -593,6 +606,7 @@ func TestRollLoopForgetsAnEarlierFailureOfAStep(t *testing.T) {
 // TestRollLoopStopsAfterThreeTriesAtANodeThatIsGone ends the run with the write's own error after the third answer that
 // the node is not in the cluster while the list still shows it, a poll after each try.
 func TestRollLoopStopsAfterThreeTriesAtANodeThatIsGone(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w := outdatedWorld(t)
 		var times []time.Time
@@ -620,6 +634,7 @@ func TestRollLoopStopsAfterThreeTriesAtANodeThatIsGone(t *testing.T) {
 // TestRollLoopGoesOnAtANodeThatWentBetweenTheObservationAndTheWrite leads to the next decision when the mark finds its
 // node gone: the machine of the missing node is deleted, and the mark is not sent for it again.
 func TestRollLoopGoesOnAtANodeThatWentBetweenTheObservationAndTheWrite(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w := outdatedWorld(t)
 		marks := 0
@@ -648,6 +663,7 @@ func TestRollLoopGoesOnAtANodeThatWentBetweenTheObservationAndTheWrite(t *testin
 // TestRollLoopTriesAgainWhenNoServerAnswersAWrite goes on after two writes that no server answered, and ends with the
 // error of the write after three.
 func TestRollLoopTriesAgainWhenNoServerAnswersAWrite(t *testing.T) {
+	t.Parallel()
 	t.Run("two failures", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			svc, _, w := outdatedWorld(t)
@@ -693,6 +709,7 @@ func TestRollLoopTriesAgainWhenNoServerAnswersAWrite(t *testing.T) {
 // TestRollLoopCountsANodeOnceThatItDrainsTwice sends the drain again when Nomad shows no sign of the first one, and
 // counts the node once.
 func TestRollLoopCountsANodeOnceThatItDrainsTwice(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w := outdatedWorld(t)
 		drains, dropped := 0, false
@@ -720,6 +737,7 @@ func TestRollLoopCountsANodeOnceThatItDrainsTwice(t *testing.T) {
 // TestRollLoopDoesNotSendADeleteAgain lists the machines at every poll while the cloud still lists a machine that it
 // deleted, sends the delete once, and ends the run five minutes after it.
 func TestRollLoopDoesNotSendADeleteAgain(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := outdatedWorld(t)
 		var deletedAt time.Time
@@ -760,6 +778,7 @@ func TestRollLoopDoesNotSendADeleteAgain(t *testing.T) {
 // TestRollLoopTriesTheIntroTokenAgain goes on after two answers of no server to the request for an intro token, makes
 // one machine for the slot, and ends before any create at an error that is not the answer of a missing server.
 func TestRollLoopTriesTheIntroTokenAgain(t *testing.T) {
+	t.Parallel()
 	t.Run("no server answers twice", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			svc, f, w := outdatedWorld(t)
@@ -797,6 +816,7 @@ func TestRollLoopTriesTheIntroTokenAgain(t *testing.T) {
 // TestRollLoopWaitsForNomadToAnswerItsReads goes on when no server answers the reads of the observation for a while,
 // and ends with the last error after ten minutes of it. An error that is not a missing answer ends the run at once.
 func TestRollLoopWaitsForNomadToAnswerItsReads(t *testing.T) {
+	t.Parallel()
 	t.Run("for a while", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			svc, _, w := outdatedWorld(t)
@@ -855,6 +875,7 @@ func TestRollLoopWaitsForNomadToAnswerItsReads(t *testing.T) {
 // TestRollLoopEndsWhenTheListFails ends the run at a list of the machines that fails, with what the run did so far
 // counted.
 func TestRollLoopEndsWhenTheListFails(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := outdatedWorld(t)
 		created := false
@@ -879,6 +900,7 @@ func TestRollLoopEndsWhenTheListFails(t *testing.T) {
 
 // TestRollLoopReportsAWaitForADrainOnce starts the wait for a drain once and ends it once, however many polls it takes.
 func TestRollLoopReportsAWaitForADrainOnce(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w := outdatedWorld(t)
 		w.SetDrainReads(3)
@@ -896,6 +918,7 @@ func TestRollLoopReportsAWaitForADrainOnce(t *testing.T) {
 
 // TestRollLoopGivesUpWaitingForADrain ends the run five minutes after the deadline of a drain that never completes.
 func TestRollLoopGivesUpWaitingForADrain(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := outdatedWith(t, drainTenMinutes)
 		// Nomad's own deadline never ends this drain
@@ -935,6 +958,7 @@ func TestRollLoopGivesUpWaitingForADrain(t *testing.T) {
 // TestRollLoopGivesUpWaitingForANodeToGoDown ends the run six minutes after the last delete, when Nomad still lists
 // the node of the deleted machine, and lists the machines once after that delete, not at each poll of the wait.
 func TestRollLoopGivesUpWaitingForANodeToGoDown(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := outdatedWorld(t)
 		w.SetDownAfter(time.Hour)
@@ -965,6 +989,7 @@ func TestRollLoopGivesUpWaitingForANodeToGoDown(t *testing.T) {
 // TestRollLoopGivesUpWaitingForTheServers ends the run after ten minutes in which a server reports no version, which
 // holds the roll back.
 func TestRollLoopGivesUpWaitingForTheServers(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w := outdatedWorld(t)
 		w.ChangeServer("prod-servers-0", func(s *nomadops.ServerHealth) { s.Version = "" })
@@ -984,6 +1009,7 @@ func TestRollLoopGivesUpWaitingForTheServers(t *testing.T) {
 // TestRollLoopReportsWhatEachNomadStepWorksOn tells the node of each Nomad step, the node's address of a wait for it to
 // go down and of a purge, and the deadline of a drain.
 func TestRollLoopReportsWhatEachNomadStepWorksOn(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := outdatedWorld(t)
 		address := privateOf(t, f, instanceNamed(t, f, "prod-workers-0"))
@@ -1012,6 +1038,7 @@ func TestRollLoopReportsWhatEachNomadStepWorksOn(t *testing.T) {
 
 // TestRollLoopEndsAtARefusalOfTheDecisions ends the run with the refusal of rollout, without a write.
 func TestRollLoopEndsAtARefusalOfTheDecisions(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := outdatedWorld(t)
 		w.ChangeNode("prod-workers-0", func(n *nomadops.Node) { n.Version = "9.9.9" })
@@ -1036,6 +1063,7 @@ func TestRollLoopEndsAtARefusalOfTheDecisions(t *testing.T) {
 // the node registered, though the decisions give the purge of an old node meanwhile: each new machine boots for a
 // minute, and the node of a deleted machine reads down after the default delay.
 func TestRollLoopKeepsAWaitOpenWhileOtherStepsComeBetweenItsPolls(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := outdatedWorld(t)
 		f.SetHook(func(ctx context.Context, c vultrfake.Call, next func(context.Context) error) error {
@@ -1063,6 +1091,7 @@ func TestRollLoopKeepsAWaitOpenWhileOtherStepsComeBetweenItsPolls(t *testing.T) 
 // TestRollLoopCountsAWaitsDeadlineFromItsFirstPollWhileOtherStepsComeBetween gives up on a node that never registers
 // ten minutes after its wait began, though the purge of an old node came between the polls of the wait.
 func TestRollLoopCountsAWaitsDeadlineFromItsFirstPollWhileOtherStepsComeBetween(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := outdatedWorld(t)
 		creates := 0

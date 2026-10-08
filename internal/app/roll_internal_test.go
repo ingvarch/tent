@@ -16,6 +16,7 @@ import (
 // TestRollActionNames names every action of rollout from Done to WaitStable, and an action outside that range
 // unknown.
 func TestRollActionNames(t *testing.T) {
+	t.Parallel()
 	want := map[rollout.Action]string{
 		rollout.Done: "done", rollout.Create: "create", rollout.WaitJoined: "wait-joined",
 		rollout.MarkIneligible: "mark-ineligible", rollout.Drain: "drain", rollout.WaitDrained: "wait-drained",
@@ -44,6 +45,7 @@ func TestRollActionNames(t *testing.T) {
 
 // TestRollStepOf names the machine of a step, else its node, and keeps the machine's ID and the step's text.
 func TestRollStepOf(t *testing.T) {
+	t.Parallel()
 	machine := rollout.Machine{ID: "instance-6", Name: "prod-workers-0", Group: "workers"}
 	node := rollout.Node{ID: "n-6", Name: "prod-workers-7", Address: netip.MustParseAddr("10.64.0.6")}
 	for _, tc := range []struct {
@@ -85,6 +87,7 @@ func TestRollStepOf(t *testing.T) {
 // TestOutdatedMachines lists the machines of the group whose hash is not the group's, that carry none or that the run
 // forces, by name and ID, each with its reason: the hash comes before the force.
 func TestOutdatedMachines(t *testing.T) {
+	t.Parallel()
 	g := rollout.Group{Name: "workers", SpecHash: "new"}
 	machine := func(id, name, group, hash string) cloud.Instance {
 		return cloud.Instance{ID: id, Name: name, Group: group, SpecHash: hash}
@@ -116,6 +119,7 @@ func TestOutdatedMachines(t *testing.T) {
 // a machine that is not ready, fail without a private address, scrub a machine whose node is ready and eligible,
 // refuse a client that is older than its intro token's life, and else wait.
 func TestJoinCheck(t *testing.T) {
+	t.Parallel()
 	now := minutes(59)
 	addr := netip.MustParseAddr("10.64.0.6")
 	machine := func(change func(*cloud.Instance)) cloud.Instance {
@@ -190,6 +194,7 @@ func TestJoinCheck(t *testing.T) {
 // TestRollRunState gives the decisions the run's groups, machines, Nomad, version and forced machines, the interval at
 // which nodes refresh their servers, and the time of the service.
 func TestRollRunState(t *testing.T) {
+	t.Parallel()
 	now := minutes(5)
 	r := &rollRun{
 		s:       &Service{Now: func() time.Time { return now }},

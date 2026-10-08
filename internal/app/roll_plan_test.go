@@ -50,6 +50,7 @@ var upToDateServers = app.RollGroup{Name: "servers", Role: v1alpha1.RoleServer, 
 // TestRollPlanWriteText writes a line for each group, then a blank line and the next step or the words that say none
 // is left. A forced machine shows ", forced" after its ID; the other reasons show nothing.
 func TestRollPlanWriteText(t *testing.T) {
+	t.Parallel()
 	create := &app.RollStep{
 		Action: "create", Group: "workers", Node: "prod-workers-2",
 		Text: "create node prod-workers-2 (client of workers, ams)",
@@ -93,6 +94,7 @@ func TestRollPlanWriteText(t *testing.T) {
 
 // TestRollPlanWriteTextFails returns the error of the writer, with what was written.
 func TestRollPlanWriteTextFails(t *testing.T) {
+	t.Parallel()
 	err := app.RollPlan{Groups: []app.RollGroup{upToDateServers}}.WriteText(&failWriter{err: errRollWrite})
 	if want := "writing the plan: broken pipe"; err == nil || err.Error() != want {
 		t.Errorf("WriteText = %v, want %q", err, want)
@@ -102,6 +104,7 @@ func TestRollPlanWriteTextFails(t *testing.T) {
 // TestRollPlanMarshalJSON leaves out applied, next and rolled when they are false, nil or not applied, and shows an
 // empty list of outdated machines as [], also for a group that was built without one.
 func TestRollPlanMarshalJSON(t *testing.T) {
+	t.Parallel()
 	step := &app.RollStep{
 		Action: "wait-joined", Group: "workers", Node: "prod-workers-2", ID: "instance-9",
 		Text: "wait until node prod-workers-2 joins",
@@ -137,6 +140,7 @@ func TestRollPlanMarshalJSON(t *testing.T) {
 
 // TestRollPlanWriteApplied counts the machines and nodes that the roll created, drained, deleted and purged.
 func TestRollPlanWriteApplied(t *testing.T) {
+	t.Parallel()
 	var b strings.Builder
 	p := app.RollPlan{Applied: true, Rolled: app.RollCounts{Created: 2, Drained: 3, Deleted: 4, Purged: 5}}
 	if err := p.WriteApplied(&b); err != nil {
