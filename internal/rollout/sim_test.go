@@ -23,20 +23,22 @@ import (
 //   - The node of a deleted machine stays ready for 2 ticks, then reads down.
 //   - A purge removes a node.
 //
-// The servers are a stub: they run, are healthy, and the first one leads.
+// The servers are modelled in sim_servers_test.go.
 
 const (
-	tickLength   = 10 * time.Second
-	maxRunSteps  = 1000
-	allocsOfNode = 2
-	oldVersion   = "2.0.6"
-	curVersion   = "2.0.7"
+	tickLength      = 10 * time.Second
+	refreshInterval = time.Minute
+	maxRunSteps     = 1000
+	allocsOfNode    = 2
+	oldVersion      = "2.0.6"
+	curVersion      = "2.0.7"
 )
 
 type simMachine struct {
 	rollout.Machine
 	age     int
 	version string // the Nomad version its agent runs
+	stopped bool   // it was stopped and stays so
 }
 
 type simNode struct {
@@ -48,11 +50,6 @@ type simNode struct {
 	drainMeta  string // the machine ID given with the drain
 }
 
-type simServer struct {
-	machine string // the ID of its machine
-	leader  bool
-}
-
 type world struct {
 	now         time.Time
 	cluster     string
@@ -60,10 +57,15 @@ type world struct {
 	groups      []rollout.Group
 	machines    []simMachine
 	nodes       []simNode
-	servers     []simServer
+	servers     []simServer // the Raft configuration
+	members     []simMember // the gossip pool
+	removed     []simRemoved
 	nextMachine int
 	nextNode    int
+	nextRaft    int
 	unplaced    int
+	lastChange  time.Time // when a server last joined or left the Raft configuration
+	noCleanup   bool      // autopilot does not remove the peers of failed servers
 	// keepsBudget has the groups that start with all their nodes available: the budget invariant holds for them.
 	keepsBudget map[string]bool
 }
@@ -84,6 +86,8 @@ func (w *world) clone() *world {
 	c.machines = slices.Clone(w.machines)
 	c.nodes = slices.Clone(w.nodes)
 	c.servers = slices.Clone(w.servers)
+	c.members = slices.Clone(w.members)
+	c.removed = slices.Clone(w.removed)
 	c.keepsBudget = make(map[string]bool, len(w.keepsBudget))
 	for k, v := range w.keepsBudget {
 		c.keepsBudget[k] = v
@@ -99,18 +103,23 @@ func (w *world) newMachineID() string {
 // newAddress is the address of the machine with the given number: 10.64.0.3 for the first.
 func newAddress(number int) netip.Addr { return ip(2 + number) }
 
-func (w *world) addServer(version string) {
+// addServer adds a running server machine to the group servers, with its peer and member; the first one leads.
+func (w *world) addServer(hash, version string) {
 	id := w.newMachineID()
-	index := len(w.servers)
+	index := w.countOf("servers")
+	zone := "ams"
+	if g, ok := w.group("servers"); ok {
+		zone = g.Zones[index%len(g.Zones)]
+	}
 	w.machines = append(w.machines, simMachine{
 		Machine: rollout.Machine{
 			ID: id, Name: rollout.NodeName(w.cluster, "servers", index), Group: "servers", Role: v1alpha1.RoleServer,
-			Zone: "ams", SpecHash: newHash, PrivateIP: newAddress(w.nextMachine), Ready: true, Joined: true,
+			Zone: zone, SpecHash: hash, PrivateIP: newAddress(w.nextMachine), Ready: true, Joined: true,
 			Created: w.now.Add(-time.Duration(1000-w.nextMachine) * time.Hour),
 		},
 		age: 100, version: version,
 	})
-	w.servers = append(w.servers, simServer{machine: id, leader: index == 0})
+	w.joinRaft(id, w.newRaftID(), len(w.servers) == 0, true, w.now.Add(-time.Hour))
 }
 
 func (w *world) addGroup(g rollout.Group) { w.groups = append(w.groups, g) }
@@ -227,39 +236,34 @@ func (w *world) availableCount(g rollout.Group) int {
 // observe returns what the cloud and Nomad report now.
 func (w *world) observe() rollout.State {
 	s := rollout.State{
-		Cluster: w.cluster, Groups: w.groups, Version: w.version, Refresh: time.Minute, Now: w.now,
+		Cluster: w.cluster, Groups: w.groups, Version: w.version, Refresh: refreshInterval, Now: w.now,
 	}
 	for _, m := range w.machines {
 		s.Machines = append(s.Machines, m.Machine)
 	}
-	s.Nomad.Healthy = true
-	for i, srv := range w.servers {
-		m := w.machines[w.machineIndex(srv.machine)]
-		name := m.Name + ".global"
-		s.Nomad.Servers = append(s.Nomad.Servers, rollout.Server{
-			ID: fmt.Sprintf("r-%d", i+1), Name: name, Address: netip.AddrPortFrom(m.PrivateIP, 4647), Voter: true,
-			Leader: srv.leader, Healthy: true, StableSince: w.now.Add(-time.Hour), Version: m.version,
-		})
-		s.Nomad.Members = append(s.Nomad.Members, rollout.Member{Name: name, Address: m.PrivateIP, Status: "alive"})
-	}
-	for _, n := range w.nodes {
-		s.Nomad.Nodes = append(s.Nomad.Nodes, n.Node)
-	}
+	s.Nomad = w.observeNomad()
 	return s
 }
 
 // tick moves the clock and what takes time.
 func (w *world) tick() {
 	w.now = w.now.Add(tickLength)
+	w.promoteServers()
 	for i := range w.machines {
 		m := &w.machines[i]
 		m.age++
-		m.Ready = m.Ready || m.age >= 1
+		m.Ready = !m.stopped && (m.Ready || m.age >= 1)
 		if m.Role == v1alpha1.RoleClient && !m.Joined && m.age >= 2 {
 			m.Joined = true
 			w.register(*m)
 		}
+		if m.Role == v1alpha1.RoleServer && m.age == 2 {
+			w.joinRaft(m.ID, w.newRaftID(), false, false, w.now)
+			w.changed()
+		}
 	}
+	w.tickMembers()
+	w.readdServers()
 	for i := range w.nodes {
 		n := &w.nodes[i]
 		if w.machineIndex(n.owner) < 0 {
@@ -325,6 +329,14 @@ func (w *world) apply(step rollout.Step) error {
 			return fmt.Errorf("%s: no such node", step)
 		}
 		w.nodes = slices.Delete(w.nodes, i, i+1)
+	case rollout.TransferLeadership:
+		return w.transfer(step)
+	case rollout.Stop:
+		return w.stop(step)
+	case rollout.RemovePeer:
+		return w.removePeer(step)
+	case rollout.ForceLeave:
+		w.forceLeave(step)
 	default:
 		return fmt.Errorf("%s: the world does not apply this step", step)
 	}
@@ -332,14 +344,16 @@ func (w *world) apply(step rollout.Step) error {
 }
 
 func (w *world) create(step rollout.Step) error {
-	for _, srv := range w.servers {
-		if v := w.machines[w.machineIndex(srv.machine)].version; semver.Compare("v"+v, "v"+w.version) < 0 {
-			return violated("%s: a server runs Nomad %s, older than the %s of the new node", step, v, w.version)
-		}
-	}
 	g, ok := w.group(step.Group)
 	if !ok {
 		return fmt.Errorf("%s: no such group", step)
+	}
+	if g.Role == v1alpha1.RoleClient {
+		for _, srv := range w.servers {
+			if v := w.machines[w.machineIndex(srv.machine)].version; semver.Compare("v"+v, "v"+w.version) < 0 {
+				return violated("%s: a server runs Nomad %s, older than the %s of the new node", step, v, w.version)
+			}
+		}
 	}
 	id := w.newMachineID()
 	w.machines = append(w.machines, simMachine{
@@ -358,10 +372,11 @@ func (w *world) delete(step rollout.Step) error {
 		return fmt.Errorf("%s: no such machine", step)
 	}
 	id := w.machines[i].ID
-	for _, srv := range w.servers {
-		if srv.leader && srv.machine == id {
-			return violated("%s: it is the machine of the leader", step)
-		}
+	if w.leads(id) {
+		return violated("%s: it is the machine of the leader", step)
+	}
+	if w.serverIndexByMachine(id) >= 0 {
+		return violated("%s: its server is still in the Raft configuration", step)
 	}
 	if j := w.nodeIndexByOwner(id); j >= 0 && w.nodes[j].Status == "ready" && w.nodes[j].allocs > 0 {
 		return violated("%s: its node is up and holds %d allocations", step, w.nodes[j].allocs)
@@ -372,10 +387,11 @@ func (w *world) delete(step rollout.Step) error {
 
 // check returns the first invariant of the world that does not hold.
 func (w *world) check() error {
-	if !slices.ContainsFunc(w.servers, func(s simServer) bool {
-		return s.leader && w.machineIndex(s.machine) >= 0
-	}) {
+	if !slices.ContainsFunc(w.servers, func(s simServer) bool { return s.leader && w.up(s.machine) }) {
 		return violated("no leader")
+	}
+	if voters, running := w.voterCounts(); running < voters/2+1 {
+		return violated("no quorum: %d of %d voters run", running, voters)
 	}
 	names := map[string]bool{}
 	for _, m := range w.machines {
@@ -385,16 +401,21 @@ func (w *world) check() error {
 		names[m.Name] = true
 	}
 	for _, g := range w.groups {
-		if g.Role != v1alpha1.RoleClient {
-			continue
-		}
-		if n := w.countOf(g.Name); n > g.Size+g.MaxSurge {
-			return violated("group %s has %d machines, more than its size %d plus surge %d", g.Name, n, g.Size,
-				g.MaxSurge)
-		}
-		if n := w.availableCount(g); w.keepsBudget[g.Name] && n < g.Size-g.MaxUnavailable {
-			return violated("group %s has %d available nodes, fewer than its size %d less %d unavailable", g.Name, n,
-				g.Size, g.MaxUnavailable)
+		n := w.countOf(g.Name)
+		switch g.Role {
+		case v1alpha1.RoleServer:
+			if n > g.Size+1 {
+				return violated("group %s has %d machines, more than its size %d plus 1", g.Name, n, g.Size)
+			}
+		case v1alpha1.RoleClient:
+			if n > g.Size+g.MaxSurge {
+				return violated("group %s has %d machines, more than its size %d plus surge %d", g.Name, n, g.Size,
+					g.MaxSurge)
+			}
+			if n := w.availableCount(g); w.keepsBudget[g.Name] && n < g.Size-g.MaxUnavailable {
+				return violated("group %s has %d available nodes, fewer than its size %d less %d unavailable", g.Name,
+					n, g.Size, g.MaxUnavailable)
+			}
 		}
 	}
 	return nil
@@ -404,10 +425,14 @@ func (w *world) check() error {
 func (w *world) summary() []string {
 	var lines []string
 	for _, m := range w.machines {
-		lines = append(lines, fmt.Sprintf("machine %s %s %s hash=%s joined=%t", m.Name, m.ID, m.Group, m.SpecHash, m.Joined))
+		lines = append(lines, fmt.Sprintf("machine %s %s %s hash=%s joined=%t stopped=%t", m.Name, m.ID, m.Group, m.SpecHash,
+			m.Joined, m.stopped))
 	}
 	for _, srv := range w.servers {
-		lines = append(lines, fmt.Sprintf("server %s leader=%t", srv.machine, srv.leader))
+		lines = append(lines, fmt.Sprintf("server %s %s leader=%t voter=%t", srv.machine, srv.id, srv.leader, srv.voter))
+	}
+	for _, mem := range w.members {
+		lines = append(lines, fmt.Sprintf("member %s %s", mem.name, mem.status))
 	}
 	for _, n := range w.nodes {
 		lines = append(lines, fmt.Sprintf("node %s %s %s eligible=%t draining=%t", n.Name, n.ID, n.Status, n.Eligible,
@@ -472,6 +497,9 @@ func (w *world) run(mode rollout.Mode, decide decider, keepSnapshots bool) (resu
 		if step.Action == rollout.Done {
 			return res, nil
 		}
+		if err := w.checkOrder(mode, step); err != nil {
+			return res, err
+		}
 		if step.Action.Waits() {
 			w.tick()
 		} else if err := w.apply(step); err != nil {
@@ -482,4 +510,25 @@ func (w *world) run(mode rollout.Mode, decide decider, keepSnapshots bool) (resu
 		}
 	}
 	return res, fmt.Errorf("the run did not end in %d steps", maxRunSteps)
+}
+
+// checkOrder is the invariant that a roll takes no step on a client group before the server groups are done: each has
+// its size, and every machine of it is up to date.
+func (w *world) checkOrder(mode rollout.Mode, step rollout.Step) error {
+	if g, ok := w.group(step.Group); mode != rollout.Roll || !ok || g.Role != v1alpha1.RoleClient {
+		return nil
+	}
+	for _, g := range w.groups {
+		if g.Role == v1alpha1.RoleClient {
+			continue
+		}
+		done := w.countOf(g.Name) == g.Size
+		for _, m := range w.machines {
+			done = done && (m.Group != g.Name || m.SpecHash == g.SpecHash)
+		}
+		if !done {
+			return violated("%s: group %s is not done", step, g.Name)
+		}
+	}
+	return nil
 }

@@ -37,18 +37,67 @@ func nodeOf(nodes []Node, m Machine) (Node, bool) {
 	return found, ok
 }
 
-// victimOrder sorts machines in the order in which a group loses them: the ones that are not available, then the ones
-// in the zone with the most machines of the group, then the oldest, and the lowest ID on a tie. The machines are
-// outdated, joined and not under removal already, so those rules decide nothing.
-func victimOrder(ms []Machine, available func(Machine) bool, perZone map[string]int) {
+// victimOrder sorts machines in the order in which a group loses them. A machine for which a later predicate holds
+// comes after one for which it does not, the predicates taken in turn. Then come the machines in the zone with the
+// most machines of the group, the oldest, and the lowest ID on a tie.
+func victimOrder(ms []Machine, perZone map[string]int, later ...func(Machine) bool) {
 	slices.SortStableFunc(ms, func(a, b Machine) int {
+		for _, after := range later {
+			if c := compareBool(after(a), after(b)); c != 0 {
+				return c
+			}
+		}
 		return cmp.Or(
-			compareBool(available(a), available(b)),
 			cmp.Compare(perZone[b.Zone], perZone[a.Zone]),
 			CompareCreated(a.Created, b.Created),
 			cmp.Compare(a.ID, b.ID),
 		)
 	})
+}
+
+// upToDate returns the machines that are not outdated.
+func upToDate(s State, g Group, ms []Machine) []Machine {
+	var fresh []Machine
+	for _, m := range ms {
+		if !outdated(s, g, m) {
+			fresh = append(fresh, m)
+		}
+	}
+	return fresh
+}
+
+// zoneCounts returns how many of the machines each zone has.
+func zoneCounts(ms []Machine) map[string]int {
+	perZone := map[string]int{}
+	for _, m := range ms {
+		perZone[m.Zone]++
+	}
+	return perZone
+}
+
+// newMachine returns the machine that a group creates next: the lowest free name of the cluster, and the zone with the
+// fewest machines that are up to date.
+func newMachine(s State, g Group, ms []Machine) Machine {
+	taken := make(map[string]bool, len(s.Machines))
+	for _, m := range s.Machines {
+		taken[m.Name] = true
+	}
+	return Machine{
+		Name:  FreeName(s.Cluster, g.Name, taken),
+		Group: g.Name,
+		Role:  g.Role,
+		Zone:  LeastUsedZone(g.Zones, zoneCounts(upToDate(s, g, ms))),
+	}
+}
+
+// waitJoined waits for the first machine of the group that has not joined.
+func waitJoined(g Group, ms []Machine) (Step, bool, error) {
+	for _, m := range ms {
+		if !m.Joined {
+			return Step{Action: WaitJoined, Group: g.Name, Machine: m}, true, nil
+		}
+	}
+	return Step{}, false, nil
 }
 
 // compareBool orders false before true.
