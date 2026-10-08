@@ -123,6 +123,16 @@ var tablePeers = []nomadops.Peer{
 // setTablePeers lists tablePeers.
 func setTablePeers(f *nomadfake.Fake) { f.SetPeers(tablePeers) }
 
+// tableMembers is a gossip pool for the calls of apiCalls on a member: s1 is alive and s3 failed. The ForceLeave of
+// apiCalls names s3, which calls that run together may all remove: a name that is gone succeeds.
+var tableMembers = []nomadops.Member{
+	{Name: "s1.eu", Address: netip.MustParseAddr("10.0.0.5"), Status: "alive"},
+	{Name: "s3.eu", Address: netip.MustParseAddr("10.0.0.7"), Status: "failed"},
+}
+
+// setTableMembers lists tableMembers.
+func setTableMembers(f *nomadfake.Fake) { f.SetMembers(tableMembers) }
+
 // apiCalls holds an apiCall for every nomadops.API method.
 var apiCalls = []apiCall{
 	{"Leader", func(ctx context.Context, a nomadops.API) error {
@@ -165,6 +175,11 @@ var apiCalls = []apiCall{
 		return a.TransferLeadership(ctx, "p-2")
 	}, setTablePeers},
 	{"RemovePeer", func(ctx context.Context, a nomadops.API) error { return a.RemovePeer(ctx, "p-3") }, setTablePeers},
+	{"Members", func(ctx context.Context, a nomadops.API) error {
+		_, err := a.Members(ctx)
+		return err
+	}, setTableMembers},
+	{"ForceLeave", func(ctx context.Context, a nomadops.API) error { return a.ForceLeave(ctx, "s3.eu") }, setTableMembers},
 }
 
 func TestAPICallsCoverTheAPI(t *testing.T) {
@@ -237,16 +252,18 @@ func argOf(name string) string {
 		return "p-2"
 	case "RemovePeer":
 		return "p-3"
+	case "ForceLeave":
+		return "s3.eu"
 	}
 	return ""
 }
 
 // TestACLCallsNeedTheBootstrap checks that, before the ACL system is bootstrapped, Nodes, Health, Peers, KeyringReady,
-// IntroToken, CreateToken, MarkIneligible, Drain, Purge, TransferLeadership and RemovePeer fail for good as Nomad's 403
-// does, while Leader and Bootstrap work; and that they work after the bootstrap.
+// IntroToken, CreateToken, MarkIneligible, Drain, Purge, TransferLeadership, RemovePeer, Members and ForceLeave fail
+// for good as Nomad's 403 does, while Leader and Bootstrap work; and that they work after the bootstrap.
 func TestACLCallsNeedTheBootstrap(t *testing.T) {
 	for _, name := range []string{"IntroToken", "CreateToken", "Nodes", "Health", "Peers", "KeyringReady",
-		"MarkIneligible", "Drain", "Purge", "TransferLeadership", "RemovePeer"} {
+		"MarkIneligible", "Drain", "Purge", "TransferLeadership", "RemovePeer", "Members", "ForceLeave"} {
 		t.Run(name, func(t *testing.T) {
 			f, a := newAPI()
 			var call apiCall
@@ -281,6 +298,7 @@ func TestNewCluster(t *testing.T) {
 	f.Register(nomadops.Node{Name: "prod-workers-0", Status: "ready", Eligible: true})
 	f.SetHealth(nomadops.Health{Healthy: true, Voters: 3})
 	f.SetPeers([]nomadops.Peer{{Name: "prod-servers-0.eu", Voter: true}})
+	f.SetMembers([]nomadops.Member{{Name: "prod-servers-0.eu", Status: "alive"}})
 	f.Fail(t, "Bootstrap", errBoom)
 	f.NewCluster()
 	if _, err := a.Leader(t.Context()); !errors.Is(err, nomadops.ErrNotReady) {
@@ -305,7 +323,10 @@ func TestNewCluster(t *testing.T) {
 	if peers, err := a.Peers(t.Context()); err != nil || len(peers) != 0 {
 		t.Errorf("Peers() = %v, %v; want none", peers, err)
 	}
-	if got, want := len(f.Calls()), 8; got != want {
+	if members, err := a.Members(t.Context()); err != nil || len(members) != 0 {
+		t.Errorf("Members() = %v, %v; want none", members, err)
+	}
+	if got, want := len(f.Calls()), 9; got != want {
 		t.Errorf("%d calls logged, want %d", got, want)
 	}
 	if got := len(f.Tokens()); got != 1 {
