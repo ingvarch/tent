@@ -38,7 +38,7 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0014](0014-vultr-first-provider-and-e2e.md) | Implement Vultr first and run the E2E suite on Vultr | Accepted; E2E rules amended by 0034 |
 | [0015](0015-idempotency-without-unique-names.md) | Idempotent creation on clouds without unique names | Accepted; amended by 0023 and 0032 |
 | [0016](0016-server-discovery-seed-and-refresh.md) | Nomad server discovery with a seed list and tent-node refresh | Accepted; amended by 0027, 0030, 0031 and 0035 |
-| [0017](0017-api-driven-server-removal.md) | Remove Nomad servers through the Nomad API; ACPI shutdown is an optimization | Accepted; amended by 0030, 0031 and 0035 |
+| [0017](0017-api-driven-server-removal.md) | Remove Nomad servers through the Nomad API; ACPI shutdown is an optimization | Accepted; amended by 0030, 0031, 0035 and 0036 |
 | [0018](0018-vultr-provider-design.md) | Vultr provider design | Accepted (item 11 still provisional); amended by 0023, 0027, 0032, 0033 and 0034 |
 | [0019](0019-combined-server-client-role.md) | A combined server+client role for dev and small clusters | Accepted; amended by 0031, 0032 and 0033 |
 | [0020](0020-release-channels-and-ci-conventions.md) | Release channels and CI conventions | Accepted; amended by 0028 |
@@ -52,8 +52,9 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0028](0028-tent-node-agent-units-and-delivery.md) | tent-node agent, units and delivery | Accepted; amended by 0029 and 0030 |
 | [0029](0029-host-firewall-runtime-and-cni-on-nodes.md) | Host firewall, container runtime and CNI plugins on nodes | Accepted; amended by 0030 and 0032 |
 | [0030](0030-nomad-on-nodes.md) | Nomad on nodes | Accepted; amended by 0031, 0032 and 0033 |
-| [0031](0031-bootstrap-in-update.md) | Bootstrap in `update` | Accepted; amended by 0032, 0033 and 0034 |
+| [0031](0031-bootstrap-in-update.md) | Bootstrap in `update` | Accepted; amended by 0032, 0033, 0034 and 0036 |
 | [0032](0032-joined-label-scrub-and-delete-guard.md) | The joined label, the scrub and the delete guard | Accepted; amended by 0033 |
 | [0033](0033-operator-commands.md) | Operator commands: validate, export nomad and ui | Accepted |
 | [0034](0034-e2e-suite-on-vultr.md) | The E2E suite on Vultr | Accepted |
-| [0035](0035-rollout-decisions.md) | Rollout decisions | Accepted; refusal of two voters and single servers provisional |
+| [0035](0035-rollout-decisions.md) | Rollout decisions | Accepted; refusal of two voters and single servers provisional; amended by 0036 |
+| [0036](0036-nomad-calls-of-a-roll.md) | The Nomad calls of a roll | Accepted |

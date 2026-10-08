@@ -461,7 +461,7 @@ github.com/ingvarch/tent
 │   │   └── nodeuptest/  # tests only: in-memory FS, scripted runner, fake Ubuntu with systemd, nft, apt and ufw;
 │   │                    # tars and zips, HTTPS and mTLS servers
 │   ├── nomadops/        # the ONLY importer of github.com/hashicorp/nomad/api: mTLS client, ACL bootstrap and tokens,
-│   │                    # waits, the proxy of tent ui
+│   │                    # drains, purges, Raft and gossip calls, snapshots, waits, the proxy of tent ui
 │   │   └── nomadfake/   # in-memory Nomad cluster behind nomadops.API, for the app's tests
 │   ├── rollout/         # pure decisions of rolling updates and removals: state -> next step; the names, zones
 │   │                    # and age order of nodes; reaches no cloud, no Nomad, no state store (ADR-0035)
@@ -2639,14 +2639,16 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
 `nomadfake` stands in for Nomad in the app's tests ([15](#15-testing)).
 - **Calls.** `nomadops.API` has `Leader`, `Bootstrap` ([9.2](#92-acl-and-tokens)), `IntroToken`
   ([9.3](#93-client-introduction)), `CreateToken` (M2.8, [9.2](#92-acl-and-tokens)), `Nodes`, `Peers` (M2.7b),
-  `Health` and `KeyringReady` (M2.9). A `Client` talks to one server
+  `Health` and `KeyringReady` (M2.9), and since M3.2 the nine calls of a roll below. A `Client` talks to one server
   ([9.7](#97-operator-access)); the caller moves to the next server when a call fails with `ErrNotReady`. Make one
   client per server and reuse it: its idle connections stay open for 90 seconds, and a server takes at most 100 HTTP
   connections from one address.
-- **Deadlines.** Each call has 30 seconds, and none is retried. The caller's context can end it sooner.
+- **Deadlines.** Each call has 30 seconds, a snapshot call 5 minutes (M3.2), and none is retried. The caller's
+  context can end it sooner.
 - **Errors.** A call that may succeed later, on this server or another one, fails with an error that matches
-  `ErrNotReady`: no answer, an answer broken off, no answer within 30 seconds, a 5xx, a 429, or no leader. For a
-  write the outcome is then unknown. When the caller's context ends, the error matches the context's error instead.
+  `ErrNotReady`: no answer, an answer broken off, no answer within the call's bound, a 5xx, a 429, or no leader. For a
+  write the outcome is then unknown. Since M3.2 an answer that says the named node or Raft peer is gone matches
+  `ErrGone` instead, or counts as done (below). When the caller's context ends, the error matches the context's error instead.
   TLS failures and every other 4xx are permanent. Messages read like `nomad: PUT /v1/acl/bootstrap: 400: …`.
 - **Answers.** `Leader` takes an empty leader as no leader. `Health` takes the 429 of an unhealthy cluster as a
   report, not an error, and returns whether the servers are healthy, how many vote and, since M2.8, each server of the
@@ -2701,6 +2703,29 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
   at its clock plus the TTL, answers a TTL under a minute or over 24 hours with Nomad's text, fails with `permission
   denied` before the bootstrap, and lists each token it issued, also one whose answer was lost, by name, TTL and
   accessor and never by secret (`Issued()`).
+- **Built in M3.2** ([ADR-0036](adr/0036-nomad-calls-of-a-roll.md)). The calls that a roll needs. Nothing calls them
+  yet: M3.3 and M3.4 wire the node, Raft and gossip calls into the loop of `rolling-update`
+  ([13.3](#133-tent-rolling-update-cluster---yes)), and M3.8 the snapshots into `tent backup`
+  ([13.8](#138-backups)).
+  - **The calls.** `nomadops.API` gains nine methods, each one Nomad call over the client's mTLS:
+    `MarkIneligible`, `Drain` (with a `DrainRequest` of a deadline and meta), `Purge`, `TransferLeadership`,
+    `RemovePeer`, `Members`, `ForceLeave`, `SaveSnapshot` and `RestoreSnapshot`.
+    - The nodes and the peers are named by Nomad's ID and the Raft ID, which the reads now return: `Peer` has `ID` and
+      `Leader`, `Health` has `FailureTolerance` (also from the body of a 429), `ServerHealth` has `ID` and
+      `StableSince` (whole seconds), and `Node` has `ID`, `Draining` and `LastDrain{Status, Meta}`. `Member` has
+      `Name` (`<node name>.<region>`), `Address` and `Status`.
+    - A node ID or a Raft ID is checked before any request (ASCII letters, digits and `-`), as are a drain's deadline
+      (above zero), a force-leave name (a `.` in it) and a snapshot (not empty). Each failure is a permanent error
+      such as `nomad: no node ID`.
+  - **The classes.** A third class, `ErrGone`, means that the node or the Raft peer that the call names is not in the
+    cluster. It is permanent, so `Servers` returns it at once; `Purge` and `RemovePeer` return `nil` for it
+    ([ADR-0036](adr/0036-nomad-calls-of-a-roll.md)).
+  - **`Servers`** moves every new call on after `ErrNotReady`, since each is safe to repeat: a repeated `Drain` moves
+    the deadline of the drain that runs, a `RestoreSnapshot` restores the same state again, and `SaveSnapshot` returns
+    the snapshot of the server that answered. `ErrGone` ends a call at once.
+  - **Snapshots** are `secret.Secret` in memory and keep Nomad's bytes. Both calls have 5 minutes, the other calls keep
+    30 seconds. A save fails for good without a `Digest` header that matches the bytes, or with no bytes.
+  - **`nomadfake`** carries out each write on its own state ([15](#15-testing)).
 
 **Built in M2.7a.** The flow of `update` with Nomad ([ADR-0031](adr/0031-bootstrap-in-update.md)). It is in
 `internal/app` and reaches Nomad only through `internal/nomadops`.
@@ -2856,8 +2881,9 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
 
 ### 13.3 `tent rolling-update cluster [--yes]`
 
-Built in parts: M3.1 built the decisions (`internal/rollout`, [ADR-0035](adr/0035-rollout-decisions.md)); nothing
-calls them yet. M3.3 wires them into this command, and M3.6 wires the removals into `update`.
+Built in parts: M3.1 built the decisions (`internal/rollout`, [ADR-0035](adr/0035-rollout-decisions.md)) and M3.2 the
+Nomad calls ([ADR-0036](adr/0036-nomad-calls-of-a-roll.md)); nothing calls them yet. M3.3 and M3.4 wire the decisions
+and the node, Raft and gossip calls into this command, and M3.6 wires the removals into `update`.
 
 **Order.** All server groups roll before any client group. This follows Nomad's upgrade guide, and the decisions refuse
 a client group's create or the start of a new victim's removal (C4, C5) while a server runs an older Nomad than a new
@@ -2881,13 +2907,16 @@ votes, failure tolerance >= 1
 → wait until autopilot no longer counts it a healthy voter
      (a 429 still carries the report: read the server's Healthy and Voter from its body)
 → if it is still a peer: DELETE /v1/operator/raft/peer?id=<raft id>
-→ PUT /v1/agent/force-leave?node=<name>&prune=true
+→ PUT /v1/agent/force-leave?node=<name>.<region>&prune=1
 → wait until the servers are healthy with N voters
      (GET /v1/operator/autopilot/health answers HTTP 429 while unhealthy: treat as "not yet")
 → delete the old VM → next
 ```
 
 See [ADR-0017](adr/0017-api-driven-server-removal.md) and [ADR-0035](adr/0035-rollout-decisions.md).
+
+- **The calls of a server removal** (M3.2, [13.2](#132-tent-update-cluster---yes)): the transfer and the removal take
+  the Raft ID, and the force-leave name is `<node name>.<region>` with `prune=1`.
 
 - **The window** replaces a sleep, so a cut run sees it. It makes sure that every node has refreshed its `05-join.hcl`
   since the servers last changed ([11.2](#112-server-discovery-seed-and-refresh)). A peer removal starts no window; a
@@ -3280,6 +3309,9 @@ while something does. It is `Service.ValidateCluster` in `internal/app`.
 
 - **`tent backup create`** reads `GET /v1/operator/snapshot` and stores the snapshot under `backups/`.
 - **`tent backup restore`** writes it back with `PUT /v1/operator/snapshot`.
+- **The calls** are `SaveSnapshot` and `RestoreSnapshot` (M3.2, [ADR-0036](adr/0036-nomad-calls-of-a-roll.md)); the
+  commands are built in M3.8. Where a restore may go is open for the maintainer
+  ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)).
 - **Scheduling.** The snapshot agent is Enterprise-only, so scheduled backups are the operator's cron or CI calling
   `tent backup create`.
 
@@ -3687,6 +3719,21 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
      line, its `tent/joined=true` tag and its user data against the stub, a reboot of a client, the refusal to delete a
      joined node, and with `--unregistered` the replacement of a client that never registered. It needs `openssl`.
      Spike v12 ran on 2026-10-07 (run `9pxbqn`, [platform notes §3.16](platform-notes.md#316-spike-runs)).
+   - **Built in M3.2** ([ADR-0036](adr/0036-nomad-calls-of-a-roll.md)): tests of the nine new calls of `nomadops`
+     and of the fake that stands in for them.
+     - **The client** runs on `httptest` servers with real mTLS from `internal/pki`. Each call shows its request
+       (method, path, query, body, token and client certificate), the answers of every error class (`ErrGone` and gone
+       means done with the leader's text and a follower's, `ErrNotReady`, permanent, the end of the context), and the
+       arguments that are refused before any request. `Servers` moves on after `ErrNotReady` and stops at `ErrGone`; a
+       lost `Purge` answer ends `nil` on the second server. A snapshot's bytes reach no error and no print
+       (`internal/secrettest`).
+     - **The fake** changes its own state the way Nomad did in the measurements of 2026-10-08 and reacts to nothing over
+       time; a test sets the reactions: a re-added server, autopilot's cleanup, a node that goes down or registers
+       again. The rules are in the doc of the `nomadfake` package.
+     - **What the fake leaves out.** A restore changes nothing in the fake, though Nomad's changes the keyring, the ACL
+       tokens, the jobs and the nodes that registered after the snapshot. Nomad's servers answer `Members` and
+       `ForceLeave` from their own gossip pool even without a leader; the fake fails them then, and it has one pool for
+       all its clients.
 4. **tent-node tests.** Phases run with an abstracted filesystem and exec. Occasionally they run in a
    systemd-enabled container or a VM.
    - **Built in M2.5.** `internal/nodeup/nodeuptest` holds the fakes: an in-memory filesystem that behaves as
@@ -4052,6 +4099,9 @@ Decided on 2026-10-07:
 Open for the maintainer: the order for two voters and for a group of one server. Until it is chosen, tent refuses
 both ([ADR-0035](adr/0035-rollout-decisions.md): item 15 has the refusals, its Context the facts, its Alternatives
 the cost of the other answer).
+
+Also open for the maintainer: where `tent backup restore` may restore a snapshot ([13.8](#138-backups); the facts
+are in [platform notes §1.2](platform-notes.md#12-features-tent-relies-on)).
 
 Decisions 18 to 20 are recorded in [ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md), decision 21 in
 [ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md), decisions 22 to 25 in

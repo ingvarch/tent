@@ -6,7 +6,9 @@
   once its machines carry the joined label; of item 4, only a create and a wait that repeats a create read the assets)
   and by [ADR-0033](0033-operator-commands.md) (the M2.8 follow-up is built: `tent export nomad` replaced
   `hack/tent-operator`) and by [ADR-0034](0034-e2e-suite-on-vultr.md) (the Nomad step waits for an active key in
-  Nomad's keyring after the health wait)
+  Nomad's keyring after the health wait) and by [ADR-0036](0036-nomad-calls-of-a-roll.md) (item 7: a third class of
+  errors, `ErrGone` (ADR-0036 items 4 and 5), beside `ErrNotReady` and the permanent one; it is permanent, so
+  `Servers` returns it at once)
 - **Date:** 2026-10-05
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),

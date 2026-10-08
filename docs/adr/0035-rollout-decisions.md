@@ -1,7 +1,8 @@
 # ADR-0035: Rollout decisions
 
 - **Status:** Accepted; the refusal of two voters and of single-server groups is **provisional** (see
-  [Server removal](#server-removal))
+  [Server removal](#server-removal)); amended by [ADR-0036](0036-nomad-calls-of-a-roll.md) (the M3.2 follow-up is
+  built: `nomadops` reads the Raft IDs, `StableSince`, the failure tolerance, the gossip members and the drain state)
 - **Date:** 2026-10-08
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0004](0004-layered-architecture.md),
