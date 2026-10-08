@@ -113,6 +113,7 @@ func rollingUpdate(svc *app.Service, opts app.RollOptions) (app.RollPlan, error)
 // date and names the first step, a create, with the plan as text and as JSON. It reads the machines once and Nomad in
 // the order of the observation, and writes nothing.
 func TestRollingUpdatePlansTheOutdatedWorkers(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := outdatedWorld(t)
 		u := watch(t, svc, f, w)
@@ -144,6 +145,7 @@ func TestRollingUpdatePlansTheOutdatedWorkers(t *testing.T) {
 
 // TestRollingUpdateWithNothingOutdated has no next step, and says so.
 func TestRollingUpdateWithNothingOutdated(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := rollWorld(t)
 		u := watch(t, svc, f, w)
@@ -223,6 +225,7 @@ func TestRollingUpdateRefusalOfAnUpToDateClusterIsNotNothingToRoll(t *testing.T)
 // TestRollingUpdateForceMarksTheSelectedWorkers forces every worker of a cluster whose machines are up to date, and
 // the groups that the selection leaves out are not in the plan.
 func TestRollingUpdateForceMarksTheSelectedWorkers(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := rollWorld(t)
 		u := watch(t, svc, f, w)
@@ -252,6 +255,7 @@ func TestRollingUpdateForceMarksTheSelectedWorkers(t *testing.T) {
 // TestRollingUpdateSelectsGroups takes every group for an empty list, each name once and the groups by name, and fails
 // for a name that the specs lack before it calls the cloud or Nomad.
 func TestRollingUpdateSelectsGroups(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := rollWorld(t)
 		for _, tc := range []struct {
@@ -290,6 +294,7 @@ func TestRollingUpdateSelectsGroups(t *testing.T) {
 // TestRollingUpdateRefusesAtTheStart fails or refuses, in the order of the checks of a run, with only reads, no lock
 // and no change of the store. A refusal of the decisions comes with the plan of the groups, a failed check without.
 func TestRollingUpdateRefusesAtTheStart(t *testing.T) {
+	t.Parallel()
 	const server = "node group servers: tent cannot roll server and combined groups yet; " +
 		"select client groups with --nodegroups"
 	for _, tc := range []struct {
@@ -390,6 +395,7 @@ func TestRollingUpdateRefusesAtTheStart(t *testing.T) {
 // TestRollingUpdateServerRefusalWithoutClientGroups leaves the advice about --nodegroups out when the specs have no
 // client group.
 func TestRollingUpdateServerRefusalWithoutClientGroups(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := newRelease(t, keyedClusterYAML, serversYAML)
 		mustUpdate(t, svc)
@@ -409,6 +415,7 @@ func TestRollingUpdateServerRefusalWithoutClientGroups(t *testing.T) {
 // TestRollingUpdateRefusesACombinedGroup refuses a step of a combined group, without the advice about --nodegroups
 // when the specs have no client group.
 func TestRollingUpdateRefusesACombinedGroup(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := newRelease(t, keyedClusterYAML, combinedYAML)
 		mustUpdate(t, svc)
@@ -437,6 +444,7 @@ func unjoinedWorld(
 // TestRollingUpdateShowsTheWaitForANodeToJoin plans the wait for a machine that has not joined, as long as the run
 // would carry it out: its node is not listed yet, or is listed and ready.
 func TestRollingUpdateShowsTheWaitForANodeToJoin(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		edit func(f *vultrfake.Fake, w *nomadWorld)
@@ -471,6 +479,7 @@ func TestRollingUpdateShowsTheWaitForANodeToJoin(t *testing.T) {
 // with the plan of the groups: a client that has not joined within the life of its intro token and that Nomad does
 // not list.
 func TestRollingUpdateRefusesAWaitThatTheRunWouldRefuse(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := unjoinedWorld(t, func(_ *vultrfake.Fake, w *nomadWorld) { w.DropNode("prod-workers-1") })
 		svc.Now = func() time.Time { return time.Now().Add(32 * time.Minute) }
@@ -490,6 +499,7 @@ func TestRollingUpdateRefusesAWaitThatTheRunWouldRefuse(t *testing.T) {
 // TestRollingUpdateRefusesAMachineWithoutAnAddress fails for a wait for a machine that the cloud reports without a
 // private address.
 func TestRollingUpdateRefusesAMachineWithoutAnAddress(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := rollWorld(t)
 		id := instanceNamed(t, f, "prod-workers-1")
@@ -519,6 +529,7 @@ func TestRollingUpdateRefusesAMachineWithoutAnAddress(t *testing.T) {
 
 // TestRollingUpdateWithoutNomadClient fails when the service has no way to reach Nomad.
 func TestRollingUpdateWithoutNomadClient(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := rollWorld(t)
 		svc.Nomad = nil
@@ -533,6 +544,7 @@ func TestRollingUpdateWithoutNomadClient(t *testing.T) {
 
 // TestRollingUpdateRefusesWhatTheDecisionsRefuse returns the refusal of rollout with the plan of the groups.
 func TestRollingUpdateRefusesWhatTheDecisionsRefuse(t *testing.T) {
+	t.Parallel()
 	pinned := func(t *testing.T, svc *app.Service) string {
 		t.Helper()
 		return decode(t, string(get(t, svc.Store, completedPath))).Cluster.Spec.Nomad.Version
@@ -608,6 +620,7 @@ func TestRollingUpdateRefusesWhatTheDecisionsRefuse(t *testing.T) {
 // TestRollingUpdateFailsForWhatIsNotThere fails for a cluster that the store lacks, a tent that is too old and a
 // cloud that does not accept the specs, and writes nothing.
 func TestRollingUpdateFailsForWhatIsNotThere(t *testing.T) {
+	t.Parallel()
 	t.Run("a cluster that the store lacks", func(t *testing.T) {
 		svc, root := newService(t)
 		withCloud(svc)
@@ -727,6 +740,7 @@ func (brokenSites) RoundTrip(*http.Request) (*http.Response, error) { return nil
 // TestRollingUpdateReportsWhatFailsToRead fails for a list of the machines or a read of Nomad that fails, naming the
 // read of Nomad.
 func TestRollingUpdateReportsWhatFailsToRead(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := rollWorld(t)
 		f.Fail(t, "ListInstances", errors.New("cloud down"), 1)
@@ -742,6 +756,7 @@ func TestRollingUpdateReportsWhatFailsToRead(t *testing.T) {
 
 // TestRollingUpdateStopsWhenInterrupted returns the interruption, which stands for the end of the context.
 func TestRollingUpdateStopsWhenInterrupted(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := rollWorld(t)
 		ctx, cancel := context.WithCancel(t.Context())

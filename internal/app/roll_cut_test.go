@@ -115,6 +115,7 @@ func cutPlaces(calls []string) []bool {
 // of the log, a read that repeats one of its observation, a write after reads, a write after a write, and the first
 // read after a write.
 func TestCutPlacesStandAtWritesAndAtTheFirstReadOfEachObservation(t *testing.T) {
+	t.Parallel()
 	calls := []string{
 		"ListInstances tent/cluster=prod",             // 0: the first read
 		"nomad Peers (prod-servers-0)",                // 1
@@ -138,6 +139,7 @@ func TestCutPlacesStandAtWritesAndAtTheFirstReadOfEachObservation(t *testing.T) 
 // of its calls; a cut at a read stands between each write and the write before it; and the places are at most half of
 // the calls, which is the reason to choose them.
 func TestCutPlacesOfARollHoldEveryWriteAndAReadBeforeEach(t *testing.T) {
+	t.Parallel()
 	calls := uninterruptedRoll(t)
 	places := cutPlaces(calls)
 
@@ -181,6 +183,7 @@ func TestCutPlacesOfARollHoldEveryWriteAndAReadBeforeEach(t *testing.T) {
 // TestEachCutAtCutsOnlyTheKeptCalls checks that eachCutAt gives a case, before and after, to each call that keep names
 // and to no other, and that a case's n counts the calls with its key that keep leaves out.
 func TestEachCutAtCutsOnlyTheKeptCalls(t *testing.T) {
+	t.Parallel()
 	calls := []string{"A x", "B y", "A x", "A x", "B y"}
 	var mu sync.Mutex
 	var got []string
@@ -205,6 +208,7 @@ func TestEachCutAtCutsOnlyTheKeptCalls(t *testing.T) {
 // roll makes, and the cluster ends as wantRollDone says. The cut run changes nothing in the store and leaves no lock.
 // The run after the cut keeps to the limits of cutShape at every call, as holdLimits checks.
 func TestRollFinishesAfterACutAtAnyWriteOrObservation(t *testing.T) {
+	t.Parallel()
 	calls := uninterruptedRoll(t)
 	places := cutPlaces(calls)
 	eachCutAt(t, calls, func(i int) bool { return places[i] }, func(t *testing.T, c cutCase) {
@@ -230,6 +234,7 @@ func TestRollFinishesAfterACutAtAnyWriteOrObservation(t *testing.T) {
 // machine ends the run, and the next run finishes the roll; the roll goes on past every other lost answer: Nomad's
 // writes go to the next server, and a create is found by its operation id. The cluster ends as wantRollDone says.
 func TestRollFinishesAfterALostAnswerOfAnyWrite(t *testing.T) {
+	t.Parallel()
 	seen := map[string]int{}
 	for i, call := range uninterruptedRoll(t) {
 		key := callKey(call)
@@ -300,6 +305,7 @@ func stampOf(svc *app.Service, line string) *time.Time {
 // TestRollGoesOnWhenNomadEndsADrainAtItsDeadline holds each drain until its deadline of ten minutes: Nomad stops what
 // remains then, and the roll goes on within the wait's limit and finishes.
 func TestRollGoesOnWhenNomadEndsADrainAtItsDeadline(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := outdatedWith(t, cutShape.yaml()+tenMinuteDrain)
 		before, old := workerHashes(f), workerIDs(f)
@@ -321,6 +327,7 @@ func TestRollGoesOnWhenNomadEndsADrainAtItsDeadline(t *testing.T) {
 // never completes, with what the run did, the lock released, and the wait's error. The next run, when the drain can
 // complete, finishes the roll.
 func TestRollEndsWhenADrainNeverCompletesAndTheNextRunGoesOn(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := outdatedWith(t, cutShape.yaml()+tenMinuteDrain)
 		before, old := workerHashes(f), workerIDs(f)
@@ -350,6 +357,7 @@ func TestRollEndsWhenADrainNeverCompletesAndTheNextRunGoesOn(t *testing.T) {
 // TestRollEndsWhenANodeDoesNotGoDownAndTheNextRunGoesOn ends the run six minutes after the delete of a machine whose
 // node Nomad keeps listing as ready. The next run, when the node reads down, purges it and finishes the roll.
 func TestRollEndsWhenANodeDoesNotGoDownAndTheNextRunGoesOn(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w, before, old := cutWorld(t)
 		w.SetDownAfter(time.Hour)
@@ -378,6 +386,7 @@ func TestRollEndsWhenANodeDoesNotGoDownAndTheNextRunGoesOn(t *testing.T) {
 // TestRollEndsWhenANewNodeNeverRegistersAndTheNextRunGoesOn ends the run ten minutes after the create of a machine
 // whose node never registers, before any node is drained. The next run, when the node registers, finishes the roll.
 func TestRollEndsWhenANewNodeNeverRegistersAndTheNextRunGoesOn(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w, before, old := cutWorld(t)
 		w.Withhold("prod-workers-2")

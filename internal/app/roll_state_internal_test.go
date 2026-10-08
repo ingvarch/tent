@@ -20,6 +20,7 @@ import (
 // TestDrainMetaKey pins the key of the drain meta, which Nomad keeps with a node: a new key would hide every drain
 // that an earlier run made.
 func TestDrainMetaKey(t *testing.T) {
+	t.Parallel()
 	if drainMeta != "tent_machine" {
 		t.Errorf("drainMeta = %q, want tent_machine", drainMeta)
 	}
@@ -29,6 +30,7 @@ func TestDrainMetaKey(t *testing.T) {
 // the report lacks gives false, the zero time and ""; an entry that is no peer is left out; two peers of one name stay
 // apart by their IDs.
 func TestNomadReadingStateServers(t *testing.T) {
+	t.Parallel()
 	stable := time.Date(2026, 10, 8, 9, 0, 0, 0, time.UTC)
 	addr := func(host string) netip.AddrPort { return netip.MustParseAddrPort(host + ":4647") }
 	reading := nomadReading{
@@ -66,6 +68,7 @@ func TestNomadReadingStateServers(t *testing.T) {
 // TestNomadReadingStateHealthFields takes Healthy and FailureTolerance from autopilot's report as they are, also when
 // they are false and zero.
 func TestNomadReadingStateHealthFields(t *testing.T) {
+	t.Parallel()
 	got := nomadReading{health: nomadops.Health{Healthy: false, FailureTolerance: 0}}.state()
 	if got.Healthy || got.FailureTolerance != 0 {
 		t.Errorf("Healthy, FailureTolerance = %v, %d, want false, 0", got.Healthy, got.FailureTolerance)
@@ -78,6 +81,7 @@ func TestNomadReadingStateHealthFields(t *testing.T) {
 
 // TestNomadReadingStateMembersAndNodes maps every field of the members and of the nodes.
 func TestNomadReadingStateMembersAndNodes(t *testing.T) {
+	t.Parallel()
 	reading := nomadReading{
 		members: []nomadops.Member{
 			{Name: "prod-servers-0.global", Address: netip.MustParseAddr("10.64.0.2"), Status: "alive"},
@@ -111,6 +115,7 @@ func TestNomadReadingStateMembersAndNodes(t *testing.T) {
 
 // TestNomadReadingStateDrainedFor names the machine of a drain only when the drain completed and carries the key.
 func TestNomadReadingStateDrainedFor(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		drain nomadops.LastDrain
@@ -138,6 +143,7 @@ func TestNomadReadingStateDrainedFor(t *testing.T) {
 
 // TestRolloutMachines maps every field of every listed machine, in the order of the list.
 func TestRolloutMachines(t *testing.T) {
+	t.Parallel()
 	created := time.Date(2026, 10, 8, 8, 0, 0, 0, time.UTC)
 	listed := []cloud.Instance{
 		{ID: "instance-7", Name: "prod-workers-0", Cluster: "prod", Group: "workers", Role: v1alpha1.RoleClient,
@@ -190,6 +196,7 @@ func rollTestBuilder() *nodeBuilder {
 // specs: a client group's two limits and drain timeout, a combined group's drain timeout alone, a server group's
 // nothing. A limit that a spec leaves out is 0, and the groups come in the order of the names.
 func TestRolloutGroups(t *testing.T) {
+	t.Parallel()
 	names := []string{"workers", "servers", "all", "batch"}
 	got, err := rolloutGroups(rollTestModel(), rollTestSpecs(), rollTestBuilder(), names)
 	if err != nil {
@@ -211,6 +218,7 @@ func TestRolloutGroups(t *testing.T) {
 
 // TestRolloutGroupsSelectsByName returns only the named groups, and none for no name.
 func TestRolloutGroupsSelectsByName(t *testing.T) {
+	t.Parallel()
 	got, err := rolloutGroups(rollTestModel(), rollTestSpecs(), rollTestBuilder(), []string{"batch"})
 	if err != nil || len(got) != 1 || got[0].Name != "batch" {
 		t.Errorf("rolloutGroups(batch) = %+v, %v, want the group batch alone", got, err)
@@ -224,6 +232,7 @@ func TestRolloutGroupsSelectsByName(t *testing.T) {
 // TestRolloutGroupsFailures fails for a name that the model lacks, a group whose spec is missing or nil, and a drain
 // timeout that does not parse, each with the group's name.
 func TestRolloutGroupsFailures(t *testing.T) {
+	t.Parallel()
 	noSpec := rollTestSpecs()
 	delete(noSpec, "workers")
 	nilSpec := rollTestSpecs()
@@ -256,6 +265,7 @@ func TestRolloutGroupsFailures(t *testing.T) {
 
 // TestForcedMachines holds the machines of the selected groups, by ID, and no machine of another group or of none.
 func TestForcedMachines(t *testing.T) {
+	t.Parallel()
 	listed := []cloud.Instance{
 		{ID: "instance-1", Group: "servers"},
 		{ID: "instance-2", Group: "workers"},
@@ -309,6 +319,7 @@ func (s *readStub) Nodes(context.Context) ([]nomadops.Node, error) {
 // TestReadNomadOrder reads the Raft configuration, autopilot's report, the members and the nodes, in that order, and
 // returns each answer in its own field.
 func TestReadNomadOrder(t *testing.T) {
+	t.Parallel()
 	stub := &readStub{}
 	got, err := readNomad(t.Context(), stub)
 	if err != nil {
@@ -330,6 +341,7 @@ func TestReadNomadOrder(t *testing.T) {
 
 // TestReadNomadFailures names the read that failed, keeps its error visible to errors.Is and reads nothing after it.
 func TestReadNomadFailures(t *testing.T) {
+	t.Parallel()
 	boom := nomadops.ErrNotReady
 	for _, tc := range []struct {
 		failOn    string

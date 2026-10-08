@@ -64,6 +64,7 @@ func availableWorkers(ids []string, nodes []nomadops.Node) int {
 // TestAvailableWorkersCountsTheReadyEligibleNodesOfTheMachines counts a node of a listed machine that is ready,
 // eligible and not draining, and none that is down, ineligible, draining or of another machine.
 func TestAvailableWorkersCountsTheReadyEligibleNodesOfTheMachines(t *testing.T) {
+	t.Parallel()
 	ready := func(id string) nomadops.Node {
 		return nomadops.Node{ID: nodeIDOf(id), Status: "ready", Eligible: true}
 	}
@@ -178,6 +179,7 @@ func rollFlowWorld(t *testing.T, s rollShape) (*app.Service, *vultrfake.Fake, *n
 // maxUnavailable 0: the plan that it returns and the calls to Vultr and Nomad match golden files, and the cluster ends
 // as wantWorkersRolled says.
 func TestRollFlowReplacesTheWorkersBySurgeOne(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := rollFlowWorld(t, rollShape{surge: 1})
 		before := workerHashes(f)
@@ -211,6 +213,7 @@ func TestRollFlowReplacesTheWorkersBySurgeOne(t *testing.T) {
 // golden files, the workers keep to the limits of the shape at every call, and the cluster ends as wantWorkersRolled
 // says.
 func TestRollFlowReportsEachStepOfTheRoll(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		shape  rollShape
@@ -244,6 +247,7 @@ func TestRollFlowReportsEachStepOfTheRoll(t *testing.T) {
 // TestRollFlowForceReplacesTheSelectedWorkersOnce rolls two workers that are up to date because it is forced: it
 // replaces each once, and the machines that it makes are not forced, so it ends.
 func TestRollFlowForceReplacesTheSelectedWorkersOnce(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := rollWorld(t)
 		holdLimits(t, f, w, rollShape{surge: 1})
@@ -267,6 +271,7 @@ func TestRollFlowForceReplacesTheSelectedWorkersOnce(t *testing.T) {
 // TestRollFlowRollsTheWorkersWhileTheServersAreOutdated rolls the selected client group and leaves the outdated
 // servers as they are.
 func TestRollFlowRollsTheWorkersWhileTheServersAreOutdated(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := rollWorld(t)
 		mustReplace(t, svc, keyedClusterYAML+"  nomad:\n    extraConfig:\n      server: 'raft_multiplier = 3'\n",
@@ -304,6 +309,7 @@ func TestRollFlowRollsTheWorkersWhileTheServersAreOutdated(t *testing.T) {
 // TestRollFlowTakesNoLockWithNothingToRoll applies a roll of a cluster that has nothing to roll: it only reads, does
 // not take the lock that the test holds, and says it applied.
 func TestRollFlowTakesNoLockWithNothingToRoll(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := rollWorld(t)
 		u := watch(t, svc, f, w)
@@ -325,6 +331,7 @@ func TestRollFlowTakesNoLockWithNothingToRoll(t *testing.T) {
 // start because the server group has a step: it returns the refusal with the groups, only reads, and does not take
 // the lock that the test holds.
 func TestRollFlowRefusesAtTheStartWithoutALock(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := rollWorld(t)
 		withTolerance(svc)
@@ -343,6 +350,7 @@ func TestRollFlowRefusesAtTheStartWithoutALock(t *testing.T) {
 
 // TestRollFlowFailsLikeThePlanAtTheStart applies a roll whose first check fails: it returns the error and no plan.
 func TestRollFlowFailsLikeThePlanAtTheStart(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := rollWorld(t)
 		u := watch(t, svc, f, w)
@@ -360,6 +368,7 @@ func TestRollFlowFailsLikeThePlanAtTheStart(t *testing.T) {
 // TestRollFlowHoldsTheLockWhileItRolls tells OnRollPlan the plan under a lock whose lease names the roll, which the
 // roll releases at its end. The plan that it returns holds the step that it began with.
 func TestRollFlowHoldsTheLockWhileItRolls(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _ := outdatedWorld(t)
 		var seen []*statestore.Lease
@@ -399,6 +408,7 @@ func TestRollFlowHoldsTheLockWhileItRolls(t *testing.T) {
 
 // TestRollFlowWaitsForTheLock waits as an update does while another tent holds the lock, then rolls.
 func TestRollFlowWaitsForTheLock(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := outdatedWorld(t)
 		held := holdLock(t, svc.Store)
@@ -432,6 +442,7 @@ func TestRollFlowWaitsForTheLock(t *testing.T) {
 // TestRollFlowStopsWhenTheLockIsLost ends the roll when its lock is removed, while a drain still runs, and returns what
 // it did until then.
 func TestRollFlowStopsWhenTheLockIsLost(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w := outdatedWith(t, drainTenMinutes)
 		w.SetDrainReads(1 << 30) // the drain ends at its deadline
@@ -469,6 +480,7 @@ func (b *beforeLock) Put(
 // TestRollFlowPlansAgainUnderTheLock rolls what the cluster is when it has the lock: a machine that lost its hash
 // before then is outdated for that, where the first plan found it outdated for its old hash.
 func TestRollFlowPlansAgainUnderTheLock(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := outdatedWorld(t)
 		id := instanceNamed(t, f, "prod-workers-0")
@@ -506,6 +518,7 @@ func TestRollFlowPlansAgainUnderTheLock(t *testing.T) {
 // TestRollFlowStopsWhenOnRollPlanFails returns the error of OnRollPlan before the roll changes anything, and releases
 // the lock.
 func TestRollFlowStopsWhenOnRollPlanFails(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := outdatedWorld(t)
 		cloudCalls, nomadCalls := len(f.Calls()), len(w.Log())
@@ -534,6 +547,7 @@ func TestRollFlowStopsWhenOnRollPlanFails(t *testing.T) {
 // TestRollFlowTellsTheWarningsOnceBeforeTheFirstStep tells OnWarning the warnings of the cluster after OnRollPlan and
 // before the first step, only for a roll that applies a step.
 func TestRollFlowTellsTheWarningsOnceBeforeTheFirstStep(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _ := outdatedWorld(t) // access.api left out is 0.0.0.0/0
 		var events []string
@@ -582,6 +596,7 @@ func TestRollFlowTellsTheWarningsOnceBeforeTheFirstStep(t *testing.T) {
 // TestRollFlowReturnsWhatItDidWhenInterrupted ends with the interruption when the context ends at the first drain, and
 // returns the machine that it created by then. The lock is released.
 func TestRollFlowReturnsWhatItDidWhenInterrupted(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w := outdatedWorld(t)
 		ctx, cancel := context.WithCancel(t.Context())
@@ -607,6 +622,7 @@ func TestRollFlowReturnsWhatItDidWhenInterrupted(t *testing.T) {
 // TestRollFlowFinishesARollThatStopped runs a roll again after an interruption: the second run goes on from what the
 // cloud and Nomad report, so that the two make two machines in all.
 func TestRollFlowFinishesARollThatStopped(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := outdatedWorld(t)
 		before := workerHashes(f)
@@ -641,6 +657,7 @@ func TestRollFlowFinishesARollThatStopped(t *testing.T) {
 // TestRollFlowFindsTheReleaseFilesOnce asks for as many release files for the two plans and the creates of a roll as
 // for the plan alone.
 func TestRollFlowFindsTheReleaseFilesOnce(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _ := outdatedWorld(t)
 		sites := withAssets(svc)
@@ -667,6 +684,7 @@ func TestRollFlowFindsTheReleaseFilesOnce(t *testing.T) {
 // the workers while this one waited for it: it tells neither OnRollPlan nor OnWarning, makes no machine, and says it
 // applied.
 func TestRollFlowEndsAppliedWhenAnotherRollFinishedFirst(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := outdatedWorld(t)
 		svc.Store = &beforeLock{Store: unwrapped{svc.Store}, run: func() {
