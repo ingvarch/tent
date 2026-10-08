@@ -133,14 +133,20 @@ func outcomeOf(s rollout.Step) outcome {
 	return outcome{s.Action, s.Group, s.Machine.Name, s.Machine.ID, s.Node.ID, s.Machine.Zone, s.Deadline}
 }
 
-// nextRoll returns the next step of a roll, failing the test on an error.
-func nextRoll(t *testing.T, s rollout.State) rollout.Step {
+// nextIn returns the next step of a run in the mode, failing the test on an error.
+func nextIn(t *testing.T, mode rollout.Mode, s rollout.State) rollout.Step {
 	t.Helper()
-	step, err := rollout.Next(s, rollout.Roll)
+	step, err := rollout.Next(s, mode)
 	if err != nil {
 		t.Fatalf("Next: %v", err)
 	}
 	return step
+}
+
+// nextRoll returns the next step of a roll, failing the test on an error.
+func nextRoll(t *testing.T, s rollout.State) rollout.Step {
+	t.Helper()
+	return nextIn(t, rollout.Roll, s)
 }
 
 func checkOutcome(t *testing.T, got rollout.Step, want outcome) {
@@ -150,10 +156,16 @@ func checkOutcome(t *testing.T, got rollout.Step, want outcome) {
 	}
 }
 
-// checkRefused fails unless Next refuses the state with exactly this text.
+// checkRefused fails unless Next refuses the state in a roll with exactly this text.
 func checkRefused(t *testing.T, s rollout.State, want string) {
 	t.Helper()
-	step, err := rollout.Next(s, rollout.Roll)
+	checkRefusedIn(t, rollout.Roll, s, want)
+}
+
+// checkRefusedIn fails unless Next refuses the state in the mode with exactly this text.
+func checkRefusedIn(t *testing.T, mode rollout.Mode, s rollout.State, want string) {
+	t.Helper()
+	step, err := rollout.Next(s, mode)
 	if err == nil {
 		t.Fatalf("Next = %q, want the refusal %q", step, want)
 	}

@@ -23,7 +23,7 @@ type State struct {
 	Groups   []Group         // the groups that the run handles
 	Machines []Machine       // every machine of the cluster that the cloud lists
 	Nomad    Nomad           // what Nomad reports
-	Version  string          // the Nomad version that a new node runs, such as 2.0.7
+	Version  string          // the Nomad version that a new node runs, such as 2.0.7; a shrink ignores it
 	Forced   map[string]bool // machines to replace whatever their hash, by ID
 	Refresh  time.Duration   // how often a node refreshes its list of servers
 	Now      time.Time

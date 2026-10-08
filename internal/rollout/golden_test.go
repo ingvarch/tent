@@ -69,6 +69,27 @@ func outdatedWorkers(surge, unavailable int) *world {
 	return w
 }
 
+// shrinkWorkers is a cluster of one server and n up to date workers for a group of size 2.
+func shrinkWorkers(n int) *world {
+	w := newWorld(curVersion)
+	w.addServer(newHash, curVersion)
+	g := workersGroup(1, 0)
+	g.Size = 2
+	w.addGroup(g)
+	w.addClients("workers", n, newHash, curVersion)
+	return w.arm()
+}
+
+// shrinkServers is a cluster of n up to date servers for a group of the given size.
+func shrinkServers(n, size int) *world {
+	w := newWorld(curVersion)
+	w.addGroup(serversGroup(size))
+	for range n {
+		w.addServer(newHash, curVersion)
+	}
+	return w.arm()
+}
+
 // countServers returns how many machines run a server.
 func (w *world) countServers() int {
 	n := 0
@@ -119,6 +140,16 @@ var scenarios = []scenario{
 	{"servers3", rollout.Roll, func() *world { return outdatedServers(3) }},
 	{"servers5", rollout.Roll, func() *world { return outdatedServers(5) }},
 	{"server1", rollout.Roll, func() *world { return outdatedServers(1) }},
+	{"servers_two_dead", rollout.Roll, func() *world {
+		w := newWorld(curVersion)
+		w.addGroup(serversGroup(3))
+		for _, hash := range []string{newHash, oldHash, oldHash, newHash, newHash} {
+			w.addServer(hash, curVersion)
+		}
+		w.stopMachine("prod-servers-1")
+		w.stopMachine("prod-servers-2")
+		return w.arm()
+	}},
 	{"combined3", rollout.Roll, func() *world { return outdatedCombined(3) }},
 	{"cluster", rollout.Roll, func() *world {
 		w := outdatedServers(3)
@@ -128,6 +159,22 @@ var scenarios = []scenario{
 		w.addClients("workers", 2, oldHash, oldVersion)
 		return w.arm()
 	}},
+	{"shrink_clients", rollout.Shrink, func() *world { return shrinkWorkers(4) }},
+	{"shrink_ineligible", rollout.Shrink, func() *world {
+		w := shrinkWorkers(4)
+		for _, name := range []string{"prod-workers-0", "prod-workers-1", "prod-workers-2"} {
+			w.makeIneligible(name)
+		}
+		return w.arm()
+	}},
+	{"shrink_stale_drain", rollout.Shrink, func() *world {
+		w := shrinkWorkers(4)
+		w.staleDrain("prod-workers-0")
+		w.staleDrain("prod-workers-3")
+		return w
+	}},
+	{"shrink_servers_5_3", rollout.Shrink, func() *world { return shrinkServers(5, 3) }},
+	{"shrink_servers_3_1", rollout.Shrink, func() *world { return shrinkServers(3, 1) }},
 	{"refuse_unhealthy", rollout.Roll, func() *world {
 		w := outdatedServers(3)
 		w.noCleanup = true
@@ -305,6 +352,63 @@ func TestResumeFromEveryState(t *testing.T) {
 			}
 			if problem != "" {
 				t.Error(problem)
+			}
+		})
+	}
+}
+
+// maxIdleTicks is the longest pause that a resume test lets pass before the new run starts.
+const maxIdleTicks = 12
+
+// idleResumeProblem finishes a new run from the world before each decision of the full run, after the world sat idle
+// for the given number of ticks, and returns the first difference in how the run ends: the last line or the world.
+// The steps in between may differ, since a pause lets waits end and servers fail. "" means that every run ended as the
+// full run did.
+func idleResumeProblem(sc scenario, idle int) (string, error) {
+	full := sc.build()
+	res, err := full.run(sc.mode, rollout.Next, true)
+	if err != nil {
+		return "", fmt.Errorf("full run: %w", err)
+	}
+	wantWorld, wantEnd := full.summary(), res.lines[len(res.lines)-1]
+	for i, snap := range res.snapshots {
+		w := snap.world.clone()
+		holds := w.check() == nil // a scenario may start in a state that breaks an invariant, as one of refusals does
+		for range idle {
+			w.tick()
+			if err := w.check(); holds && err != nil {
+				return "", fmt.Errorf("pause of %d ticks before decision %d: %w", idle, i, err)
+			}
+		}
+		rest, err := w.run(sc.mode, rollout.Next, false)
+		if err != nil {
+			return "", fmt.Errorf("run resumed at decision %d after %d idle ticks: %w", i, idle, err)
+		}
+		if end := rest.lines[len(rest.lines)-1]; end != wantEnd {
+			return fmt.Sprintf("run resumed at decision %d after %d idle ticks ends with %q, want %q", i, idle, end,
+				wantEnd), nil
+		}
+		if diff := cmp.Diff(wantWorld, w.summary()); diff != "" {
+			return fmt.Sprintf("run resumed at decision %d after %d idle ticks ends in another world (-full +resumed):\n%s",
+				i, idle, diff), nil
+		}
+	}
+	return "", nil
+}
+
+// A run that is resumed after a pause, whether of a tick or of two minutes, ends in the same cluster as the full run:
+// what a pause lets happen (a wait ends, a server fails, autopilot cleans up) does not change where the roll ends.
+func TestResumeAfterIdleTicks(t *testing.T) {
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			for idle := 1; idle <= maxIdleTicks; idle++ {
+				problem, err := idleResumeProblem(sc, idle)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if problem != "" {
+					t.Fatal(problem)
+				}
 			}
 		})
 	}

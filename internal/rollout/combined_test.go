@@ -105,12 +105,15 @@ func TestCombinedLinesBToDTakeTheVictimThroughItsDrain(t *testing.T) {
 			n.Eligible, n.Draining, n.DrainedFor = false, true, machineIDOf(1)
 		}, wait},
 		{"g: the drain is complete", func(t *testing.T, s *rollout.State) { serverDrained(t, s, 1) }, stop},
-		{"g: an operator made the node eligible after its drain; no check at rest follows", func(t *testing.T,
+		{"b: the node is eligible and carries the drain meta of its machine: a new drain, not a mark",
+			func(t *testing.T, s *rollout.State) { node(t, s).DrainedFor = machineIDOf(1) }, drain},
+		{"c: the node is ineligible and carries the drain meta of its machine: it counts as drained",
+			func(t *testing.T, s *rollout.State) { serverDrained(t, s, 1) }, stop},
+		{"c: an operator made the node eligible after its drain: it is drained again", func(t *testing.T,
 			s *rollout.State) {
 			serverDrained(t, s, 1)
 			node(t, s).Eligible = true
-			s.Nomad.Healthy = false
-		}, stop},
+		}, drain},
 		{"g: the node is down while it drains: nothing to wait for", func(t *testing.T, s *rollout.State) {
 			n := node(t, s)
 			n.Eligible, n.Draining, n.Status = false, true, "down"
@@ -157,6 +160,102 @@ func TestCombinedDrainStartedVictimIsNotCheckedAtRestOrForTheWindowAgain(t *test
 		s := combinedMidRoll()
 		s.Nomad.Healthy = false
 		checkRefused(t, s, "node group servers: autopilot reports the servers unhealthy"+unhealthyAdvice)
+	})
+}
+
+func TestCombinedDrainedVictimIsCheckedAgainBeforeItsServerLeavesTheQuorum(t *testing.T) {
+	// The drain may last long and a run may resume days later, so another server can have failed since the checks.
+	unhealthy := func(t *testing.T, s *rollout.State) {
+		t.Helper()
+		s.Nomad.Healthy = false
+		serverNode(t, s, 2).Healthy = false
+	}
+	failures := []refusalCase{
+		{"autopilot reports a server unhealthy", unhealthy,
+			"node group servers: autopilot reports the servers unhealthy (prod-servers-2)" + unhealthyAdvice},
+		{"a machine of the group stopped and autopilot has not noticed", func(t *testing.T, s *rollout.State) {
+			stopServer(t, s, 3)
+		}, "node group servers: node prod-servers-3 is not running" + restAdvice},
+		{"a server of the group does not vote", func(t *testing.T, s *rollout.State) {
+			serverNode(t, s, 3).Voter = false
+		}, "node group servers: node prod-servers-3 is not a voting server" + restAdvice},
+		{"a server of the group is not in the Raft configuration", func(t *testing.T, s *rollout.State) {
+			dropServerPeer(t, s, 3)
+		}, "node group servers: node prod-servers-3 is not a server in the Raft configuration" + restAdvice},
+		{"the cluster can lose no voter", func(_ *testing.T, s *rollout.State) {
+			s.Nomad.FailureTolerance = 0
+		}, "node group servers: the servers can lose no voter (failure tolerance 0); tent removes a server only from " +
+			"a cluster that can lose one"},
+		{"autopilot comes first", func(t *testing.T, s *rollout.State) {
+			unhealthy(t, s)
+			stopServer(t, s, 3)
+		}, "node group servers: autopilot reports the servers unhealthy (prod-servers-2)" + unhealthyAdvice},
+	}
+	t.Run("before the stop", func(t *testing.T) {
+		runRefusalCases(t, func() rollout.State {
+			s := combinedMidRoll()
+			serverDrained(t, &s, 1)
+			return s
+		}, failures)
+	})
+	t.Run("before the leadership moves", func(t *testing.T) {
+		runRefusalCases(t, func() rollout.State {
+			s := combinedLeaderRoll()
+			serverDrained(t, &s, 0)
+			return s
+		}, failures)
+	})
+	t.Run("three voters need a failure tolerance too", func(t *testing.T) {
+		s := combinedState(3)
+		s.Groups[0].Size = 1
+		serverDrained(t, &s, 1)
+		s.Nomad.FailureTolerance = 0
+		checkRefusedIn(t, rollout.Shrink, s, "node group servers: the servers can lose no voter (failure tolerance 0); "+
+			"tent removes a server only from a cluster that can lose one")
+	})
+	t.Run("a shrink takes the same care", func(t *testing.T) {
+		s := combinedMidRoll()
+		serverDrained(t, &s, 1)
+		unhealthy(t, &s)
+		checkRefusedIn(t, rollout.Shrink, s, "node group servers: autopilot reports the servers unhealthy "+
+			"(prod-servers-2); tent removes a server only while every server is healthy")
+	})
+	t.Run("the drain itself goes on while a server is down", func(t *testing.T) {
+		s := combinedMidRoll()
+		nodeNamed(t, &s, serverName(1)).Eligible = false
+		unhealthy(t, &s)
+		checkServerStep(t, nextRoll(t, s), serverOutcome{Action: rollout.Drain, Machine: serverName(1),
+			Node: nodeIDOf(1), Deadline: time.Hour})
+	})
+	t.Run("a victim whose server does not vote is stopped whatever the others do", func(t *testing.T) {
+		s := combinedMidRoll()
+		serverDrained(t, &s, 1)
+		serverNode(t, &s, 1).Voter = false
+		unhealthy(t, &s)
+		checkServerStep(t, nextRoll(t, s), serverOutcome{Action: rollout.Stop, Machine: serverName(1)})
+	})
+}
+
+func TestCombinedEligibleNodeWithItsDrainMetaHasNotStarted(t *testing.T) {
+	// An operator made the node eligible after its drain, so its removal starts again from the beginning.
+	meta := func(t *testing.T, s *rollout.State, i int) {
+		t.Helper()
+		nodeNamed(t, s, serverName(i)).DrainedFor = machineIDOf(i)
+	}
+	runRefusalCases(t, combinedMidRoll, []refusalCase{
+		{"the victim is checked at rest", func(t *testing.T, s *rollout.State) {
+			meta(t, s, 1)
+			s.Nomad.Healthy = false
+		}, "node group servers: autopilot reports the servers unhealthy" + unhealthyAdvice},
+	})
+	runServerCases(t, combinedMidRoll, []serverCase{
+		{"the victim waits for the window", func(t *testing.T, s *rollout.State) {
+			meta(t, s, 1)
+			serverNode(t, s, 3).StableSince = s.Now
+		}, serverOutcome{Action: rollout.WaitStable, Until: epoch.Add(70 * time.Second)}},
+		{"the node does not come first in the victim order", func(t *testing.T, s *rollout.State) {
+			meta(t, s, 2)
+		}, serverOutcome{Action: rollout.MarkIneligible, Machine: serverName(1), Node: nodeIDOf(1)}},
 	})
 }
 
@@ -212,12 +311,6 @@ func TestCombinedLeaderHandsOverToAnUpToDateVoter(t *testing.T) {
 		serverNode(t, &s, 3).Healthy = false
 		checkRefused(t, s, "node group servers: prod-servers-0 leads, and no healthy voter of the group that is up to date "+
 			"can take the leadership")
-	})
-	runServerCases(t, combinedLeaderRoll, []serverCase{
-		{"a nonvoter is passed over", func(t *testing.T, s *rollout.State) {
-			serverDrained(t, s, 0)
-			serverNode(t, s, 1).Voter = false
-		}, transfer("r-3")},
 	})
 }
 
@@ -386,4 +479,21 @@ func TestCombinedGroupRollsLikeAServerGroup(t *testing.T) {
 		checkRefused(t, s, "node group servers: removing prod-servers-1 would leave one voter of two: tent does not "+
 			"take a group from two voters to one yet")
 	})
+	t.Run("with two voters the failure tolerance is 0, and the refusal says why it is two", func(t *testing.T) {
+		s := combinedState(1)
+		addCombinedNode(&s, 1, oldHash)
+		serverDrained(t, &s, 1)
+		s.Nomad.FailureTolerance = 0
+		checkRefused(t, s, "node group servers: removing prod-servers-1 would leave one voter of two: tent does not "+
+			"take a group from two voters to one yet")
+	})
+}
+
+func TestShrinkOfACombinedGroupGivesAnEligibleNodeWithItsDrainMetaANewDrain(t *testing.T) {
+	s := combinedState(3)
+	s.Groups[0].Size = 2
+	nodeNamed(t, &s, serverName(2)).DrainedFor = machineIDOf(2)
+	step := nextIn(t, rollout.Shrink, s)
+	checkServerStep(t, step, serverOutcome{Action: rollout.Drain, Machine: serverName(2), Node: nodeIDOf(2),
+		Deadline: time.Hour})
 }

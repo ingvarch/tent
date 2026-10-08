@@ -651,12 +651,22 @@ func TestADrainingNodeCountsAsRemovedEvenIfEligible(t *testing.T) {
 		MachineID: "m-1", Node: "n-m-1", Zone: "ams"})
 }
 
-func TestAMachineDrainedForItIsDeletedEvenIfItsNodeIsEligibleAgain(t *testing.T) {
+func TestAnEligibleNodeWithTheDrainMetaOfItsMachineGetsANewDrain(t *testing.T) {
 	s := baseState()
 	addWorker(&s, 0, oldHash)
 	addWorker(&s, 1, newHash)
 	addWorker(&s, 2, newHash)
 	nodeNamed(t, &s, workerName(0)).DrainedFor = "m-1"
+	checkOutcome(t, nextRoll(t, s), outcome{Action: rollout.Drain, Group: "workers", Machine: workerName(0),
+		MachineID: "m-1", Node: "n-m-1", Zone: "ams", Deadline: time.Hour})
+}
+
+func TestADrainOfAnEligibleNodeIsFollowedByItsDelete(t *testing.T) {
+	s := baseState()
+	addWorker(&s, 0, oldHash)
+	addWorker(&s, 1, newHash)
+	addWorker(&s, 2, newHash)
+	drainedFor(t, &s, 0, "m-1", false)
 	checkOutcome(t, nextRoll(t, s), outcome{Action: rollout.Delete, Group: "workers", Machine: workerName(0),
 		MachineID: "m-1", Node: "n-m-1", Zone: "ams"})
 }
@@ -764,5 +774,77 @@ func TestANodeThatDiesWhileItDrainsIsDeleted(t *testing.T) {
 	drainedFor(t, &s, 0, "", true)
 	setNodeStatus(t, &s, 0, "down")
 	checkOutcome(t, nextRoll(t, s), outcome{Action: rollout.Delete, Group: "workers", Machine: workerName(0),
+		MachineID: "m-1", Node: "n-m-1", Zone: "ams"})
+}
+
+func TestAServerWithoutAVersionIsWaitedFor(t *testing.T) {
+	// The servers' versions are not all known yet, so a new node or a removal waits and does not refuse.
+	wait := func(t *testing.T, s rollout.State) {
+		t.Helper()
+		got := nextRoll(t, s)
+		if got.Action != rollout.WaitHealthy || got.Group != "workers" || got.Voters != 1 {
+			t.Errorf("step = %q (group %q, %d voters), want a wait until 1 healthy server votes for workers "+
+				"(the nonvoter does not count)", got, got.Group, got.Voters)
+		}
+	}
+	unknown := func() rollout.State {
+		s := baseState()
+		s.Nomad.Servers[0].Version = ""
+		second := s.Nomad.Servers[0]
+		second.ID, second.Name, second.Voter, second.Leader = "r-1", "prod-servers-1.global", false, false
+		s.Nomad.Servers = append(s.Nomad.Servers, second)
+		return s
+	}
+	t.Run("before a node is created", func(t *testing.T) {
+		s := unknown()
+		addWorker(&s, 0, oldHash)
+		addWorker(&s, 1, oldHash)
+		wait(t, s)
+	})
+	t.Run("before a removal starts", func(t *testing.T) {
+		s := unknown()
+		addWorker(&s, 0, oldHash)
+		addWorker(&s, 1, newHash)
+		addWorker(&s, 2, newHash)
+		wait(t, s)
+	})
+	t.Run("a drain that is due goes first", func(t *testing.T) {
+		s := unknown()
+		addWorker(&s, 0, oldHash)
+		addWorker(&s, 1, newHash)
+		addWorker(&s, 2, newHash)
+		nodeNamed(t, &s, workerName(0)).Eligible = false
+		checkOutcome(t, nextRoll(t, s), outcome{Action: rollout.Drain, Group: "workers", Machine: workerName(0),
+			MachineID: "m-1", Node: "n-m-1", Zone: "ams", Deadline: time.Hour})
+	})
+	t.Run("an older server is refused first", func(t *testing.T) {
+		s := unknown()
+		s.Version = "2.0.8"
+		s.Nomad.Servers[1].Version = "2.0.7"
+		addWorker(&s, 0, oldHash)
+		addWorker(&s, 1, oldHash)
+		checkRefused(t, s, "node group workers: a new node would run Nomad 2.0.8, newer than the 2.0.7 of server "+
+			"prod-servers-1.global; roll the servers first")
+	})
+	t.Run("a shrink does not look at versions", func(t *testing.T) {
+		s := unknown()
+		addWorker(&s, 0, newHash)
+		addWorker(&s, 1, newHash)
+		addWorker(&s, 2, newHash)
+		checkOutcome(t, nextIn(t, rollout.Shrink, s), outcome{Action: rollout.MarkIneligible, Group: "workers",
+			Machine: workerName(2), MachineID: "m-3", Node: "n-m-3", Zone: "ams"})
+	})
+}
+
+func TestARollTakesAJoinedVictimWhileAnOutdatedMachineHasNotJoined(t *testing.T) {
+	// maxUnavailable 2 leaves room for the victim whatever the others do; the machine that has not joined is no victim.
+	s := baseState()
+	s.Groups[0].Size, s.Groups[0].MaxSurge, s.Groups[0].MaxUnavailable = 3, 0, 2
+	addWorker(&s, 0, oldHash)
+	addWorker(&s, 1, oldHash)
+	addWorker(&s, 2, newHash)
+	machineOf(t, &s, workerName(1)).Joined = false
+	dropNode(&s, workerName(1))
+	checkOutcome(t, nextRoll(t, s), outcome{Action: rollout.MarkIneligible, Group: "workers", Machine: workerName(0),
 		MachineID: "m-1", Node: "n-m-1", Zone: "ams"})
 }

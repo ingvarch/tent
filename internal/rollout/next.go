@@ -26,20 +26,19 @@ func refuse(format string, args ...any) error { return refusal(fmt.Sprintf(forma
 
 // Next returns the next step of a run, Done when nothing is left, or an error that matches ErrRefused when the run
 // must not go on. It reads only s, so a run that was cut is finished by calling it again on what the cloud and Nomad
-// report.
+// report. A roll replaces outdated machines and never moves a node to an older Nomad. A shrink removes the machines
+// beyond the size of a group, creates none and leaves the Nomad versions alone.
 func Next(s State, mode Mode) (Step, error) {
-	switch mode {
-	case Roll:
-	case Shrink:
-		return Step{}, errors.New("rollout cannot shrink yet")
-	default:
+	if mode != Roll && mode != Shrink {
 		return Step{}, fmt.Errorf("rollout: unknown mode %d", mode)
 	}
-	if err := checkVersions(s); err != nil {
-		return Step{}, err
+	if mode == Roll {
+		if err := checkVersions(s); err != nil {
+			return Step{}, err
+		}
 	}
 	groups := sortedGroups(s.Groups)
-	next := map[v1alpha1.Role]func(State, Group) (Step, bool, error){
+	next := map[v1alpha1.Role]func(State, Mode, Group) (Step, bool, error){
 		v1alpha1.RoleServer:   nextServer,
 		v1alpha1.RoleCombined: nextServer,
 		v1alpha1.RoleClient:   nextClient,
@@ -53,7 +52,7 @@ func Next(s State, mode Mode) (Step, error) {
 		return Step{}, err
 	}
 	for _, g := range groups {
-		step, found, err := next[g.Role](s, g)
+		step, found, err := next[g.Role](s, mode, g)
 		if err != nil || found {
 			return step, err
 		}
@@ -112,12 +111,15 @@ func checkDuplicates(s State, groups []Group) error {
 }
 
 // checkVersions refuses a version that is not a version number, and a new node that would run an older Nomad than
-// a server or a node that is not down.
+// a server or a node that is not down. A server that reports no version yet is skipped.
 func checkVersions(s State) error {
 	if err := checkVersion("a new node", s.Version); err != nil {
 		return err
 	}
 	for _, srv := range s.Nomad.Servers {
+		if srv.Version == "" {
+			continue
+		}
 		if err := checkNotNewer(s.Version, "server "+srv.Name, srv.Version); err != nil {
 			return err
 		}

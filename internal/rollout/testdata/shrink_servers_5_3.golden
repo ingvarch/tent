@@ -1,0 +1,20 @@
+# mode shrink
+# a new node runs Nomad 2.0.7
+# group servers: server, size 3, zones ams and fra
+# machine prod-servers-0 (m-1) in ams runs Nomad 2.0.7, up to date
+# machine prod-servers-1 (m-2) in fra runs Nomad 2.0.7, up to date
+# machine prod-servers-2 (m-3) in ams runs Nomad 2.0.7, up to date
+# machine prod-servers-3 (m-4) in fra runs Nomad 2.0.7, up to date
+# machine prod-servers-4 (m-5) in ams runs Nomad 2.0.7, up to date
+# leader prod-servers-0
+stop node prod-servers-4 (ID m-5)
+wait until autopilot no longer counts prod-servers-4 as a healthy voter
+remove prod-servers-4 from the Raft configuration
+force prod-servers-4.global out of the gossip pool
+delete node prod-servers-4 (ID m-5)
+stop node prod-servers-3 (ID m-4)
+wait until autopilot no longer counts prod-servers-3 as a healthy voter
+remove prod-servers-3 from the Raft configuration
+force prod-servers-3.global out of the gossip pool
+delete node prod-servers-3 (ID m-4)
+done

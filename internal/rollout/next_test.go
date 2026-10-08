@@ -19,7 +19,6 @@ func TestNextRejectsModesItCannotRun(t *testing.T) {
 		mode rollout.Mode
 		want string
 	}{
-		{"shrink", rollout.Shrink, "rollout cannot shrink yet"},
 		{"no mode", 0, "rollout: unknown mode 0"},
 	}
 	for _, tt := range tests {
@@ -103,8 +102,6 @@ func TestNextRefusesVersions(t *testing.T) {
 		{"a server's version is not a version", func(_ *testing.T, s *rollout.State) {
 			s.Nomad.Servers[0].Version = "two"
 		}, `the Nomad version of server prod-servers-0.global is "two", which is not a version number`},
-		{"a server reports no version", func(_ *testing.T, s *rollout.State) { s.Nomad.Servers[0].Version = "" },
-			`the Nomad version of server prod-servers-0.global is "", which is not a version number`},
 		{"a node's version is not a version", func(t *testing.T, s *rollout.State) {
 			nodeNamed(t, s, workerName(0)).Version = "x.y"
 		}, `the Nomad version of node prod-workers-0 is "x.y", which is not a version number`},
@@ -243,4 +240,11 @@ func TestNextRefusesDuplicatesInAnyGroupBeforeActing(t *testing.T) {
 	}
 	checkRefused(t, s, "node group zeta: machines m-50 and m-51 share the name prod-zeta-0; run tent update cluster "+
 		"first")
+}
+
+func TestNextAcceptsAServerThatReportsNoVersion(t *testing.T) {
+	// A server is in the Raft configuration a moment before autopilot reports it, with no version yet.
+	s := midRoll()
+	s.Nomad.Servers[0].Version = ""
+	checkServerStep(t, nextRoll(t, s), serverOutcome{Action: rollout.Stop, Machine: serverName(1)})
 }

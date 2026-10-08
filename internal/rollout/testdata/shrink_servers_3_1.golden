@@ -1,0 +1,13 @@
+# mode shrink
+# a new node runs Nomad 2.0.7
+# group servers: server, size 1, zones ams and fra
+# machine prod-servers-0 (m-1) in ams runs Nomad 2.0.7, up to date
+# machine prod-servers-1 (m-2) in fra runs Nomad 2.0.7, up to date
+# machine prod-servers-2 (m-3) in ams runs Nomad 2.0.7, up to date
+# leader prod-servers-0
+stop node prod-servers-2 (ID m-3)
+wait until autopilot no longer counts prod-servers-2 as a healthy voter
+remove prod-servers-2 from the Raft configuration
+force prod-servers-2.global out of the gossip pool
+delete node prod-servers-2 (ID m-3)
+refused: node group servers: removing prod-servers-1 would leave one voter of two: tent does not take a group from two voters to one yet
