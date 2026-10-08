@@ -132,6 +132,12 @@ type cutCase struct {
 // calls, the calls of an uninterrupted run as flowCalls gives them: first just before each call, then just after
 // each. A subtest's name gives the call's place and method, such as "after 017 CreateFirewallRule".
 func eachCut(t *testing.T, calls []string, test func(t *testing.T, c cutCase)) {
+	eachCutAt(t, calls, func(int) bool { return true }, test)
+}
+
+// eachCutAt is eachCut for the calls that keep says to cut, by their place in calls from 0. A call that keep leaves
+// out still counts in the n of the cases of the calls with its key.
+func eachCutAt(t *testing.T, calls []string, keep func(index int) bool, test func(t *testing.T, c cutCase)) {
 	for _, after := range []bool{false, true} {
 		when := "before"
 		if after {
@@ -141,6 +147,9 @@ func eachCut(t *testing.T, calls []string, test func(t *testing.T, c cutCase)) {
 		for i, call := range calls {
 			key := callKey(call)
 			seen[key]++
+			if !keep(i) {
+				continue
+			}
 			c := cutCase{index: i + 1, key: key, n: seen[key], after: after}
 			method, _, _ := strings.Cut(key, " ")
 			t.Run(fmt.Sprintf("%s %03d %s", when, c.index, method), func(t *testing.T) {
