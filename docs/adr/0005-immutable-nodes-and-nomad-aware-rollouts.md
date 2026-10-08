@@ -6,7 +6,12 @@
   [ADR-0031](0031-bootstrap-in-update.md) (servers and combined nodes have `leave_on_terminate = false`, so a server
   does not leave Raft when it stops; tent removes it through the API, ADR-0017) and by
   [ADR-0032](0032-joined-label-scrub-and-delete-guard.md) (until M3, `update` refuses to delete a machine that joined
-  Nomad, and it deletes a client that never registered before it creates the replacement)
+  Nomad, and it deletes a client that never registered before it creates the replacement) and by
+  [ADR-0035](0035-rollout-decisions.md) (a removal from two voters to one and the roll of a group of one server are
+  refused for now; a server is removed only after the stability window, the refresh interval plus 10 s read from
+  autopilot's `StableSince`; clients: every victim of a batch is marked ineligible before any drain, the VM is
+  deleted without a shutdown, its node is purged only once Nomad lists it down, and no validate step runs between
+  batches)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0004](0004-layered-architecture.md), [ADR-0009](0009-server-discovery-fixed-ip-slots.md),

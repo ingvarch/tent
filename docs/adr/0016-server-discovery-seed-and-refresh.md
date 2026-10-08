@@ -8,7 +8,10 @@
   the node's own agent first; `05-join.hcl` is rewritten only when the rendering changes, and an empty answer changes
   nothing) and by [ADR-0031](0031-bootstrap-in-update.md) (the seed as built: the private addresses of every other
   server that the run knows, by name; the first server has none; a server that is not ready has no address, so a
-  wait runs before the creates of its role; a client gets every known server)
+  wait runs before the creates of its role; a client gets every known server) and by
+  [ADR-0035](0035-rollout-decisions.md) (the rollout guard is the stability window: a server is removed only when
+  every other voter's `StableSince` is at least the refresh interval plus 10 s old; before a server roll tent checks
+  the servers, not every node)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** complements [ADR-0009](0009-server-discovery-fixed-ip-slots.md) (Hetzner slots become a provider

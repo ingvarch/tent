@@ -138,6 +138,55 @@ in the source at that tag):
   `serf.StatusFailed` to `failed` and `serf.StatusLeft` to `left`. The run of 2026-10-05 above measured 41 s for the
   delay. `none` is a fourth status by the source (not run).
 
+**Server removal, leadership, drains and purges** (v2.0.7, run on 2026-10-07 on a local cluster of up to four servers
+with `bootstrap_expect = 3`, `leave_on_terminate = false` and one client, **without ACL and TLS**; the reads came every
+0.5 s; times are from the start of each step). The rollout decisions rest on them
+([ADR-0035](adr/0035-rollout-decisions.md)). A run on 2026-10-08 (local Nomad 2.0.7, five servers, with ACL, mTLS,
+gossip encryption and strict client introduction) repeated most of them; of it, only the facts the decisions use are
+recorded here so far, each dated.
+- **Raft IDs** are UUIDs (`7f3d49f3-2757-a5a3-ff6d-f85e459bcdc7`), not addresses. The comment of `api.RaftServer.ID` in
+  the pinned module ("currently the same as the address") is out of date. Autopilot reported `FailureTolerance` 1 with
+  3 healthy voters and with 4, and 0 with 2 and with 1.
+- **A new server** was in the Raft configuration as a nonvoter at once, healthy in autopilot's report at 2 s, and a
+  voter at 21.9 s. Its `StableSince` did not change when it began to vote. On 2026-10-08 two new servers were voters
+  in the Raft configuration at 12.4 s and 13 s, and in autopilot's report at 14.5 s and 15 s.
+- **A live follower's peer removed** (`DELETE /v1/operator/raft/peer?id=`, 200): the leader added it again as a
+  nonvoter at 39.8 s, and autopilot made it a voter at 49.4 s. On 2026-10-08 the leader re-added it 4.1 s after its
+  peer was removed, and autopilot made it a voter 14 s later, about 18 s after the removal.
+- **A follower killed (SIGKILL) and its peer removed at once,** with no force-leave: no re-add in 75 s, and Serf marked
+  it failed at 36.7 s.
+- **Force-leave** (`PUT /v1/agent/force-leave?node=<name>&prune=1`): a failed member was gone from `GET
+  /v1/agent/members` within 2 s, and a repeat or an unknown name answered 200. A member that Serf still saw alive (a
+  server killed less than a second before) turned `leaving` and was gone 4 to 7 s later (two runs).
+- **Removing a peer that is gone** answers 500 `rpc error: id "<id>" was not found in the Raft configuration`.
+- **Two voters** (`s1`, `s2` leading): removing the live follower `s1`'s peer (200) and killing it at once kept `s2`
+  leading, with `FailureTolerance` 0.
+  - Without a force-leave the leader added the dead `s1` again as a nonvoter at 57.5 s. Autopilot answered 429 from
+    58.6 s, Serf marked `s1` failed at 65.7 s, autopilot removed it at 67.2 s and was healthy at 69.3 s. `s2` led
+    throughout.
+  - With a force-leave right after the kill (second run, `s2` the follower, `s4` leading): `s2` turned `leaving`, was
+    gone at 6.1 s, no re-add in 95 s, and `s4` led throughout.
+- **Leadership transfer** (`PUT /v1/operator/raft/transfer-leadership?id=<raft id>`): 200 with `{"From": {...}, "To":
+  {...}, "Noop": false, "Err": null}`, and the leader moved at once. To the leader itself: 200 with `"Noop": true`. To
+  an unknown ID: 400 `id "<id>" was not found in the Raft configuration`. After the transfer every server's
+  `StableSince` read the time of the transfer.
+- **A server killed at four voters,** after the transfer: autopilot counted it healthy until Serf marked it failed at
+  41.2 s. At 43.3 s autopilot had removed its peer and answered 429 with `FailureTolerance` 0, the report still listing
+  it, and at 45.3 s it was healthy with 3 voters. The runs of M2.7b saw 36 to 41 s.
+- **Drains:** `PUT /v1/node/<id>/drain` with `{"DrainSpec": {"Deadline": 20000000000}, "Meta": {"tent_machine":
+  "m-123"}}` answered 200. The node then read `Drain` true, `ineligible` and `LastDrain` `{Status: draining, Meta:
+  {tent_machine: m-123}}` in `GET /v1/nodes`, and `DrainStrategy.ForceDeadline` was `StartedAt` plus 20 s.
+  - With one client, the job's allocation stopped and the drain read `complete` 2 s later, its replacement left
+    unplaced. The node stayed `ineligible`.
+  - `Deadline` 0 gave a `ForceDeadline` of null: no deadline.
+  - A drain cancelled with `{"DrainSpec": null, "MarkEligible": true}` read `canceled`, with the node eligible and the
+    meta kept.
+- **Clients:** a SIGKILLed client read `down` after 17 s. `PUT /v1/node/<id>/purge` of a down node answered 200, and of
+  a node that is gone 500 `node not found`. A purged live node registered again with the same ID 22 s later, ready and
+  eligible (no ACL, no client introduction). Under strict client introduction (2026-10-08) a purged live client whose
+  introduction token had expired (TTL 1 minute, purged after the leeway) was refused at every try to register again
+  (`rpc error: rpc error: Permission denied`) and was not listed again in the 2 minutes watched.
+
 **ACL tokens that expire** (v2.0.7, run on 2026-10-06 with curl and the operator certificate; source at the tag):
 - **The create.** `PUT /v1/acl/token {"Name", "Type": "management", "ExpirationTTL": "24h"}` with the bootstrap secret
   answers 200 with an `AccessorID`, a `SecretID` of 36 characters (a UUID) and an `ExpirationTime` exactly 24 hours

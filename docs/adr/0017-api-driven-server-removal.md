@@ -5,7 +5,11 @@
   `leave_on_terminate` is decided in M2.7) and by [ADR-0031](0031-bootstrap-in-update.md) (decision 26: server and
   combined agents run with `leave_on_terminate = false`, so a stopped server stays a Raft peer on every provider,
   an ACPI shutdown included, until step 5 removes it through the API or autopilot's `cleanup_dead_servers` does
-  first; clients keep `true`)
+  first; clients keep `true`) and by [ADR-0035](0035-rollout-decisions.md) (the order holds with three or more voters;
+  with two voters a stop would leave no quorum, so tent refuses the removal for now, and the other answer, to remove
+  the live server's peer before its stop, is not built; a server is stopped only after the stability window; the
+  leadership goes to a healthy, up-to-date voter; a client's VM is deleted after its drain and its node purged only
+  once Nomad lists it down)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md); [ADR-0016](0016-server-discovery-seed-and-refresh.md),

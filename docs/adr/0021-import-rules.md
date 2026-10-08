@@ -14,7 +14,9 @@
   (`internal/shellenv` and `internal/shellenv/shellenvtest` replace `hack/internal/shellenv`, since tent prints shell
   lines and `cmd/tent` cannot import a package under `hack/internal`; only tests import `shellenvtest`) and by
   [ADR-0034](0034-e2e-suite-on-vultr.md) (`e2e-black-box`: `test/e2e` and `hack/e2e-janitor`, tests included, import
-  nothing under `internal`, so E2E code gets no exemption; only tests import `test/e2e/janitor/janitortest`)
+  nothing under `internal`, so E2E code gets no exemption; only tests import `test/e2e/janitor/janitortest`) and by
+  [ADR-0035](0035-rollout-decisions.md) (`rollout-pure`: `internal/rollout` imports only the standard library,
+  `api/v1alpha1`, `internal/english` and `golang.org/x/mod/semver`; its tests are exempt)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0004](0004-layered-architecture.md), [ADR-0006](0006-two-binaries-and-nodeconfig.md),

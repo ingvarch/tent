@@ -193,6 +193,10 @@ spec:
   machineType: vc2-2c-4gb
   image: ubuntu-24.04
   size: 3
+  rollingUpdate:                 # how tent rolling-update replaces the group's nodes (13.3)
+    maxSurge: 1                  # client groups: extra nodes while it rolls; default 1
+    maxUnavailable: 0            # client groups: nodes that may be unavailable; default 0
+    drainTimeout: 1h             # client and combined groups: Nomad's drain deadline; default 1h
   nomad:
     nodePool: default
     nodeClass: general
@@ -212,9 +216,8 @@ spec:
 # NodeGroup: machineType: cx23 / cx33
 ```
 
-Fields for later milestones (private topology, the API load balancer, rolling update settings, Hetzner placement and
-IP options) join the types with those milestones. ACLs are always on ([ADR-0007](adr/0007-security-baseline.md)), so
-there is no `acl` field.
+Fields for later milestones (private topology, the API load balancer, Hetzner placement and IP options) join the types
+with those milestones. ACLs are always on ([ADR-0007](adr/0007-security-baseline.md)), so there is no `acl` field.
 
 ### 3.2 Concept mapping
 
@@ -302,6 +305,16 @@ This table is also the check that the abstraction survives several providers.
     `tent_nodegroup` and `tent_instance_id`;
   - a meta value must not hold a control character, U+E123 or `${` ([8.4](#84-nomad-configuration-rendering));
   - `nodePool` must not be `all`, Nomad's built-in pool of every node, which no client joins.
+- **Rolling update settings** (M3.1, [ADR-0035](adr/0035-rollout-decisions.md)). `spec.rollingUpdate` has `maxSurge`,
+  `maxUnavailable` and `drainTimeout`, and a field that does not apply to a group's role is a field error, as
+  `spec.nomad` is for `role=server`.
+  - A client group has all three, with the defaults 1, 0 and `1h`. A combined group has `drainTimeout` only (default
+    `1h`), and a server group has none. Server and combined groups roll one node at a time, with one more node first.
+  - `maxSurge` and `maxUnavailable` are not negative and are not both 0, since the group could not roll. An explicit 0
+    stays. `drainTimeout` is a duration such as `1h` or `30m` above zero, since Nomad reads 0 as a drain without a
+    deadline. The errors read, for example, `NodeGroup workers: spec.rollingUpdate.maxSurge: must not be negative`.
+  - The settings never change the spec hash: nothing of them reaches NodeConfig. The completed spec holds their
+    defaults, so the first `update` with a tent that has them writes `cluster.completed.yaml` once.
 - **Escape hatch.** `nomad.extraConfig` is added as given: `server` as `98-user-server.hcl` on server and combined
   nodes, `client` as `99-user-client.hcl` on client and combined nodes. Nomad merges configuration files in the order
   of their names, so the operator's settings win over tent's ([8.4](#84-nomad-configuration-rendering)). This is
@@ -378,7 +391,8 @@ Since Nomad 1.5 jobs default to `datacenters = ["*"]`, so mapping zones to datac
 │                  │   cloud.Provider ──► engine (plan/apply DAG)             │
 │                  │   ├─ vultr   (first)                                     │
 │                  │   └─ hetzner (second; aws later)                         │
-│                  └──► rollout ──► nomadops (ACL, raft, drain, proxy)       │
+│                  ├──► rollout (pure decisions: state ──► next step)         │
+│                  └──► nomadops (ACL, raft, drain, proxy)                    │
 └──────┬───────────────────┬──────────────────────────┬──────────────────────┘
        ▼                   ▼                          ▼
   S3 / file          Cloud API                Nomad API :4646 (mTLS + ACL)
@@ -395,8 +409,11 @@ This split is the central decision.
    a graph of provider-implemented tasks run by the engine ([§6](#6-reconciliation-engine)).
 2. **Node lifecycle**: create, replace and remove machines.
    - It is Nomad-aware: it drains nodes and respects Raft quorum.
-   - It lives in the core (`internal/rollout`) and calls only provider primitives: `List`, `Create`, `Stop` and
-     `Delete`.
+   - `internal/rollout` decides. `Next` takes what the cloud lists and what Nomad reports and returns the next step,
+     and it calls nothing ([ADR-0035](adr/0035-rollout-decisions.md)).
+   - `internal/app` carries the steps out: it observes, calls `Next`, does the step with the provider primitives
+     (`List`, `Create`, `Stop` and `Delete`) and `internal/nomadops`, and observes again. It does so from M3.3 on, for
+     `rolling-update`, and from M3.6 on for the removals of `update`.
    - Nodes are **not** tasks in the engine graph. In kops the Hetzner "ServerGroup" is a task, so replacing one node
      re-runs the whole plan.
 3. **Nomad configuration**: agent config, TLS material, ACL bootstrap, node pool membership and the rest of day-1
@@ -446,7 +463,8 @@ github.com/ingvarch/tent
 │   ├── nomadops/        # the ONLY importer of github.com/hashicorp/nomad/api: mTLS client, ACL bootstrap and tokens,
 │   │                    # waits, the proxy of tent ui
 │   │   └── nomadfake/   # in-memory Nomad cluster behind nomadops.API, for the app's tests
-│   ├── rollout/         # scale up/down, rolling update, server quorum safety
+│   ├── rollout/         # pure decisions of rolling updates and removals: state -> next step; the names, zones
+│   │                    # and age order of nodes; reaches no cloud, no Nomad, no state store (ADR-0035)
 │   ├── pki/             # CA, node and operator certificates, gossip key, ACL bootstrap secret
 │   ├── secret/          # the Secret type of keys and tokens, which never prints
 │   ├── uuid/            # random lower-case UUIDs of version 4: operation ids, the ACL bootstrap secret
@@ -473,21 +491,26 @@ github.com/ingvarch/tent
 └── docs/                # this document, ADRs, platform notes, roadmap
 ```
 
-The node planner of M1, which scales node groups without Nomad ([13.4](#134-scaling)), is in `internal/app`. It moves
-to `internal/rollout` with the drain and the quorum checks
-([ADR-0005](adr/0005-immutable-nodes-and-nomad-aware-rollouts.md)). `validate cluster` is in `internal/app` as well,
-since it reuses that planner ([13.6](#136-tent-validate-cluster---wait-duration),
-[ADR-0033](adr/0033-operator-commands.md)).
+The node planner of M1, which scales node groups without Nomad ([13.4](#134-scaling)), is in `internal/app`. Since M3.1
+the pure helpers that it shares with the rollout decisions are in `internal/rollout`: `NodeName`, `FreeName` (the
+lowest free index), `LeastUsedZone` and `CompareCreated` (a machine without a creation time counts as the newest).
+`planNodes` calls them there. The rest of the planner moves to `internal/rollout` with the removals of `update`
+(M3.6, [ADR-0005](adr/0005-immutable-nodes-and-nomad-aware-rollouts.md),
+[ADR-0035](adr/0035-rollout-decisions.md)). `validate cluster` is in `internal/app` as well, since it reuses that
+planner ([13.6](#136-tent-validate-cluster---wait-duration), [ADR-0033](adr/0033-operator-commands.md)).
 
 `depguard` in golangci-lint enforces the dependency rules ([ADR-0021](adr/0021-import-rules.md)):
 
 - `api/...` imports only the standard library and other `api/` packages, so third parties can use the types. Its
   tests are exempt.
 - Only `cmd/tent` imports provider packages (`internal/cloud/<provider>`), to register them. Every other package,
-  the core (`internal/model`, `internal/rollout`, `internal/app`) included, uses only the interfaces in
+  the core (`internal/model`, `internal/app`) included, uses only the interfaces in
   `internal/cloud`, so no package reaches a provider through another one. Tests are exempt, and so is code under
   `internal/cloud/<provider>/`, so a provider can have subpackages.
 - Cloud SDKs (govultr, hcloud-go) are imported only by their provider's packages, tests included.
+- `internal/rollout`, tests aside, imports only the standard library, `api/v1alpha1`, `internal/english` and
+  `golang.org/x/mod/semver` (`rollout-pure`, [ADR-0035](adr/0035-rollout-decisions.md)). It reaches no cloud, no Nomad
+  and no state store, so `internal/app` is the only code that acts on what it decides.
 - `internal/nodeup`, `internal/nodeconfig` and `cmd/tent-node`, tests included, never import `internal/cloud/...`
   (`nodeup-no-cloud`). No code that can create or delete cloud resources ever runs on a node.
 - `internal/nodeup` and `cmd/tent-node` import only the standard library, `internal/nodeup` and its subpackages,
@@ -1996,8 +2019,8 @@ tent therefore uses the generic seed-and-refresh strategy
    then the seed for `GET /v1/status/peers?stale` and renders the answer into `05-join.hcl`
    ([8.2](#82-tent-node-phases)). `refresh-join` does it every 60 seconds, and on server and combined nodes asks the
    node's own agent first, so the cluster's first server learns its peers. Neither restarts Nomad.
-3. **Rollout guard.** Before replacing servers, every node must be healthy. Between server replacements tent waits at
-   least one refresh interval.
+3. **Rollout guard.** A server is removed only when every other voter has been stable for the refresh interval plus
+   10 s, read from autopilot's `StableSince` ([13.3](#133-tent-rolling-update-cluster---yes)).
 
 ### 11.3 Creating a node
 
@@ -2833,36 +2856,107 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
 
 ### 13.3 `tent rolling-update cluster [--yes]`
 
-**Order.** All server groups roll before any client group. This follows Nomad's upgrade guide, and the planner refuses
-any state in which clients would run a newer Nomad than servers. A node is outdated when its `tent/spec-hash` differs
-from the desired hash, or when `--force` is given.
+Built in parts: M3.1 built the decisions (`internal/rollout`, [ADR-0035](adr/0035-rollout-decisions.md)); nothing
+calls them yet. M3.3 wires them into this command, and M3.6 wires the removals into `update`.
 
-**Servers**, one at a time. Precondition: autopilot healthy, failure tolerance ≥ 1, every node healthy.
+**Order.** All server groups roll before any client group. This follows Nomad's upgrade guide, and the decisions refuse
+a client group's create or the start of a new victim's removal (C4, C5) while a server runs an older Nomad than a new
+node would; removals already under way go on. A node is outdated when its `tent/spec-hash`
+differs from the desired hash, when it has none, or when `--force` is given.
+
+**Servers**, one at a time. A server group never goes below its size: it creates the replacement first.
 
 ```
-create the replacement (Hetzner: free slot; Vultr: seeded with the current servers)
-→ wait: it is a Raft voter and autopilot reports Healthy
-     (GET /v1/operator/autopilot/health answers HTTP 429 while unhealthy: treat as "not yet")
-→ if the old server is the leader: PUT /v1/operator/raft/transfer-leadership to an updated server
+checks at rest (a machine that has not joined is waited for first): autopilot healthy, every server runs and
+votes, failure tolerance >= 1
+→ create the replacement (Hetzner: free slot; Vultr: seeded with the current servers)
+→ wait until it has joined (the checks at rest need it to vote)
+→ wait until every voter but the victim has been stable for the window: the refresh interval plus 10 s,
+     read from autopilot's StableSince
+→ if the old server is the leader: PUT /v1/operator/raft/transfer-leadership to a healthy, updated voter,
+     then the window again (a transfer resets StableSince on every server; combined groups: no window after
+     the transfer)
 → stop the old server: ACPI shutdown where GracefulShutdown, otherwise hard stop/DELETE (Vultr); the server
   does not leave Raft either way (leave_on_terminate is false on servers, decision 26)
-→ if it is still a peer: DELETE /v1/operator/raft/peer?id=<raft id>; PUT /v1/agent/force-leave?node=<name>&prune=true
-→ wait: peer count back to N, autopilot healthy
-→ seed-and-refresh providers: wait at least one join refresh interval
-→ delete the old VM (if not already) → next
+→ wait until autopilot no longer counts it a healthy voter
+     (a 429 still carries the report: read the server's Healthy and Voter from its body)
+→ if it is still a peer: DELETE /v1/operator/raft/peer?id=<raft id>
+→ PUT /v1/agent/force-leave?node=<name>&prune=true
+→ wait until the servers are healthy with N voters
+     (GET /v1/operator/autopilot/health answers HTTP 429 while unhealthy: treat as "not yet")
+→ delete the old VM → next
 ```
 
-See [ADR-0017](adr/0017-api-driven-server-removal.md).
+See [ADR-0017](adr/0017-api-driven-server-removal.md) and [ADR-0035](adr/0035-rollout-decisions.md).
 
-**Clients**, per group, honouring `maxSurge` and `maxUnavailable`:
+- **The window** replaces a sleep, so a cut run sees it. It makes sure that every node has refreshed its `05-join.hcl`
+  since the servers last changed ([11.2](#112-server-discovery-seed-and-refresh)). A peer removal starts no window; a
+  server that joins and a leadership transfer do (a combined group checks the window before the drain only).
+- **Combined groups** roll like servers, and each victim is drained first: marked ineligible, drained with the group's
+  `drainTimeout`, waited for, then removed as a server. A combined victim that leads hands the leadership over after
+  its drain. The node of the deleted machine is purged once Nomad lists it down. A drain may last the whole
+  `drainTimeout` and a cut run may resume days later, so before a drained victim that still runs and votes hands its
+  leadership over or stops, the server half of the checks at rest runs again, and with more than two voters the
+  failure tolerance must be at least 1.
+- **Two voters and a single server are refused for now** (provisional, [ADR-0035](adr/0035-rollout-decisions.md),
+  item 15).
+- **Refusals.** Before a removal starts or a replacement is created, a run is refused, not waited for, when autopilot
+  reports a server unhealthy, a server does not run or does not vote, or a server group has fewer nodes than its size
+  (run `tent update cluster` first); a replacement also needs a failure tolerance of at least 1. During a removal these
+  are waits, except that a drained combined victim is checked again before its leadership moves or it stops: a server
+  that is unhealthy, does not run or does not vote, or a failure tolerance of 0 with more than two voters, is then a
+  refusal. A run is also refused when no healthy updated voter can take the leadership, or when a version rule fails: a
+  new node older than a server or than a node that is not down, and a client create or a new victim's removal while a
+  server runs an older Nomad than a new node. A server that reports no version, as a server does for a moment after it
+  joins, before autopilot reports it, is skipped by these rules, and a client group waits for it before a create or a
+  new removal.
+
+**Clients**, per group, honouring `maxSurge` and `maxUnavailable` ([3.3](#33-api-rules)):
 
 ```
 create surge node(s) → wait until registered and ready
      (optionally start ineligible via client.default_ineligible, Nomad ≥ 2.0.3; check the node; mark eligible)
-→ old node: mark ineligible → drain (deadline, honours job migrate{} blocks) → wait for completion
-→ stop/delete the VM → purge the node in Nomad → validate → next batch
+→ mark every old node of the batch ineligible, then drain each (deadline: drainTimeout, honours job migrate{} blocks;
+     meta tent_machine=<machine ID>) → wait for completion
+→ delete the VM → purge the node in Nomad once it is down → next batch
 ```
 
+The rules of a client group are tried in the order C1, C2, C4, C5, C3, C6 to C10, and the first that applies gives
+the step:
+
+| Rule | Applies when | Step |
+|---|---|---|
+| C1 | an orphan node of the group is down | `Purge` |
+| C2 | a removing machine's node is down, or is drained for that machine and not draining | `Delete` |
+| C4 | `Roll`, the up-to-date machines are fewer than `size`, and the group has fewer than `size + maxSurge` machines | `Create`; `WaitHealthy` while a server reports no version |
+| C5 | a victim is among the joined machines that are not removing, and the available machines without it are at least `size - maxUnavailable` | `Delete` when its node is missing or down; `Drain` at once when the node's drain meta already holds the machine's ID; else `MarkIneligible`; in `Roll`, `WaitHealthy` first while a server reports no version |
+| C3 | a removing machine's node is ineligible, not draining and not drained for it | `Drain` with the group's `drainTimeout` |
+| C6 | a removing machine's node is draining | `WaitDrained` |
+| C7 | a machine has not joined | `WaitJoined`; in `Shrink`, `Delete` when Nomad lists no node of its name and address |
+| C8 | an orphan node of the group is not down | `WaitNodeDown` |
+| C9 | nothing is outdated, removing or pending, and there is no orphan (`Shrink`: at most `size` machines) | the group is done |
+| C10 | otherwise | refused, with the machines that are not available and why |
+
+A machine is removing when it has joined, has a node, the node is ineligible, draining or drained for it, and the
+machine is outdated (`Roll`) or surplus (`Shrink`). A node that an operator made ineligible is removed only when it is
+outdated or surplus. An orphan node is one named `<cluster>-<group>-<digits>` that no listed machine has at its name and
+address.
+
+- **A batch is marked whole before any of it drains.** New nodes are created first, up to `size + maxSurge` machines,
+  and a victim goes only while the available nodes without it are at least `size - maxUnavailable`. A victim whose node
+  is not available costs no availability, so a dead outdated node is replaced without waiting for the budget.
+- **A drain counts for a machine** only when its meta holds that machine's ID. Only a node that Nomad lists down is
+  purged.
+- **A group that cannot go on is refused,** with the nodes that are not available and why: an up-to-date node that an
+  operator made ineligible blocks `maxUnavailable` 0.
+- **A joined machine without a private address** cannot be matched to a Nomad node or server, since tent matches them
+  by name and address. A client group never deletes it and never takes it as a victim. It counts the machine as not
+  available, goes on with its other victims while the budget allows, and is refused (C10) only when something is still
+  outdated (`Shrink`: the group is above its size) and no other step is left. A server or combined group refuses a
+  running one at the checks at rest until the cloud lists an address. It counts a stopped one as a removal under way:
+  when the group has more machines than its size and the machine may go (outdated in `Roll`), it is deleted once
+  autopilot is healthy with one voter fewer. A machine that has not joined gets `WaitJoined`; in `Shrink` it may be
+  deleted instead (rule C7).
 - **Targeted.** Replacements call `Nodes` directly and never re-run the whole plan.
 - **Crash-safe.** Because the new node is created first, a crash leaves an extra outdated node, and the next run
   finishes the job.
@@ -2871,8 +2965,8 @@ create surge node(s) → wait until registered and ready
 
 **Built in M1.** `update` plans the node changes from `Nodes.List` ([13.2](#132-tent-update-cluster---yes)). Only
 instances with the cluster's label count. A node group's nodes are the instances whose group label names it. The
-planner is in `internal/app`, and it moves to `internal/rollout` with the drain and the quorum checks
-([ADR-0005](adr/0005-immutable-nodes-and-nomad-aware-rollouts.md)).
+planner is in `internal/app`; its shared helpers are in `internal/rollout`
+([5](#5-repository-layout-and-dependency-rules)).
 - **Scale up.** A missing node gets the lowest free index: its name `<cluster>-<group>-<index>` is one that no listed
   instance of the cluster has, whatever its group. It goes into the group's zone with the fewest nodes, the zone
   listed first on a tie.
@@ -3388,7 +3482,22 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
    - the engine: golden plans, apply with fake time (`testing/synctest`);
    - the Nomad API client: `httptest` servers with real mTLS from `internal/pki`, and the waits on `nomadfake` with
      fake time;
-   - rollout decisions as pure functions (cluster state → next step).
+   - rollout decisions as pure functions (cluster state → next step), built in M3.1
+     ([ADR-0035](adr/0035-rollout-decisions.md)):
+     - golden step sequences of the roll of client, server and combined groups, of servers then clients in one roll, of
+       the removal of surplus nodes, of a server roll with two stopped servers, and of the main refusals (unhealthy,
+       failure tolerance 0, a client newer than the servers, a downgrade, a group that cannot go on, a short server
+       group, duplicate names, a single server, two voters); the other refusals have unit tests;
+     - a simulator with a model of the cloud and of Nomad and a clock of its own, which checks the invariants after
+       every step and every tick: a leader and a quorum at every point, the leader never stopped or deleted, no server
+       deleted while it is a peer, no client deleted while its node holds allocations, the availability budget, the
+       machine limits, no client step before the servers are done and no client created before they run the new
+       version, a shrink that creates nothing, the stability window, no two machines of one name;
+     - a resume test: from the world after every step and every tick, a new run ends in the same cluster and prints
+       exactly the rest of the full run; when it starts after up to 12 ticks without a step, it ends with the same
+       last line in the same cluster, though the steps in between may differ;
+     - quorum tests: in the roll of three servers and of three combined nodes, a voter whose machine stops at any
+       point, before or after autopilot notices it, never leads to a stop or a leadership transfer while it is down.
 2. **Provider tests.**
    - Tasks and `Nodes` run against in-memory fakes of narrow interfaces that inject provider-specific failures.
    - Vultr: `internal/cloud/vultr/vultrfake` is an in-memory fake of `vultr.API`
@@ -3922,11 +4031,34 @@ Decided on 2026-10-06:
 32. **`validate cluster` exit codes:** 2 when the cluster is not valid, with the table and no `Error:` line, and 1 when
     tent could not check ([13.6](#136-tent-validate-cluster---wait-duration), [14](#14-cli)).
 
+Decided on 2026-10-07:
+
+33. **`rollingUpdate` of a node group:** `NodeGroup.spec.rollingUpdate` has `maxSurge` (default 1), `maxUnavailable`
+    (default 0) and `drainTimeout` (default `1h`, Nomad's drain deadline: at the deadline Nomad stops the allocations
+    that remain). `maxSurge` and `maxUnavailable` apply to client groups. Server and combined groups always roll one
+    node at a time, with one more node first. The settings never change the spec hash, since they are no node
+    configuration ([3.3](#33-api-rules), [13.3](#133-tent-rolling-update-cluster---yes)). Built in M3.1.
+34. **Smaller server groups:** `update` may shrink a server group (5 to 3, 3 to 1) one server at a time: the
+    leadership is moved away first, the server is stopped, its Raft peer is removed through the API, and autopilot must
+    be healthy again before the next one. It refuses when the cluster is unhealthy or the removal would lose quorum.
+    Going to one server needs `--allow-single-server`, as today. A scale-down of clients drains them first. This lifts
+    decision 27's guard for the nodes that tent drains or removes safely. The decisions are built in M3.1 and
+    `update` uses them from M3.6. The step from two voters to one and the roll of a single server are refused until
+    the maintainer chooses the order ([13.3](#133-tent-rolling-update-cluster---yes),
+    [ADR-0035](adr/0035-rollout-decisions.md)).
+35. **`rolling-update` is its own command,** as [13.3](#133-tent-rolling-update-cluster---yes) and ADR-0005 say.
+    `update` never replaces a node; it reports how many are outdated.
+
+Open for the maintainer: the order for two voters and for a group of one server. Until it is chosen, tent refuses
+both ([ADR-0035](adr/0035-rollout-decisions.md): item 15 has the refusals, its Context the facts, its Alternatives
+the cost of the other answer).
+
 Decisions 18 to 20 are recorded in [ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md), decision 21 in
 [ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md), decisions 22 to 25 in
 [ADR-0030](adr/0030-nomad-on-nodes.md), decision 26 in [ADR-0031](adr/0031-bootstrap-in-update.md), decisions 27
 and 28 in [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md), and decisions 29 to 32 in
-[ADR-0033](adr/0033-operator-commands.md).
+[ADR-0033](adr/0033-operator-commands.md), and decisions 33 to 35 in
+[ADR-0035](adr/0035-rollout-decisions.md).
 
 ---
 

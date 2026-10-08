@@ -1,7 +1,9 @@
 # ADR-0004: Layered architecture: a cloud-agnostic core and providers that translate intents
 
 - **Status:** Accepted; provider order changed by [ADR-0014](0014-vultr-first-provider-and-e2e.md) (Vultr first);
-  narrowed by [ADR-0021](0021-import-rules.md)
+  narrowed by [ADR-0021](0021-import-rules.md); amended by [ADR-0035](0035-rollout-decisions.md)
+  (`internal/rollout` decides the next step and calls nothing; `internal/app` carries the steps out with the provider
+  primitives and `internal/nomadops`)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0002](0002-direct-cloud-apis-and-own-engine.md), [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),
