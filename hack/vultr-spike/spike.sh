@@ -4253,7 +4253,7 @@ cl_guard_run() {
     case "$res" in "as expected"*) res="UNEXPECTED${res#as expected}" ;; esac
     res="$res; the API lists $n instances, want $want"
   fi
-  row "$title" "$res" "until M3 tent cannot drain a node: update refuses to delete one that joined, with and without --yes, before any write"
+  row "$title" "$res" "until M3.6 update cannot drain: it refuses to delete a joined node, with or without --yes"
   cl_out_detail "$title"
 }
 

@@ -11,15 +11,17 @@ import (
 	"github.com/ingvarch/tent/internal/nomadops"
 )
 
-// noDrain says why an update keeps the nodes that joined Nomad.
-const noDrain = "tent cannot drain a node or remove a server yet, so update deletes only nodes that never joined"
+// onlyUnjoined says why an update keeps the nodes that joined Nomad.
+const onlyUnjoined = "update deletes only nodes that never joined"
 
 // refuseJoinedDeletes fails when the node changes delete a machine that carries the joined label, among the machines
 // that the cloud listed. The error names each such machine, with its ID and the reason of its delete; for a duplicate
-// the reason names the machine that stays. It says what to do for each kind of delete.
+// the reason names the machine that stays. It says what to do for each kind of delete; for a surplus node it also
+// names the rolling update that finishes a roll that stopped.
 func refuseJoinedDeletes(changes []NodeChange, listed []cloud.Instance) error {
 	var names, dups []string
 	kept := 0 // the machines whose delete is not that of a duplicate
+	surplus := false
 	for _, c := range changes {
 		if c.Action != NodeDelete {
 			continue
@@ -33,6 +35,7 @@ func refuseJoinedDeletes(changes []NodeChange, listed []cloud.Instance) error {
 			dups = append(dups, c.Name)
 		} else {
 			kept++
+			surplus = surplus || c.Reason == reasonSurplus
 		}
 		names = append(names, fmt.Sprintf("%s (ID %s, %s)", c.Name, c.ID, reason))
 	}
@@ -40,12 +43,15 @@ func refuseJoinedDeletes(changes []NodeChange, listed []cloud.Instance) error {
 		return nil
 	}
 	var todo []string
-	switch kept {
-	case 0:
-	case 1:
-		todo = append(todo, "keep this node in the specs")
-	default:
-		todo = append(todo, "keep these nodes in the specs")
+	keep := "keep this node in the specs"
+	if kept > 1 {
+		keep = "keep these nodes in the specs"
+	}
+	if surplus {
+		keep = "run tent rolling-update cluster to finish a rolling update that stopped, " + keep
+	}
+	if kept > 0 {
+		todo = append(todo, keep)
 	}
 	switch len(dups) {
 	case 0:
@@ -58,8 +64,8 @@ func refuseJoinedDeletes(changes []NodeChange, listed []cloud.Instance) error {
 	if len(names) > 1 {
 		nodes = "nodes that joined"
 	}
-	return fmt.Errorf("update would delete %s Nomad: %s; %s; %s, or delete the whole cluster with tent delete cluster",
-		nodes, english.And(names), noDrain, strings.Join(todo, ", and "))
+	return fmt.Errorf("update would delete %s Nomad: %s; %s: %s, or delete the whole cluster with tent delete cluster",
+		nodes, english.And(names), onlyUnjoined, strings.Join(todo, ", and "))
 }
 
 // stayerOf returns the machine that stays in the place of the duplicate with the ID id: the listed machine of its
@@ -104,7 +110,7 @@ func (a *applier) guardDelete(ctx context.Context, c NodeChange) error {
 	if err := a.s.markJoined(ctx, a.u.nodeKit, in); err != nil {
 		return fmt.Errorf("delete node %s (%s): the node has joined Nomad (%s): %w", c.Name, c.ID, joinedAs, err)
 	}
-	return fmt.Errorf("delete node %s (%s): the node has joined Nomad (%s); %s", c.Name, c.ID, joinedAs, noDrain)
+	return fmt.Errorf("delete node %s (%s): the node has joined Nomad (%s); %s", c.Name, c.ID, joinedAs, onlyUnjoined)
 }
 
 // hasJoined asks Nomad whether the machine in has joined, whatever its role: whether a client of its name at its
