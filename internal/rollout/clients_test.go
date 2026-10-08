@@ -200,6 +200,65 @@ func TestRuleC4CreatesNodes(t *testing.T) {
 	})
 }
 
+// A new node never takes a name that Nomad lists, whatever the status of the node listed (a down node that no machine
+// has is purged before any create, so it never reaches this rule).
+func TestRuleC4SkipsNamesThatNomadLists(t *testing.T) {
+	create := func(name string) outcome {
+		return outcome{Action: rollout.Create, Group: "workers", Machine: name, Zone: "ams"}
+	}
+	outdatedPair := func(s *rollout.State) {
+		addWorker(s, 0, oldHash)
+		addWorker(s, 1, oldHash)
+	}
+	runRuleCases(t, []ruleCase{
+		{"a ready node of the lowest free name", func(_ *testing.T, s *rollout.State) {
+			outdatedPair(s)
+			addOrphan(s, workerName(2), "ready", 50)
+		}, create("prod-workers-3")},
+		{"an ineligible node of the lowest free name", func(t *testing.T, s *rollout.State) {
+			outdatedPair(s)
+			addOrphan(s, workerName(2), "ready", 50)
+			nodeNamed(t, s, workerName(2)).Eligible = false
+		}, create("prod-workers-3")},
+		{"a disconnected node of the lowest free name", func(_ *testing.T, s *rollout.State) {
+			outdatedPair(s)
+			addOrphan(s, workerName(2), "disconnected", 50)
+		}, create("prod-workers-3")},
+		{"an initializing node of the lowest free name", func(_ *testing.T, s *rollout.State) {
+			outdatedPair(s)
+			addOrphan(s, workerName(2), "initializing", 50)
+		}, create("prod-workers-3")},
+		{"two nodes of one name count once", func(_ *testing.T, s *rollout.State) {
+			outdatedPair(s)
+			addOrphan(s, workerName(2), "ready", 50)
+			s.Nomad.Nodes = append(s.Nomad.Nodes, s.Nomad.Nodes[len(s.Nomad.Nodes)-1])
+		}, create("prod-workers-3")},
+		{"nodes of consecutive names", func(_ *testing.T, s *rollout.State) {
+			outdatedPair(s)
+			addOrphan(s, workerName(2), "ready", 50)
+			addOrphan(s, workerName(3), "ready", 51)
+		}, create("prod-workers-4")},
+		{"a node above the lowest free name leaves it free", func(_ *testing.T, s *rollout.State) {
+			outdatedPair(s)
+			addOrphan(s, workerName(3), "ready", 50)
+		}, create("prod-workers-2")},
+		{"a node below the machines' names takes its name", func(_ *testing.T, s *rollout.State) {
+			addWorker(s, 1, oldHash)
+			addWorker(s, 2, oldHash)
+			addOrphan(s, workerName(0), "ready", 50)
+		}, create("prod-workers-3")},
+		{"a node of another name does not count", func(_ *testing.T, s *rollout.State) {
+			outdatedPair(s)
+			addOrphan(s, "prod-web-2", "ready", 50)
+		}, create("prod-workers-2")},
+		{"a name is free again once its node is purged", func(_ *testing.T, s *rollout.State) {
+			outdatedPair(s)
+			addOrphan(s, workerName(2), "ready", 50)
+			dropNode(s, workerName(2))
+		}, create("prod-workers-2")},
+	})
+}
+
 func TestRuleC4CreatesNothingBeyondSizePlusSurge(t *testing.T) {
 	s := baseState()
 	addWorker(&s, 0, oldHash)

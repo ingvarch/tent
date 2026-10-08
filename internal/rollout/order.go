@@ -133,12 +133,17 @@ func zoneCounts(ms []Machine) map[string]int {
 	return perZone
 }
 
-// newMachine returns the machine that a group creates next: the lowest free name of the cluster, and the zone with the
-// fewest machines that are up to date.
+// newMachine returns the machine that a group creates next: the lowest name that no machine of the cluster has and
+// Nomad lists no node of, in any status, and the zone with the fewest machines that are up to date. A deleted
+// machine's node stays listed for a while and a new machine may get its address, so a new machine never takes the
+// name of a listed node; a purge frees the name.
 func newMachine(s State, g Group, ms []Machine) Machine {
-	taken := make(map[string]bool, len(s.Machines))
+	taken := make(map[string]bool, len(s.Machines)+len(s.Nomad.Nodes))
 	for _, m := range s.Machines {
 		taken[m.Name] = true
+	}
+	for _, n := range s.Nomad.Nodes {
+		taken[n.Name] = true
 	}
 	return Machine{
 		Name:  FreeName(s.Cluster, g.Name, taken),

@@ -111,6 +111,11 @@ var scenarios = []scenario{
 	{"clients_surge1", rollout.Roll, func() *world { return outdatedWorkers(1, 0).arm() }},
 	{"clients_surge2", rollout.Roll, func() *world { return outdatedWorkers(2, 0).arm() }},
 	{"clients_unavailable1", rollout.Roll, func() *world { return outdatedWorkers(0, 1).arm() }},
+	{"clients_reuse", rollout.Roll, func() *world {
+		w := outdatedWorkers(1, 0)
+		w.reuseAddresses, w.downAfter = true, 8
+		return w.arm()
+	}},
 	{"refuse_client_newer", rollout.Roll, func() *world {
 		w := outdatedWorkers(1, 0)
 		w.version = "2.0.8"
@@ -197,6 +202,12 @@ func (w *world) describe(mode rollout.Mode) []string {
 	lines := []string{
 		"mode " + modes[mode],
 		fmt.Sprintf("a new node runs Nomad %s", w.version),
+	}
+	if w.reuseAddresses {
+		lines = append(lines, "a new machine takes the lowest private address that no machine holds")
+	}
+	if w.downAfter > 0 {
+		lines = append(lines, fmt.Sprintf("the node of a deleted machine reads down after %d ticks", w.downAfter))
 	}
 	for _, g := range w.groups {
 		line := fmt.Sprintf("group %s: %s, size %d, zones %s", g.Name, g.Role, g.Size, strings.Join(g.Zones, " and "))
@@ -370,7 +381,7 @@ func idleResumeProblem(sc scenario, idle int) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("full run: %w", err)
 	}
-	wantWorld, wantEnd := full.summary(), res.lines[len(res.lines)-1]
+	wantWorld, wantEnd := full.clientShape(), res.lines[len(res.lines)-1]
 	for i, snap := range res.snapshots {
 		w := snap.world.clone()
 		holds := w.check() == nil // a scenario may start in a state that breaks an invariant, as one of refusals does
@@ -388,7 +399,7 @@ func idleResumeProblem(sc scenario, idle int) (string, error) {
 			return fmt.Sprintf("run resumed at decision %d after %d idle ticks ends with %q, want %q", i, idle, end,
 				wantEnd), nil
 		}
-		if diff := cmp.Diff(wantWorld, w.summary()); diff != "" {
+		if diff := cmp.Diff(wantWorld, w.clientShape()); diff != "" {
 			return fmt.Sprintf("run resumed at decision %d after %d idle ticks ends in another world (-full +resumed):\n%s",
 				i, idle, diff), nil
 		}

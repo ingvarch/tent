@@ -1,6 +1,7 @@
 package rollout_test
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"maps"
@@ -20,9 +21,11 @@ import (
 //   - A created machine is listed not ready, is ready after 1 tick, and after 2 a client registers ready and eligible
 //     with two allocations and is labelled. A combined machine registers its node then too, and its server is modelled
 //     as the servers are: it is labelled when it votes.
+//   - A new machine gets an address that no machine has had, unless the scenario sets reuseAddresses: then the lowest
+//     one that no machine holds.
 //   - A drain makes the node ineligible and draining; after 2 ticks it completes with the machine ID of its meta in
 //     DrainedFor, and the allocations go to the first available node.
-//   - The node of a deleted machine stays ready for 2 ticks, then reads down.
+//   - The node of a deleted machine stays ready for 2 ticks (a scenario may set more), then reads down.
 //   - A purge removes a node.
 //
 // The servers are modelled in sim_servers_test.go.
@@ -34,6 +37,8 @@ const (
 	allocsOfNode    = 2
 	oldVersion      = "2.0.6"
 	curVersion      = "2.0.7"
+	// defaultDownAfter is how many ticks the node of a deleted machine stays ready unless a scenario sets it.
+	defaultDownAfter = 2
 )
 
 type simMachine struct {
@@ -72,6 +77,11 @@ type world struct {
 	keepsBudget map[string]bool
 	// startSize is how many machines each group had when arm was called.
 	startSize map[string]int
+	// reuseAddresses gives a new machine the lowest private address that no machine holds, as vultrfake does; without
+	// it an address is never given twice.
+	reuseAddresses bool
+	// downAfter is how many ticks the node of a deleted machine stays ready; 0 means defaultDownAfter.
+	downAfter int
 }
 
 func newWorld(version string) *world {
@@ -308,7 +318,7 @@ func (w *world) tick() {
 	for i := range w.nodes {
 		n := &w.nodes[i]
 		if w.machineIndex(n.owner) < 0 {
-			if n.deadTicks++; n.deadTicks >= 2 {
+			if n.deadTicks++; n.deadTicks >= cmp.Or(w.downAfter, defaultDownAfter) {
 				n.Status = "down"
 			}
 		}
@@ -400,11 +410,23 @@ func (w *world) create(step rollout.Step) error {
 	w.machines = append(w.machines, simMachine{
 		Machine: rollout.Machine{
 			ID: id, Name: step.Machine.Name, Group: g.Name, Role: g.Role, Zone: step.Machine.Zone, SpecHash: g.SpecHash,
-			PrivateIP: newAddress(w.nextMachine), Created: w.now,
+			PrivateIP: w.addressForNew(), Created: w.now,
 		},
 		version: w.version,
 	})
 	return nil
+}
+
+// addressForNew is the private address of a machine that is created now.
+func (w *world) addressForNew() netip.Addr {
+	if !w.reuseAddresses {
+		return newAddress(w.nextMachine)
+	}
+	for number := 1; ; number++ {
+		if !slices.ContainsFunc(w.machines, func(m simMachine) bool { return m.PrivateIP == newAddress(number) }) {
+			return newAddress(number)
+		}
+	}
 }
 
 func (w *world) delete(step rollout.Step) error {
@@ -455,11 +477,25 @@ func (w *world) check() error {
 }
 
 // summary lists the machines, servers and nodes, for comparing the worlds that two runs end in.
-func (w *world) summary() []string {
+func (w *world) summary() []string { return w.lines(true) }
+
+// clientShape is summary without the names of client machines, of their nodes and of nodes whose machine is gone:
+// which new client gets which free name depends on when the node of a deleted machine is purged.
+func (w *world) clientShape() []string { return w.lines(false) }
+
+// lines lists the machines, servers and nodes, sorted; without clientNames the name of a client machine, of its node
+// and of a node whose machine is gone reads "-".
+func (w *world) lines(clientNames bool) []string {
+	nameOf := func(role v1alpha1.Role, name string) string {
+		if !clientNames && role == v1alpha1.RoleClient {
+			return "-"
+		}
+		return name
+	}
 	var lines []string
 	for _, m := range w.machines {
-		lines = append(lines, fmt.Sprintf("machine %s %s %s hash=%s joined=%t stopped=%t", m.Name, m.ID, m.Group, m.SpecHash,
-			m.Joined, m.stopped))
+		lines = append(lines, fmt.Sprintf("machine %s %s %s hash=%s joined=%t stopped=%t", nameOf(m.Role, m.Name), m.ID,
+			m.Group, m.SpecHash, m.Joined, m.stopped))
 	}
 	for _, srv := range w.servers {
 		lines = append(lines, fmt.Sprintf("server %s %s leader=%t voter=%t", srv.machine, srv.id, srv.leader, srv.voter))
@@ -468,8 +504,12 @@ func (w *world) summary() []string {
 		lines = append(lines, fmt.Sprintf("member %s %s", mem.name, mem.status))
 	}
 	for _, n := range w.nodes {
-		lines = append(lines, fmt.Sprintf("node %s %s %s eligible=%t draining=%t", n.Name, n.ID, n.Status, n.Eligible,
-			n.Draining))
+		role := v1alpha1.RoleClient
+		if i := w.machineIndex(n.owner); i >= 0 {
+			role = w.machines[i].Role
+		}
+		lines = append(lines, fmt.Sprintf("node %s %s %s eligible=%t draining=%t", nameOf(role, n.Name), n.ID, n.Status,
+			n.Eligible, n.Draining))
 	}
 	slices.Sort(lines)
 	return lines

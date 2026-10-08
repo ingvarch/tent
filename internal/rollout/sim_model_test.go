@@ -113,6 +113,93 @@ func TestSimNodeOfADeletedMachineGoesDownAfterTwoTicksAndPurgeRemovesIt(t *testi
 	}
 }
 
+func TestSimNodeOfADeletedMachineGoesDownAfterTheScenarioDelay(t *testing.T) {
+	w := outdatedWorkers(1, 0).arm()
+	w.downAfter = 5
+	if err := w.apply(w.machineStep(rollout.Drain, "prod-workers-0")); err != nil {
+		t.Fatal(err)
+	}
+	w.tick()
+	w.tick()
+	if err := w.apply(w.machineStep(rollout.Delete, "prod-workers-0")); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 4; i++ {
+		w.tick()
+		if got := w.observe().Nomad.Nodes[0].Status; got != "ready" {
+			t.Fatalf("node after %d ticks = %s, want ready", i, got)
+		}
+	}
+	w.tick()
+	if got := w.observe().Nomad.Nodes[0].Status; got != "down" {
+		t.Errorf("node after 5 ticks = %s, want down", got)
+	}
+}
+
+func TestSimNewMachineTakesTheLowestFreeAddressWhenTheScenarioAsksForIt(t *testing.T) {
+	create := rollout.Step{Action: rollout.Create, Group: "workers", Machine: rollout.Machine{
+		Name: "prod-workers-3", Zone: "fra"}}
+	newest := func(w *world) netip.Addr { return w.machines[len(w.machines)-1].PrivateIP }
+	for _, tt := range []struct {
+		name  string
+		reuse bool
+		want  netip.Addr
+	}{
+		{"an address is never used twice by default", false, ip(7)},
+		{"the lowest address that no machine holds", true, ip(4)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			w := outdatedWorkers(1, 0).arm()
+			w.reuseAddresses = tt.reuse
+			if err := w.apply(w.machineStep(rollout.Drain, "prod-workers-0")); err != nil {
+				t.Fatal(err)
+			}
+			w.tick()
+			w.tick()
+			if err := w.apply(w.machineStep(rollout.Delete, "prod-workers-0")); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.apply(create); err != nil {
+				t.Fatal(err)
+			}
+			if got := newest(w); got != tt.want {
+				t.Errorf("address of the new machine = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+// Which client machine got which name depends on when its predecessor's node was purged; the shape ignores that and
+// nothing else.
+func TestSimClientShapeIgnoresTheNamesOfClientsOnly(t *testing.T) {
+	a := outdatedWorkers(1, 0)
+	rename := func(w *world, name, other string) {
+		i := w.machineIndexByName(name)
+		w.machines[i].Name = other
+		if j := w.nodeIndexByOwner(w.machines[i].ID); j >= 0 {
+			w.nodes[j].Name = other
+		}
+	}
+	b := a.clone()
+	rename(b, "prod-workers-0", "prod-workers-9")
+	if slices.Equal(a.summary(), b.summary()) {
+		t.Error("the summary does not show the name of a client")
+	}
+	if !slices.Equal(a.clientShape(), b.clientShape()) {
+		t.Errorf("the shapes differ by the name of a client (-a +b):\n%s", cmp.Diff(a.clientShape(), b.clientShape()))
+	}
+	c := a.clone()
+	rename(c, "prod-servers-0", "prod-servers-9")
+	if slices.Equal(a.clientShape(), c.clientShape()) {
+		t.Error("the shape does not show the name of a server")
+	}
+	d := a.clone()
+	d.makeIneligible("prod-workers-1")
+	if slices.Equal(a.clientShape(), d.clientShape()) {
+		t.Error("the shape does not show an ineligible client node")
+	}
+}
+
 func TestSimServersAreHealthyAndTheFirstLeads(t *testing.T) {
 	w := newWorld(curVersion)
 	w.addServer(newHash, curVersion)
