@@ -20,6 +20,8 @@ import (
 
 // RollOptions say what a rolling update does.
 type RollOptions struct {
+	// Apply carries the roll out under the cluster's lock; without it, RollingUpdate only plans.
+	Apply bool
 	// NodeGroups are the groups to roll, by name; every group of the specs when empty.
 	NodeGroups []string
 	// Force replaces every machine of those groups that the cloud lists when the run starts, whatever its hash.
@@ -34,23 +36,76 @@ type RollOptions struct {
 // has joined. The completed spec and the infrastructure are the business of tent update cluster, so specs that it has
 // not applied fail the plan.
 //
-// It lists the machines once and reads Nomad's Raft configuration, autopilot's report, gossip members and nodes, in
-// that order. The plan holds the selected groups with their outdated machines, and in Next the step that comes next.
-// Next is nil when nothing is left to roll. A failed check or read returns no plan. The plan comes with an error and
-// no Next when the decisions of rollout refuse the run, when the next step is one of a server or combined group, which
-// a roll does not replace yet, and when the next step waits for a machine to join that a run would refuse to wait for.
-// It changes nothing in the cloud, in Nomad and in the store, and takes no lock.
+// Each plan lists the machines once and reads Nomad's Raft configuration, autopilot's report, gossip members and nodes,
+// in that order. The plan holds the selected groups with their outdated machines, and in Next the step that comes next.
+// Next is nil when nothing is left to roll. A failed check or read returns no plan. The plan comes with an error and no
+// Next when the decisions of rollout refuse the run, when the next step is one of a server or combined group, which a
+// roll does not replace yet, and when the next step waits for a machine to join that a run would refuse to wait for.
+// Without Apply it changes nothing in the cloud, in Nomad and in the store, and takes no lock.
+//
+// With Apply, a plan that has no next step or an error ends the run as it is, without a lock; a plan without a next
+// step comes back applied. Otherwise it takes the cluster's lock and plans again under it. When that plan has a next
+// step, it calls OnRollPlan with it, then OnWarning with each warning about the cluster, such as a Nomad API that the
+// whole internet may reach, and carries the steps out until none is left. The plan that it returns is the one under
+// the lock, or the one made without it when it cannot take the lock, with Rolled holding what the roll did, also when
+// it stopped, and Applied set once it reached its end.
 func (s *Service) RollingUpdate(ctx context.Context, cluster string, opts RollOptions) (_ RollPlan, err error) {
 	defer func() { err = stopped(ctx, err) }()
 	l, err := s.layout(ctx, cluster)
 	if err != nil {
 		return RollPlan{}, err
 	}
-	r, err := s.prepareRoll(ctx, l, opts, assetCache{})
-	if err != nil {
-		return RollPlan{}, err
+	cache := assetCache{} // both plans of this run find the release files once
+	_, plan, err := s.planRoll(ctx, l, opts, cache)
+	switch {
+	case err != nil || !opts.Apply:
+		return plan, err
+	case plan.Next == nil:
+		plan.Applied = true
+		return plan, nil
 	}
-	return r.plan(ctx)
+	err = s.locked(ctx, l, "rolling-update", func(ctx context.Context) error {
+		var r *rollRun
+		var err error
+		if r, plan, err = s.planRoll(ctx, l, opts, cache); err != nil {
+			return err
+		}
+		if plan.Next != nil {
+			if err := s.beginRoll(r, plan); err != nil {
+				return err
+			}
+			if plan.Rolled, err = r.run(ctx); err != nil {
+				return err
+			}
+		}
+		plan.Applied = true
+		return nil
+	})
+	return plan, err
+}
+
+// planRoll prepares the run, as prepareRoll does, and plans it. A failed check returns no run and no plan; after that
+// it returns the run with what plan returns, the plan and its error.
+func (s *Service) planRoll(ctx context.Context, l statestore.Layout, opts RollOptions, cache assetCache,
+) (*rollRun, RollPlan, error) {
+	r, err := s.prepareRoll(ctx, l, opts, cache)
+	if err != nil {
+		return nil, RollPlan{}, err
+	}
+	plan, err := r.plan(ctx)
+	return r, plan, err
+}
+
+// beginRoll tells OnRollPlan the plan of r, then OnWarning each warning about the cluster. It returns the error of
+// OnRollPlan.
+func (s *Service) beginRoll(r *rollRun, plan RollPlan) error {
+	if s.OnRollPlan != nil {
+		if err := s.OnRollPlan(plan); err != nil {
+			return err
+		}
+	}
+	s.warn(r.warnings...)
+	return nil
 }
 
 // rollRun is a rolling update of a cluster: what it knows of the cluster when it starts.
@@ -63,6 +118,8 @@ type rollRun struct {
 	forced  map[string]bool  // the machines to replace whatever their hash, by ID
 	listed  []cloud.Instance // the last list of the machines
 	api     nomadops.API     // over the servers that have joined
+	// warnings are about the cluster, for the run to tell before its first step.
+	warnings []string
 	rollLoop
 }
 
@@ -117,6 +174,7 @@ func (s *Service) prepareRoll(ctx context.Context, l statestore.Layout, opts Rol
 	}
 	r := &rollRun{
 		s: s, kit: kit, model: c.m, groups: groups, version: c.objs.Cluster.Spec.Nomad.Version, listed: listed, api: api,
+		warnings: s.updateWarnings(c.objs.Cluster, c.objs.NodeGroups, c.ch),
 	}
 	if opts.Force {
 		r.forced = forcedMachines(listed, groups)
