@@ -38,9 +38,12 @@
 > ([ADR-0035](adr/0035-rollout-decisions.md)): `internal/rollout` returns the next step of a rolling update or of a
 > removal of nodes from what the cloud and Nomad report, and a simulator proves it from every state a roll passes
 > through. It also added the `rollingUpdate` settings of a node group. M3.2 built the Nomad calls of a roll
-> ([ADR-0036](adr/0036-nomad-calls-of-a-roll.md)) and the matching model in `nomadfake`. Nothing calls the decisions
-> or the calls yet, and nothing of M3 runs against a cloud: M3.3 and M3.4 wire the node, Raft and gossip calls into
-> `tent rolling-update cluster`, and M3.8 the snapshots into `tent backup`.
+> ([ADR-0036](adr/0036-nomad-calls-of-a-roll.md)) and the matching model in `nomadfake`. M3.3 built `tent
+> rolling-update cluster` for client groups ([ADR-0037](adr/0037-rolling-update-of-client-groups.md)): it creates new
+> nodes first (with the default `maxSurge` 1), drains each old node, deletes its machine and purges its node, and a
+> run that stops is finished by running it again. `update` reports the outdated nodes and `validate cluster` warns
+> about them. Server groups are refused until M3.4 and combined groups until M3.5; M3.4 wires the Raft and gossip
+> calls into the command, and M3.8 the snapshots into `tent backup`.
 >
 > **Work items live in GitHub:** each milestone below links to its GitHub milestone, and the
 > [tent roadmap project][project] shows the open issues. This file keeps the goals and exit criteria; close issues as
@@ -92,8 +95,16 @@ twenty-third on 2026-10-02.
 | 31 | Where `export nomad` writes | `$XDG_CACHE_HOME/tent/<cluster>`, else `~/.cache/tent/<cluster>`; the directory has mode 0700, the files 0600; `--dir` changes the place ([ADR-0033](adr/0033-operator-commands.md)) |
 | 32 | Exit codes of `validate cluster` | 2 when the cluster is not valid, with no `Error:` line; 1 when tent could not check ([ADR-0033](adr/0033-operator-commands.md)) |
 | 33 | `rollingUpdate` of a node group | `maxSurge` (default 1), `maxUnavailable` (default 0) and `drainTimeout` (default `1h`, Nomad's drain deadline); the first two apply to client groups, and server and combined groups roll one node at a time with one more node first; the settings never change the spec hash; built in M3.1 (2026-10-07; [ADR-0035](adr/0035-rollout-decisions.md)) |
-| 34 | Smaller server groups | `update` may shrink a server group one server at a time: leadership moved away, the server stopped, its peer removed through the API, autopilot healthy before the next; refused when the cluster is unhealthy or quorum would be lost; one server needs `--allow-single-server`; clients are drained before a scale-down; lifts decision 27's guard where tent drains or removes safely (2026-10-07; [ADR-0035](adr/0035-rollout-decisions.md)); the decisions are built in M3.1, with two voters and single servers refused until the maintainer chooses |
+| 34 | Smaller server groups | `update` may shrink a server group one server at a time: leadership moved away, the server stopped, its peer removed through the API, autopilot healthy before the next; refused when the cluster is unhealthy or quorum would be lost; one server needs `--allow-single-server`; clients are drained before a scale-down; lifts decision 27's guard where tent drains or removes safely (2026-10-07; [ADR-0035](adr/0035-rollout-decisions.md)); the decisions are built in M3.1, with two voters and single servers refused until M3.4 builds the maintainer's answer (decisions 37 and 38) |
 | 35 | `rolling-update` is its own command | `update` never replaces a node and reports how many are outdated (2026-10-07; [ADR-0035](adr/0035-rollout-decisions.md)) |
+| 37 | From two voters to one | with two voters the live server's peer is removed first, the machine is stopped at once, then it is forced out of the gossip pool with prune; amends ADR-0017 for two voters (2026-10-08); built in M3.4 |
+| 38 | A single-server group rolls | without the failure-tolerance check, through two voters (decision 37), with `--allow-single-server` (2026-10-08); built in M3.4 |
+| 39 | The outdated report and the exit codes | `update` prints the outdated nodes as a line of its plan and a JSON field, and they do not make `update --exit-code` exit 2; `rolling-update --exit-code` exits 2 while a roll is due; `validate cluster` warns about them; when the release files cannot be read, `validate` and an `update` that creates no node warn and go on (an `update` that creates a node still fails); for M3.9, `ha` runs on ubuntu-24.04 and `upgrade` on ubuntu-26.04 in one run, with the backup step in `ha` (2026-10-08); built in M3.3, the E2E runs in M3.9 ([ADR-0037](adr/0037-rolling-update-of-client-groups.md)) |
+| 40 | A forced roll survives a cut | each forced machine is labelled `tent/replace=true` at the start of the run, and every run replaces labelled machines, with or without `--force` (2026-10-08); built in M3.3 ([ADR-0037](adr/0037-rolling-update-of-client-groups.md)) |
+| 41 | Client names above the group's range are accepted | a new node takes the lowest index that no machine and no Nomad node holds (2026-10-08); built in M3.3 ([ADR-0037](adr/0037-rolling-update-of-client-groups.md)) |
+| 42 | `update` before `rolling-update` | `rolling-update` refuses until `update` has applied the current specs, also after an upgrade of tent (2026-10-08); built in M3.3 ([ADR-0037](adr/0037-rolling-update-of-client-groups.md)) |
+| 43 | Server and combined names only grow | a roll of three servers makes `prod-servers-3`, `-4` and `-5` (2026-10-08); built in M3.4 |
+| 44 | tent-node stays in every node's spec hash | each tent release rolls the servers too; an operator who wants to defer them rolls the client groups with `--nodegroups` (2026-10-08); the hash holds it already, and M3.4 lets the default selection roll the servers |
 
 New questions for the maintainer are issues with the `decision` label.
 
@@ -245,6 +256,11 @@ Work after M6 or not scheduled yet: [issues with the `later` label][later].
   carries out each write. Facts measured on a local Nomad 2.0.7
   ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)); the calls are recorded in
   [ADR-0036](adr/0036-nomad-calls-of-a-roll.md). Part of #101 to #105; closes none.
+- 2026-10-08: M3.3 is built: `tent rolling-update cluster` rolls client groups through the loop of `internal/app` over
+  the decisions of M3.1 and the calls of M3.2, with deadlines, a repeat guard, the label `tent/replace` for a forced
+  roll, the outdated report of `update` and `validate cluster`, and tests that cut a roll at its writes and lose every
+  answer. Maintainer decisions 37 to 44 are recorded; 39 to 42 are built here, with
+  [ADR-0037](adr/0037-rolling-update-of-client-groups.md). Closes #102.
 
 [project]: https://github.com/users/ingvarch/projects/2
 [later]: https://github.com/ingvarch/tent/issues?q=is%3Aissue%20label%3Alater

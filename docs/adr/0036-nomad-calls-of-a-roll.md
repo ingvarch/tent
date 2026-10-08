@@ -135,7 +135,8 @@ holds. M3.2 adds them. Nothing calls them yet: M3.3 and M3.4 wire the node, Raft
   with the node calls, and observes again after `ErrGone`.
 - **M3.4** uses the transfer, the peer removal, the members and force-leave for server removals.
 - **M3.8** stores the snapshots.
-- **Two voters to one** (ADR-0035, item 15) stays open for the maintainer; the facts are in platform notes §1.2.
+- **Two voters to one** (ADR-0035, item 15) was answered on 2026-10-08 (decisions 37 and 38), and M3.4 builds it; the
+  facts are in platform notes §1.2.
 - **Where a restore may go** stays open for the maintainer; the restore facts are in platform notes §1.2.
 
 ## Alternatives considered

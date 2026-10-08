@@ -26,7 +26,7 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0002](0002-direct-cloud-apis-and-own-engine.md) | Call cloud APIs directly and reconcile with an in-house engine | Accepted |
 | [0003](0003-cloud-is-source-of-truth.md) | The cloud is the source of truth: ownership labels and deterministic names | Accepted; extended by 0015 |
 | [0004](0004-layered-architecture.md) | Layered architecture: a cloud-agnostic core and providers that translate intents | Accepted; provider order changed by 0014; narrowed by 0021; amended by 0035 |
-| [0005](0005-immutable-nodes-and-nomad-aware-rollouts.md) | Immutable nodes and Nomad-aware rolling updates | Accepted; amended by 0017, 0030, 0031, 0032 and 0035 |
+| [0005](0005-immutable-nodes-and-nomad-aware-rollouts.md) | Immutable nodes and Nomad-aware rolling updates | Accepted; amended by 0017, 0030, 0031, 0032, 0035 and 0037 |
 | [0006](0006-two-binaries-and-nodeconfig.md) | Two binaries and a versioned NodeConfig contract | Accepted; extended by 0026; amended by 0027 and 0028 |
 | [0007](0007-security-baseline.md) | Security baseline: PKI, mTLS, ACL, client introduction | Accepted; see 0019; amended by 0024, 0029 and 0033 |
 | [0008](0008-node-credential-delivery.md) | Node credential delivery: user data in v1, bootstrap controller as the target | Accepted; exception in 0019; amended by 0029 and 0032 |
@@ -53,8 +53,9 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0029](0029-host-firewall-runtime-and-cni-on-nodes.md) | Host firewall, container runtime and CNI plugins on nodes | Accepted; amended by 0030 and 0032 |
 | [0030](0030-nomad-on-nodes.md) | Nomad on nodes | Accepted; amended by 0031, 0032 and 0033 |
 | [0031](0031-bootstrap-in-update.md) | Bootstrap in `update` | Accepted; amended by 0032, 0033, 0034 and 0036 |
-| [0032](0032-joined-label-scrub-and-delete-guard.md) | The joined label, the scrub and the delete guard | Accepted; amended by 0033 |
+| [0032](0032-joined-label-scrub-and-delete-guard.md) | The joined label, the scrub and the delete guard | Accepted; amended by 0033 and 0037 |
 | [0033](0033-operator-commands.md) | Operator commands: validate, export nomad and ui | Accepted |
 | [0034](0034-e2e-suite-on-vultr.md) | The E2E suite on Vultr | Accepted |
-| [0035](0035-rollout-decisions.md) | Rollout decisions | Accepted; refusal of two voters and single servers provisional; amended by 0036 |
+| [0035](0035-rollout-decisions.md) | Rollout decisions | Accepted; refusal of two voters and single servers provisional (answered, built in M3.4); amended by 0036 and 0037 |
 | [0036](0036-nomad-calls-of-a-roll.md) | The Nomad calls of a roll | Accepted |
+| [0037](0037-rolling-update-of-client-groups.md) | Rolling update of client groups | Accepted |
