@@ -1,6 +1,7 @@
 # Roadmap
 
-> **Current status (2026-10-07):** M0 Foundation, M1 Vultr infrastructure and M2 Nomad bootstrap are complete.
+> **Current status (2026-10-08):** M0 Foundation, M1 Vultr infrastructure and M2 Nomad bootstrap are complete. M3 Day-2
+> operations is in progress.
 >
 > M0 built the Go module, `tent version`, the Makefile, the import rules in golangci-lint, CI on Linux, macOS and
 > Windows, the release pipeline for `tent`, the API types with defaults and validation, the spec reader and writer,
@@ -31,7 +32,13 @@
 > a combined cluster gets a warning. `hack/tent-operator` is gone. Its real-cloud check ran on Vultr on 2026-10-07.
 > M2.9 added the E2E suite on Vultr ([ADR-0034](adr/0034-e2e-suite-on-vultr.md)), which `make e2e` runs from the
 > maintainer's machine. Its runs found four faults, all fixed, and on 2026-10-07 `smoke` passed on ubuntu-24.04 and
-> ubuntu-26.04: M2 is done. M3 is next.
+> ubuntu-26.04: M2 is done.
+>
+> M3 is in progress, in parts M3.1 to M3.9. M3.1 built the rollout decisions
+> ([ADR-0035](adr/0035-rollout-decisions.md)): `internal/rollout` returns the next step of a rolling update or of a
+> removal of nodes from what the cloud and Nomad report, and a simulator proves it from every state a roll passes
+> through. It also added the `rollingUpdate` settings of a node group. Nothing calls the decisions yet, and nothing
+> of M3 runs against a cloud: M3.3 wires them into `tent rolling-update cluster`.
 >
 > **Work items live in GitHub:** each milestone below links to its GitHub milestone, and the
 > [tent roadmap project][project] shows the open issues. This file keeps the goals and exit criteria; close issues as
@@ -45,7 +52,8 @@ and, from M2 on, in the E2E suite on Vultr.
 These come from [architecture §18](architecture.md#18-open-questions). The first six were decided on 2026-09-25, the
 seventh to the fifteenth on 2026-09-28, the sixteenth to the twenty-first on 2026-09-29, the twenty-second to the
 twenty-fourth on 2026-09-30, the twenty-fifth to the twenty-seventh on 2026-10-05, and the twenty-eighth to the
-thirty-second on 2026-10-06. The maintainer extended the twenty-third on 2026-10-02.
+thirty-second on 2026-10-06, and the thirty-third to the thirty-fifth on 2026-10-07. The maintainer extended the
+twenty-third on 2026-10-02.
 
 | # | Question | Decision |
 |---|---|---|
@@ -81,6 +89,9 @@ thirty-second on 2026-10-06. The maintainer extended the twenty-third on 2026-10
 | 30 | The exported token | a management token with a TTL, 24 hours by default; tent owns no ACL policy yet ([ADR-0033](adr/0033-operator-commands.md)) |
 | 31 | Where `export nomad` writes | `$XDG_CACHE_HOME/tent/<cluster>`, else `~/.cache/tent/<cluster>`; the directory has mode 0700, the files 0600; `--dir` changes the place ([ADR-0033](adr/0033-operator-commands.md)) |
 | 32 | Exit codes of `validate cluster` | 2 when the cluster is not valid, with no `Error:` line; 1 when tent could not check ([ADR-0033](adr/0033-operator-commands.md)) |
+| 33 | `rollingUpdate` of a node group | `maxSurge` (default 1), `maxUnavailable` (default 0) and `drainTimeout` (default `1h`, Nomad's drain deadline); the first two apply to client groups, and server and combined groups roll one node at a time with one more node first; the settings never change the spec hash; built in M3.1 (2026-10-07; [ADR-0035](adr/0035-rollout-decisions.md)) |
+| 34 | Smaller server groups | `update` may shrink a server group one server at a time: leadership moved away, the server stopped, its peer removed through the API, autopilot healthy before the next; refused when the cluster is unhealthy or quorum would be lost; one server needs `--allow-single-server`; clients are drained before a scale-down; lifts decision 27's guard where tent drains or removes safely (2026-10-07; [ADR-0035](adr/0035-rollout-decisions.md)); the decisions are built in M3.1, with two voters and single servers refused until the maintainer chooses |
+| 35 | `rolling-update` is its own command | `update` never replaces a node and reports how many are outdated (2026-10-07; [ADR-0035](adr/0035-rollout-decisions.md)) |
 
 New questions for the maintainer are issues with the `decision` label.
 
@@ -157,6 +168,8 @@ it: [`hack/vultr-spike/README.md`](../hack/vultr-spike/README.md).
 **Exit criteria:** E2E `ha` and `upgrade` pass on Vultr, with no quorum loss and no job downtime beyond the configured
 migrations.
 
+**Status:** in progress; see the note at the top of this file.
+
 ## M4 Hetzner provider
 
 [Issues](https://github.com/ingvarch/tent/milestone/5)
@@ -222,6 +235,10 @@ Work after M6 or not scheduled yet: [issues with the `later` label][later].
   first intro token, the suite's `validate` lacked `--allow-single-server`, and the metadata probe depended on one
   control site. `smoke` then passed three times on both
   images (runs `r7l48w`, `58sglh` and `g57k85`). Closes #96, #97 and #64.
+- 2026-10-08: M3.1 is built. `internal/rollout` decides the steps of rolling updates and of removals of nodes as pure
+  functions, and a simulator with golden step sequences, invariants and a resume test proves them. A node group gets
+  the `rollingUpdate` settings (decision 33); decisions 33 to 35 are recorded with
+  [ADR-0035](adr/0035-rollout-decisions.md). Closes #99.
 
 [project]: https://github.com/users/ingvarch/projects/2
 [later]: https://github.com/ingvarch/tent/issues?q=is%3Aissue%20label%3Alater

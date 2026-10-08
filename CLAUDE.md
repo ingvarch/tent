@@ -93,7 +93,14 @@ packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries that
     key (the Nomad step now waits for it); the suite's `validate` lacked `--allow-single-server`; and the probe's one
     control site, `archive.ubuntu.com`, did not answer over IPv4 (it tries three now). The next three runs passed on
     both images (`r7l48w`, `58sglh`, `g57k85`): that is the exit of M2.
-- Next: M3 Day-2 operations (`docs/roadmap.md`).
+- M3 Day-2 operations is in progress, in parts M3.1 to M3.9 (`docs/roadmap.md`).
+  - M3.1 added the rollout decisions (`internal/rollout`, ADR-0035; maintainer decisions 33 to 35): `Next(State,
+    Mode)` returns one step of a rolling update (`Roll`) or of a removal of surplus nodes (`Shrink`) from what the
+    cloud and Nomad report, and reaches nothing itself. A simulator with golden step sequences, invariants and a
+    resume test from every state proves it. It also added `spec.rollingUpdate` of a node group (`maxSurge`,
+    `maxUnavailable`, `drainTimeout`), which never changes the spec hash. Nothing calls the decisions yet: M3.3 wires
+    them into `tent rolling-update cluster`. Two voters and a single server are refused until the maintainer chooses
+    (ADR-0035).
 
 ## Read before changing anything
 
@@ -118,9 +125,11 @@ packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries that
 - **Layering** (ADR-0021, enforced by depguard in `.golangci.yml`):
   - `api/...` imports only the standard library and other `api/` packages.
   - Only `cmd/tent` imports provider packages (`internal/cloud/vultr`, `internal/cloud/hetzner`, …); everything else,
-    `internal/model`, `internal/rollout` and `internal/app` included, uses the interfaces in `internal/cloud`.
+    `internal/model` and `internal/app` included, uses the interfaces in `internal/cloud`.
     Tests and the provider packages themselves are exempt.
   - Cloud SDKs (govultr, hcloud-go) are imported only by their provider package, tests included.
+  - `internal/rollout` imports only the standard library, `api/v1alpha1`, `internal/english` and
+    `golang.org/x/mod/semver`; its tests are exempt (`rollout-pure`, ADR-0035).
   - `internal/nodeup` (the tent-node agent), `internal/nodeconfig` and `cmd/tent-node`, tests included, never import
     `internal/cloud/...`.
   - `internal/nodeup` and `cmd/tent-node` import only the standard library, `internal/nodeup/...`,
