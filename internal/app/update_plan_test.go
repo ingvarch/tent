@@ -471,8 +471,9 @@ func TestUpdatePlanWriteApplied(t *testing.T) {
 func TestNomadActionString(t *testing.T) {
 	for a, want := range map[app.NomadAction]string{
 		app.NomadLeader: "leader", app.NomadBootstrap: "bootstrap", app.NomadHealthy: "healthy",
-		app.NomadRegister: "register", app.NomadKeyring: "keyring", app.NomadAction(0): "NomadAction(0)",
-		app.NomadKeyring + 1: "NomadAction(6)",
+		app.NomadRegister: "register", app.NomadKeyring: "keyring", app.NomadIneligible: "ineligible",
+		app.NomadDrain: "drain", app.NomadDrained: "drained", app.NomadDown: "down", app.NomadPurge: "purge",
+		app.NomadAction(0): "NomadAction(0)", app.NomadPurge + 1: "NomadAction(11)",
 	} {
 		if got := a.String(); got != want {
 			t.Errorf("NomadAction(%d).String() = %q, want %q", int(a), got, want)

@@ -20,13 +20,14 @@ import (
 // nodeTimeout is how long the create of a node, or the wait for one, may take.
 const nodeTimeout = 10 * time.Minute
 
-// Progress is one thing that happened while an update or a delete applied its plan. When Infra is set, it is an event
-// of an infrastructure change. When Nomad is set, it is a step of the Nomad step of an update, and Step and Err say how
-// far it got and why it failed. When Going is set, a delete starts to wait until the cloud stops listing that many
-// nodes that it deleted. Otherwise it is a step of the node change Node; for NodeScrub, which no plan holds, Node
-// has only the action, the name and the machine's ID, and Instance is zero. Err says why a failed step failed. Instance
-// is the machine of a create or a wait that is done, as the provider reports it, with its ID and its private address
-// when the cloud gave one; it is the zero Instance for the other steps.
+// Progress is one thing that happened while an update, a delete or a rolling update applied its plan. When Infra is
+// set, it is an event of an infrastructure change. When Nomad is set, it is a step that works on Nomad, of an update or
+// of a rolling update, and Step and Err say how far it got and why it failed. When Going is set, a delete starts to
+// wait until the cloud stops listing that many nodes that it deleted. Otherwise it is a step of the node change Node;
+// for NodeScrub, which no plan holds, Node has only the action, the name and the machine's ID, and Instance is zero.
+// Err says why a failed step failed. Instance is the machine of a create or a wait that is done, as the provider
+// reports it, with its ID and its private address when the cloud gave one; it is the zero Instance for the other
+// steps.
 type Progress struct {
 	Infra    *engine.Event
 	Going    int
@@ -37,7 +38,7 @@ type Progress struct {
 	Nomad    *NomadEvent
 }
 
-// NomadAction is what the Nomad step of an update does.
+// NomadAction is what a step of an update or of a rolling update does in Nomad.
 type NomadAction int
 
 // Nomad actions.
@@ -52,11 +53,22 @@ const (
 	NomadRegister
 	// NomadKeyring waits until Nomad's keyring has an active key, so that intro tokens can be signed.
 	NomadKeyring
+	// NomadIneligible marks a node ineligible.
+	NomadIneligible
+	// NomadDrain drains a node.
+	NomadDrain
+	// NomadDrained waits until a node's drain completes.
+	NomadDrained
+	// NomadDown waits until Nomad lists a node as down.
+	NomadDown
+	// NomadPurge purges a node from Nomad.
+	NomadPurge
 )
 
 var nomadActionNames = [...]string{
 	NomadLeader: "leader", NomadBootstrap: "bootstrap", NomadHealthy: "healthy", NomadRegister: "register",
-	NomadKeyring: "keyring",
+	NomadKeyring: "keyring", NomadIneligible: "ineligible", NomadDrain: "drain", NomadDrained: "drained",
+	NomadDown: "down", NomadPurge: "purge",
 }
 
 // String returns the action's name in lower case, such as leader.
@@ -70,14 +82,17 @@ func (a NomadAction) String() string {
 // MarshalText returns the action's name, as String does.
 func (a NomadAction) MarshalText() ([]byte, error) { return []byte(a.String()), nil }
 
-// NomadEvent is what a step of the Nomad step of an update works on. Node names the node that a register waits for.
-// Leader is the leader's RPC address once a leader wait is done. Voters is how many healthy servers a healthy wait
-// waits for, and once it is done how many of them vote.
+// NomadEvent is what a step that works on Nomad works on. Node names the node that a register, ineligible, drain,
+// drained, down or purge step works on. Address is that node's address, for a down and a purge step. Deadline is the
+// deadline of the drain that a drain step starts. Leader is the leader's RPC address once a leader wait is done. Voters
+// is how many healthy servers a healthy wait waits for, and once it is done how many of them vote.
 type NomadEvent struct {
-	Action NomadAction
-	Node   string
-	Leader string
-	Voters int
+	Action   NomadAction
+	Node     string
+	Address  string
+	Deadline time.Duration
+	Leader   string
+	Voters   int
 }
 
 // NodeStep is how far a node change got.

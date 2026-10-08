@@ -63,6 +63,7 @@ type rollRun struct {
 	forced  map[string]bool  // the machines to replace whatever their hash, by ID
 	listed  []cloud.Instance // the last list of the machines
 	api     nomadops.API     // over the servers that have joined
+	rollLoop
 }
 
 // prepareRoll checks what a rolling update starts from, as RollingUpdate says, lists the machines and returns the run
@@ -166,11 +167,16 @@ func (s *Service) checkApplied(ctx context.Context, l statestore.Layout, c loade
 	return nil
 }
 
+// isServerMachine reports whether the machine in belongs to a server or combined group of m.
+func isServerMachine(m *model.Cluster, in cloud.Instance) bool {
+	g, _ := findGroup(m, in.Group)
+	return g.Role.RunsServer()
+}
+
 // rollAPI returns the API over the machines of the server and combined groups of m among listed that have joined.
 func (s *Service) rollAPI(m *model.Cluster, listed []cloud.Instance, kit nodeKit) (nomadops.API, error) {
 	joined := slices.DeleteFunc(slices.Clone(listed), func(in cloud.Instance) bool {
-		g, _ := findGroup(m, in.Group)
-		return !g.Role.RunsServer() || !in.Joined
+		return !isServerMachine(m, in) || !in.Joined
 	})
 	if len(joined) == 0 {
 		return nil, fmt.Errorf("%s has no server that joined; run tent update cluster first", clusterLabel(m.Name))
@@ -213,17 +219,29 @@ func (r *rollRun) plan(ctx context.Context) (RollPlan, error) {
 	return plan, nil
 }
 
-// state returns what the decisions see: the cluster as the cloud listed it and as the reading of Nomad shows it.
+// state returns what the decisions see: the cluster as the cloud listed it, with the machines that the run created and
+// no list has shown yet, and as the reading of Nomad shows it.
 func (r *rollRun) state(reading nomadReading) rollout.State {
 	return rollout.State{
-		Cluster: r.kit.cluster, Groups: r.groups, Machines: rolloutMachines(r.listed), Nomad: reading.state(),
+		Cluster: r.kit.cluster, Groups: r.groups, Machines: rolloutMachines(r.machines()), Nomad: reading.state(),
 		Version: r.version, Forced: r.forced, Refresh: joinRefresh, Now: r.s.now(),
 	}
 }
 
-// refuse returns why the run cannot carry out the step, or nil. A roll replaces no server yet. A wait for a machine to
-// join is refused as its first poll would refuse it, given the nodes that Nomad lists.
+// refuse returns why the run cannot carry out the step, or nil: see refuseRole. A wait for a machine to join is refused
+// as its first poll would refuse it, given the nodes that Nomad lists.
 func (r *rollRun) refuse(step rollout.Step, nodes []nomadops.Node) error {
+	if err := r.refuseRole(step); err != nil || step.Action != rollout.WaitJoined {
+		return err
+	}
+	in, _ := instanceByID(r.listed, step.Machine.ID)
+	_, err := joinCheck(in, nodes, r.s.now())
+	return err
+}
+
+// refuseRole returns why the run cannot carry out the step of a group of its role, or nil. A roll replaces no server
+// yet.
+func (r *rollRun) refuseRole(step rollout.Step) error {
 	if g, _ := findGroup(r.model, step.Group); g.Role != v1alpha1.RoleClient {
 		msg := fmt.Sprintf("node group %s: tent cannot roll server and combined groups yet", step.Group)
 		if r.model.HasClientGroup() {
@@ -231,12 +249,7 @@ func (r *rollRun) refuse(step rollout.Step, nodes []nomadops.Node) error {
 		}
 		return errors.New(msg)
 	}
-	if step.Action != rollout.WaitJoined {
-		return nil
-	}
-	in, _ := instanceByID(r.listed, step.Machine.ID)
-	_, err := joinCheck(in, nodes, r.s.now())
-	return err
+	return nil
 }
 
 // joinStep is what a poll of the wait for a new node to join does.
