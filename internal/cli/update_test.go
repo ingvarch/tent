@@ -748,8 +748,8 @@ func TestUpdateClusterRefusesToDeleteAJoinedNode(t *testing.T) {
 		before := s.objects(t)
 		calls := len(f.Calls())
 		const want = "Error: update would delete a node that joined Nomad: prod-workers-2 (ID instance-6, surplus); " +
-			"tent cannot drain a node or remove a server yet, so update deletes only nodes that never joined; " +
-			"keep this node in the specs, or delete the whole cluster with tent delete cluster\n"
+			"update deletes only nodes that never joined: run tent rolling-update cluster to finish a rolling update " +
+			"that stopped, keep this node in the specs, or delete the whole cluster with tent delete cluster\n"
 
 		for _, more := range [][]string{nil, {"--yes"}, {"--exit-code"}} {
 			wantError(t, runOn(t, f, update(s, more...)...), want)

@@ -682,9 +682,12 @@ func TestUpdateRepairsANode(t *testing.T) {
 }
 
 // joinedRefusal is the error of a plan that deletes the nodes of names, which joined Nomad: each name is
-// "<node> (ID <id>, <reason>)".
-func joinedRefusal(names ...string) string {
-	const tail = "; tent cannot drain a node or remove a server yet, so update deletes only nodes that never joined; "
+// "<node> (ID <id>, <reason>)". The advice names tent rolling-update cluster when a node is surplus.
+func joinedRefusal(surplus bool, names ...string) string {
+	tail := "; update deletes only nodes that never joined: "
+	if surplus {
+		tail += "run tent rolling-update cluster to finish a rolling update that stopped, "
+	}
 	if len(names) == 1 {
 		return "update would delete a node that joined Nomad: " + names[0] + tail +
 			"keep this node in the specs, or delete the whole cluster with tent delete cluster"
@@ -697,9 +700,8 @@ func joinedRefusal(names ...string) string {
 // stayer, which joined Nomad.
 func duplicateRefusal(name, id, stayer string) string {
 	return "update would delete a node that joined Nomad: " + name + " (ID " + id + ", duplicate of ID " + stayer + "); " +
-		"tent cannot drain a node or remove a server yet, so update deletes only nodes that never joined; remove one of " +
-		"the two machines called " + name + " from Nomad and delete it in the cloud, or delete the whole cluster with " +
-		"tent delete cluster"
+		"update deletes only nodes that never joined: remove one of the two machines called " + name + " from Nomad " +
+		"and delete it in the cloud, or delete the whole cluster with tent delete cluster"
 }
 
 // wantRefused fails the test unless the update of the test cluster, with and without apply, fails with the error
@@ -726,7 +728,7 @@ func TestUpdateScales(t *testing.T) {
 
 		// Down: the newest worker joined, so the plan refuses to delete it.
 		mustReplace(t, svc, edit(t, workersYAML, "size: 2", "size: 1"))
-		wantRefused(t, svc, f, joinedRefusal("prod-workers-1 (ID instance-5, surplus)"))
+		wantRefused(t, svc, f, joinedRefusal(true, "prod-workers-1 (ID instance-5, surplus)"))
 		wantNodes(t, f, allNodes...)
 
 		// Up: the new node takes the next index.
@@ -796,7 +798,7 @@ func TestUpdateRemovesTheLastClientGroup(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			wantRefused(t, svc, f, joinedRefusal(
+			wantRefused(t, svc, f, joinedRefusal(false,
 				"prod-workers-0 (ID instance-4, not in the spec)", "prod-workers-1 (ID instance-5, not in the spec)"))
 			wantNodes(t, f, allNodes...)
 		})

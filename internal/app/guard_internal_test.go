@@ -12,7 +12,10 @@ import (
 	"github.com/ingvarch/tent/internal/nomadops"
 )
 
-const refusalCause = "tent cannot drain a node or remove a server yet, so update deletes only nodes that never joined"
+const (
+	refusalCause = "update deletes only nodes that never joined"
+	rollAdvice   = "run tent rolling-update cluster to finish a rolling update that stopped, "
+)
 
 // TestRefuseJoinedDeletes fails a plan that deletes a machine with the joined label, for every reason a delete has,
 // and names each such machine in one error. It accepts a plan whose deletes have never joined.
@@ -27,7 +30,7 @@ func TestRefuseJoinedDeletes(t *testing.T) {
 	stray, keeper4, twin4 := joined("instance-11", "prod-workers-4"), joined("instance-12", "prod-workers-4"),
 		joined("instance-13", "prod-workers-4")
 	listed := []cloud.Instance{old, w1, w2, twin, free, keeper, twin2, stray, keeper4, twin4}
-	const tail = "; " + refusalCause + "; "
+	const tail = "; " + refusalCause + ": "
 	const orCluster = ", or delete the whole cluster with tent delete cluster"
 	for _, tc := range []struct {
 		name    string
@@ -46,13 +49,14 @@ func TestRefuseJoinedDeletes(t *testing.T) {
 			name:    "one node that is not in the spec",
 			changes: []NodeChange{deleteNode(old, reasonNotInSpec)},
 			want: "update would delete a node that joined Nomad: prod-old-0 (ID instance-7, not in the spec)" +
-				"; " + refusalCause + "; keep this node in the specs, or delete the whole cluster with tent delete cluster",
+				"; " + refusalCause + ": keep this node in the specs, or delete the whole cluster with tent delete cluster",
 		},
 		{
 			name:    "a surplus node among nodes that never joined",
 			changes: []NodeChange{deleteNode(free, reasonSurplus), deleteNode(w1, reasonSurplus)},
 			want: "update would delete a node that joined Nomad: prod-workers-1 (ID instance-5, surplus)" +
-				"; " + refusalCause + "; keep this node in the specs, or delete the whole cluster with tent delete cluster",
+				"; " + refusalCause + ": " + rollAdvice + "keep this node in the specs, or delete the whole cluster with tent " +
+				"delete cluster",
 		},
 		{
 			name:    "a duplicate",
@@ -72,7 +76,7 @@ func TestRefuseJoinedDeletes(t *testing.T) {
 			name:    "a duplicate and a surplus node",
 			changes: []NodeChange{deleteNode(w1, reasonSurplus), deleteNode(twin, reasonDuplicate)},
 			want: "update would delete nodes that joined Nomad: prod-workers-1 (ID instance-5, surplus) and " +
-				"prod-workers-0 (ID instance-8, duplicate of ID instance-3)" + tail + "keep this node in the specs, " +
+				"prod-workers-0 (ID instance-8, duplicate of ID instance-3)" + tail + rollAdvice + "keep this node in the specs, " +
 				"and remove one of the two machines called prod-workers-0 from Nomad and delete it in the cloud" +
 				orCluster,
 		},
@@ -80,7 +84,7 @@ func TestRefuseJoinedDeletes(t *testing.T) {
 			name:    "a duplicate whose keeper is surplus",
 			changes: []NodeChange{deleteNode(keeper, reasonSurplus), deleteNode(twin, reasonDuplicate)},
 			want: "update would delete nodes that joined Nomad: prod-workers-0 (ID instance-3, surplus) and " +
-				"prod-workers-0 (ID instance-8, duplicate of ID instance-3)" + tail + "keep this node in the specs, " +
+				"prod-workers-0 (ID instance-8, duplicate of ID instance-3)" + tail + rollAdvice + "keep this node in the specs, " +
 				"and remove one of the two machines called prod-workers-0 from Nomad and delete it in the cloud" +
 				orCluster,
 		},
@@ -99,15 +103,22 @@ func TestRefuseJoinedDeletes(t *testing.T) {
 			},
 			want: "update would delete nodes that joined Nomad: prod-workers-1 (ID instance-5, surplus), " +
 				"prod-workers-2 (ID instance-6, surplus) and prod-workers-0 (ID instance-8, duplicate of ID instance-3)" +
-				tail + "keep these nodes in the specs, and remove one of the two machines called prod-workers-0 from " +
-				"Nomad and delete it in the cloud" + orCluster,
+				tail + rollAdvice + "keep these nodes in the specs, and remove one of the two machines called " +
+				"prod-workers-0 from Nomad and delete it in the cloud" + orCluster,
 		},
 		{
 			name:    "two nodes",
 			changes: []NodeChange{deleteNode(old, reasonNotInSpec), deleteNode(w1, reasonSurplus)},
 			want: "update would delete nodes that joined Nomad: prod-old-0 (ID instance-7, not in the spec) and " +
 				"prod-workers-1 (ID instance-5, surplus)" +
-				"; " + refusalCause + "; keep these nodes in the specs, or delete the whole cluster with tent delete cluster",
+				"; " + refusalCause + ": " + rollAdvice + "keep these nodes in the specs, or delete the whole cluster with tent " +
+				"delete cluster",
+		},
+		{
+			name:    "two nodes that are not in the spec",
+			changes: []NodeChange{deleteNode(old, reasonNotInSpec), deleteNode(stray, reasonNotInSpec)},
+			want: "update would delete nodes that joined Nomad: prod-old-0 (ID instance-7, not in the spec) and " +
+				"prod-workers-4 (ID instance-11, not in the spec)" + tail + "keep these nodes in the specs" + orCluster,
 		},
 		{
 			name: "three nodes",
@@ -116,7 +127,8 @@ func TestRefuseJoinedDeletes(t *testing.T) {
 			},
 			want: "update would delete nodes that joined Nomad: prod-old-0 (ID instance-7, not in the spec), " +
 				"prod-workers-1 (ID instance-5, surplus) and prod-workers-2 (ID instance-6, surplus)" +
-				"; " + refusalCause + "; keep these nodes in the specs, or delete the whole cluster with tent delete cluster",
+				"; " + refusalCause + ": " + rollAdvice + "keep these nodes in the specs, or delete the whole cluster with tent " +
+				"delete cluster",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
