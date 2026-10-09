@@ -27,6 +27,9 @@ const (
 	// serverDownTimeout is how long a wait for autopilot to stop counting a stopped server lasts: Serf marked a killed
 	// server failed after 36 to 66 s.
 	serverDownTimeout = 5 * time.Minute
+	// settleTimeout is how long a run that has taken a step waits for a refusal of the decisions to clear: autopilot
+	// reports a server unhealthy for about 2 s after the leadership moves.
+	settleTimeout = time.Minute
 )
 
 // rollAgain is what the operator does after a wait ran out.
@@ -98,6 +101,13 @@ func (w openWait) over(r *rollRun, reading nomadReading) bool {
 	return true
 }
 
+// openSettle is the wait for a refusal of the decisions to clear whose start the run has reported and whose end it has
+// not: the event, and when the refusal that began the series first showed.
+type openSettle struct {
+	event NomadEvent
+	since time.Time
+}
+
 // rollTally holds the IDs of the machines and nodes that a roll created, drained, stopped, deleted and purged, so that
 // a step tried twice counts once.
 type rollTally struct{ created, drained, stopped, deleted, purged map[string]bool }
@@ -124,6 +134,8 @@ type rollLoop struct {
 	listing  bool                      // the last observation listed the machines
 	failing  time.Time                 // since when the reads of Nomad fail in a row; zero when they do not
 	open     *openWait
+	settling *openSettle // the wait for a refusal to clear; nil when the last decision was no refusal
+	wrote    bool        // act has sent a write in this run, whatever the answer
 	rolled   rollTally
 }
 
@@ -142,10 +154,13 @@ func newRollLoop() rollLoop {
 // run carries out the steps of the rolling update until the decisions have none left, and returns what it did. It
 // observes the cloud and Nomad, asks the decisions for a step, carries it out, and observes again; a wait polls every
 // rollPoll until the decisions move on or its limit passes. A step that the decisions give again after it was carried
-// out is tried again a poll later, and the third try in a row ends the run. It takes no lock.
+// out is tried again a poll later, and the third try in a row ends the run. A refusal of the decisions ends the run at
+// once, unless the run has sent a write: then it waits for the refusal to clear, for up to settleTimeout. It takes no
+// lock.
 func (r *rollRun) run(ctx context.Context) (RollCounts, error) {
 	r.rollLoop = newRollLoop()
 	err := r.loop(ctx)
+	r.endSettle(err)
 	r.endWait(err)
 	return r.rolled.counts(), err
 }
@@ -168,9 +183,16 @@ func (r *rollRun) loop(ctx context.Context) error {
 		}
 		step, err := rollout.Next(r.state(reading), rollout.Roll)
 		r.logObserved(reading, step, err)
+		if r.waitsFor(err) {
+			if err := r.settle(ctx, err); err != nil {
+				return err
+			}
+			continue
+		}
 		if err != nil {
 			return err
 		}
+		r.endSettle(nil)
 		if r.needsList(step) {
 			r.relist = true
 			continue
@@ -198,6 +220,47 @@ func (r *rollRun) loop(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+// waitsFor reports whether err, the answer of the decisions, is a refusal that the run waits on: the run has sent a
+// write. A refusal before that, and any other error, end the run.
+func (r *rollRun) waitsFor(err error) bool {
+	return r.wrote && errors.Is(err, rollout.ErrRefused)
+}
+
+// settle waits a poll for the refusal of the decisions to clear. The first refusal of a series reports the start of
+// the wait; the machines are listed at every observation of it, since a refusal may rest on a machine that does not
+// run. The wait forgets no other wait and ends none, and it is no try of a step. It returns the refusal once it has
+// lasted settleTimeout.
+func (r *rollRun) settle(ctx context.Context, refusal error) error {
+	if r.settling == nil {
+		event := NomadEvent{Action: NomadSettle, Deadline: settleTimeout, Reason: refusal.Error()}
+		r.settling = &openSettle{event: event, since: time.Now()}
+		r.s.progress(Progress{Step: NodeStarted, Nomad: &event})
+	}
+	if time.Since(r.settling.since) >= settleTimeout {
+		return refusal
+	}
+	return r.sleep(ctx)
+}
+
+// endSettle reports the wait for a refusal to clear, if there is one, as failed with err, or as done when err is nil.
+func (r *rollRun) endSettle(err error) {
+	w := r.settling
+	if w == nil {
+		return
+	}
+	r.settling = nil
+	r.ended(w.event, err)
+}
+
+// ended reports the wait of event as failed with err, or as done when err is nil.
+func (r *rollRun) ended(event NomadEvent, err error) {
+	step := NodeDone
+	if err != nil {
+		step = NodeFailed
+	}
+	r.s.progress(Progress{Step: step, Err: err, Nomad: &event})
 }
 
 // logObserved logs the observation at debug level: the leader's node, the voters, autopilot's health and failure
@@ -247,11 +310,11 @@ func (r *rollRun) group(name string) rollout.Group {
 }
 
 // observe lists the machines when the last step changed them, or a machine that the run created is not listed yet or a
-// machine that it deleted still is, or one that it stopped is still listed as running, and reads Nomad; it notes in
-// listing whether it listed. It returns false, and no error, for reads that no server answered, until they have failed
-// for nomadTimeout.
+// machine that it deleted still is, or one that it stopped is still listed as running, or the run waits for a refusal
+// to clear, and reads Nomad; it notes in listing whether it listed. It returns false, and no error, for reads that no
+// server answered, until they have failed for nomadTimeout.
 func (r *rollRun) observe(ctx context.Context) (nomadReading, bool, error) {
-	r.listing = r.relist || len(r.pending) > 0 || len(r.deleting) > 0 || len(r.stopping) > 0
+	r.listing = r.relist || r.settling != nil || len(r.pending) > 0 || len(r.deleting) > 0 || len(r.stopping) > 0
 	if r.listing {
 		if err := r.list(ctx); err != nil {
 			return nomadReading{}, false, err
@@ -482,11 +545,7 @@ func (r *rollRun) endWait(err error) {
 		return
 	}
 	r.open = nil
-	if err != nil {
-		r.s.progress(Progress{Step: NodeFailed, Err: err, Nomad: &w.event})
-		return
-	}
-	r.s.progress(Progress{Step: NodeDone, Nomad: &w.event})
+	r.ended(w.event, err)
 }
 
 // act carries out the step that is no wait. The step on a machine whose delete was sent is that delete, which the cloud
@@ -495,7 +554,8 @@ func (r *rollRun) endWait(err error) {
 // cloud lists the machine as not running, and ends the run after stopTimeout; such polls are no tries. A step that the
 // decisions give right after it was carried out waits a poll before it is tried again; the third try in a row ends the
 // run. A write that fails because the node is gone or no server answered, and a create that failed before it sent
-// anything because no server answered, wait a poll and count as a try; any other failure ends the run.
+// anything because no server answered, wait a poll and count as a try; any other failure ends the run. A step that it
+// carries out counts as a write that the run has sent, whatever the answer.
 func (r *rollRun) act(ctx context.Context, step rollout.Step) error {
 	key := keyOf(step)
 	if since, sent := r.deleting[step.Machine.ID]; sent {
@@ -520,6 +580,7 @@ func (r *rollRun) act(ctx context.Context, step rollout.Step) error {
 	} else {
 		r.last, r.tries = key, 1
 	}
+	r.wrote = true
 	err := r.carry(ctx, step)
 	if err == nil {
 		return nil
