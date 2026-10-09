@@ -148,12 +148,18 @@ func (w *nomadWorld) pinned() string {
 	if w.version != "" {
 		return w.version
 	}
+	return stableNomad()
+}
+
+// stableNomad returns the Nomad version that the embedded stable channel recommends, read once: the world asks at
+// every call of a test.
+var stableNomad = sync.OnceValue(func() string {
 	ch, err := channels.Load("stable")
 	if err != nil {
 		return ""
 	}
 	return ch.Nomad.Recommended
-}
+})
 
 // forgetNodes clears the clients that registered, the world's view of the nodes, and the times it noted for clients.
 func (w *nomadWorld) forgetNodes() {
@@ -362,7 +368,7 @@ func (w *nomadWorld) follow() {
 	if !w.keepsAServer(servers) {
 		w.NewCluster() // a cluster whose servers are all gone is lost with them
 	}
-	v := w.raftView(servers, w.serverCount())
+	v := w.raftView(servers, w.serverCount)
 	w.SetLeader(v.leader)
 	w.SetHealth(v.health)
 	w.SetPeers(v.peers)

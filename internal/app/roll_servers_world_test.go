@@ -194,9 +194,9 @@ type raftView struct {
 	members []nomadops.Member
 }
 
-// raftView brings the servers to now from the server machines and returns what the fake shows. want is how many
+// raftView brings the servers to now from the server machines and returns what the fake shows. want returns how many
 // servers the specs give, which the cluster needs ready to elect its first leader.
-func (w *nomadWorld) raftView(servers []machine, want int) raftView {
+func (w *nomadWorld) raftView(servers []machine, want func() int) raftView {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	now, d, c := time.Now(), w.delays, &w.raft
@@ -264,8 +264,9 @@ func (r *raftServer) memberStatus(now time.Time, d serverDelays) string {
 
 // syncServers brings the records to now: a ready machine that has no record joins, a machine that stopped is noted,
 // a server that failed long enough has its peer removed by autopilot, and a leader is elected when the cluster has
-// none and as many servers are ready as the specs give. The caller holds w.mu.
-func (w *nomadWorld) syncServers(now time.Time, servers []machine, want int) {
+// none and as many servers are ready as the specs give. want reads the specs, so it is asked only while the cluster
+// has no leader. The caller holds w.mu.
+func (w *nomadWorld) syncServers(now time.Time, servers []machine, want func() int) {
 	c, d := &w.raft, w.delays
 	byID := map[string]machine{}
 	ready := 0
@@ -301,8 +302,10 @@ func (w *nomadWorld) syncServers(now time.Time, servers []machine, want int) {
 		c.leader = ""
 		c.elect(now, d)
 	}
-	if c.leader == "" && want > 0 && ready >= want {
-		c.elect(now, d)
+	if c.leader == "" && ready > 0 {
+		if n := want(); n > 0 && ready >= n {
+			c.elect(now, d)
+		}
 	}
 }
 
