@@ -170,13 +170,7 @@ func (a *applier) applyServer(ctx context.Context, c NodeChange) error {
 	if !bootsMachine(c) {
 		return nil
 	}
-	in, err := a.s.applyNodeWith(ctx, a.u.nodes, a.u.cluster, c, func(context.Context) (cloud.UserData, error) {
-		seed, err := a.seed(c.Name, false)
-		if err != nil {
-			return nil, err
-		}
-		return a.u.userData(c, a.s.now(), seed, nil)
-	})
+	in, err := a.s.bootServer(ctx, a.u.nodeKit, a, c)
 	if err != nil {
 		return err
 	}

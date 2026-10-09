@@ -83,6 +83,18 @@ func (s *Service) bootClient(ctx context.Context, k nodeKit, j joinPoint, c Node
 	})
 }
 
+// bootServer creates the server or combined node of c, or repeats its create with c's operation id, with the seed of
+// j and no intro token, and returns its machine.
+func (s *Service) bootServer(ctx context.Context, k nodeKit, j joinPoint, c NodeChange) (cloud.Instance, error) {
+	return s.applyNodeWith(ctx, k.nodes, k.cluster, c, func(context.Context) (cloud.UserData, error) {
+		seed, err := j.seed(c.Name, false)
+		if err != nil {
+			return nil, err
+		}
+		return k.userData(c, s.now(), seed, nil)
+	})
+}
+
 // markJoined replaces the user data of the machine in with the stub and labels the machine as joined, and reports the
 // scrub as a step. A failure stops the run with the provider's error; the next run plans the wait again.
 func (s *Service) markJoined(ctx context.Context, k nodeKit, in cloud.Instance) error {
