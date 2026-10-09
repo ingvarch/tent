@@ -13,6 +13,7 @@ import (
 
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/cloud"
+	"github.com/ingvarch/tent/internal/nodeconfig"
 	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/pki"
 )
@@ -248,6 +249,104 @@ func TestBootClientFailedCreateDoesNotMatchErrNotSent(t *testing.T) {
 	}
 	if len(nodes.creates) != 1 {
 		t.Errorf("bootClient asked the cloud for %d machines, want 1", len(nodes.creates))
+	}
+}
+
+// serverCreate is the create of a server node of the group servers.
+func serverCreate() NodeChange {
+	return NodeChange{
+		Action: NodeCreate, Name: "prod-servers-0", Group: "servers", Role: v1alpha1.RoleServer, Zone: "ams",
+		MachineType: "vc2-2c-4gb", Image: "ubuntu-24.04", SpecHash: "hash",
+	}
+}
+
+// TestBootServerCreatesTheNodeWithTheSeedAndNoIntroToken checks that the user data of a server holds the seed that the
+// join point gives for a node that is not a client and no intro token, that the join point's API is not used, and that
+// the create carries the change's operation id.
+func TestBootServerCreatesTheNodeWithTheSeedAndNoIntroToken(t *testing.T) {
+	t.Parallel()
+	var steps []string
+	nodes := &recordingNodes{}
+	seed := []netip.Addr{netip.MustParseAddr("10.10.0.5"), netip.MustParseAddr("10.10.0.6")}
+	// A call of nomadAPI fails the create, so a server that asks for the API fails the test.
+	join := &joinStub{addrs: seed, apiErr: errors.New("a server needs no API")}
+	c := serverCreate()
+	c.Op = "4f6a2d5e-8c3b-4d1e-9a7f-0b2c3d4e5f60"
+
+	in, err := testService(&steps).bootServer(t.Context(), testKit(t, nodes), join, c)
+
+	if err != nil {
+		t.Fatalf("bootServer: %v", err)
+	}
+	if in.Name != c.Name || in.ID != "id-1" {
+		t.Errorf("bootServer returned the machine %+v, want the one that the cloud created", in)
+	}
+	if diff := cmp.Diff([]string{c.Name}, join.seedFor); diff != "" || join.asClient[0] {
+		t.Errorf("the seed was asked for (-want +got):\n%s\nas a client: %v", diff, join.asClient)
+	}
+	if len(nodes.creates) != 1 {
+		t.Fatalf("bootServer asked the cloud for %d machines, want 1", len(nodes.creates))
+	}
+	got := nodes.creates[0]
+	if got.Cluster != "prod" || got.Op != c.Op || got.Name != c.Name || got.Group != "servers" ||
+		got.SpecHash != "hash" {
+		t.Errorf("the create request is %+v, want the kit's cluster, the change's operation id, name, group and spec "+
+			"hash", got)
+	}
+	nc, err := nodeconfig.Decode(payloadOf(t, got.UserData))
+	if err != nil {
+		t.Fatalf("the NodeConfig in the user data: %v", err)
+	}
+	if diff := cmp.Diff(seed, nc.Join.Servers, cmpopts.EquateComparable(netip.Addr{})); diff != "" {
+		t.Errorf("the servers that the node joins (-want +got):\n%s", diff)
+	}
+	for _, f := range nc.Files {
+		if f.Path == nodeconfig.IntroTokenFile {
+			t.Errorf("the NodeConfig of a server holds the file %s", f.Path)
+		}
+	}
+	if diff := cmp.Diff([]string{"create prod-servers-0 started", "create prod-servers-0 done"}, steps); diff != "" {
+		t.Errorf("the steps (-want +got):\n%s", diff)
+	}
+}
+
+// TestBootServerFailsBeforeTheCloudIsAsked checks that a failure of the seed is reported as a failed create with its
+// own text, calls no cloud, and matches errNotSent and its cause.
+func TestBootServerFailsBeforeTheCloudIsAsked(t *testing.T) {
+	t.Parallel()
+	var steps []string
+	seedErr := errors.New("no server has a private address")
+	nodes := &recordingNodes{}
+
+	_, err := testService(&steps).bootServer(t.Context(), testKit(t, nodes), &joinStub{seedErr: seedErr}, serverCreate())
+
+	if !errors.Is(err, errNotSent) || !errors.Is(err, seedErr) || err.Error() != seedErr.Error() {
+		t.Fatalf("bootServer error = %v, want the seed's error that also matches errNotSent", err)
+	}
+	if len(nodes.creates) != 0 {
+		t.Errorf("bootServer asked the cloud for %d machines, want none", len(nodes.creates))
+	}
+	wantSteps := []string{"create prod-servers-0 started", "create prod-servers-0 failed: " + seedErr.Error()}
+	if diff := cmp.Diff(wantSteps, steps); diff != "" {
+		t.Errorf("the steps (-want +got):\n%s", diff)
+	}
+}
+
+// TestBootServerFailedCreateDoesNotMatchErrNotSent checks that a failure of the cloud's create does not match
+// errNotSent, since the request may have reached the cloud, and keeps its text.
+func TestBootServerFailedCreateDoesNotMatchErrNotSent(t *testing.T) {
+	t.Parallel()
+	var steps []string
+	boom := errors.New("the cloud refused")
+	nodes := &recordingNodes{createErr: boom}
+
+	_, err := testService(&steps).bootServer(t.Context(), testKit(t, nodes), &joinStub{}, serverCreate())
+
+	if !errors.Is(err, boom) || errors.Is(err, errNotSent) || err.Error() != boom.Error() {
+		t.Errorf("bootServer error = %v, want the cloud's error alone, not matching errNotSent", err)
+	}
+	if len(nodes.creates) != 1 {
+		t.Errorf("bootServer asked the cloud for %d machines, want 1", len(nodes.creates))
 	}
 }
 
