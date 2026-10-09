@@ -24,10 +24,10 @@ const nodeTimeout = 10 * time.Minute
 // set, it is an event of an infrastructure change. When Nomad is set, it is a step that works on Nomad, of an update or
 // of a rolling update, and Step and Err say how far it got and why it failed. When Going is set, a delete starts to
 // wait until the cloud stops listing that many nodes that it deleted. Otherwise it is a step of the node change Node;
-// for NodeScrub, which no plan holds, Node has only the action, the name and the machine's ID, and Instance is zero.
-// Err says why a failed step failed. Instance is the machine of a create or a wait that is done, as the provider
-// reports it, with its ID and its private address when the cloud gave one; it is the zero Instance for the other
-// steps.
+// for NodeScrub and NodeStop, which no plan holds, Node has only the action, the name and the machine's ID, and
+// Instance is zero. Err says why a failed step failed. Instance is the machine of a create or a wait that is done, as
+// the provider reports it, with its ID and its private address when the cloud gave one; it is the zero Instance for
+// the other steps.
 type Progress struct {
 	Infra    *engine.Event
 	Going    int
@@ -63,12 +63,25 @@ const (
 	NomadDown
 	// NomadPurge purges a node from Nomad.
 	NomadPurge
+	// NomadVote waits until a new server votes.
+	NomadVote
+	// NomadStable waits until the servers have been stable for the window in which every node learns of them.
+	NomadStable
+	// NomadTransfer moves the leadership to another server.
+	NomadTransfer
+	// NomadServerDown waits until autopilot no longer counts a stopped server as a healthy voter.
+	NomadServerDown
+	// NomadRemovePeer removes a server from the Raft configuration.
+	NomadRemovePeer
+	// NomadForceLeave forces a server out of the gossip pool.
+	NomadForceLeave
 )
 
 var nomadActionNames = [...]string{
 	NomadLeader: "leader", NomadBootstrap: "bootstrap", NomadHealthy: "healthy", NomadRegister: "register",
 	NomadKeyring: "keyring", NomadIneligible: "ineligible", NomadDrain: "drain", NomadDrained: "drained",
-	NomadDown: "down", NomadPurge: "purge",
+	NomadDown: "down", NomadPurge: "purge", NomadVote: "vote", NomadStable: "stable", NomadTransfer: "transfer",
+	NomadServerDown: "server-down", NomadRemovePeer: "remove-peer", NomadForceLeave: "force-leave",
 }
 
 // String returns the action's name in lower case, such as leader.
@@ -82,15 +95,18 @@ func (a NomadAction) String() string {
 // MarshalText returns the action's name, as String does.
 func (a NomadAction) MarshalText() ([]byte, error) { return []byte(a.String()), nil }
 
-// NomadEvent is what a step that works on Nomad works on. Node names the node that a register, ineligible, drain,
-// drained, down or purge step works on. Address is that node's address, for a down and a purge step. Deadline is the
-// deadline of the drain that a drain step starts. Leader is the leader's RPC address once a leader wait is done. Voters
-// is how many healthy servers a healthy wait waits for, and once it is done how many of them vote.
+// NomadEvent is what a step that works on Nomad works on. Node names the node that a register, vote, ineligible, drain,
+// drained, down, purge, transfer, server-down or remove-peer step works on; for a force-leave step it is the member's
+// name in the gossip pool. Address is that node's address, for a down and a purge step. Deadline is the deadline of the
+// drain that a drain step starts. Until is when the window of a stable step ends. Leader is the leader's RPC address
+// once a leader wait is done, and for a transfer the node name of the server that takes the leadership. Voters is how
+// many healthy servers a healthy wait waits for, and once it is done how many of them vote.
 type NomadEvent struct {
 	Action   NomadAction
 	Node     string
 	Address  string
 	Deadline time.Duration
+	Until    time.Time
 	Leader   string
 	Voters   int
 }
@@ -490,8 +506,8 @@ func (s *Service) applyOptions() engine.ApplyOptions {
 	return engine.ApplyOptions{OnEvent: func(e engine.Event) { s.progress(Progress{Infra: &e}) }}
 }
 
-// applyNode carries out the delete c of a node of the cluster and reports its steps, as applyNodeWith does. It has no
-// user data to boot a machine with, so a create or a wait fails.
+// applyNode carries out the node change c of the cluster, which is a delete or a stop, and reports its steps, as
+// applyNodeWith does. It has no user data to boot a machine with, so a create or a wait fails.
 func (s *Service) applyNode(ctx context.Context, nodes cloud.Nodes, cluster string, c NodeChange) error {
 	_, err := s.applyNodeWith(ctx, nodes, cluster, c, nil)
 	return err
@@ -517,8 +533,8 @@ func (s *Service) applyNodeWith(ctx context.Context, nodes cloud.Nodes, cluster 
 }
 
 // changeNode carries out the node change c of the cluster: a create with its operation id, or with a new one when it
-// has none; a wait, which repeats the create of the machine with its operation id; or a delete. It returns the machine
-// of a create or a wait.
+// has none; a wait, which repeats the create of the machine with its operation id; a delete; or a stop. It returns the
+// machine of a create or a wait.
 func changeNode(ctx context.Context, nodes cloud.Nodes, cluster string, c NodeChange,
 	prepare func(context.Context) (cloud.UserData, error),
 ) (cloud.Instance, error) {
@@ -533,6 +549,8 @@ func changeNode(ctx context.Context, nodes cloud.Nodes, cluster string, c NodeCh
 		return createNode(ctx, nodes, cluster, c, c.Op, prepare)
 	case NodeDelete:
 		return cloud.Instance{}, nodes.Delete(ctx, cloud.Instance{ID: c.ID, Name: c.Name, Cluster: cluster})
+	case NodeStop:
+		return cloud.Instance{}, nodes.Stop(ctx, cloud.Instance{ID: c.ID, Name: c.Name, Cluster: cluster})
 	}
 	return cloud.Instance{}, fmt.Errorf("node %s: unknown change %s", c.Name, c.Action)
 }

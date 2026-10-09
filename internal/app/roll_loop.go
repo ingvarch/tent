@@ -9,6 +9,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/rollout"
@@ -21,16 +22,21 @@ const (
 	downTimeout    = 6 * time.Minute // how long a wait for Nomad to list a node as down lasts
 	pendingTimeout = time.Minute     // how long the lists may miss a machine that the run created
 	repeatLimit    = 3               // how often a step is tried in a row before the run ends
+	// stableTimeout is how long one wait for the stability window lasts: the window is the refresh interval plus 10 s.
+	stableTimeout = 5 * time.Minute
+	// serverDownTimeout is how long a wait for autopilot to stop counting a stopped server lasts: Serf marked a killed
+	// server failed after 36 to 66 s.
+	serverDownTimeout = 5 * time.Minute
 )
 
 // rollAgain is what the operator does after a wait ran out.
 const rollAgain = "run tent rolling-update cluster again to go on waiting"
 
-// stepKey names a step by its action, its group, the machine or the node it acts on; the machine of a create by its
-// name, which is all it has yet.
+// stepKey names a step by its action, its group, the machine or the node it acts on, and the server or the member that
+// it moves the leadership to, removes or forces out; the machine of a create by its name, which is all it has yet.
 type stepKey struct {
-	action               rollout.Action
-	group, machine, node string
+	action                               rollout.Action
+	group, machine, node, server, member string
 }
 
 // keyOf returns the key of the step.
@@ -39,7 +45,10 @@ func keyOf(step rollout.Step) stepKey {
 	if step.Action == rollout.Create {
 		machine = step.Machine.Name
 	}
-	return stepKey{action: step.Action, group: step.Group, machine: machine, node: step.Node.ID}
+	return stepKey{
+		action: step.Action, group: step.Group, machine: machine, node: step.Node.ID, server: step.Server.ID,
+		member: step.Member.Name,
+	}
 }
 
 // seenWait is a wait that the run has met: the step and when the run first met it.
@@ -61,8 +70,11 @@ type openWait struct {
 	event NomadEvent
 }
 
-// over reports whether the reading shows what the wait waits for. The decisions may give other steps while it is open,
-// and the wait goes on until then.
+// over reports whether the reading shows what the wait waits for. A stopped server's wait is over once autopilot no
+// longer counts it a healthy voter; the wait for the servers of a server or combined group once autopilot reports them
+// healthy and as many vote as the step says, and that of a client group once each reports a version; the window as
+// soon as the decisions give another step. The decisions may give other steps while a wait is open, and the wait goes
+// on until then.
 func (w openWait) over(r *rollRun, reading nomadReading) bool {
 	nomad := reading.state()
 	nodes := nomad.Nodes
@@ -75,7 +87,12 @@ func (w openWait) over(r *rollRun, reading nomadReading) bool {
 		return node < 0 || nodes[node].Status == "down" || nodes[node].DrainedFor == w.step.Machine.ID
 	case rollout.WaitNodeDown:
 		return node < 0 || nodes[node].Status == "down"
+	case rollout.WaitServerDown:
+		return !healthyVoterAt(nomad.Servers, w.step.Machine.PrivateIP)
 	case rollout.WaitHealthy:
+		if r.group(w.step.Group).Role.RunsServer() {
+			return nomad.Healthy && voting(nomad.Servers) == w.step.Voters
+		}
 		return !slices.ContainsFunc(nomad.Servers, func(s rollout.Server) bool { return s.Version == "" })
 	}
 	return true
@@ -100,6 +117,7 @@ type rollLoop struct {
 	lastErr  error                     // why the last try failed; nil when it did not
 	settled  bool                      // the loop waited a poll since the last try
 	relist   bool                      // the next observation lists the machines
+	listing  bool                      // the last observation listed the machines
 	failing  time.Time                 // since when the reads of Nomad fail in a row; zero when they do not
 	open     *openWait
 	rolled   rollTally
@@ -146,6 +164,10 @@ func (r *rollRun) loop(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if r.needsList(step) {
+			r.relist = true
+			continue
+		}
 		if r.open != nil && r.open.key != keyOf(step) && r.open.over(r, reading) {
 			r.endWait(nil)
 		}
@@ -157,7 +179,7 @@ func (r *rollRun) loop(ctx context.Context) error {
 		if step.Action == rollout.Done {
 			return nil
 		}
-		if err := r.refuseRole(step); err != nil {
+		if err := r.refuseRole(step, false); err != nil {
 			return err
 		}
 		if step.Action.Waits() {
@@ -169,6 +191,15 @@ func (r *rollRun) loop(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+// needsList reports whether the step must wait for an observation that lists the machines: a stop or a transfer of the
+// leadership that was decided on an observation that did not. The list may be older than a wait of a minute, and a
+// server that someone halted meanwhile still reads healthy in autopilot's report, so that stopping a server or
+// handing over the leadership on that list could take a second voter out of the quorum. The first observation of a
+// run does not list: it uses the list that prepared the run.
+func (r *rollRun) needsList(step rollout.Step) bool {
+	return !r.listing && (step.Action == rollout.Stop || step.Action == rollout.TransferLeadership)
 }
 
 // machines returns the machines of the last list and those that the run created and no list has shown yet.
@@ -190,10 +221,11 @@ func (r *rollRun) group(name string) rollout.Group {
 }
 
 // observe lists the machines when the last step changed them, or a machine that the run created is not listed yet or a
-// machine that it deleted still is, and reads Nomad. It returns false, and no error, for reads that no server answered,
-// until they have failed for nomadTimeout.
+// machine that it deleted still is, and reads Nomad; it notes in listing whether it listed. It returns false, and no
+// error, for reads that no server answered, until they have failed for nomadTimeout.
 func (r *rollRun) observe(ctx context.Context) (nomadReading, bool, error) {
-	if r.relist || len(r.pending) > 0 || len(r.deleting) > 0 {
+	r.listing = r.relist || len(r.pending) > 0 || len(r.deleting) > 0
+	if r.listing {
 		if err := r.list(ctx); err != nil {
 			return nomadReading{}, false, err
 		}
@@ -263,6 +295,9 @@ func (r *rollRun) waitOf(step rollout.Step) (rollWait, error) {
 	m, n := step.Machine, step.Node
 	switch step.Action {
 	case rollout.WaitJoined:
+		if joinsByVote(m.Role) {
+			return rollWait{NomadEvent{Action: NomadVote, Node: m.Name}, nodeTimeout, "node " + m.Name, "vote"}, nil
+		}
 		return rollWait{NomadEvent{Action: NomadRegister, Node: m.Name}, nodeTimeout, "node " + m.Name, "join"}, nil
 	case rollout.WaitDrained:
 		g := r.group(step.Group)
@@ -278,18 +313,32 @@ func (r *rollRun) waitOf(step rollout.Step) (rollWait, error) {
 		return rollWait{
 			NomadEvent{Action: NomadHealthy, Voters: step.Voters}, nomadTimeout, "the servers", "become healthy and vote",
 		}, nil
+	case rollout.WaitStable:
+		return rollWait{
+			NomadEvent{Action: NomadStable, Until: step.Until}, stableTimeout, "the servers", "become stable",
+		}, nil
+	case rollout.WaitServerDown:
+		return rollWait{
+			NomadEvent{Action: NomadServerDown, Node: m.Name}, serverDownTimeout, "autopilot",
+			"stop counting " + m.Name + " as a healthy voter",
+		}, nil
 	}
 	return rollWait{}, fmt.Errorf("no deadline for the wait %s", step)
 }
 
 // showing says what the reading of Nomad shows of what the wait step waits for.
 func showing(step rollout.Step, reading nomadReading) string {
-	if step.Action == rollout.WaitHealthy {
+	switch {
+	case step.Action == rollout.WaitHealthy:
 		state := "healthy"
 		if !reading.health.Healthy {
 			state = "not healthy"
 		}
 		return fmt.Sprintf("autopilot reports %d voters and the servers %s", reading.health.Voters, state)
+	case step.Action == rollout.WaitStable:
+		return "the window ends at " + step.Until.UTC().Format(time.TimeOnly)
+	case step.Action == rollout.WaitServerDown || step.Action == rollout.WaitJoined && joinsByVote(step.Machine.Role):
+		return showingServer(step, reading)
 	}
 	i := slices.IndexFunc(reading.nodes, func(n nomadops.Node) bool {
 		if step.Action == rollout.WaitJoined {
@@ -339,12 +388,15 @@ func (r *rollRun) poll(ctx context.Context, step rollout.Step, reading nomadRead
 }
 
 // joinPoll does what joinCheck says to the machine of the wait for a node to join: it repeats the machine's create,
-// scrubs it, or does nothing.
+// scrubs it, or does nothing. A server is also scrubbed once its server votes and autopilot counts it healthy.
 func (r *rollRun) joinPoll(ctx context.Context, step rollout.Step, reading nomadReading) error {
 	in, _ := instanceByID(r.machines(), step.Machine.ID)
 	what, err := joinCheck(in, reading.nodes, r.s.now())
 	if err != nil {
 		return err
+	}
+	if what == joinWait && joinsByVote(in.Role) && healthyVoterAt(reading.state().Servers, in.PrivateIP) {
+		what = joinScrub
 	}
 	switch what {
 	case joinCreate:
@@ -361,7 +413,7 @@ func (r *rollRun) repeatCreate(ctx context.Context, in cloud.Instance) error {
 	g, _ := findGroup(r.model, in.Group)
 	c, _ := waitFor(g, in)
 	c.SpecHash = r.group(in.Group).SpecHash
-	made, err := r.s.bootClient(ctx, r.kit, r, c)
+	made, err := r.boot(ctx, c)
 	if err != nil {
 		return err
 	}
@@ -480,6 +532,19 @@ func (r *rollRun) carry(ctx context.Context, step rollout.Step) error {
 		})
 	case rollout.Delete:
 		return r.remove(ctx, step.Machine)
+	case rollout.Stop:
+		return r.stop(ctx, step.Machine)
+	case rollout.TransferLeadership:
+		event := NomadEvent{Action: NomadTransfer, Node: step.Machine.Name, Leader: nodeOfServer(step.Server.Name)}
+		return r.write(event, func() error { return r.api.TransferLeadership(ctx, step.Server.ID) })
+	case rollout.RemovePeer:
+		return r.write(NomadEvent{Action: NomadRemovePeer, Node: step.Machine.Name}, func() error {
+			return r.api.RemovePeer(ctx, step.Server.ID)
+		})
+	case rollout.ForceLeave:
+		return r.write(NomadEvent{Action: NomadForceLeave, Node: step.Member.Name}, func() error {
+			return r.api.ForceLeave(ctx, step.Member.Name)
+		})
 	case rollout.Purge:
 		return r.write(NomadEvent{Action: NomadPurge, Node: n.Name, Address: n.Address.String()}, func() error {
 			return counted(r.rolled.purged, n.ID, r.api.Purge(ctx, n.ID))
@@ -512,10 +577,19 @@ func (r *rollRun) createChange(step rollout.Step) NodeChange {
 	}
 }
 
+// boot creates the machine of c, or repeats its create, as the machine's role says: a client with an intro token, any
+// other node with the seed alone.
+func (r *rollRun) boot(ctx context.Context, c NodeChange) (cloud.Instance, error) {
+	if c.Role == v1alpha1.RoleClient {
+		return r.s.bootClient(ctx, r.kit, r, c)
+	}
+	return r.s.bootServer(ctx, r.kit, r, c)
+}
+
 // create creates the machine of the step and keeps it among the pending machines until a list shows it.
 func (r *rollRun) create(ctx context.Context, step rollout.Step) error {
 	c := r.createChange(step)
-	in, err := r.s.bootClient(ctx, r.kit, r, c)
+	in, err := r.boot(ctx, c)
 	if err != nil {
 		return err
 	}

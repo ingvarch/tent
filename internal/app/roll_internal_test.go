@@ -174,6 +174,12 @@ func TestJoinCheck(t *testing.T) {
 		{"a machine with no creation time is never old", machine(func(in *cloud.Instance) {
 			in.Created = time.Time{}
 		}), nil, joinWait, ""},
+		{"a server without an address fails the wait", machine(func(in *cloud.Instance) {
+			in.Role, in.PrivateIP = v1alpha1.RoleServer, netip.Addr{}
+		}), nil, 0, noAddress},
+		{"a server that is not ready is created again with its operation id", machine(func(in *cloud.Instance) {
+			in.Role, in.Ready, in.PrivateIP = v1alpha1.RoleServer, false, netip.Addr{}
+		}), nil, joinCreate, ""},
 		{"an old server is waited for", machine(func(in *cloud.Instance) {
 			in.Role = v1alpha1.RoleServer
 			old(in)

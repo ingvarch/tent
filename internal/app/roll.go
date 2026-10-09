@@ -307,10 +307,10 @@ func (r *rollRun) state(reading nomadReading) rollout.State {
 	}
 }
 
-// refuse returns why the run cannot carry out the step, or nil: see refuseRole. A wait for a machine to join is refused
-// as its first poll would refuse it, given the nodes that Nomad lists.
+// refuse returns why the run cannot carry out the step, or nil: see refuseRole, which refuses server groups here too. A
+// wait for a machine to join is refused as its first poll would refuse it, given the nodes that Nomad lists.
 func (r *rollRun) refuse(step rollout.Step, nodes []nomadops.Node) error {
-	if err := r.refuseRole(step); err != nil || step.Action != rollout.WaitJoined {
+	if err := r.refuseRole(step, true); err != nil || step.Action != rollout.WaitJoined {
 		return err
 	}
 	in, _ := instanceByID(r.listed, step.Machine.ID)
@@ -318,17 +318,22 @@ func (r *rollRun) refuse(step rollout.Step, nodes []nomadops.Node) error {
 	return err
 }
 
-// refuseRole returns why the run cannot carry out the step of a group of its role, or nil. A roll replaces no server
-// yet.
-func (r *rollRun) refuseRole(step rollout.Step) error {
-	if g, _ := findGroup(r.model, step.Group); g.Role != v1alpha1.RoleClient {
-		msg := fmt.Sprintf("node group %s: tent cannot roll server and combined groups yet", step.Group)
-		if r.model.HasClientGroup() {
-			msg += "; select client groups with --nodegroups"
-		}
-		return errors.New(msg)
+// refuseRole returns why the run cannot carry out the step of a group of its role, or nil. A roll replaces no combined
+// group yet; with servers it replaces no server group either.
+func (r *rollRun) refuseRole(step rollout.Step, servers bool) error {
+	g, _ := findGroup(r.model, step.Group)
+	if g.Role == v1alpha1.RoleClient || g.Role == v1alpha1.RoleServer && !servers {
+		return nil
 	}
-	return nil
+	what := "combined"
+	if servers {
+		what = "server and combined"
+	}
+	msg := fmt.Sprintf("node group %s: tent cannot roll %s groups yet", step.Group, what)
+	if r.model.HasClientGroup() {
+		msg += "; select client groups with --nodegroups"
+	}
+	return errors.New(msg)
 }
 
 // joinStep is what a poll of the wait for a new node to join does.
