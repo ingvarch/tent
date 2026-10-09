@@ -155,6 +155,14 @@ var scenarios = []scenario{
 		w.stopMachine("prod-servers-2")
 		return w.arm()
 	}},
+	{"servers_two_ahead", rollout.Roll, func() *world {
+		w := newWorld(curVersion)
+		w.addGroup(serversGroup(3))
+		for _, hash := range []string{oldHash, oldHash, oldHash, newHash, newHash} {
+			w.addServer(hash, curVersion)
+		}
+		return w.arm()
+	}},
 	{"combined3", rollout.Roll, func() *world { return outdatedCombined(3) }},
 	{"cluster", rollout.Roll, func() *world {
 		w := outdatedServers(3)

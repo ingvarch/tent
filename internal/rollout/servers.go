@@ -188,7 +188,7 @@ func (sg *serverGroup) removeServer(v Machine) (Step, error) {
 	default:
 		voters := sg.withServer() // the victim has none here: it is not a voter and has no peer
 		if !sg.s.Nomad.Healthy || sg.voters != voters {
-			return Step{Action: WaitHealthy, Group: sg.g.Name, Voters: voters}, nil
+			return Step{Action: WaitHealthy, Group: sg.g.Name, Machine: v, Voters: voters}, nil
 		}
 		step.Action = Delete
 	}
@@ -312,7 +312,7 @@ func (sg *serverGroup) notServing(m Machine) string {
 }
 
 // waitStable returns the wait until every voter but the victim's has been stable for the stability window, so that
-// every node has refreshed its list of servers since the servers last changed.
+// every node has refreshed its list of servers since the servers last changed. The step names the victim.
 func (sg *serverGroup) waitStable(v Machine) (Step, bool) {
 	var latest time.Time
 	for _, srv := range sg.s.Nomad.Servers {
@@ -324,7 +324,7 @@ func (sg *serverGroup) waitStable(v Machine) (Step, bool) {
 	if !until.After(sg.s.Now) {
 		return Step{}, false
 	}
-	return Step{Action: WaitStable, Group: sg.g.Name, Until: until}, true
+	return Step{Action: WaitStable, Group: sg.g.Name, Machine: v, Until: until}, true
 }
 
 // settleOrphans purges the node that a deleted machine of a combined group leaves behind, once Nomad lists it down,

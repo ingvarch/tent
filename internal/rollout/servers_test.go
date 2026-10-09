@@ -255,10 +255,10 @@ func TestServerRuleS5CreatesAServerWhenAnOutdatedOneIsLeft(t *testing.T) {
 			checkOutcome(t, nextRoll(t, s), outcome{Action: rollout.Create, Group: "servers",
 				Machine: serverName(3), Zone: "fra"})
 		})
-	t.Run("a name that is free below the others is used", func(t *testing.T) {
+	t.Run("a name below the highest is not used again", func(t *testing.T) {
 		s := roll()
 		machineOf(t, &s, serverName(2)).Name = serverName(3)
-		checkOutcome(t, nextRoll(t, s), outcome{Action: rollout.Create, Group: "servers", Machine: serverName(2),
+		checkOutcome(t, nextRoll(t, s), outcome{Action: rollout.Create, Group: "servers", Machine: serverName(4),
 			Zone: "ams"})
 	})
 	t.Run("a new Nomad version is no reason to wait for the clients", func(t *testing.T) {
@@ -274,6 +274,118 @@ func TestServerRuleS5CreatesAServerWhenAnOutdatedOneIsLeft(t *testing.T) {
 		checkOutcome(t, nextRoll(t, s), outcome{Action: rollout.Create, Group: "servers", Machine: serverName(3),
 			Zone: "fra"})
 	})
+}
+
+// renameNode gives the machine, the server, the member and the client node of node i the name of node j.
+func renameNode(s *rollout.State, i, j int) {
+	from, to := serverName(i), serverName(j)
+	for k := range s.Machines {
+		if s.Machines[k].Name == from {
+			s.Machines[k].Name = to
+		}
+	}
+	for k := range s.Nomad.Servers {
+		if s.Nomad.Servers[k].Name == from+".global" {
+			s.Nomad.Servers[k].Name = to + ".global"
+		}
+	}
+	for k := range s.Nomad.Members {
+		if s.Nomad.Members[k].Name == from+".global" {
+			s.Nomad.Members[k].Name = to + ".global"
+		}
+	}
+	for k := range s.Nomad.Nodes {
+		if s.Nomad.Nodes[k].Name == from {
+			s.Nomad.Nodes[k].Name = to
+		}
+	}
+}
+
+// A new server or combined node takes the index above the highest that the group's name pattern has in any listed
+// machine, server or member, so it never takes a name at or below one of theirs.
+func TestNewServerNameIsAboveEveryIndexTheGroupHas(t *testing.T) {
+	bases := []struct {
+		name string
+		base func() rollout.State
+	}{
+		{"server group", func() rollout.State { return serversState(3) }},
+		{"combined group", func() rollout.State { return combinedState(3) }},
+	}
+	// Each build leaves server 0 outdated, so the next step creates a server; want is the index of its name.
+	tests := []struct {
+		name  string
+		build func(s *rollout.State)
+		want  int
+	}{
+		{"machines 0 to 2", func(*rollout.State) {}, 3},
+		{"machines 1 to 3", func(s *rollout.State) { renameNode(s, 0, 3) }, 4},
+		{"machines 0, 1 and 3", func(s *rollout.State) { renameNode(s, 2, 3) }, 4},
+		{"a member above every machine", func(s *rollout.State) {
+			s.Nomad.Members = append(s.Nomad.Members, rollout.Member{Name: serverName(7) + ".global",
+				Address: ip(40), Status: "failed"})
+		}, 8},
+		{"a member without a region suffix", func(s *rollout.State) {
+			s.Nomad.Members = append(s.Nomad.Members, rollout.Member{Name: serverName(5), Address: ip(40),
+				Status: "failed"})
+		}, 6},
+		{"a server of the Raft configuration above every machine", func(s *rollout.State) {
+			s.Nomad.Servers = append(s.Nomad.Servers, rollout.Server{ID: "r-9", Name: serverName(6) + ".global",
+				Address: netip.AddrPortFrom(ip(41), 4647), Healthy: true, Version: "2.0.7"})
+		}, 7},
+		{"a machine above every server and member", func(s *rollout.State) {
+			m := &s.Machines[2]
+			for k := range s.Nomad.Nodes {
+				if s.Nomad.Nodes[k].Name == m.Name {
+					s.Nomad.Nodes[k].Name = serverName(9)
+				}
+			}
+			m.Name = serverName(9)
+		}, 10},
+		{"names that are not of the group's pattern", func(s *rollout.State) {
+			for _, name := range []string{
+				"prod-servers-x", "prod-servers-", "prod-servers--9", "prod-servers-+9", "prod-servers-9-b",
+				"prod-servers-4294967296",
+				"prod-servers-99999999999999999999", "other-servers-9", "prod-workers-9", "servers-9", "prod-servers9",
+			} {
+				s.Nomad.Members = append(s.Nomad.Members, rollout.Member{Name: name + ".global", Address: ip(40),
+					Status: "failed"})
+				s.Nomad.Servers = append(s.Nomad.Servers, rollout.Server{ID: "r-" + name, Name: name + ".global",
+					Address: netip.AddrPortFrom(ip(41), 4647), Healthy: true, Version: "2.0.7"})
+			}
+		}, 3},
+	}
+	for _, b := range bases {
+		for _, tt := range tests {
+			t.Run(b.name+": "+tt.name, func(t *testing.T) {
+				s := b.base()
+				s.Machines[0].SpecHash = oldHash
+				tt.build(&s)
+				checkOutcome(t, nextRoll(t, s), outcome{Action: rollout.Create, Group: "servers",
+					Machine: serverName(tt.want), Zone: "ams"})
+			})
+		}
+	}
+}
+
+// A server group of three with five machines, three of them outdated, loses two outdated servers before it creates
+// another, which takes a name above every name that the group had.
+func TestAServerGroupAboveItsSizeByTwoRemovesBeforeItCreates(t *testing.T) {
+	s := serversState(3)
+	for i := range 3 {
+		s.Machines[i].SpecHash = oldHash
+	}
+	addServerNode(&s, 3, newHash)
+	addServerNode(&s, 4, newHash)
+	// Zone ams holds three machines and fra two, so the outdated server in ams that does not lead goes first.
+	checkServerStep(t, nextRoll(t, s), serverOutcome{Action: rollout.Stop, Machine: serverName(2)})
+	// Server 2 is gone: four machines, two outdated, two in each zone.
+	s.Machines = append(s.Machines[:2], s.Machines[3:]...)
+	dropPeerAndMember(t, &s, 2)
+	checkServerStep(t, nextRoll(t, s), serverOutcome{Action: rollout.Stop, Machine: serverName(1)})
+	// Server 1 is gone too: three machines, one outdated, and the next create takes the next name.
+	s.Machines = append(s.Machines[:1], s.Machines[2:]...)
+	dropPeerAndMember(t, &s, 1)
+	checkOutcome(t, nextRoll(t, s), outcome{Action: rollout.Create, Group: "servers", Machine: serverName(5), Zone: "ams"})
 }
 
 func TestServerRuleS6IsDoneWhenNothingIsOutdated(t *testing.T) {
@@ -397,13 +509,13 @@ func TestServerRuleAWaitsForTheStabilityWindow(t *testing.T) {
 	runServerCases(t, midRoll, []serverCase{
 		{"one second short of the window", func(t *testing.T, s *rollout.State) {
 			since(t, s, 3, window-time.Second)
-		}, serverOutcome{Action: rollout.WaitStable, Until: epoch.Add(time.Second)}},
+		}, serverOutcome{Action: rollout.WaitStable, Machine: serverName(1), Until: epoch.Add(time.Second)}},
 		{"exactly the window", func(t *testing.T, s *rollout.State) { since(t, s, 3, window) }, stop},
 		{"the latest voter decides", func(t *testing.T, s *rollout.State) {
 			since(t, s, 0, 30*time.Second)
 			since(t, s, 2, 50*time.Second)
 			since(t, s, 3, 20*time.Second)
-		}, serverOutcome{Action: rollout.WaitStable, Until: epoch.Add(window - 20*time.Second)}},
+		}, serverOutcome{Action: rollout.WaitStable, Machine: serverName(1), Until: epoch.Add(window - 20*time.Second)}},
 		{"the victim's own server does not count", func(t *testing.T, s *rollout.State) {
 			since(t, s, 1, 0)
 		}, stop},
@@ -414,11 +526,11 @@ func TestServerRuleAWaitsForTheStabilityWindow(t *testing.T) {
 		{"the window is the refresh interval plus ten seconds", func(t *testing.T, s *rollout.State) {
 			s.Refresh = 2 * time.Minute
 			since(t, s, 3, window)
-		}, serverOutcome{Action: rollout.WaitStable, Until: epoch.Add(time.Minute)}},
+		}, serverOutcome{Action: rollout.WaitStable, Machine: serverName(1), Until: epoch.Add(time.Minute)}},
 		{"a leader victim waits too, before its transfer", func(t *testing.T, s *rollout.State) {
 			s.Machines[1].SpecHash, s.Machines[2].SpecHash = newHash, newHash
 			since(t, s, 3, 0)
-		}, serverOutcome{Action: rollout.WaitStable, Until: epoch.Add(window)}},
+		}, serverOutcome{Action: rollout.WaitStable, Machine: serverName(0), Until: epoch.Add(window)}},
 	})
 	t.Run("the checks at rest come before the window", func(t *testing.T) {
 		s := midRoll()
@@ -591,27 +703,27 @@ func TestServerRemovalOfAStoppedServer(t *testing.T) {
 			dropServerPeer(t, s, 1)
 			serverMember(t, s, 1).Status = "leaving"
 			s.Nomad.Healthy = false
-		}, serverOutcome{Action: rollout.WaitHealthy, Voters: 3}},
+		}, serverOutcome{Action: rollout.WaitHealthy, Machine: serverName(1), Voters: 3}},
 		{"k: the member is gone and autopilot is unhealthy", func(t *testing.T, s *rollout.State) {
 			dropPeerAndMember(t, s, 1)
 			s.Nomad.Healthy = false
-		}, serverOutcome{Action: rollout.WaitHealthy, Voters: 3}},
+		}, serverOutcome{Action: rollout.WaitHealthy, Machine: serverName(1), Voters: 3}},
 		{"k: autopilot is healthy and two servers vote", func(t *testing.T, s *rollout.State) {
 			dropPeerAndMember(t, s, 1)
 			serverNode(t, s, 2).Voter = false
-		}, serverOutcome{Action: rollout.WaitHealthy, Voters: 3}},
+		}, serverOutcome{Action: rollout.WaitHealthy, Machine: serverName(1), Voters: 3}},
 		{"k: autopilot is healthy and four servers vote", func(t *testing.T, s *rollout.State) {
 			dropServerPeer(t, s, 1)
 			serverMember(t, s, 1).Status = "left"
 			s.Nomad.Servers = append(s.Nomad.Servers, rollout.Server{ID: "r-9", Name: "x.global", Voter: true,
 				Healthy: true, Version: "2.0.7"})
-		}, serverOutcome{Action: rollout.WaitHealthy, Voters: 3}},
+		}, serverOutcome{Action: rollout.WaitHealthy, Machine: serverName(1), Voters: 3}},
 		{"k: two servers are gone, and one server of the others does not vote", func(t *testing.T, s *rollout.State) {
 			stopServer(t, s, 2)
 			dropPeerAndMember(t, s, 1)
 			dropPeerAndMember(t, s, 2)
 			serverNode(t, s, 3).Voter = false
-		}, serverOutcome{Action: rollout.WaitHealthy, Voters: 2}},
+		}, serverOutcome{Action: rollout.WaitHealthy, Machine: serverName(1), Voters: 2}},
 		{"l: two servers are gone and their peers with them: only the others vote", func(t *testing.T, s *rollout.State) {
 			stopServer(t, s, 2)
 			dropPeerAndMember(t, s, 1)

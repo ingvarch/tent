@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/netip"
 	"slices"
+	"strings"
 	"time"
 
 	"golang.org/x/mod/semver"
@@ -82,6 +83,9 @@ type world struct {
 	reuseAddresses bool
 	// downAfter is how many ticks the node of a deleted machine stays ready; 0 means defaultDownAfter.
 	downAfter int
+	// named holds every name that a machine, a server or a member of the run has had; a new server or combined node
+	// may not take one of them.
+	named map[string]bool
 }
 
 func newWorld(version string) *world {
@@ -91,6 +95,7 @@ func newWorld(version string) *world {
 		version:     version,
 		keepsBudget: map[string]bool{},
 		startSize:   map[string]int{},
+		named:       map[string]bool{},
 	}
 }
 
@@ -108,7 +113,19 @@ func (w *world) clone() *world {
 		c.keepsBudget[k] = v
 	}
 	c.startSize = maps.Clone(w.startSize)
+	c.named = maps.Clone(w.named)
 	return &c
+}
+
+// noteNames records the names that the machines and members have now; a server has its machine's name. A run calls it
+// before each step, so a name that a step removes is recorded before.
+func (w *world) noteNames() {
+	for _, m := range w.machines {
+		w.named[m.Name] = true
+	}
+	for _, mem := range w.members {
+		w.named[strings.TrimSuffix(mem.name, ".global")] = true
+	}
 }
 
 func (w *world) newMachineID() string {
@@ -406,6 +423,9 @@ func (w *world) create(step rollout.Step) error {
 			}
 		}
 	}
+	if name := step.Machine.Name; g.Role.RunsServer() && w.named[name] {
+		return violated("%s: %s was the name of a machine, a server or a member before", step, name)
+	}
 	id := w.newMachineID()
 	w.machines = append(w.machines, simMachine{
 		Machine: rollout.Machine{
@@ -545,6 +565,7 @@ func appendLine(lines []string, step rollout.Step) []string {
 func (w *world) run(mode rollout.Mode, decide decider, keepSnapshots bool) (result, error) {
 	var res result
 	for range maxRunSteps {
+		w.noteNames()
 		var snap snapshot
 		if keepSnapshots {
 			snap.world = w.clone()

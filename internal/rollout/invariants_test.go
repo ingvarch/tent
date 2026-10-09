@@ -140,6 +140,29 @@ func TestRunBreaksOnInvariants(t *testing.T) {
 		}, func(w *world) []rollout.Step {
 			return []rollout.Step{w.machineStep(rollout.MarkIneligible, "prod-workers-0")}
 		}, "group servers is not done"},
+		{"a server is created under the name of a deleted machine", func() *world {
+			w := serverWorld(3)
+			w.failServer("prod-servers-1")
+			return w
+		}, func(w *world) []rollout.Step {
+			// The tick lets autopilot remove the peer of the failed server.
+			return []rollout.Step{
+				{Action: rollout.WaitJoined}, w.machineStep(rollout.Delete, "prod-servers-1"),
+				{Action: rollout.Create, Group: "servers", Machine: rollout.Machine{Name: "prod-servers-1", Zone: "ams"}},
+			}
+		}, "prod-servers-1 was the name of a machine, a server or a member before"},
+		{"a combined node is created under the name of a deleted machine", func() *world {
+			w := combinedWorld(3)
+			w.failServer("prod-control-1")
+			return w
+		}, func(w *world) []rollout.Step {
+			wait := rollout.Step{Action: rollout.WaitJoined}
+			return []rollout.Step{
+				wait, w.machineStep(rollout.Drain, "prod-control-1"), wait, wait,
+				w.machineStep(rollout.Delete, "prod-control-1"),
+				{Action: rollout.Create, Group: "control", Machine: rollout.Machine{Name: "prod-control-1", Zone: "ams"}},
+			}
+		}, "prod-control-1 was the name of a machine, a server or a member before"},
 		{"two machines get one name", func() *world { return outdatedWorkers(1, 0).arm() },
 			func(*world) []rollout.Step {
 				return []rollout.Step{{Action: rollout.Create, Group: "workers", Machine: rollout.Machine{

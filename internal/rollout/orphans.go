@@ -30,7 +30,7 @@ func hasMachine(s State, g Group, n Node) bool {
 
 // isNodeOf reports whether name is <cluster>-<group>-<digits>.
 func isNodeOf(cluster, group, name string) bool {
-	index, ok := strings.CutPrefix(name, cluster+"-"+group+"-")
+	index, ok := strings.CutPrefix(name, namePrefix(cluster, group))
 	return ok && index != "" && strings.Trim(index, "0123456789") == ""
 }
 

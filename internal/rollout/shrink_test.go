@@ -347,7 +347,7 @@ func TestShrinkServerChecksAtRestAndTheWindowStillApply(t *testing.T) {
 	runServerCasesIn(t, rollout.Shrink, base, []serverCase{
 		{"a server changed 10 seconds ago", func(t *testing.T, s *rollout.State) {
 			serverNode(t, s, 0).StableSince = epoch.Add(-10 * time.Second)
-		}, serverOutcome{Action: rollout.WaitStable, Until: epoch.Add(time.Minute)}},
+		}, serverOutcome{Action: rollout.WaitStable, Machine: serverName(2), Until: epoch.Add(time.Minute)}},
 	})
 }
 
