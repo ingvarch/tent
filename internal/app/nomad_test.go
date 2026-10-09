@@ -272,12 +272,15 @@ func (w *nomadWorld) NoLeader() {
 	w.noLeader = true
 }
 
-// Unhealthy keeps the servers of the cluster from being healthy.
-func (w *nomadWorld) Unhealthy() {
+// SetUnhealthy sets whether autopilot reports the servers unhealthy, whatever the instances show.
+func (w *nomadWorld) SetUnhealthy(on bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.unhealthy = true
+	w.unhealthy = on
 }
+
+// Unhealthy keeps the servers of the cluster from being healthy.
+func (w *nomadWorld) Unhealthy() { w.SetUnhealthy(true) }
 
 // Configs returns the configurations that the service made Nomad clients with, in order.
 func (w *nomadWorld) Configs() []nomadops.Config {

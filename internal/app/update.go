@@ -75,6 +75,8 @@ const (
 	NomadRemovePeer
 	// NomadForceLeave forces a server out of the gossip pool.
 	NomadForceLeave
+	// NomadSettle waits for a refusal of the decisions of a rolling update to clear.
+	NomadSettle
 )
 
 var nomadActionNames = [...]string{
@@ -82,6 +84,7 @@ var nomadActionNames = [...]string{
 	NomadKeyring: "keyring", NomadIneligible: "ineligible", NomadDrain: "drain", NomadDrained: "drained",
 	NomadDown: "down", NomadPurge: "purge", NomadVote: "vote", NomadStable: "stable", NomadTransfer: "transfer",
 	NomadServerDown: "server-down", NomadRemovePeer: "remove-peer", NomadForceLeave: "force-leave",
+	NomadSettle: "settle",
 }
 
 // String returns the action's name in lower case, such as leader.
@@ -98,9 +101,10 @@ func (a NomadAction) MarshalText() ([]byte, error) { return []byte(a.String()), 
 // NomadEvent is what a step that works on Nomad works on. Node names the node that a register, vote, ineligible, drain,
 // drained, down, purge, transfer, server-down or remove-peer step works on; for a force-leave step it is the member's
 // name in the gossip pool. Address is that node's address, for a down and a purge step. Deadline is the deadline of the
-// drain that a drain step starts. Until is when the window of a stable step ends. Leader is the leader's RPC address
-// once a leader wait is done, and for a transfer the node name of the server that takes the leadership. Voters is how
-// many healthy servers a healthy wait waits for, and once it is done how many of them vote.
+// drain that a drain step starts, and how long a settle wait lasts at most. Until is when the window of a stable step
+// ends. Leader is the leader's RPC address once a leader wait is done, and for a transfer the node name of the server
+// that takes the leadership. Voters is how many healthy servers a healthy wait waits for, and once it is done how many
+// of them vote. Reason is the refusal of the decisions that a settle wait waits on.
 type NomadEvent struct {
 	Action   NomadAction
 	Node     string
@@ -109,6 +113,7 @@ type NomadEvent struct {
 	Until    time.Time
 	Leader   string
 	Voters   int
+	Reason   string
 }
 
 // NodeStep is how far a node change got.
