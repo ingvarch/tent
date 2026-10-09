@@ -40,6 +40,7 @@ var nodeLines = map[app.NodeAction][3]string{
 	app.NodeCreate: {"creating %s", "created %s", "failed to create %s"},
 	app.NodeWait:   {"waiting for %s", "%s is ready", "failed to wait for %s"},
 	app.NodeDelete: {"deleting %s", "deleted %s", "failed to delete %s"},
+	app.NodeStop:   {"stopping %s", "stopped %s", "failed to stop %s"},
 	app.NodeScrub: {
 		"scrubbing the user data of %s", "scrubbed the user data of %s", "failed to scrub the user data of %s",
 	},
@@ -61,7 +62,7 @@ func progressText(p app.Progress) string {
 	}
 	node := "node " + p.Node.Name
 	switch {
-	case p.Node.Action == app.NodeDelete:
+	case p.Node.Action == app.NodeDelete, p.Node.Action == app.NodeStop:
 		node += " (ID " + p.Node.ID + ")"
 	case p.Instance.PrivateIP.IsValid():
 		node += " (" + p.Instance.PrivateIP.String() + ")"
@@ -138,6 +139,43 @@ func nomadText(p app.Progress) string {
 			"purging node " + node + " from Nomad", "purged node " + node + " from Nomad",
 			"failed to purge node " + node + " from Nomad",
 		}
+	case app.NomadVote:
+		lines = [3]string{
+			"waiting for node " + e.Node + " to vote", "node " + e.Node + " votes",
+			"failed to wait for node " + e.Node + " to vote",
+		}
+	case app.NomadStable:
+		lines = [3]string{
+			"waiting until " + e.Until.UTC().Format(time.TimeOnly) + " for the servers to be stable",
+			"the servers are stable", "failed to wait for the servers to be stable",
+		}
+	case app.NomadTransfer:
+		move := e.Node + " to " + e.Leader
+		lines = [3]string{
+			"moving the leadership from " + move, "moved the leadership from " + move,
+			"failed to move the leadership from " + move,
+		}
+	case app.NomadServerDown:
+		lines = [3]string{
+			"waiting until autopilot no longer counts " + e.Node + " as a healthy voter",
+			"autopilot no longer counts " + e.Node + " as a healthy voter",
+			"failed to wait for autopilot to stop counting " + e.Node,
+		}
+	case app.NomadRemovePeer:
+		lines = [3]string{
+			"removing " + e.Node + " from the Raft configuration", "removed " + e.Node + " from the Raft configuration",
+			"failed to remove " + e.Node + " from the Raft configuration",
+		}
+	case app.NomadForceLeave:
+		lines = [3]string{
+			"forcing " + e.Node + " out of the gossip pool", "forced " + e.Node + " out of the gossip pool",
+			"failed to force " + e.Node + " out of the gossip pool",
+		}
+	case app.NomadSettle:
+		lines = [3]string{
+			fmt.Sprintf("waiting up to %s for the cluster to settle: %s", e.Deadline, e.Reason),
+			"the cluster settled", "failed to wait for the cluster to settle",
+		}
 	default:
 		return fmt.Sprintf("%s %s Nomad", e.Action, p.Step)
 	}
@@ -210,9 +248,11 @@ type nodeEvent struct {
 	Error   string         `json:"error,omitempty"`
 }
 
-// nomadEvent is a step that works on Nomad, as -o json prints it. Name is the node that a step works on, Address its
-// address for a down or purge step, Deadline the deadline of a drain step, Leader the leader of a done leader wait,
-// and Voters the number of servers of a healthy wait.
+// nomadEvent is a step that works on Nomad, as -o json prints it. Name is the node that a step works on, or for a
+// force-leave step the member's name in the gossip pool, Address the node's address for a down or purge step,
+// Deadline the deadline of a drain step or the limit of a settle wait, Leader the leader of a done leader wait or the
+// node name of the server that takes the leadership in a transfer, Voters the number of servers of a healthy wait,
+// Until the end of the window of a stable wait in UTC (RFC 3339), and Reason the refusal that a settle wait waits on.
 type nomadEvent struct {
 	Type     string          `json:"type"` // nomad
 	Step     string          `json:"step"`
@@ -220,8 +260,10 @@ type nomadEvent struct {
 	Name     string          `json:"name,omitempty"`
 	Address  string          `json:"address,omitempty"`
 	Deadline string          `json:"deadline,omitempty"`
+	Until    string          `json:"until,omitempty"`
 	Leader   string          `json:"leader,omitempty"`
 	Voters   int             `json:"voters,omitempty"`
+	Reason   string          `json:"reason,omitempty"`
 	Error    string          `json:"error,omitempty"`
 }
 
@@ -246,7 +288,10 @@ func jsonEvent(p app.Progress) any {
 	}
 	if e := p.Nomad; e != nil {
 		ev := nomadEvent{Type: "nomad", Step: p.Step.String(), Action: e.Action, Name: e.Node, Address: e.Address,
-			Leader: e.Leader, Voters: e.Voters, Error: errorText(p.Err)}
+			Leader: e.Leader, Voters: e.Voters, Reason: e.Reason, Error: errorText(p.Err)}
+		if !e.Until.IsZero() {
+			ev.Until = e.Until.UTC().Format(time.RFC3339)
+		}
 		if e.Deadline > 0 {
 			ev.Deadline = e.Deadline.String()
 		}

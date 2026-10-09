@@ -597,3 +597,41 @@ func TestRollingUpdateClusterExitCodeNeedsAPlan(t *testing.T) {
 		t.Errorf("calls to the cloud: %v", calls)
 	}
 }
+
+// TestRollingUpdateClusterLogsItsObservationsWithDebugOnly gives the debug lines of the loop to the logger that -v and
+// -vv configure: -vv passes them to stderr, -v does not. Stderr shows no secret of the cluster.
+func TestRollingUpdateClusterLogsItsObservationsWithDebugOnly(t *testing.T) {
+	const line = `level=DEBUG msg="rolling update observed" cluster=prod `
+	for _, tc := range []struct {
+		name     string
+		verbose  string
+		wantLine bool
+	}{
+		{"-vv", "-vv", true},
+		{"-v", "-v", false},
+		{"no flag", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				s, f := outdatedCluster(t)
+				args := roll(s, "--yes")
+				if tc.verbose != "" {
+					args = append(args, tc.verbose)
+				}
+
+				got := rollRunner(t, f)(args...)
+
+				if got.code != 0 {
+					t.Fatalf("exit code %d\n%s", got.code, got.errOut)
+				}
+				wantNoSecrets(t, s, "stderr", got.errOut)
+				if has := strings.Contains(got.errOut, line); has != tc.wantLine {
+					t.Errorf("stderr has the observation line = %v, want %v\n%s", has, tc.wantLine, got.errOut)
+				}
+				if strings.Contains(got.out, "rolling update observed") {
+					t.Errorf("stdout has the observation line\n%s", got.out)
+				}
+			})
+		})
+	}
+}
