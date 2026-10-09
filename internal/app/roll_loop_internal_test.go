@@ -317,7 +317,7 @@ func TestListDropsWhatTheCloudShows(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		nodes := listsNodes{listed: []cloud.Instance{{ID: "i-2"}, {ID: "i-5"}}}
-		r := &rollRun{kit: nodeKit{nodes: nodes}, rollLoop: newRollLoop()}
+		r := &rollRun{kit: nodeKit{nodes: nodes}, rollLoop: newRollLoop(), model: apiModel}
 		r.pending["op-a"] = pendingMachine{in: cloud.Instance{ID: "i-2"}, since: time.Now()}
 		r.pending["op-b"] = pendingMachine{in: cloud.Instance{ID: "i-3"}, since: time.Now()}
 		r.deleting["i-5"] = time.Now()
@@ -946,15 +946,15 @@ func TestJoinPollScrubsAServerThatVotesAndNotACombinedMachine(t *testing.T) {
 	}
 }
 
-// TestStopStopsTheMachineAndListsAtTheNextObservation sends the stop to the cloud and then lists the machines at the
-// next observation; a stop that fails returns the cloud's error and leaves the list as it is.
-func TestStopStopsTheMachineAndListsAtTheNextObservation(t *testing.T) {
+// TestStopStopsTheMachineAndNotesItAsBeingStopped sends the stop to the cloud and notes the machine, so that the next
+// observations list the machines; a stop that fails returns the cloud's error and notes nothing.
+func TestStopStopsTheMachineAndNotesItAsBeingStopped(t *testing.T) {
 	t.Parallel()
 	errCloud := errors.New("the cloud refused")
 	for _, tc := range []struct {
 		name      string
 		cloudErr  error
-		wantList  bool
+		wantNoted bool
 		wantAsked int
 	}{{"the cloud stops it", nil, true, 1}, {"the cloud refuses", errCloud, false, 1}} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -968,9 +968,9 @@ func TestStopStopsTheMachineAndListsAtTheNextObservation(t *testing.T) {
 			if !errors.Is(err, tc.cloudErr) {
 				t.Errorf("stop error = %v, want %v", err, tc.cloudErr)
 			}
-			if len(nodes.stopped) != tc.wantAsked || r.relist != tc.wantList {
-				t.Errorf("the cloud was asked to stop %d machines and the run lists next: %v; want %d and %v",
-					len(nodes.stopped), r.relist, tc.wantAsked, tc.wantList)
+			if len(nodes.stopped) != tc.wantAsked || (len(r.stopping) > 0) != tc.wantNoted {
+				t.Errorf("the cloud was asked to stop %d machines and the run notes a machine being stopped: %v; want %d and %v",
+					len(nodes.stopped), len(r.stopping) > 0, tc.wantAsked, tc.wantNoted)
 			}
 		})
 	}

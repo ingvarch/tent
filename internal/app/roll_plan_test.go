@@ -122,9 +122,9 @@ func TestRollPlanMarshalJSON(t *testing.T) {
 				`"text":"wait until node prod-workers-2 joins"}}`},
 		{"applied", app.RollPlan{
 			Groups: []app.RollGroup{upToDateServers}, Applied: true,
-			Rolled: app.RollCounts{Created: 2, Drained: 2, Deleted: 2, Purged: 1},
+			Rolled: app.RollCounts{Created: 2, Drained: 2, Stopped: 3, Deleted: 2, Purged: 1},
 		}, `{"applied":true,"groups":[{"name":"servers","role":"server","size":3,"outdated":[]}],` +
-			`"rolled":{"created":2,"drained":2,"deleted":2,"purged":1}}`},
+			`"rolled":{"created":2,"drained":2,"stopped":3,"deleted":2,"purged":1}}`},
 		{"counts of a plan that did not apply stay out", app.RollPlan{
 			Groups: []app.RollGroup{upToDateServers}, Rolled: app.RollCounts{Created: 1},
 		}, `{"groups":[{"name":"servers","role":"server","size":3,"outdated":[]}]}`},
@@ -138,15 +138,15 @@ func TestRollPlanMarshalJSON(t *testing.T) {
 	}
 }
 
-// TestRollPlanWriteApplied counts the machines and nodes that the roll created, drained, deleted and purged.
+// TestRollPlanWriteApplied counts the machines and nodes that the roll created, drained, stopped, deleted and purged.
 func TestRollPlanWriteApplied(t *testing.T) {
 	t.Parallel()
 	var b strings.Builder
-	p := app.RollPlan{Applied: true, Rolled: app.RollCounts{Created: 2, Drained: 3, Deleted: 4, Purged: 5}}
+	p := app.RollPlan{Applied: true, Rolled: app.RollCounts{Created: 2, Drained: 3, Stopped: 4, Deleted: 5, Purged: 6}}
 	if err := p.WriteApplied(&b); err != nil {
 		t.Fatalf("WriteApplied: %v", err)
 	}
-	if want := "Rolled: 2 created, 3 drained, 4 deleted, 5 purged.\n"; b.String() != want {
+	if want := "Rolled: 2 created, 3 drained, 4 stopped, 5 deleted, 6 purged.\n"; b.String() != want {
 		t.Errorf("WriteApplied wrote %q, want %q", b.String(), want)
 	}
 	err := p.WriteApplied(&failWriter{err: errRollWrite})

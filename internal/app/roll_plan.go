@@ -56,11 +56,12 @@ type RollStep struct {
 	Text   string `json:"text"`           // what the step does, in words
 }
 
-// RollCounts count the distinct machines that an applied roll created and deleted and the distinct nodes that it
-// drained and purged; a step tried twice counts once.
+// RollCounts count the distinct machines that an applied roll created, stopped and deleted and the distinct nodes that
+// it drained and purged; a step tried twice counts once.
 type RollCounts struct {
 	Created int `json:"created"`
 	Drained int `json:"drained"`
+	Stopped int `json:"stopped"`
 	Deleted int `json:"deleted"`
 	Purged  int `json:"purged"`
 }
@@ -154,12 +155,12 @@ func (g RollGroup) line() string {
 	return fmt.Sprintf("%s%d outdated: %s", head, len(g.Outdated), english.And(items))
 }
 
-// WriteApplied writes what applying the plan did, on one line, such as "Rolled: 2 created, 2 drained, 2 deleted, 2
-// purged.".
+// WriteApplied writes what applying the plan did, on one line, such as "Rolled: 2 created, 2 drained, 0 stopped, 2
+// deleted, 2 purged.".
 func (p RollPlan) WriteApplied(w io.Writer) error {
 	n := p.Rolled
-	return writeText(w, "the summary", fmt.Sprintf("Rolled: %d created, %d drained, %d deleted, %d purged.\n",
-		n.Created, n.Drained, n.Deleted, n.Purged))
+	return writeText(w, "the summary", fmt.Sprintf("Rolled: %d created, %d drained, %d stopped, %d deleted, %d purged.\n",
+		n.Created, n.Drained, n.Stopped, n.Deleted, n.Purged))
 }
 
 // MarshalJSON encodes the plan as {"applied": true, "groups": [...], "next": {...}, "rolled": {...}}. Groups is a

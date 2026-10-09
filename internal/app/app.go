@@ -8,6 +8,7 @@ package app
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
@@ -54,6 +55,9 @@ type Service struct {
 	// OnProgress, when set, is told what happens while an update or a delete applies its plan. One update or delete
 	// never calls it concurrently.
 	OnProgress func(Progress)
+	// Log, when set, gets the debug lines of a rolling update: one for each observation, with the leader's node, the
+	// voters, autopilot's health and failure tolerance, and the next step. Nil discards them.
+	Log *slog.Logger
 	// OnUpdatePlan, when set, is called with the plan of an update that has changes, made under the cluster's lock,
 	// just before the update applies it. When it returns an error, the update stops before it changes anything and
 	// returns that error.

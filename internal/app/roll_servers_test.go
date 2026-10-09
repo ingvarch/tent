@@ -112,22 +112,14 @@ func TestRollLoopReplacesAServerWithOneMoreFirst(t *testing.T) {
 		counts, err := rollUntil(svc, "node done delete prod-servers-1")
 
 		wantInterrupted(t, err)
-		if want := (app.RollCounts{Created: 1, Deleted: 1}); counts != want {
+		if want := (app.RollCounts{Created: 1, Stopped: 1, Deleted: 1}); counts != want {
 			t.Errorf("the roll did %+v, want %+v", counts, want)
 		}
 		wantLines(t, *lines, serverSteps("prod-servers-3", "prod-servers-1"))
 		if got := countCalls(f, "CreateInstance") - creates; got != 1 {
 			t.Errorf("CreateInstance was called %d times, want once", got)
 		}
-		var halted, deleted []string
-		for _, c := range f.Calls() {
-			switch c.Name {
-			case "HaltInstance":
-				halted = append(halted, c.Arg)
-			case "DeleteInstance":
-				deleted = append(deleted, c.Arg)
-			}
-		}
+		halted, deleted := callsOf(f, "HaltInstance"), callsOf(f, "DeleteInstance")
 		if !slices.Equal(halted, []string{old}) || !slices.Equal(deleted, []string{old}) {
 			t.Errorf("the roll halted %v and deleted %v, want only %s", halted, deleted, old)
 		}

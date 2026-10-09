@@ -244,7 +244,7 @@ func rolledActions() []string {
 }
 
 // rolledSummary is what rolling-update --yes prints after it rolled the three outdated workers.
-const rolledSummary = "\nRolled: 3 created, 3 drained, 3 deleted, 3 purged.\n"
+const rolledSummary = "\nRolled: 3 created, 3 drained, 0 stopped, 3 deleted, 3 purged.\n"
 
 // TestRollingUpdateClusterApply prints the plan made under the lock, each step on stderr and the summary, replaces
 // the machines, and then finds nothing to roll.
@@ -284,10 +284,12 @@ func TestRollingUpdateClusterApplyJSON(t *testing.T) {
 		if err := json.Unmarshal([]byte(got.out), &plan); err != nil {
 			t.Fatalf("stdout is not the plan: %v\n%s", err, got.out)
 		}
+		stopped, hasStopped := plan.Rolled["stopped"]
 		if !plan.Applied || len(plan.Groups) != 2 || plan.Next == nil ||
 			plan.Rolled["created"] != 3 || plan.Rolled["drained"] != 3 || plan.Rolled["deleted"] != 3 ||
-			plan.Rolled["purged"] != 3 {
-			t.Errorf("the plan = %+v, want it applied, with both groups, the step it began with, and 3 of each", plan)
+			plan.Rolled["purged"] != 3 || !hasStopped || stopped != 0 {
+			t.Errorf("the plan = %+v, want it applied, with both groups, the step it began with, 3 of each and "+
+				"no stopped machine", plan)
 		}
 		var done []string
 		for _, e := range decodeProgress(t, got.errOut) {
