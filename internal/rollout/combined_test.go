@@ -141,7 +141,7 @@ func TestCombinedDrainStartedVictimIsNotCheckedAtRestOrForTheWindowAgain(t *test
 	runServerCases(t, combinedMidRoll, []serverCase{
 		{"before the drain the window decides", func(t *testing.T, s *rollout.State) {
 			since(t, s, 3, 0)
-		}, serverOutcome{Action: rollout.WaitStable, Until: epoch.Add(70 * time.Second)}},
+		}, serverOutcome{Action: rollout.WaitStable, Machine: serverName(1), Until: epoch.Add(70 * time.Second)}},
 		{"a drain that has begun does not wait for the window", func(t *testing.T, s *rollout.State) {
 			nodeNamed(t, s, serverName(1)).Eligible = false
 			since(t, s, 3, 0)
@@ -252,7 +252,7 @@ func TestCombinedEligibleNodeWithItsDrainMetaHasNotStarted(t *testing.T) {
 		{"the victim waits for the window", func(t *testing.T, s *rollout.State) {
 			meta(t, s, 1)
 			serverNode(t, s, 3).StableSince = s.Now
-		}, serverOutcome{Action: rollout.WaitStable, Until: epoch.Add(70 * time.Second)}},
+		}, serverOutcome{Action: rollout.WaitStable, Machine: serverName(1), Until: epoch.Add(70 * time.Second)}},
 		{"the node does not come first in the victim order", func(t *testing.T, s *rollout.State) {
 			meta(t, s, 2)
 		}, serverOutcome{Action: rollout.MarkIneligible, Machine: serverName(1), Node: nodeIDOf(1)}},

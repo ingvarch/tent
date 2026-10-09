@@ -133,11 +133,31 @@ func zoneCounts(ms []Machine) map[string]int {
 	return perZone
 }
 
-// newMachine returns the machine that a group creates next: the lowest name that no machine of the cluster has and
-// Nomad lists no node of, in any status, and the zone with the fewest machines that are up to date. A deleted
-// machine's node stays listed for a while and a new machine may get its address, so a new machine never takes the
-// name of a listed node; a purge frees the name.
+// newMachine returns the machine that a group creates next, in the zone with the fewest machines that are up to date.
+// A client group takes the lowest name that no machine of the cluster has and Nomad lists no node of, in any status: a
+// deleted machine's node stays listed for a while and a new machine may get its address, so a new machine never takes
+// the name of a listed node; a purge frees the name. A server or combined group takes the index above the highest of
+// its names that a listed machine, a server of the Raft configuration or a member of the gossip pool has, so its
+// names grow while its highest name is still listed: a roll never reuses one. A new server that took the name of a
+// removed server failed to join the Raft configuration: the leader added it as a nonvoter and autopilot removed it
+// again.
 func newMachine(s State, g Group, ms []Machine) Machine {
+	var name string
+	if g.Role.RunsServer() {
+		name = NodeName(s.Cluster, g.Name, nextServerIndex(s, g))
+	} else {
+		name = FreeName(s.Cluster, g.Name, takenNames(s))
+	}
+	return Machine{
+		Name:  name,
+		Group: g.Name,
+		Role:  g.Role,
+		Zone:  LeastUsedZone(g.Zones, zoneCounts(upToDate(s, g, ms))),
+	}
+}
+
+// takenNames returns the names of the listed machines and of the client nodes that Nomad lists.
+func takenNames(s State) map[string]bool {
 	taken := make(map[string]bool, len(s.Machines)+len(s.Nomad.Nodes))
 	for _, m := range s.Machines {
 		taken[m.Name] = true
@@ -145,12 +165,30 @@ func newMachine(s State, g Group, ms []Machine) Machine {
 	for _, n := range s.Nomad.Nodes {
 		taken[n.Name] = true
 	}
-	return Machine{
-		Name:  FreeName(s.Cluster, g.Name, taken),
-		Group: g.Name,
-		Role:  g.Role,
-		Zone:  LeastUsedZone(g.Zones, zoneCounts(upToDate(s, g, ms))),
+	return taken
+}
+
+// nextServerIndex returns the index above the highest that a name of the group has among the listed machines, the
+// servers of the Raft configuration and the members of the gossip pool; 0 when none has one. The names of servers and
+// members are <node name>.<region>.
+func nextServerIndex(s State, g Group) int {
+	names := make([]string, 0, len(s.Machines)+len(s.Nomad.Servers)+len(s.Nomad.Members))
+	for _, m := range s.Machines {
+		names = append(names, m.Name)
 	}
+	for _, srv := range s.Nomad.Servers {
+		names = append(names, nodeOfServer(srv.Name))
+	}
+	for _, mem := range s.Nomad.Members {
+		names = append(names, nodeOfServer(mem.Name))
+	}
+	next := 0
+	for _, name := range names {
+		if index, ok := nodeIndex(s.Cluster, g.Name, name); ok {
+			next = max(next, index+1)
+		}
+	}
+	return next
 }
 
 // spare is how many machines beyond its size the group has, not counting those whose removal has started.

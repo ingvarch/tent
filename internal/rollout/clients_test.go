@@ -841,9 +841,10 @@ func TestAServerWithoutAVersionIsWaitedFor(t *testing.T) {
 	wait := func(t *testing.T, s rollout.State) {
 		t.Helper()
 		got := nextRoll(t, s)
-		if got.Action != rollout.WaitHealthy || got.Group != "workers" || got.Voters != 1 {
-			t.Errorf("step = %q (group %q, %d voters), want a wait until 1 healthy server votes for workers "+
-				"(the nonvoter does not count)", got, got.Group, got.Voters)
+		if got.Action != rollout.WaitHealthy || got.Group != "workers" || got.Voters != 1 || got.Machine.Name != "" {
+			t.Errorf("step = %q (group %q, %d voters, machine %q), want a wait until 1 healthy server votes for "+
+				"workers that names no machine (the nonvoter does not count)", got, got.Group, got.Voters,
+				got.Machine.Name)
 		}
 	}
 	unknown := func() rollout.State {

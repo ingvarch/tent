@@ -8,7 +8,20 @@ import (
 
 // NodeName returns the machine name of the node index of a group.
 func NodeName(cluster, group string, index int) string {
-	return cluster + "-" + group + "-" + strconv.Itoa(index)
+	return namePrefix(cluster, group) + strconv.Itoa(index)
+}
+
+// namePrefix is what the machine names of a group's nodes start with.
+func namePrefix(cluster, group string) string { return cluster + "-" + group + "-" }
+
+// nodeIndex returns the index in a node name of the group: the digits that follow the group's prefix. It reports false
+// for a name of another form, such as one with a suffix, a sign or an index above 2147483647.
+func nodeIndex(cluster, group, name string) (int, bool) {
+	if !isNodeOf(cluster, group, name) {
+		return 0, false
+	}
+	index, err := strconv.ParseInt(strings.TrimPrefix(name, namePrefix(cluster, group)), 10, 32)
+	return int(index), err == nil
 }
 
 // FreeName returns the group's node name of the lowest index that taken does not hold as true. The caller marks the

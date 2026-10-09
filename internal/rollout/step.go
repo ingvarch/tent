@@ -43,7 +43,8 @@ const (
 	WaitStable
 )
 
-// Step is one thing that a run does next.
+// Step is one thing that a run does next. The WaitStable and WaitHealthy of a server's removal name the server's
+// machine as their Machine.
 type Step struct {
 	Action   Action
 	Group    string
