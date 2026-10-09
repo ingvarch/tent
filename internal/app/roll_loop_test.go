@@ -274,30 +274,6 @@ func TestRollLoopHasNothingToDoWhenNothingIsOutdated(t *testing.T) {
 	})
 }
 
-// TestRollLoopRefusesServerGroups ends with the refusal of the server group and its advice about --nodegroups, and
-// writes nothing to the cloud or to Nomad.
-func TestRollLoopRefusesServerGroups(t *testing.T) {
-	t.Parallel()
-	synctest.Test(t, func(t *testing.T) {
-		svc, f, w := rollWorld(t)
-		mustReplace(t, svc, keyedClusterYAML+"  nomad:\n    extraConfig:\n      server: 'raft_multiplier = 3'\n")
-		mustUpdate(t, svc)
-		cloudCalls, nomadCalls := len(f.Calls()), len(w.Log())
-
-		counts, err := roll(svc, app.RollOptions{})
-
-		wantError(t, err, "node group servers: tent cannot roll server and combined groups yet; "+
-			"select client groups with --nodegroups")
-		wantNoWrites(t, f.Calls()[cloudCalls:])
-		if got := nomadWrites(w, nomadCalls); len(got) > 0 {
-			t.Errorf("the roll wrote to Nomad: %q", got)
-		}
-		if counts != (app.RollCounts{}) {
-			t.Errorf("the roll did %+v, want nothing", counts)
-		}
-	})
-}
-
 // TestRollLoopScrubsAMachineWhoseNodeJoined labels the machine and replaces its user data once Nomad lists its node
 // ready and eligible, and reports the wait and the scrub.
 func TestRollLoopScrubsAMachineWhoseNodeJoined(t *testing.T) {

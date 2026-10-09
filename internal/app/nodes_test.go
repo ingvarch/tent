@@ -1,7 +1,9 @@
 package app
 
 import (
+	"context"
 	"encoding/hex"
+	"errors"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -736,8 +738,9 @@ func TestNodeActionString(t *testing.T) {
 		{NodeWait, "wait"},
 		{NodeDelete, "delete"},
 		{NodeScrub, "scrub"},
+		{NodeStop, "stop"},
 		{0, "NodeAction(0)"},
-		{NodeScrub + 1, "NodeAction(5)"},
+		{NodeStop + 1, "NodeAction(6)"},
 	} {
 		if got := tc.action.String(); got != tc.want {
 			t.Errorf("NodeAction(%d).String() = %q, want %q", int(tc.action), got, tc.want)
@@ -746,5 +749,47 @@ func TestNodeActionString(t *testing.T) {
 		if err != nil || string(text) != tc.want {
 			t.Errorf("NodeAction(%d).MarshalText() = %q, %v; want %q", int(tc.action), text, err, tc.want)
 		}
+	}
+}
+
+// stoppingNodes is a cloud that records the machines it is asked to stop and answers with err.
+type stoppingNodes struct {
+	cloud.Nodes
+	stopped []cloud.Instance
+	err     error
+}
+
+func (n *stoppingNodes) Stop(_ context.Context, in cloud.Instance) error {
+	n.stopped = append(n.stopped, in)
+	return n.err
+}
+
+// TestChangeNodeStopsTheMachineAndFailsWithTheCloudsError sends a stop to the cloud with the machine's ID, name and
+// cluster, and returns the cloud's error as it is.
+func TestChangeNodeStopsTheMachineAndFailsWithTheCloudsError(t *testing.T) {
+	t.Parallel()
+	errCloud := errors.New("the cloud refused")
+	for _, tc := range []struct {
+		name     string
+		cloudErr error
+	}{{"the cloud stops it", nil}, {"the cloud refuses", errCloud}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			nodes := &stoppingNodes{err: tc.cloudErr}
+			c := NodeChange{Action: NodeStop, Name: "prod-servers-0", ID: "i-1"}
+
+			in, err := changeNode(t.Context(), nodes, "prod", c, nil)
+
+			if !errors.Is(err, tc.cloudErr) {
+				t.Errorf("changeNode error = %v, want %v", err, tc.cloudErr)
+			}
+			want := []cloud.Instance{{ID: "i-1", Name: "prod-servers-0", Cluster: "prod"}}
+			if !slices.Equal(nodes.stopped, want) {
+				t.Errorf("the cloud was asked to stop %+v, want %+v", nodes.stopped, want)
+			}
+			if in.ID != "" {
+				t.Errorf("changeNode returned the machine %+v, want none", in)
+			}
+		})
 	}
 }

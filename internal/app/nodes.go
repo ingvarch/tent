@@ -12,8 +12,8 @@ import (
 	"github.com/ingvarch/tent/internal/rollout"
 )
 
-// NodeAction is what an update does to one node. A plan holds NodeCreate, NodeWait and NodeDelete. NodeScrub is a step
-// of the progress only and never a change of a plan.
+// NodeAction is what an update does to one node. A plan holds NodeCreate, NodeWait and NodeDelete. NodeScrub and
+// NodeStop are steps of the progress only and never a change of a plan.
 type NodeAction int
 
 // Node actions.
@@ -27,9 +27,14 @@ const (
 	NodeDelete
 	// NodeScrub replaces the user data of a node that has joined its cluster and labels its machine.
 	NodeScrub
+	// NodeStop powers off the machine of a server that a rolling update replaces. The server's peer leaves the Raft
+	// configuration after the stop, except when the server has no peer there.
+	NodeStop
 )
 
-var nodeActionNames = [...]string{NodeCreate: "create", NodeWait: "wait", NodeDelete: "delete", NodeScrub: "scrub"}
+var nodeActionNames = [...]string{
+	NodeCreate: "create", NodeWait: "wait", NodeDelete: "delete", NodeScrub: "scrub", NodeStop: "stop",
+}
 
 // String returns the action's name in lower case, such as create.
 func (a NodeAction) String() string {
@@ -44,8 +49,8 @@ func (a NodeAction) MarshalText() ([]byte, error) { return []byte(a.String()), n
 
 // NodeChange is one change to the nodes of a cluster. A create and a wait hold what a create request needs, with the
 // hash of the group's node configuration, except a wait without an operation id, which calls no cloud and holds no
-// hash; a wait and a delete hold the ID of the machine, a wait its operation id, when it repeats a create, and a
-// delete the reason.
+// hash; a wait, a delete and a stop hold the ID of the machine, a wait its operation id, when it repeats a create, and
+// a delete the reason.
 type NodeChange struct {
 	Action      NodeAction    `json:"action"`
 	Name        string        `json:"name"`

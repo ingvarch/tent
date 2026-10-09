@@ -53,7 +53,51 @@ func TestKeyOfKeysACreateByItsName(t *testing.T) {
 	}
 }
 
-// TestWaitOfGivesEachWaitItsLimitAndItsEvent holds each wait of a client roll to its limit and tells Nomad's event
+// TestKeyOfKeysAServerStepByItsTarget tells the steps of one victim apart by the server that takes the leadership, the
+// peer that is removed and the member that is forced out, and a wait by its victim.
+func TestKeyOfKeysAServerStepByItsTarget(t *testing.T) {
+	t.Parallel()
+	victim := func(id string) rollout.Machine { return rollout.Machine{ID: id, Name: "prod-servers-" + id} }
+	transfer := func(id, to string) rollout.Step {
+		return rollout.Step{Action: rollout.TransferLeadership, Group: "servers", Machine: victim(id),
+			Server: rollout.Server{ID: to}}
+	}
+	removal := func(id, peer string) rollout.Step {
+		return rollout.Step{
+			Action: rollout.RemovePeer, Group: "servers", Machine: victim(id), Server: rollout.Server{ID: peer},
+		}
+	}
+	force := func(id, member string) rollout.Step {
+		return rollout.Step{
+			Action: rollout.ForceLeave, Group: "servers", Machine: victim(id), Member: rollout.Member{Name: member},
+		}
+	}
+	wait := func(id string) rollout.Step {
+		return rollout.Step{Action: rollout.WaitStable, Group: "servers", Machine: victim(id)}
+	}
+	for _, tc := range []struct {
+		name       string
+		one, other rollout.Step
+	}{
+		{"leaders to take over", transfer("0", "r-1"), transfer("0", "r-2")},
+		{"peers to remove", removal("0", "r-1"), removal("0", "r-2")},
+		{"members to force out", force("0", "a.global"), force("0", "b.global")},
+		{"victims of a wait", wait("0"), wait("1")},
+	} {
+		if keyOf(tc.one) == keyOf(tc.other) {
+			t.Errorf("two steps of %s have one key", tc.name)
+		}
+	}
+	first, again := keyOf(transfer("0", "r-1")), keyOf(transfer("0", "r-1"))
+	if first != again {
+		t.Error("two equal transfers have different keys")
+	}
+}
+
+// stableUntil is the end of a stability window in the tests.
+var stableUntil = time.Date(2026, 10, 8, 12, 4, 20, 0, time.UTC)
+
+// TestWaitOfGivesEachWaitItsLimitAndItsEvent holds each wait of a roll to its limit and tells Nomad's event
 // what the wait waits for.
 func TestWaitOfGivesEachWaitItsLimitAndItsEvent(t *testing.T) {
 	t.Parallel()
@@ -75,6 +119,16 @@ func TestWaitOfGivesEachWaitItsLimitAndItsEvent(t *testing.T) {
 				"node prod-workers-0 (10.64.0.6)", "go down"}},
 		{"healthy", rollout.Step{Action: rollout.WaitHealthy, Group: "workers", Voters: 3},
 			rollWait{NomadEvent{Action: NomadHealthy, Voters: 3}, 10 * time.Minute, "the servers", "become healthy and vote"}},
+		{"a server voting", rollout.Step{Action: rollout.WaitJoined, Group: "servers", Machine: rollout.Machine{
+			Name: "prod-servers-3", Role: v1alpha1.RoleServer}},
+			rollWait{NomadEvent{Action: NomadVote, Node: "prod-servers-3"}, 10 * time.Minute, "node prod-servers-3", "vote"}},
+		{"the window", rollout.Step{Action: rollout.WaitStable, Group: "servers", Until: stableUntil,
+			Machine: rollout.Machine{Name: "prod-servers-0"}},
+			rollWait{NomadEvent{Action: NomadStable, Until: stableUntil}, 5 * time.Minute, "the servers", "become stable"}},
+		{"a stopped server", rollout.Step{Action: rollout.WaitServerDown, Group: "servers",
+			Machine: rollout.Machine{Name: "prod-servers-0"}},
+			rollWait{NomadEvent{Action: NomadServerDown, Node: "prod-servers-0"}, 5 * time.Minute, "autopilot",
+				"stop counting prod-servers-0 as a healthy voter"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := r.waitOf(tc.step)
@@ -88,27 +142,25 @@ func TestWaitOfGivesEachWaitItsLimitAndItsEvent(t *testing.T) {
 	}
 }
 
-// TestWaitOfFailsForAWaitWithoutALimit refuses to poll a wait that has no limit, so that a wait added later cannot
-// run for ever.
-func TestWaitOfFailsForAWaitWithoutALimit(t *testing.T) {
-	t.Parallel()
-	r := &rollRun{}
-	for _, step := range []rollout.Step{
-		{Action: rollout.WaitServerDown, Machine: rollout.Machine{Name: "prod-servers-0"}},
-		{Action: rollout.WaitStable, Until: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)},
-	} {
-		_, err := r.waitOf(step)
-		if want := "no deadline for the wait " + step.String(); err == nil || err.Error() != want {
-			t.Errorf("waitOf(%s) error = %v, want %q", step, err, want)
-		}
-	}
-}
-
-// TestCarryFailsForAStepOfAServerGroup refuses a step that a client roll never gets from the decisions.
-func TestCarryFailsForAStepOfAServerGroup(t *testing.T) {
+// TestWaitOfFailsForAStepThatIsNoWait refuses to poll a step that has no limit, so that a wait added later cannot run
+// for ever.
+func TestWaitOfFailsForAStepThatIsNoWait(t *testing.T) {
 	t.Parallel()
 	r := &rollRun{}
 	step := rollout.Step{Action: rollout.Stop, Machine: rollout.Machine{Name: "prod-servers-0", ID: "i-1"}}
+
+	_, err := r.waitOf(step)
+
+	if want := "no deadline for the wait " + step.String(); err == nil || err.Error() != want {
+		t.Errorf("waitOf error = %v, want %q", err, want)
+	}
+}
+
+// TestCarryFailsForAWait refuses a step that the loop polls and never carries out.
+func TestCarryFailsForAWait(t *testing.T) {
+	t.Parallel()
+	r := &rollRun{}
+	step := rollout.Step{Action: rollout.WaitStable, Machine: rollout.Machine{Name: "prod-servers-0", ID: "i-1"}}
 
 	err := r.carry(t.Context(), step)
 
@@ -610,6 +662,315 @@ func TestRepeatCreateCountsOnlyAMachineThatItMakes(t *testing.T) {
 			got := slices.Sorted(maps.Keys(r.rolled.created))
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("the roll counts the created machines %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// serversReading is the reading of a Nomad whose servers are as the entries say, by Raft ID.
+func serversReading(healthy bool, entries ...serverEntry) nomadReading {
+	r := nomadReading{health: nomadops.Health{Healthy: healthy}}
+	for _, e := range entries {
+		addr := netip.AddrPortFrom(netip.MustParseAddr(e.address), 4647)
+		r.peers = append(r.peers, nomadops.Peer{ID: e.id, Address: addr, Voter: e.voter})
+		r.health.Servers = append(r.health.Servers, nomadops.ServerHealth{ID: e.id, Healthy: e.healthy})
+		if e.voter {
+			r.health.Voters++
+		}
+	}
+	return r
+}
+
+// serverEntry is a server of a reading: its Raft ID, private address, vote and health.
+type serverEntry struct {
+	id, address    string
+	voter, healthy bool
+}
+
+// TestShowingSaysWhatNomadListsOfAServerWait says what the Raft configuration and autopilot show of the server that a
+// wait for a vote, for a stopped server and for the window waits on.
+func TestShowingSaysWhatNomadListsOfAServerWait(t *testing.T) {
+	t.Parallel()
+	machine := rollout.Machine{
+		Name: "prod-servers-3", Role: v1alpha1.RoleServer, PrivateIP: netip.MustParseAddr("10.64.0.6"),
+	}
+	join := rollout.Step{Action: rollout.WaitJoined, Machine: machine}
+	down := rollout.Step{Action: rollout.WaitServerDown, Machine: machine}
+	stable := rollout.Step{Action: rollout.WaitStable, Machine: machine, Until: stableUntil}
+	at := func(voter, healthy bool) nomadReading {
+		return serversReading(healthy, serverEntry{"s-3", "10.64.0.6", voter, healthy},
+			serverEntry{"s-0", "10.64.0.3", true, true})
+	}
+	for _, tc := range []struct {
+		name    string
+		step    rollout.Step
+		reading nomadReading
+		want    string
+	}{
+		{"a vote that no server at the address has", join, serversReading(true, serverEntry{"s-0", "10.64.0.3", true, true}),
+			"the Raft configuration lists no server at its address"},
+		{"a vote of a server that has none yet", join, at(false, true), "its server does not vote yet"},
+		{"a vote of a server that autopilot counts unhealthy", join, at(true, false),
+			"autopilot does not count its server healthy"},
+		{"a stopped server that autopilot counts a healthy voter", down, at(true, true),
+			"autopilot counts it a healthy voter"},
+		{"a stopped server that autopilot counts unhealthy", down, at(true, false),
+			"autopilot does not count it a healthy voter"},
+		{"a stopped server that is no voter", down, at(false, true), "autopilot does not count it a healthy voter"},
+		{"a stopped server that has no peer", down, serversReading(true), "autopilot does not count it a healthy voter"},
+		{"the window", stable, at(true, true), "the window ends at 12:04:20"},
+		{"a vote of a machine without an address", rollout.Step{Action: rollout.WaitJoined, Machine: rollout.Machine{
+			Name: "prod-servers-3", Role: v1alpha1.RoleServer}}, nomadReading{peers: []nomadops.Peer{{ID: "s-9"}}},
+			"the Raft configuration lists no server at its address"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := showing(tc.step, tc.reading); got != tc.want {
+				t.Errorf("showing = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestOpenWaitOfAServerGroupIsOverWhenTheReadingShowsItsEnd ends the wait for a stopped server when autopilot no longer
+// counts it a healthy voter, the wait for the servers of a server group when they are healthy and the group's voters
+// vote, and the wait for the window as soon as the decisions give another step.
+func TestOpenWaitOfAServerGroupIsOverWhenTheReadingShowsItsEnd(t *testing.T) {
+	t.Parallel()
+	victim := rollout.Machine{ID: "i-0", Name: "prod-servers-0", PrivateIP: netip.MustParseAddr("10.64.0.3")}
+	servers := func(healthy bool, victimVoter, victimHealthy bool) nomadReading {
+		return serversReading(healthy,
+			serverEntry{"s-0", "10.64.0.3", victimVoter, victimHealthy},
+			serverEntry{"s-1", "10.64.0.4", true, true}, serverEntry{"s-2", "10.64.0.5", true, true})
+	}
+	down := rollout.Step{Action: rollout.WaitServerDown, Group: "servers", Machine: victim}
+	healthy := rollout.Step{Action: rollout.WaitHealthy, Group: "servers", Machine: victim, Voters: 2}
+	for _, tc := range []struct {
+		name     string
+		step     rollout.Step
+		reading  nomadReading
+		wantOver bool
+	}{
+		{"a stopped server that is a healthy voter", down, servers(true, true, true), false},
+		{"a stopped server that autopilot counts unhealthy", down, servers(false, true, false), true},
+		{"a stopped server that is no voter", down, servers(true, false, true), true},
+		{"a stopped server whose peer is gone", down,
+			serversReading(true, serverEntry{"s-1", "10.64.0.4", true, true}), true},
+		{"the servers of a group, unhealthy", healthy, servers(false, false, false), false},
+		{"the servers of a group, with a voter too many", healthy, servers(true, true, true), false},
+		{"the servers of a group, with a voter too few", healthy,
+			serversReading(true, serverEntry{"s-1", "10.64.0.4", true, true}), false},
+		{"the servers of a group that are healthy and vote", healthy, serversReading(true,
+			serverEntry{"s-1", "10.64.0.4", true, true}, serverEntry{"s-2", "10.64.0.5", true, true}), true},
+		{"the window", rollout.Step{Action: rollout.WaitStable, Group: "servers", Machine: victim},
+			servers(true, true, true), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := &rollRun{rollLoop: newRollLoop(), groups: []rollout.Group{{Name: "servers", Role: v1alpha1.RoleServer}}}
+			if got := (openWait{step: tc.step}).over(r, tc.reading); got != tc.wantOver {
+				t.Errorf("over = %v, want %v", got, tc.wantOver)
+			}
+		})
+	}
+}
+
+// TestRefuseRoleRefusesCombinedGroupsAndServerGroupsOnlyForThePlan refuses a combined group whatever the caller, and a
+// server group only when the caller says that servers are refused too; a client group never.
+func TestRefuseRoleRefusesCombinedGroupsAndServerGroupsOnlyForThePlan(t *testing.T) {
+	t.Parallel()
+	m := &model.Cluster{Name: "prod", Groups: []model.NodeGroup{
+		{Name: "servers", Role: v1alpha1.RoleServer}, {Name: "all", Role: v1alpha1.RoleCombined},
+		{Name: "workers", Role: v1alpha1.RoleClient},
+	}}
+	withClients := &rollRun{model: m}
+	serversOnly := &rollRun{model: &model.Cluster{Name: "prod", Groups: m.Groups[:2]}}
+	step := func(group string) rollout.Step { return rollout.Step{Action: rollout.Create, Group: group} }
+	for _, tc := range []struct {
+		name    string
+		r       *rollRun
+		group   string
+		servers bool
+		want    string
+	}{
+		{"a combined group", withClients, "all", false,
+			"node group all: tent cannot roll combined groups yet; select client groups with --nodegroups"},
+		{"a combined group of a cluster without clients", serversOnly, "all", false,
+			"node group all: tent cannot roll combined groups yet"},
+		{"a server group", withClients, "servers", false, ""},
+		{"a client group", withClients, "workers", false, ""},
+		{"a combined group for the plan", withClients, "all", true,
+			"node group all: tent cannot roll server and combined groups yet; select client groups with --nodegroups"},
+		{"a server group for the plan", withClients, "servers", true,
+			"node group servers: tent cannot roll server and combined groups yet; select client groups with --nodegroups"},
+		{"a server group for the plan, without clients", serversOnly, "servers", true,
+			"node group servers: tent cannot roll server and combined groups yet"},
+		{"a client group for the plan", withClients, "workers", true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.r.refuseRole(step(tc.group), tc.servers)
+			if (err == nil) != (tc.want == "") || err != nil && err.Error() != tc.want {
+				t.Errorf("refuseRole error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestNeedsListOnlyForAStopOrATransferDecidedWithoutAList wants a list for a stop and for a transfer of the leadership
+// that were decided on an observation that did not list the machines, and for no other step or observation.
+func TestNeedsListOnlyForAStopOrATransferDecidedWithoutAList(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		action  rollout.Action
+		listing bool
+		want    bool
+	}{
+		{rollout.Stop, false, true}, {rollout.TransferLeadership, false, true},
+		{rollout.Stop, true, false}, {rollout.TransferLeadership, true, false},
+		{rollout.Create, false, false}, {rollout.Delete, false, false}, {rollout.RemovePeer, false, false},
+		{rollout.WaitStable, false, false},
+	} {
+		t.Run(fmt.Sprintf("%v listing %v", tc.action, tc.listing), func(t *testing.T) {
+			t.Parallel()
+			r := &rollRun{rollLoop: newRollLoop()}
+			r.listing = tc.listing
+			if got := r.needsList(rollout.Step{Action: tc.action}); got != tc.want {
+				t.Errorf("needsList = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestObserveNotesWhetherItListed notes that it listed when the last step changed the machines, and that it did not
+// when nothing asked for a list.
+func TestObserveNotesWhetherItListed(t *testing.T) {
+	t.Parallel()
+	fail := false
+	r := &rollRun{api: readsNomad{fail: &fail}, rollLoop: newRollLoop(), kit: nodeKit{nodes: listsNodes{}}}
+	r.relist = true
+
+	if _, ok, err := r.observe(t.Context()); !ok || err != nil || !r.listing {
+		t.Fatalf("observe = %v, %v, listing %v; want an observation that listed", ok, err, r.listing)
+	}
+	if _, ok, err := r.observe(t.Context()); !ok || err != nil || r.listing {
+		t.Errorf("observe = %v, %v, listing %v; want an observation that did not list", ok, err, r.listing)
+	}
+}
+
+// TestCreateAndRepeatCreateBootAServerWithoutAnIntroTokenAndAClientWithOne asks the servers for an intro token only
+// when the machine is a client, whether the loop creates the machine or repeats its create.
+func TestCreateAndRepeatCreateBootAServerWithoutAnIntroTokenAndAClientWithOne(t *testing.T) {
+	t.Parallel()
+	const op = "4f6a2d5e-8c3b-4d1e-9a7f-0b2c3d4e5f60"
+	m := &model.Cluster{Name: "prod", Groups: []model.NodeGroup{
+		{Name: "servers", Role: v1alpha1.RoleServer, MachineType: serverType, Image: testImage},
+		{Name: "workers", Role: v1alpha1.RoleClient, MachineType: clientType, Image: testImage},
+	}}
+	for _, tc := range []struct {
+		name   string
+		group  string
+		role   v1alpha1.Role
+		tokens int
+	}{
+		{"a server", "servers", v1alpha1.RoleServer, 0},
+		{"a client", "workers", v1alpha1.RoleClient, 1},
+	} {
+		machine := cloud.Instance{
+			ID: "i-9", Name: "prod-" + tc.group + "-1", Group: tc.group, Role: tc.role, Zone: "ams", Op: op,
+		}
+		for _, b := range []struct {
+			how  string
+			boot func(*testing.T, *rollRun) error
+		}{
+			{"create", func(t *testing.T, r *rollRun) error {
+				return r.create(t.Context(), rollout.Step{Action: rollout.Create, Group: tc.group, Machine: rollout.Machine{
+					Name: machine.Name, Group: tc.group, Role: tc.role, Zone: "ams"}})
+			}},
+			{"repeat", func(t *testing.T, r *rollRun) error { return r.repeatCreate(t.Context(), machine) }},
+		} {
+			t.Run(tc.name+" "+b.how, func(t *testing.T) {
+				t.Parallel()
+				var steps []string
+				nodes, intro := &recordingNodes{}, &introStub{}
+				r := &rollRun{
+					s: testService(&steps), kit: testKit(t, nodes), model: m, api: intro, rollLoop: newRollLoop(),
+					groups: []rollout.Group{{Name: tc.group}},
+					listed: []cloud.Instance{{
+						Name: "prod-servers-0", Group: "servers", Role: v1alpha1.RoleServer, PrivateIP: netip.MustParseAddr("10.64.0.3"),
+					}},
+				}
+
+				if err := b.boot(t, r); err != nil {
+					t.Fatalf("%s: %v", b.how, err)
+				}
+
+				if len(nodes.creates) != 1 || nodes.creates[0].Role != tc.role {
+					t.Errorf("the cloud was asked for %+v, want one machine of the role %s", nodes.creates, tc.role)
+				}
+				if len(intro.requests) != tc.tokens {
+					t.Errorf("the servers were asked for %d intro tokens, want %d", len(intro.requests), tc.tokens)
+				}
+			})
+		}
+	}
+}
+
+// TestJoinPollScrubsAServerThatVotesAndNotACombinedMachine scrubs a server once a healthy voter runs at its address,
+// and a combined machine not before its node has registered.
+func TestJoinPollScrubsAServerThatVotesAndNotACombinedMachine(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		role      v1alpha1.Role
+		wantScrub int
+	}{{v1alpha1.RoleServer, 1}, {v1alpha1.RoleCombined, 0}} {
+		t.Run(string(tc.role), func(t *testing.T) {
+			t.Parallel()
+			var steps []string
+			nodes := &recordingNodes{}
+			in := cloud.Instance{
+				ID: "i-3", Name: "prod-servers-3", Role: tc.role, Ready: true, PrivateIP: netip.MustParseAddr("10.64.0.6"),
+			}
+			r := &rollRun{s: testService(&steps), kit: testKit(t, nodes), rollLoop: newRollLoop(), listed: []cloud.Instance{in}}
+			step := rollout.Step{Action: rollout.WaitJoined, Machine: rollout.Machine{ID: in.ID, Name: in.Name, Role: tc.role}}
+			reading := serversReading(true, serverEntry{"s-3", "10.64.0.6", true, true})
+
+			if err := r.joinPoll(t.Context(), step, reading); err != nil {
+				t.Fatalf("joinPoll: %v", err)
+			}
+
+			if len(nodes.joined) != tc.wantScrub {
+				t.Errorf("the cloud was asked to label %d machines, want %d", len(nodes.joined), tc.wantScrub)
+			}
+		})
+	}
+}
+
+// TestStopStopsTheMachineAndListsAtTheNextObservation sends the stop to the cloud and then lists the machines at the
+// next observation; a stop that fails returns the cloud's error and leaves the list as it is.
+func TestStopStopsTheMachineAndListsAtTheNextObservation(t *testing.T) {
+	t.Parallel()
+	errCloud := errors.New("the cloud refused")
+	for _, tc := range []struct {
+		name      string
+		cloudErr  error
+		wantList  bool
+		wantAsked int
+	}{{"the cloud stops it", nil, true, 1}, {"the cloud refuses", errCloud, false, 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var steps []string
+			nodes := &stoppingNodes{err: tc.cloudErr}
+			r := &rollRun{s: testService(&steps), kit: nodeKit{cluster: "prod", nodes: nodes}, rollLoop: newRollLoop()}
+
+			err := r.stop(t.Context(), rollout.Machine{ID: "i-1", Name: "prod-servers-0"})
+
+			if !errors.Is(err, tc.cloudErr) {
+				t.Errorf("stop error = %v, want %v", err, tc.cloudErr)
+			}
+			if len(nodes.stopped) != tc.wantAsked || r.relist != tc.wantList {
+				t.Errorf("the cloud was asked to stop %d machines and the run lists next: %v; want %d and %v",
+					len(nodes.stopped), r.relist, tc.wantAsked, tc.wantList)
 			}
 		})
 	}
