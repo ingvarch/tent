@@ -280,7 +280,6 @@ func TestRollLoopRefusesServerGroups(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := rollWorld(t)
-		withTolerance(svc)
 		mustReplace(t, svc, keyedClusterYAML+"  nomad:\n    extraConfig:\n      server: 'raft_multiplier = 3'\n")
 		mustUpdate(t, svc)
 		cloudCalls, nomadCalls := len(f.Calls()), len(w.Log())
