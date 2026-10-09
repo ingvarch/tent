@@ -389,8 +389,8 @@ var openAPILine = strings.TrimSuffix(openAPIWarning, "\n")
 
 // progressEvent is a progress line of -o json.
 type progressEvent struct {
-	Type, Event, Step, Kind, Name, Action, ID, Address, Deadline, Wait, Cause, Error, Leader string
-	Voters                                                                                   int
+	Type, Event, Step, Kind, Name, Action, ID, Address, Deadline, Until, Wait, Cause, Reason, Error, Leader string
+	Voters, Nodes                                                                                           int
 }
 
 // decodeProgress decodes the progress lines of -o json, one JSON object each, and skips the other lines of stderr,

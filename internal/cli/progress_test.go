@@ -27,6 +27,14 @@ var (
 	errBusy    = errors.New("vultr: POST /v2/vpcs: 503 Service Unavailable: busy")
 )
 
+// stableUntil is the end of a stability window, given in a zone that is not UTC: 12:04:20 UTC.
+var stableUntil = time.Date(2026, 10, 9, 13, 4, 20, 0, time.FixedZone("CET", 3600))
+
+// serverStep returns the progress of the Nomad step e at step, with err for a failed one.
+func serverStep(e app.NomadEvent, step app.NodeStep, err error) app.Progress {
+	return app.Progress{Nomad: &e, Step: step, Err: err}
+}
+
 // infraStep returns the progress of an infrastructure event.
 func infraStep(e engine.Event) app.Progress { return app.Progress{Infra: &e} }
 
@@ -39,6 +47,7 @@ var (
 		Op: "5f0c2a9e-8d1b-4c7e-9f3a-2b6d8e1c4a70"}
 	deleteNode = app.NodeChange{Action: app.NodeDelete, Name: "prod-workers-3", ID: "instance-8", Reason: "surplus"}
 	scrubNode  = app.NodeChange{Action: app.NodeScrub, Name: "prod-workers-0", ID: "instance-4"}
+	stopNode   = app.NodeChange{Action: app.NodeStop, Name: "prod-servers-0", ID: "instance-2"}
 )
 
 var progressCases = []progressCase{
@@ -119,6 +128,16 @@ var progressCases = []progressCase{
 	{"node scrub failed", app.Progress{Node: scrubNode, Step: app.NodeFailed, Err: errBusy},
 		"failed to scrub the user data of node prod-workers-0: " + errBusy.Error(),
 		`{"type":"node","step":"failed","action":"scrub","name":"prod-workers-0","id":"instance-4",` +
+			`"error":"` + errBusy.Error() + `"}`},
+	{"node stop started", app.Progress{Node: stopNode, Step: app.NodeStarted},
+		"stopping node prod-servers-0 (ID instance-2)",
+		`{"type":"node","step":"started","action":"stop","name":"prod-servers-0","id":"instance-2"}`},
+	{"node stopped", app.Progress{Node: stopNode, Step: app.NodeDone},
+		"stopped node prod-servers-0 (ID instance-2)",
+		`{"type":"node","step":"done","action":"stop","name":"prod-servers-0","id":"instance-2"}`},
+	{"node stop failed", app.Progress{Node: stopNode, Step: app.NodeFailed, Err: errBusy},
+		"failed to stop node prod-servers-0 (ID instance-2): " + errBusy.Error(),
+		`{"type":"node","step":"failed","action":"stop","name":"prod-servers-0","id":"instance-2",` +
 			`"error":"` + errBusy.Error() + `"}`},
 	{"node delete started", app.Progress{Node: deleteNode, Step: app.NodeStarted},
 		"deleting node prod-workers-3 (ID instance-8)",
@@ -262,6 +281,97 @@ var progressCases = []progressCase{
 		"failed to purge node prod-workers-0 (10.64.0.6) from Nomad: " + errBusy.Error(),
 		`{"type":"nomad","step":"failed","action":"purge","name":"prod-workers-0","address":"10.64.0.6",` +
 			`"error":"` + errBusy.Error() + `"}`},
+	{"Nomad vote wait started", serverStep(app.NomadEvent{Action: app.NomadVote, Node: "prod-servers-3"},
+		app.NodeStarted, nil),
+		"waiting for node prod-servers-3 to vote",
+		`{"type":"nomad","step":"started","action":"vote","name":"prod-servers-3"}`},
+	{"Nomad node votes", serverStep(app.NomadEvent{Action: app.NomadVote, Node: "prod-servers-3"},
+		app.NodeDone, nil),
+		"node prod-servers-3 votes",
+		`{"type":"nomad","step":"done","action":"vote","name":"prod-servers-3"}`},
+	{"Nomad vote wait failed", serverStep(app.NomadEvent{Action: app.NomadVote, Node: "prod-servers-3"},
+		app.NodeFailed, errBusy),
+		"failed to wait for node prod-servers-3 to vote: " + errBusy.Error(),
+		`{"type":"nomad","step":"failed","action":"vote","name":"prod-servers-3","error":"` +
+			errBusy.Error() + `"}`},
+	{"Nomad stable wait started", serverStep(app.NomadEvent{Action: app.NomadStable, Until: stableUntil},
+		app.NodeStarted, nil),
+		"waiting until 12:04:20 for the servers to be stable",
+		`{"type":"nomad","step":"started","action":"stable","until":"2026-10-09T12:04:20Z"}`},
+	{"Nomad servers stable", serverStep(app.NomadEvent{Action: app.NomadStable, Until: stableUntil},
+		app.NodeDone, nil),
+		"the servers are stable",
+		`{"type":"nomad","step":"done","action":"stable","until":"2026-10-09T12:04:20Z"}`},
+	{"Nomad stable wait failed", serverStep(app.NomadEvent{Action: app.NomadStable, Until: stableUntil},
+		app.NodeFailed, errBusy),
+		"failed to wait for the servers to be stable: " + errBusy.Error(),
+		`{"type":"nomad","step":"failed","action":"stable","until":"2026-10-09T12:04:20Z","error":"` +
+			errBusy.Error() + `"}`},
+	{"Nomad transfer started", serverStep(app.NomadEvent{Action: app.NomadTransfer, Node: "prod-servers-0",
+		Leader: "prod-servers-3"}, app.NodeStarted, nil),
+		"moving the leadership from prod-servers-0 to prod-servers-3",
+		`{"type":"nomad","step":"started","action":"transfer","name":"prod-servers-0","leader":"prod-servers-3"}`},
+	{"Nomad leadership moved", serverStep(app.NomadEvent{Action: app.NomadTransfer, Node: "prod-servers-0",
+		Leader: "prod-servers-3"}, app.NodeDone, nil),
+		"moved the leadership from prod-servers-0 to prod-servers-3",
+		`{"type":"nomad","step":"done","action":"transfer","name":"prod-servers-0","leader":"prod-servers-3"}`},
+	{"Nomad transfer failed", serverStep(app.NomadEvent{Action: app.NomadTransfer, Node: "prod-servers-0",
+		Leader: "prod-servers-3"}, app.NodeFailed, errBusy),
+		"failed to move the leadership from prod-servers-0 to prod-servers-3: " + errBusy.Error(),
+		`{"type":"nomad","step":"failed","action":"transfer","name":"prod-servers-0","leader":"prod-servers-3",` +
+			`"error":"` + errBusy.Error() + `"}`},
+	{"Nomad server-down wait started", serverStep(app.NomadEvent{Action: app.NomadServerDown,
+		Node: "prod-servers-0"}, app.NodeStarted, nil),
+		"waiting until autopilot no longer counts prod-servers-0 as a healthy voter",
+		`{"type":"nomad","step":"started","action":"server-down","name":"prod-servers-0"}`},
+	{"Nomad server no longer counted", serverStep(app.NomadEvent{Action: app.NomadServerDown,
+		Node: "prod-servers-0"}, app.NodeDone, nil),
+		"autopilot no longer counts prod-servers-0 as a healthy voter",
+		`{"type":"nomad","step":"done","action":"server-down","name":"prod-servers-0"}`},
+	{"Nomad server-down wait failed", serverStep(app.NomadEvent{Action: app.NomadServerDown,
+		Node: "prod-servers-0"}, app.NodeFailed, errBusy),
+		"failed to wait for autopilot to stop counting prod-servers-0: " + errBusy.Error(),
+		`{"type":"nomad","step":"failed","action":"server-down","name":"prod-servers-0","error":"` +
+			errBusy.Error() + `"}`},
+	{"Nomad remove-peer started", serverStep(app.NomadEvent{Action: app.NomadRemovePeer, Node: "prod-servers-0"},
+		app.NodeStarted, nil),
+		"removing prod-servers-0 from the Raft configuration",
+		`{"type":"nomad","step":"started","action":"remove-peer","name":"prod-servers-0"}`},
+	{"Nomad peer removed", serverStep(app.NomadEvent{Action: app.NomadRemovePeer, Node: "prod-servers-0"},
+		app.NodeDone, nil),
+		"removed prod-servers-0 from the Raft configuration",
+		`{"type":"nomad","step":"done","action":"remove-peer","name":"prod-servers-0"}`},
+	{"Nomad remove-peer failed", serverStep(app.NomadEvent{Action: app.NomadRemovePeer, Node: "prod-servers-0"},
+		app.NodeFailed, errBusy),
+		"failed to remove prod-servers-0 from the Raft configuration: " + errBusy.Error(),
+		`{"type":"nomad","step":"failed","action":"remove-peer","name":"prod-servers-0","error":"` +
+			errBusy.Error() + `"}`},
+	{"Nomad force-leave started", serverStep(app.NomadEvent{Action: app.NomadForceLeave,
+		Node: "prod-servers-0.global"}, app.NodeStarted, nil),
+		"forcing prod-servers-0.global out of the gossip pool",
+		`{"type":"nomad","step":"started","action":"force-leave","name":"prod-servers-0.global"}`},
+	{"Nomad member forced out", serverStep(app.NomadEvent{Action: app.NomadForceLeave,
+		Node: "prod-servers-0.global"}, app.NodeDone, nil),
+		"forced prod-servers-0.global out of the gossip pool",
+		`{"type":"nomad","step":"done","action":"force-leave","name":"prod-servers-0.global"}`},
+	{"Nomad force-leave failed", serverStep(app.NomadEvent{Action: app.NomadForceLeave,
+		Node: "prod-servers-0.global"}, app.NodeFailed, errBusy),
+		"failed to force prod-servers-0.global out of the gossip pool: " + errBusy.Error(),
+		`{"type":"nomad","step":"failed","action":"force-leave","name":"prod-servers-0.global","error":"` +
+			errBusy.Error() + `"}`},
+	{"Nomad settle started", serverStep(app.NomadEvent{Action: app.NomadSettle, Deadline: time.Minute,
+		Reason: "autopilot is unhealthy"}, app.NodeStarted, nil),
+		"waiting up to 1m0s for the cluster to settle: autopilot is unhealthy",
+		`{"type":"nomad","step":"started","action":"settle","deadline":"1m0s","reason":"autopilot is unhealthy"}`},
+	{"Nomad cluster settled", serverStep(app.NomadEvent{Action: app.NomadSettle, Deadline: time.Minute,
+		Reason: "autopilot is unhealthy"}, app.NodeDone, nil),
+		"the cluster settled",
+		`{"type":"nomad","step":"done","action":"settle","deadline":"1m0s","reason":"autopilot is unhealthy"}`},
+	{"Nomad settle failed", serverStep(app.NomadEvent{Action: app.NomadSettle, Deadline: time.Minute,
+		Reason: "autopilot is unhealthy"}, app.NodeFailed, errBusy),
+		"failed to wait for the cluster to settle: " + errBusy.Error(),
+		`{"type":"nomad","step":"failed","action":"settle","deadline":"1m0s",` +
+			`"reason":"autopilot is unhealthy","error":"` + errBusy.Error() + `"}`},
 	{"Nomad unknown action", app.Progress{Nomad: &app.NomadEvent{}, Step: app.NodeStarted},
 		"NomadAction(0) started Nomad",
 		`{"type":"nomad","step":"started","action":"NomadAction(0)"}`},
