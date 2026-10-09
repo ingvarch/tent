@@ -334,7 +334,6 @@ func TestRollFlowRefusesAtTheStartWithoutALock(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := rollWorld(t)
-		withTolerance(svc)
 		u := watch(t, svc, f, w)
 
 		plan, err := applyRoll(svc, app.RollOptions{Force: true})

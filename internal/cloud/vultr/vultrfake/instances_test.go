@@ -545,6 +545,162 @@ func TestHaltInstance(t *testing.T) {
 	)
 }
 
+// stoppedReady is an instance that was halted after it booted.
+var stoppedReady = state{"active", "stopped", "ok"}
+
+// bootedInstance creates the instance label, which shows as ready from its first read, and returns its ID.
+func bootedInstance(t *testing.T, f *vultrfake.Fake, label string) string {
+	t.Helper()
+	f.SetBootReads(t, 0, 0)
+	return mustCreateInstance(t, f, nodeReq(label, "tent/cluster=prod")).ID
+}
+
+func halt(t *testing.T, f *vultrfake.Fake, id string) {
+	t.Helper()
+	if err := f.HaltInstance(t.Context(), id); err != nil {
+		t.Fatalf("HaltInstance %s: %v", id, err)
+	}
+}
+
+// listedState returns the state that ListInstances shows for the instance id.
+func listedState(t *testing.T, f *vultrfake.Fake, id string) state {
+	t.Helper()
+	list, err := f.ListInstances(t.Context(), "tent/cluster=prod")
+	if err != nil {
+		t.Fatalf("ListInstances: %v", err)
+	}
+	for _, in := range list {
+		if in.ID == id {
+			return stateOf(in)
+		}
+	}
+	t.Fatalf("ListInstances lists no %s", id)
+	return state{}
+}
+
+func TestSetHaltReadsKeepsAHaltedInstanceRunningForNReads(t *testing.T) {
+	for _, n := range []int{0, 1, 3} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			f := newInfra(t)
+			id := bootedInstance(t, f, "n")
+			f.SetHaltReads(t, n)
+			halt(t, f, id)
+			// ListInstances and GetInstance both count; Instances and Halted do not.
+			for read := range n + 3 {
+				want := stoppedReady
+				if read < n {
+					want = ready
+				}
+				if got := stateOf(f.Instances()[0]); got != want {
+					t.Errorf("before read %d: Instances shows %+v, want %+v", read+1, got, want)
+				}
+				if !f.Halted(id) {
+					t.Errorf("before read %d: Halted = false, want true at once", read+1)
+				}
+				var got state
+				if read%2 == 0 {
+					got = listedState(t, f, id)
+				} else {
+					got = stateOf(mustGetInstance(t, f, id))
+				}
+				if got != want {
+					t.Errorf("read %d = %+v, want %+v", read+1, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestSetHaltReadsApplyToLaterHaltsOnly(t *testing.T) {
+	f := newInfra(t)
+	early := bootedInstance(t, f, "early")
+	late := bootedInstance(t, f, "late")
+	halt(t, f, early)
+	f.SetHaltReads(t, 2)
+	halt(t, f, late)
+	if got := stateOf(mustGetInstance(t, f, early)); got != stoppedReady {
+		t.Errorf("the instance halted before the setting is %+v, want %+v", got, stoppedReady)
+	}
+	if got := stateOf(mustGetInstance(t, f, late)); got != ready {
+		t.Errorf("the instance halted after the setting is %+v, want %+v", got, ready)
+	}
+}
+
+func TestSecondHaltDoesNotRestartTheHaltReads(t *testing.T) {
+	f := newInfra(t)
+	id := bootedInstance(t, f, "n")
+	f.SetHaltReads(t, 1)
+	halt(t, f, id)
+	if got := stateOf(mustGetInstance(t, f, id)); got != ready {
+		t.Errorf("first read = %+v, want %+v", got, ready)
+	}
+	halt(t, f, id)
+	if got := stateOf(mustGetInstance(t, f, id)); got != stoppedReady {
+		t.Errorf("read after the second halt = %+v, want %+v", got, stoppedReady)
+	}
+}
+
+func TestSetHaltReadsCountsOnlyTheHaltedInstance(t *testing.T) {
+	f := newInfra(t)
+	halted := bootedInstance(t, f, "halted")
+	running := bootedInstance(t, f, "running")
+	f.SetHaltReads(t, 1)
+	halt(t, f, halted)
+	if got := stateOf(mustGetInstance(t, f, running)); got != ready {
+		t.Errorf("the instance that runs reads %+v, want %+v", got, ready)
+	}
+	if got := stateOf(mustGetInstance(t, f, halted)); got != ready {
+		t.Errorf("the first read of the halted one = %+v, want %+v after reads of another instance", got, ready)
+	}
+	if f.Halted(running) {
+		t.Error("Halted of the instance that runs is true")
+	}
+}
+
+func TestSetHaltReadsDoNotShowAnInstanceThatIsStillPendingAsRunning(t *testing.T) {
+	f := newInfra(t)
+	id := mustCreateInstance(t, f, nodeReq("n", "tent/cluster=prod")).ID
+	f.SetHaltReads(t, 5)
+	halt(t, f, id)
+	if got := stateOf(mustGetInstance(t, f, id)); got != pending {
+		t.Errorf("the first read of the instance halted while pending = %+v, want %+v", got, pending)
+	}
+}
+
+func TestSetHaltReadsMisuse(t *testing.T) {
+	f := newInfra(t)
+	tb := &fatalTB{TB: t}
+	f.SetHaltReads(tb, -1)
+	wantFatal(t, tb, "vultrfake: SetHaltReads: n is -1, want 0 or more")
+	// The default stands: a halt shows at once.
+	id := bootedInstance(t, f, "n")
+	halt(t, f, id)
+	if got := stateOf(mustGetInstance(t, f, id)); got != stoppedReady {
+		t.Errorf("GetInstance after a halt = %+v, want %+v", got, stoppedReady)
+	}
+}
+
+func TestHalted(t *testing.T) {
+	f := newInfra(t)
+	id := bootedInstance(t, f, "n")
+	if f.Halted(id) {
+		t.Error("Halted of a new instance is true")
+	}
+	halt(t, f, id)
+	if !f.Halted(id) {
+		t.Error("Halted after a halt is false")
+	}
+	if f.Halted("instance-9") {
+		t.Error("Halted of an unknown instance is true")
+	}
+	if err := f.DeleteInstance(t.Context(), id); err != nil {
+		t.Fatalf("DeleteInstance: %v", err)
+	}
+	if f.Halted(id) {
+		t.Error("Halted of a deleted instance is true")
+	}
+}
+
 func TestDeleteInstance(t *testing.T) {
 	f := newInfra(t)
 	mustCreateInstance(t, f, nodeReq("a"))
@@ -777,6 +933,7 @@ func TestInstanceGetters(t *testing.T) {
 		}
 		_ = f.UserData("instance-1")
 		_, _ = f.CreateRequest("instance-1")
+		_ = f.Halted("instance-1")
 	}
 	f.Instances()[0].Tags[0] = "changed"
 	if tags := f.Instances()[0].Tags; tags[0] != "t" {

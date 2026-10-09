@@ -49,20 +49,32 @@ type nomadCall struct {
 }
 
 // nomadWorld is the Nomad cluster of one cluster of the test service, which follows a Vultr fake: before each call it
-// sets the fake's leader, health, Raft peers and nodes from the cluster's instances there. The cluster has a leader
-// once as many servers are ready as its specs give, and its servers are healthy when every listed one is ready. The
-// ready servers are the voting peers, named <hostname>.global at <private address>:4647, so the peers, the servers of
-// the autopilot report and Health.Voters stay in step; each runs the world's Nomad version, as each node does. Once the
-// cluster has a leader, each ready client or combined instance registers at its private address (the first VPC of the
-// instance on the Vultr fake), unless it is withheld, with the ID n-<instance id>, and only once in a cluster: a mark,
-// a drain or a purge that a test or a run makes stays. The node of a machine that is gone or not ready for downAfter
-// reads down from then on, with its drain complete, while the world's last view of the fake still lists it; the view is
-// what the last read of the nodes returned, plus the nodes the world registered since, minus those that a client of
-// the world purged; any other write since that read is not in it.
-// The peers and the autopilot report of the ready servers carry the Raft ID r-<instance id>, the first one leads, and
-// the gossip members are the same servers, alive. A cluster whose servers are all gone is a new, unbootstrapped Nomad
-// when new ones come. The fake's own methods, such as Fail, LoseResponse and SetDrainReads, are the world's. A test
-// changes what the world answers with ChangeServer, DropServer, ChangePeers, ChangeNode and DropNode.
+// sets the fake's leader, health, Raft peers, gossip members and nodes from the cluster's instances there.
+//
+// Its servers have a model that lasts across calls, by the time of the bubble (see raftServer). A server machine that
+// is ready joins the Raft configuration, and votes at once when the cluster has no leader yet and after voteAfter
+// otherwise. The cluster has its first leader once as many servers are ready as its specs give, and keeps it until a
+// transfer through the fake moves it; the world fails the test, if it has one (FailOnLeaderLoss), when the machine of
+// the leader halts or goes. A server whose machine halts or goes stays alive and healthy for failAfter, then fails;
+// cleanupAfter later autopilot removes its peer, and the report keeps the removed peer for reportLag. The cluster is
+// healthy when no peer is unhealthy, no removed peer is still reported and no blip after a transfer is under way, and
+// its failure tolerance is the healthy voters beyond a quorum. A call to the address of a server whose machine is
+// halted or gone fails at once with ErrNotReady. Every delay is 0 by default, so a server joins and votes, and a
+// halted or deleted one is out of the Raft configuration, at the next call.
+//
+// The servers are named <hostname>.global at their private address:4647, with the Raft ID r-<instance id>, and each
+// runs the world's Nomad version, as each node does. A TransferLeadership, RemovePeer or ForceLeave that succeeds
+// through a client of the world changes the model for good. One that fails does not, even when LoseResponse made the
+// fake carry it out: the world undoes it at the next call, so a test loses the answer of such a write with a hook that
+// calls next and returns an error. Once the cluster has a leader, each ready client or combined instance registers at
+// its private address (the first VPC of the instance on the Vultr fake), unless it is withheld, with the ID n-<instance
+// id>, and only once in a cluster: a mark, a drain or a purge that a test or a run makes stays. The node of a machine
+// that is gone or not ready for downAfter reads down from then on, with its drain complete, while the world's last view
+// of the fake still lists it; the view is what the last read of the nodes returned, plus the nodes the world registered
+// since, minus those that a client of the world purged; any other write since that read is not in it. A cluster whose
+// servers are all gone is a new, unbootstrapped Nomad when new ones come. The fake's own methods, such as Fail,
+// LoseResponse and SetDrainReads, are the world's. A test changes what the world answers with ChangeServer, DropServer,
+// ChangePeers, ChangeNode and DropNode.
 type nomadWorld struct {
 	*nomadfake.Fake
 	cloud *vultrfake.Fake
@@ -79,6 +91,12 @@ type nomadWorld struct {
 	noLeader    bool
 	// seen holds the ids of the server machines at the last call.
 	seen []string
+	// delays and raft are the model of the servers; haltedCalls are the calls to the address of a halted or gone
+	// server; tb is the test that a loss of the leader fails.
+	delays      serverDelays
+	raft        raftCluster
+	haltedCalls []nomadfake.Call
+	tb          testing.TB
 	// unhealthy keeps the servers from being healthy, whatever the instances show.
 	unhealthy bool
 	// version is the Nomad version that every server and node reports; empty for the one of the stable channel.
@@ -96,9 +114,7 @@ type nomadWorld struct {
 	listed map[string]nomadops.Node
 	// unreadySince is when the world first saw a registered client's machine gone or not ready, by instance ID.
 	unreadySince map[string]time.Time
-	// stableSince is when the world first saw a server machine ready, by instance ID.
-	stableSince map[string]time.Time
-	downAfter   time.Duration
+	downAfter    time.Duration
 }
 
 // defaultDownAfter is how long the node of a machine that is gone reads ready: Nomad marks a node down 14 to 19 s
@@ -139,20 +155,23 @@ func (w *nomadWorld) pinned() string {
 	return ch.Nomad.Recommended
 }
 
-// forgetNodes clears the clients that registered, the world's view of the nodes, and the times it noted for machines.
+// forgetNodes clears the clients that registered, the world's view of the nodes, and the times it noted for clients.
 func (w *nomadWorld) forgetNodes() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.registered = map[string]bool{}
 	w.listed = map[string]nomadops.Node{}
 	w.unreadySince = map[string]time.Time{}
-	w.stableSince = map[string]time.Time{}
 }
 
-// NewCluster makes the Nomad a new cluster, as the fake does, and has every ready client register again.
+// NewCluster makes the Nomad a new cluster, as the fake does, and has every ready client register again and every
+// ready server join again.
 func (w *nomadWorld) NewCluster() {
 	w.Fake.NewCluster()
 	w.forgetNodes()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.raft = raftCluster{}
 }
 
 // SetDownAfter sets how long the node of a machine that is gone or not ready reads ready; the default is 20 s.
@@ -326,9 +345,9 @@ func (w *nomadWorld) serverCount() int {
 	return n
 }
 
-// follow sets the fake to what the instances of the Vultr fake show now.
+// follow sets the fake to what the instances of the Vultr fake and the model of the servers show now.
 func (w *nomadWorld) follow() {
-	var servers, readyServers, clients []machine
+	var servers, clients []machine
 	for _, m := range w.machines() {
 		switch m.role {
 		case "server":
@@ -340,29 +359,15 @@ func (w *nomadWorld) follow() {
 			clients = append(clients, m)
 		}
 	}
-	for _, m := range servers {
-		if m.ready {
-			readyServers = append(readyServers, m)
-		}
-	}
 	if !w.keepsAServer(servers) {
 		w.NewCluster() // a cluster whose servers are all gone is lost with them
 	}
-	w.mu.Lock()
-	noLeader, unhealthy := w.noLeader, w.unhealthy
-	w.mu.Unlock()
-	leader := ""
-	if n := w.serverCount(); !noLeader && n > 0 && len(readyServers) >= n {
-		leader = readyServers[0].address + ":4647"
-	}
-	w.SetLeader(leader)
-	w.SetHealth(nomadops.Health{
-		Healthy: !unhealthy && len(servers) > 0 && len(readyServers) == len(servers), Voters: len(readyServers),
-		Servers: w.report(readyServers),
-	})
-	w.SetPeers(raftPeers(readyServers))
-	w.SetMembers(membersOf(readyServers))
-	if leader == "" {
+	v := w.raftView(servers, w.serverCount())
+	w.SetLeader(v.leader)
+	w.SetHealth(v.health)
+	w.SetPeers(v.peers)
+	w.SetMembers(v.members)
+	if v.leader == "" {
 		return
 	}
 	w.registerClients(clients)
@@ -370,9 +375,6 @@ func (w *nomadWorld) follow() {
 
 // nodeIDOf returns the ID of the node that the machine with the instance ID id registers.
 func nodeIDOf(id string) string { return "n-" + id }
-
-// raftID returns the Raft ID of the server machine m.
-func raftID(m machine) string { return "r-" + m.id }
 
 // registerClients registers each ready client that is not withheld and did not register in this cluster, and turns the
 // node of each registered client whose machine has been gone or not ready for downAfter to down. A node that the
@@ -418,51 +420,6 @@ func (w *nomadWorld) registerClients(clients []machine) {
 	}
 }
 
-// report returns autopilot's entries for the ready servers m: alive, healthy and voting, the first one leading. The
-// entries come in the reverse order of the machines, as Nomad does not keep one.
-func (w *nomadWorld) report(m []machine) []nomadops.ServerHealth {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	var out []nomadops.ServerHealth
-	for i := len(m) - 1; i >= 0; i-- {
-		out = append(out, nomadops.ServerHealth{
-			ID: raftID(m[i]), Name: m[i].name + ".global", Address: netip.AddrPortFrom(m[i].private, 4647), Serf: "alive",
-			Healthy: true, Voter: true, Leader: i == 0, Version: w.pinned(), StableSince: w.stableOf(m[i]),
-		})
-	}
-	return out
-}
-
-// stableOf returns when the world first saw the server machine m ready, and notes now when it did not. The caller holds
-// w.mu.
-func (w *nomadWorld) stableOf(m machine) time.Time {
-	if _, ok := w.stableSince[m.id]; !ok {
-		w.stableSince[m.id] = time.Now()
-	}
-	return w.stableSince[m.id]
-}
-
-// raftPeers returns the servers m as the voting peers of the Raft configuration, at their private addresses, the first
-// one leading, as the autopilot report has it.
-func raftPeers(m []machine) []nomadops.Peer {
-	peers := make([]nomadops.Peer, 0, len(m))
-	for i, s := range m {
-		peers = append(peers, nomadops.Peer{
-			ID: raftID(s), Name: s.name + ".global", Address: netip.AddrPortFrom(s.private, 4647), Voter: true, Leader: i == 0,
-		})
-	}
-	return peers
-}
-
-// membersOf returns the servers m as alive members of the gossip pool, at their private addresses.
-func membersOf(m []machine) []nomadops.Member {
-	members := make([]nomadops.Member, 0, len(m))
-	for _, s := range m {
-		members = append(members, nomadops.Member{Name: s.name + ".global", Address: s.private, Status: "alive"})
-	}
-	return members
-}
-
 // keepsAServer records the ids of servers and reports whether the machines of the last call that were servers are not
 // all gone: it is true when there were none.
 func (w *nomadWorld) keepsAServer(servers []machine) bool {
@@ -483,10 +440,14 @@ type worldClient struct {
 	server string // the address of the server it calls
 }
 
-// do carries out the call through the world's hook, and logs what reached the Nomad fake.
+// do carries out the call through the world's hook, and logs what reached the Nomad fake. A call to the address of a
+// halted or gone server fails at once.
 func (c *worldClient) do(ctx context.Context, call nomadfake.Call, run func(context.Context) error) error {
 	call.Server = c.server
 	c.w.follow()
+	if c.w.reachesHalted(call) {
+		return errHalted(c.server)
+	}
 	c.w.mu.Lock()
 	hook := c.w.hook
 	c.w.mu.Unlock()
@@ -618,18 +579,31 @@ func (c *worldClient) Purge(ctx context.Context, nodeID string) error {
 
 func (c *worldClient) TransferLeadership(ctx context.Context, raftID string) error {
 	call := nomadfake.Call{Name: "TransferLeadership", Arg: raftID}
-	return c.do(ctx, call, func(ctx context.Context) error { return c.inner.TransferLeadership(ctx, raftID) })
+	return c.do(ctx, call, func(ctx context.Context) error {
+		err := c.inner.TransferLeadership(ctx, raftID)
+		if err == nil {
+			c.w.transferred(raftID)
+		}
+		return err
+	})
 }
 
 func (c *worldClient) RemovePeer(ctx context.Context, raftID string) error {
 	return c.do(ctx, nomadfake.Call{Name: "RemovePeer", Arg: raftID}, func(ctx context.Context) error {
-		return c.inner.RemovePeer(ctx, raftID)
+		err := c.inner.RemovePeer(ctx, raftID)
+		if err == nil {
+			c.w.peerRemoved(raftID)
+		}
+		return err
 	})
 }
 
 func (c *worldClient) Members(ctx context.Context) (v []nomadops.Member, err error) {
 	err = c.do(ctx, nomadfake.Call{Name: "Members"}, func(ctx context.Context) (err error) {
 		v, err = c.inner.Members(ctx)
+		if err == nil {
+			c.w.membersRead()
+		}
 		return
 	})
 	if err != nil {
@@ -640,7 +614,11 @@ func (c *worldClient) Members(ctx context.Context) (v []nomadops.Member, err err
 
 func (c *worldClient) ForceLeave(ctx context.Context, name string) error {
 	return c.do(ctx, nomadfake.Call{Name: "ForceLeave", Arg: name}, func(ctx context.Context) error {
-		return c.inner.ForceLeave(ctx, name)
+		err := c.inner.ForceLeave(ctx, name)
+		if err == nil {
+			c.w.memberForced(name)
+		}
+		return err
 	})
 }
 

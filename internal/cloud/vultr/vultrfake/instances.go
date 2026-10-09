@@ -36,6 +36,7 @@ type instance struct {
 	reads       int // how many times GetInstance read it
 	activeAfter int // the reads after which it shows as active
 	okAfter     int // the reads after which it shows as ok
+	haltLeft    int // the reads that still show a halted instance as running
 }
 
 // view returns a copy of the instance as every call shows it now.
@@ -48,12 +49,22 @@ func (in *instance) view() govultr.Instance {
 	case in.reads < in.okAfter:
 		v.ServerStatus = "installingbooting"
 	}
+	if in.haltLeft > 0 && v.Status == "active" {
+		v.PowerStatus = "running"
+	}
+	return v
+}
+
+// listed returns the instance as a ListInstances shows it, and counts the read of a halted instance.
+func (in *instance) listed() govultr.Instance {
+	v := in.view()
+	in.haltLeft = max(0, in.haltLeft-1)
 	return v
 }
 
 // read returns the instance as a GetInstance shows it, and counts the read.
 func (in *instance) read() govultr.Instance {
-	v := in.view()
+	v := in.listed()
 	in.reads++
 	return v
 }
@@ -81,6 +92,22 @@ func (f *Fake) SetBootReads(tb testing.TB, active, ok int) {
 	}
 }
 
+// SetHaltReads sets how many reads show an instance as running after a halt: it reads running at its next n reads by
+// ListInstances and GetInstance, then stopped, as Vultr reads stopped 4 to 19 s after the call. A read of Instances
+// counts none, and Halted tells the truth at once. It applies to the halts after the call, and a second halt of an
+// instance that is halted does not start the reads again. With 0, the default, an instance reads stopped at once. It
+// fails the test when n is negative.
+func (f *Fake) SetHaltReads(tb testing.TB, n int) {
+	tb.Helper()
+	if n < 0 {
+		tb.Fatalf("vultrfake: SetHaltReads: n is %d, want 0 or more", n)
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.haltReads = n
+}
+
 // instance returns the instance with id, or nil. The caller holds the lock.
 func (f *Fake) instance(id string) *instance {
 	i := slices.IndexFunc(f.instances, func(in *instance) bool { return in.ID == id })
@@ -101,7 +128,7 @@ func (f *Fake) ListInstances(ctx context.Context, tag string) ([]govultr.Instanc
 	err := f.run(ctx, r, func() error {
 		for _, in := range f.instances {
 			if slices.ContainsFunc(in.Tags, func(t string) bool { return strings.EqualFold(t, tag) }) {
-				out = append(out, in.view())
+				out = append(out, in.listed())
 			}
 		}
 		return nil
@@ -278,7 +305,8 @@ func (f *Fake) DeleteInstance(ctx context.Context, id string) error {
 	})
 }
 
-// HaltInstance powers an instance off: its power_status becomes stopped, and stays so while it boots.
+// HaltInstance powers an instance off: its power_status becomes stopped, and stays so while it boots. Reads show it
+// as stopped after as many reads as SetHaltReads says.
 func (f *Fake) HaltInstance(ctx context.Context, id string) error {
 	if err := vultr.CheckID("POST /v2/instances/{id}/halt", "id", id); err != nil {
 		return err
@@ -289,7 +317,9 @@ func (f *Fake) HaltInstance(ctx context.Context, id string) error {
 		if in == nil {
 			return r.fail(http.StatusNotFound, noInstance)
 		}
-		in.PowerStatus = "stopped"
+		if in.PowerStatus != "stopped" {
+			in.PowerStatus, in.haltLeft = "stopped", f.haltReads
+		}
 		return nil
 	})
 }

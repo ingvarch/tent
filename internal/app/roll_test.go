@@ -40,26 +40,6 @@ func outdatedWorld(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
 	return svc, f, w
 }
 
-// tolerant is a Nomad API whose autopilot reports that the servers can lose one voter, as the Nomad of the test world
-// does not say.
-type tolerant struct{ nomadops.API }
-
-func (t tolerant) Health(ctx context.Context) (nomadops.Health, error) {
-	h, err := t.API.Health(ctx)
-	h.FailureTolerance = 1
-	return h, err
-}
-
-// withTolerance makes the Nomad of svc report that the servers can lose one voter, so that the decisions give a step to
-// a server group instead of refusing it for the want of one.
-func withTolerance(svc *app.Service) {
-	inner := svc.Nomad
-	svc.Nomad = func(cfg nomadops.Config) (nomadops.API, error) {
-		api, err := inner(cfg)
-		return tolerant{api}, err
-	}
-}
-
 // instanceNamed returns the ID of the instance of f whose hostname is name.
 func instanceNamed(t *testing.T, f *vultrfake.Fake, name string) string {
 	t.Helper()
@@ -361,14 +341,12 @@ func TestRollingUpdateRefusesAtTheStart(t *testing.T) {
 		}, app.RollOptions{}, "cluster prod has no server that joined; run tent update cluster first", false},
 		{"outdated servers in the default selection", func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
 			svc, f, w := rollWorld(t)
-			withTolerance(svc)
 			mustReplace(t, svc, keyedClusterYAML+"  nomad:\n    extraConfig:\n      server: 'raft_multiplier = 3'\n")
 			mustUpdate(t, svc)
 			return svc, f, w
 		}, app.RollOptions{}, server, true},
 		{"force with the default selection", func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
 			svc, f, w := rollWorld(t)
-			withTolerance(svc)
 			return svc, f, w
 		}, app.RollOptions{Force: true}, server, true},
 	} {
@@ -399,7 +377,6 @@ func TestRollingUpdateServerRefusalWithoutClientGroups(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := newRelease(t, keyedClusterYAML, serversYAML)
 		mustUpdate(t, svc)
-		withTolerance(svc)
 		u := watch(t, svc, f, w)
 
 		plan, err := rollingUpdate(svc, app.RollOptions{Force: true})
@@ -419,7 +396,6 @@ func TestRollingUpdateRefusesACombinedGroup(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := newRelease(t, keyedClusterYAML, combinedYAML)
 		mustUpdate(t, svc)
-		withTolerance(svc)
 		u := watch(t, svc, f, w)
 
 		_, err := rollingUpdate(svc, app.RollOptions{Force: true})

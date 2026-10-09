@@ -24,7 +24,8 @@ import (
 // fault applies. Its errors are *vultr.APIError values with the method, path, status and class that the client
 // gives; a missing id, for example, is vultr.ErrNotFound. Lists are whole and in creation order, and every value the
 // fake returns is a copy. New objects get ids such as ssh-key-1, vpc-1, firewall-1 and instance-1; no id is given
-// out twice. A new instance boots as GetInstance reads it: see SetBootReads.
+// out twice. A new instance boots as GetInstance reads it: see SetBootReads. A halted instance reads stopped after a
+// number of reads: see SetHaltReads.
 //
 // The fake is simpler than Vultr in these ways:
 //   - ListInstanceVPCs lists nothing until the instance shows as active. Vultr listed the address 6–7 s after the
@@ -42,8 +43,8 @@ import (
 // been created before, without a call. An empty id gets a new one, and an empty date_created the clock's time.
 // Seeding checks no other field, no limit and no second copy of a rule, and returns the object as stored.
 // SetInstanceTags and SetInstanceUserData change an instance without a call. SSHKeys, VPCs, FirewallGroups,
-// FirewallRules, Instances, UserData, InstanceVPCs and CreateRequest read the objects back without a call: Calls does
-// not log them, and no fault applies to them.
+// FirewallRules, Instances, UserData, InstanceVPCs, Halted and CreateRequest read the objects back without a call:
+// Calls does not log them, and no fault applies to them.
 //
 // The fault and seeding methods take the test's testing.TB. They fail the test on a bug of the test, such as a name
 // that is not a vultr.API method or an id that is taken, at the line of the wrong call, rather than return an error
@@ -66,6 +67,7 @@ type Fake struct {
 	hook      Hook // wraps every call when set
 
 	activeAfter, okAfter int // the boot reads of new instances
+	haltReads            int // the reads that show an instance as running after its next halt
 	macs                 int // how many MACs were given out
 	mainIPs              int // how many main IPs were given out
 }
@@ -172,6 +174,15 @@ func (f *Fake) Instances() []govultr.Instance {
 		out = append(out, in.view())
 	}
 	return out
+}
+
+// Halted reports whether the instance is powered off, without a call and whatever the reads show while SetHaltReads
+// delays them. It is false for an unknown or a deleted instance.
+func (f *Fake) Halted(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	in := f.instance(id)
+	return in != nil && in.PowerStatus == "stopped"
 }
 
 // UserData returns the user data of an instance, base64 as sent, without a call. It returns "" for an unknown

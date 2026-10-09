@@ -48,8 +48,8 @@ spec:
 )
 
 // newRelease returns a service of tent v0.5.0 that allows a single server, whose store holds the test cluster, or the
-// specs docs, and whose providers reach the Vultr fake and the Nomad that follows it. A test that applies an update
-// calls it in a synctest bubble.
+// specs docs, and whose providers reach the Vultr fake and the Nomad that follows it, which fails t when the machine
+// of its leader halts or is deleted. A test that applies an update calls it in a synctest bubble.
 func newRelease(t *testing.T, docs ...string) (*app.Service, *vultrfake.Fake, *nomadWorld) {
 	t.Helper()
 	if len(docs) == 0 {
@@ -60,7 +60,9 @@ func newRelease(t *testing.T, docs ...string) (*app.Service, *vultrfake.Fake, *n
 	mustCreate(t, svc, docs...)
 	svc.Version = "v0.5.0"
 	f, _ := withCloud(svc)
-	return svc, f, withNomad(svc, f)
+	w := withNomad(svc, f)
+	w.FailOnLeaderLoss(t)
+	return svc, f, w
 }
 
 // configOf returns the NodeConfig in the user data that the create request of the instance called name carried; the

@@ -23,9 +23,15 @@ type liveWorld struct {
 }
 
 // newLiveWorld updates the test cluster in the bubble of t, and returns its fakes and a Nomad client.
-func newLiveWorld(t *testing.T) liveWorld {
+func newLiveWorld(t *testing.T) liveWorld { return newLiveWorldWith(t, nil) }
+
+// newLiveWorldWith is newLiveWorld with the world set by setup, when it is not nil, before the update.
+func newLiveWorldWith(t *testing.T, setup func(*nomadWorld)) liveWorld {
 	t.Helper()
 	svc, f, w := newRelease(t)
+	if setup != nil {
+		setup(w)
+	}
 	mustUpdate(t, svc)
 	api, err := svc.Nomad(nomadops.Config{Address: "198.51.100.1:4646"})
 	if err != nil {
