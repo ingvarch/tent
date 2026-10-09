@@ -52,6 +52,9 @@ func instanceNamed(t *testing.T, f *vultrfake.Fake, name string) string {
 	return ""
 }
 
+// noServerRuns is the refusal of a roll that finds no server of the cluster that joined and runs.
+const noServerRuns = "cluster prod has no server that joined and runs; run tent validate cluster to see what is wrong"
+
 // nomadReads are the calls of the Nomad fake that read.
 var nomadReads = []string{"Leader", "Peers", "Health", "Members", "Nodes", "KeyringReady"}
 
@@ -338,7 +341,17 @@ func TestRollingUpdateRefusesAtTheStart(t *testing.T) {
 				dropJoinedTag(t, f, instanceNamed(t, f, name))
 			}
 			return svc, f, w
-		}, app.RollOptions{}, "cluster prod has no server that joined; run tent update cluster first", false},
+		}, app.RollOptions{}, noServerRuns, false},
+		{"servers that joined and do not run", func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
+			svc, f, w := rollWorld(t)
+			w.FailOnLeaderLoss(&failureTB{TB: t}) // the leader halts too
+			for _, name := range []string{"prod-servers-0", "prod-servers-1", "prod-servers-2"} {
+				if err := f.HaltInstance(t.Context(), instanceNamed(t, f, name)); err != nil {
+					t.Fatalf("HaltInstance: %v", err)
+				}
+			}
+			return svc, f, w
+		}, app.RollOptions{}, noServerRuns, false},
 		{"outdated servers in the default selection", func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
 			svc, f, w := rollWorld(t)
 			mustReplace(t, svc, keyedClusterYAML+"  nomad:\n    extraConfig:\n      server: 'raft_multiplier = 3'\n")

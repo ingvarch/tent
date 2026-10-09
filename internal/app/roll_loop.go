@@ -98,19 +98,23 @@ func (w openWait) over(r *rollRun, reading nomadReading) bool {
 	return true
 }
 
-// rollTally holds the IDs of the machines and nodes that a roll created, drained, deleted and purged, so that a step
-// tried twice counts once.
-type rollTally struct{ created, drained, deleted, purged map[string]bool }
+// rollTally holds the IDs of the machines and nodes that a roll created, drained, stopped, deleted and purged, so that
+// a step tried twice counts once.
+type rollTally struct{ created, drained, stopped, deleted, purged map[string]bool }
 
 // counts returns how many distinct machines and nodes the tally holds.
 func (t rollTally) counts() RollCounts {
-	return RollCounts{Created: len(t.created), Drained: len(t.drained), Deleted: len(t.deleted), Purged: len(t.purged)}
+	return RollCounts{
+		Created: len(t.created), Drained: len(t.drained), Stopped: len(t.stopped), Deleted: len(t.deleted),
+		Purged: len(t.purged),
+	}
 }
 
 // rollLoop is what a rolling update remembers from one step to the next.
 type rollLoop struct {
 	pending  map[string]pendingMachine // by operation id; kept until a list shows the machine
 	deleting map[string]time.Time      // the machines whose delete was sent and that the cloud still lists, by ID
+	stopping map[string]time.Time      // the machines whose stop was sent and that the cloud may list as running, by ID
 	seen     map[stepKey]seenWait      // when the run first met each wait that has not ended
 	last     stepKey                   // the step carried out last
 	tries    int                       // how often in a row it was carried out
@@ -126,9 +130,11 @@ type rollLoop struct {
 // newRollLoop returns the memory of a run that has done nothing.
 func newRollLoop() rollLoop {
 	return rollLoop{
-		pending: map[string]pendingMachine{}, deleting: map[string]time.Time{}, seen: map[stepKey]seenWait{},
+		pending: map[string]pendingMachine{}, deleting: map[string]time.Time{}, stopping: map[string]time.Time{},
+		seen: map[stepKey]seenWait{},
 		rolled: rollTally{
-			created: map[string]bool{}, drained: map[string]bool{}, deleted: map[string]bool{}, purged: map[string]bool{},
+			created: map[string]bool{}, drained: map[string]bool{}, stopped: map[string]bool{}, deleted: map[string]bool{},
+			purged: map[string]bool{},
 		},
 	}
 }
@@ -161,6 +167,7 @@ func (r *rollRun) loop(ctx context.Context) error {
 			continue
 		}
 		step, err := rollout.Next(r.state(reading), rollout.Roll)
+		r.logObserved(reading, step, err)
 		if err != nil {
 			return err
 		}
@@ -193,6 +200,25 @@ func (r *rollRun) loop(ctx context.Context) error {
 	}
 }
 
+// logObserved logs the observation at debug level: the leader's node, the voters, autopilot's health and failure
+// tolerance, and the step that comes next, or the refusal of the decisions in its place.
+func (r *rollRun) logObserved(reading nomadReading, step rollout.Step, refusal error) {
+	if r.s.Log == nil {
+		return
+	}
+	nomad := reading.state()
+	leader := "none"
+	if i := slices.IndexFunc(nomad.Servers, func(s rollout.Server) bool { return s.Leader }); i >= 0 {
+		leader = nodeOfServer(nomad.Servers[i].Name)
+	}
+	next := step.String()
+	if refusal != nil {
+		next = refusal.Error()
+	}
+	r.s.Log.Debug("rolling update observed", "cluster", r.kit.cluster, "leader", leader, "voters", voting(nomad.Servers),
+		"healthy", nomad.Healthy, "tolerance", nomad.FailureTolerance, "next", next)
+}
+
 // needsList reports whether the step must wait for an observation that lists the machines: a stop or a transfer of the
 // leadership that was decided on an observation that did not. The list may be older than a wait of a minute, and a
 // server that someone halted meanwhile still reads healthy in autopilot's report, so that stopping a server or
@@ -221,10 +247,11 @@ func (r *rollRun) group(name string) rollout.Group {
 }
 
 // observe lists the machines when the last step changed them, or a machine that the run created is not listed yet or a
-// machine that it deleted still is, and reads Nomad; it notes in listing whether it listed. It returns false, and no
-// error, for reads that no server answered, until they have failed for nomadTimeout.
+// machine that it deleted still is, or one that it stopped is still listed as running, and reads Nomad; it notes in
+// listing whether it listed. It returns false, and no error, for reads that no server answered, until they have failed
+// for nomadTimeout.
 func (r *rollRun) observe(ctx context.Context) (nomadReading, bool, error) {
-	r.listing = r.relist || len(r.pending) > 0 || len(r.deleting) > 0
+	r.listing = r.relist || len(r.pending) > 0 || len(r.deleting) > 0 || len(r.stopping) > 0
 	if r.listing {
 		if err := r.list(ctx); err != nil {
 			return nomadReading{}, false, err
@@ -248,7 +275,8 @@ func (r *rollRun) observe(ctx context.Context) (nomadReading, bool, error) {
 }
 
 // list reads the machines, drops the pending machines that the cloud shows and the deleted ones that it no longer
-// shows, and fails for a pending machine that the lists have missed for pendingTimeout.
+// shows, drops the stopped ones that it shows not running or no longer, makes the API follow the servers, and fails for
+// a pending machine that the lists have missed for pendingTimeout.
 func (r *rollRun) list(ctx context.Context) error {
 	listed, err := r.kit.nodes.List(ctx, r.kit.cluster)
 	if err != nil {
@@ -265,12 +293,17 @@ func (r *rollRun) list(ctx context.Context) error {
 			delete(r.deleting, id)
 		}
 	}
+	for id := range r.stopping {
+		if in, ok := instanceByID(listed, id); !ok || !in.Ready {
+			delete(r.stopping, id)
+		}
+	}
 	for _, op := range slices.Sorted(maps.Keys(r.pending)) {
 		if p := r.pending[op]; time.Since(p.since) >= pendingTimeout {
 			return fmt.Errorf("the cloud does not list node %s (ID %s), which this run created", p.in.Name, p.in.ID)
 		}
 	}
-	return nil
+	return r.followAPI()
 }
 
 // sleep waits one poll, or until ctx ends.
@@ -458,14 +491,18 @@ func (r *rollRun) endWait(err error) {
 
 // act carries out the step that is no wait. The step on a machine whose delete was sent is that delete, which the cloud
 // took and still lists: it is not sent again, and the loop lists at every poll until the cloud stops listing the
-// machine. A step that the decisions give right after it was carried out waits a poll before it is tried again; the
-// third try in a row ends the run. A write that fails because the node is gone or no server answered, and a create
-// that failed before it sent anything because no server answered, wait a poll and count as a try; any other failure
-// ends the run.
+// machine. A stop of a machine that the run stopped is not sent again either: the loop lists at every poll until the
+// cloud lists the machine as not running, and ends the run after stopTimeout; such polls are no tries. A step that the
+// decisions give right after it was carried out waits a poll before it is tried again; the third try in a row ends the
+// run. A write that fails because the node is gone or no server answered, and a create that failed before it sent
+// anything because no server answered, wait a poll and count as a try; any other failure ends the run.
 func (r *rollRun) act(ctx context.Context, step rollout.Step) error {
 	key := keyOf(step)
 	if since, sent := r.deleting[step.Machine.ID]; sent {
 		return r.waitGone(ctx, step, since)
+	}
+	if since, sent := r.stopping[step.Machine.ID]; sent && step.Action == rollout.Stop {
+		return r.waitStopped(ctx, step, since)
 	}
 	if key == r.last && !r.settled {
 		r.settled = true
@@ -620,5 +657,5 @@ func (r *rollRun) seed(name string, client bool) ([]netip.Addr, error) {
 	return seedOf(r.kit.cluster, servers, name, client)
 }
 
-// nomadAPI returns the API over the servers that joined.
+// nomadAPI returns the API over the servers that joined and run, as the run last made it.
 func (r *rollRun) nomadAPI() (nomadops.API, error) { return r.api, nil }

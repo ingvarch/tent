@@ -35,7 +35,7 @@ type RollOptions struct {
 // whatever its hash. It fails when the store's layout needs a newer tent. It loads the specs as an update does, and
 // then fails, in this order, unless: the selected node groups are in the specs; the cloud's live API accepts the
 // specs; the store holds the mark of the Nomad bootstrap, then the completed spec as the specs make it now, then the
-// cluster's secrets; and a server of the cluster has joined. The completed spec and the infrastructure are the
+// cluster's secrets; and a server of the cluster has joined and runs. The completed spec and the infrastructure are the
 // business of tent update cluster, so specs that it has not applied fail the plan.
 //
 // Each plan lists the machines once and reads Nomad's Raft configuration, autopilot's report, gossip members and nodes,
@@ -135,7 +135,8 @@ type rollRun struct {
 	version string           // the Nomad version that a new node runs
 	forced  map[string]bool  // the machines to replace whatever their hash, by ID; those with the label, or all with Force
 	listed  []cloud.Instance // the last list of the machines
-	api     nomadops.API     // over the servers that have joined
+	api     nomadops.API     // over the servers that joined and run; followAPI keeps it so
+	apiAt   []string         // the addresses that api was made over
 	// unlabelled are the machines of a forced run that lack the replace label when it lists them.
 	unlabelled []cloud.Instance
 	// warnings are about the cluster, for the run to tell before its first step.
@@ -184,7 +185,8 @@ func (s *Service) prepareRoll(ctx context.Context, l statestore.Layout, opts Rol
 	kit := nodeKit{
 		cluster: c.m.Name, region: c.objs.Cluster.Spec.Nomad.Region, nodes: nodes, secrets: secrets, builder: builder,
 	}
-	api, err := s.rollAPI(c.m, listed, kit)
+	machines := apiMachines(c.m, listed, nil)
+	api, err := s.rollAPI(c.m.Name, machines, kit)
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +195,8 @@ func (s *Service) prepareRoll(ctx context.Context, l statestore.Layout, opts Rol
 		return nil, err
 	}
 	r := &rollRun{
-		s: s, kit: kit, model: c.m, groups: groups, version: c.objs.Cluster.Spec.Nomad.Version, listed: listed, api: api,
+		s: s, kit: kit, model: c.m, groups: groups, version: c.objs.Cluster.Spec.Nomad.Version, listed: listed,
+		api: api, apiAt: addressesOf(machines),
 		warnings: s.updateWarnings(c.objs.Cluster, c.objs.NodeGroups, c.ch),
 	}
 	r.forced = forcedMachines(listed, groups, opts.Force)
@@ -252,15 +255,13 @@ func isServerMachine(m *model.Cluster, in cloud.Instance) bool {
 	return g.Role.RunsServer()
 }
 
-// rollAPI returns the API over the machines of the server and combined groups of m among listed that have joined.
-func (s *Service) rollAPI(m *model.Cluster, listed []cloud.Instance, kit nodeKit) (nomadops.API, error) {
-	joined := slices.DeleteFunc(slices.Clone(listed), func(in cloud.Instance) bool {
-		return !isServerMachine(m, in) || !in.Joined
-	})
-	if len(joined) == 0 {
-		return nil, fmt.Errorf("%s has no server that joined; run tent update cluster first", clusterLabel(m.Name))
+// rollAPI returns the API over machines, the servers a roll calls (see apiMachines). It fails when there are none.
+func (s *Service) rollAPI(cluster string, machines []cloud.Instance, kit nodeKit) (nomadops.API, error) {
+	if len(machines) == 0 {
+		return nil, fmt.Errorf("%s has no server that joined and runs; run tent validate cluster to see what is wrong",
+			clusterLabel(cluster))
 	}
-	api, err := s.nomadOver(joined, kit.nomad())
+	api, err := s.nomadOver(machines, kit.nomad())
 	if err != nil { // not returned with api: a nil *Servers in an interface is not nil
 		return nil, err
 	}
