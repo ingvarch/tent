@@ -274,7 +274,7 @@ func (s *Service) rollAPI(cluster string, machines []cloud.Instance, kit nodeKit
 func (r *rollRun) plan(ctx context.Context) (RollPlan, error) {
 	reading, err := readNomad(ctx, r.api)
 	if err != nil {
-		return RollPlan{}, err
+		return RollPlan{}, r.withStoppedAdvice(err)
 	}
 	groups := make([]RollGroup, 0, len(r.groups))
 	for _, g := range r.groups {
