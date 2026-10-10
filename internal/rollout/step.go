@@ -90,7 +90,7 @@ func (s Step) String() string {
 	case Purge:
 		return fmt.Sprintf("purge node %s at %s from Nomad", n.Name, n.Address)
 	case TransferLeadership:
-		return fmt.Sprintf("move the leadership from %s to %s", m.Name, nodeOfServer(s.Server.Name))
+		return fmt.Sprintf("move the leadership from %s to %s", m.Name, NodeOfServer(s.Server.Name))
 	case Stop:
 		return fmt.Sprintf("stop node %s (ID %s)", m.Name, m.ID)
 	case WaitServerDown:

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
@@ -21,12 +20,6 @@ const stopTimeout = 2 * time.Minute
 // joinsByVote reports whether a machine of the role has joined once its server votes and autopilot counts it healthy.
 // A server's does; the node of a combined machine must register too.
 func joinsByVote(role v1alpha1.Role) bool { return role == v1alpha1.RoleServer }
-
-// nodeOfServer returns the name of the node from the name of its server, which is <node name>.<region>.
-func nodeOfServer(name string) string {
-	node, _, _ := strings.Cut(name, ".")
-	return node
-}
 
 // serverAt returns the server of servers that runs at the private address addr, and whether there is one.
 func serverAt(servers []rollout.Server, addr netip.Addr) (rollout.Server, bool) {

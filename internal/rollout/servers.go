@@ -8,11 +8,11 @@ import (
 	"github.com/ingvarch/tent/internal/english"
 )
 
-// Statuses of a member of the gossip pool as Serf lists them.
-const (
-	memberAlive  = "alive"
-	memberFailed = "failed"
-)
+// MemberAlive is the status of a member of the gossip pool that Serf lists for a server that answers.
+const MemberAlive = "alive"
+
+// memberFailed is the status of a member that Serf lists for a server that stopped answering.
+const memberFailed = "failed"
 
 // stableMargin is added to the refresh interval to make the stability window.
 const stableMargin = 10 * time.Second
@@ -207,7 +207,7 @@ func (sg *serverGroup) removeServer(v Machine) (Step, error) {
 		step.Action = WaitServerDown
 	case hasServer:
 		step.Action, step.Server = RemovePeer, srv
-	case mem.Status == memberAlive || mem.Status == memberFailed:
+	case mem.Status == MemberAlive || mem.Status == memberFailed:
 		step.Action, step.Member = ForceLeave, mem
 	default:
 		voters := sg.withServer() // the victim has none here: it is not a voter and has no peer
@@ -281,7 +281,7 @@ func (sg *serverGroup) checkHealthy() error {
 	var unhealthy []string
 	for _, srv := range sg.s.Nomad.Servers {
 		if !srv.Healthy {
-			unhealthy = append(unhealthy, nodeOfServer(srv.Name))
+			unhealthy = append(unhealthy, NodeOfServer(srv.Name))
 		}
 	}
 	slices.Sort(unhealthy)
