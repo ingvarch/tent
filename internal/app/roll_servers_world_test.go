@@ -28,6 +28,8 @@ type serverDelays struct {
 	reportLag    time.Duration // the report keeps a removed peer this long
 	transferBlip time.Duration // one follower reads unhealthy this long after a transfer of the leadership
 	noCleanup    bool          // autopilot never removes the peer of a failed server
+	// reconcileEvery, promoteAfter and haltLag are set by SetReconcile and SetHaltLag.
+	reconcileEvery, promoteAfter, haltLag time.Duration
 }
 
 // raftServer is the world's record of a server machine that was ready once: its place in the Raft configuration, in
@@ -42,9 +44,12 @@ type raftServer struct {
 	removed           bool       // its peer is out of the Raft configuration
 	alone             bool       // it started a cluster of its own: it never joined this one, and its node never registers
 	removedAt         time.Time
-	forced            bool // a ForceLeave turned its member to leaving
-	shown             bool // a read of Members showed it leaving, and it is not listed again
-	left              bool // a ForceLeave dropped its member, which failed
+	forced            bool      // a ForceLeave turned its member to leaving
+	shown             bool      // a read of Members showed it leaving, and it is not listed again
+	left              bool      // a ForceLeave dropped its member, which failed
+	readded           time.Time // when the leader added its peer again; zero if it never did
+	promoteAt         time.Time // when autopilot makes it vote after the leader added it again; zero for never
+	deadWhenAdded     bool      // the leader added it again after its machine stopped: it reads unhealthy
 }
 
 // raftCluster is the world's servers, in the order they joined, with the server that leads, by instance ID, and the
@@ -52,6 +57,7 @@ type raftServer struct {
 type raftCluster struct {
 	servers   []*raftServer
 	leader    string
+	ledAt     time.Time // when the leader took the leadership: the election or the last transfer
 	blipID    string
 	blipUntil time.Time
 }
@@ -67,12 +73,15 @@ func (r *raftServer) running() bool { return r.down.IsZero() }
 
 // votes reports whether the server votes at now.
 func (r *raftServer) votes(now time.Time, d serverDelays) bool {
+	if !r.readded.IsZero() {
+		return r.promoted(now, d)
+	}
 	return r.bootstrap || !now.Before(r.joined.Add(d.voteAfter))
 }
 
 // failedAt returns when the server counts as failed, and whether its machine stopped at all.
 func (r *raftServer) failedAt(d serverDelays) (time.Time, bool) {
-	return r.down.Add(d.failAfter), !r.running()
+	return r.down.Add(d.haltLag + d.failAfter), !r.running()
 }
 
 // failed reports whether the server counts as failed at now.
@@ -177,13 +186,14 @@ func (w *nomadWorld) HaltedCalls() []nomadfake.Call {
 	return slices.Clone(w.haltedCalls)
 }
 
-// reachesHalted reports whether the call goes to the address of a server whose machine is halted or gone, and notes
-// it in HaltedCalls when it does.
+// reachesHalted reports whether the call goes to the address of a server whose machine is halted or gone, past the
+// halt lag, and notes it in HaltedCalls when it does.
 func (w *nomadWorld) reachesHalted(call nomadfake.Call) bool {
 	host, _, _ := strings.Cut(call.Server, ":")
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	i := slices.IndexFunc(w.raft.servers, func(r *raftServer) bool { return r.address == host && !r.running() })
+	now, lag := time.Now(), w.delays.haltLag
+	i := slices.IndexFunc(w.raft.servers, func(r *raftServer) bool { return r.address == host && !r.runsAt(now, lag) })
 	if i >= 0 {
 		w.haltedCalls = append(w.haltedCalls, call)
 	}
@@ -218,6 +228,7 @@ func (w *nomadWorld) raftView(servers []machine, want func() int) raftView {
 		blipped := r.id == c.blipID && now.Before(c.blipUntil)
 		voter := r.votes(now, d)
 		counted := !r.removed && !failed
+		healthy := counted && !blipped && !r.deadWhenAdded
 		if !r.removed {
 			v.peers = append(v.peers, nomadops.Peer{
 				ID: raftIDOf(r.id), Name: r.memberName(), Address: netip.AddrPortFrom(r.private, 4647), Voter: voter,
@@ -225,7 +236,7 @@ func (w *nomadWorld) raftView(servers []machine, want func() int) raftView {
 			})
 			if voter {
 				voters++
-				if counted && !blipped {
+				if healthy {
 					healthyVoters++
 				}
 			}
@@ -238,12 +249,13 @@ func (w *nomadWorld) raftView(servers []machine, want func() int) raftView {
 		if r.removed && !now.Before(r.removedAt.Add(d.reportLag)) {
 			continue
 		}
+		lingers := r.lingers(now, d)
 		entry := nomadops.ServerHealth{
 			ID: raftIDOf(r.id), Name: r.memberName(), Address: netip.AddrPortFrom(r.private, 4647), Serf: "alive",
-			Healthy: counted && !blipped, Voter: voter, Leader: r.id == c.leader, Version: w.pinned(),
+			Healthy: healthy || lingers, Voter: voter, Leader: r.id == c.leader, Version: w.pinned(),
 			StableSince: r.stable.Truncate(time.Second),
 		}
-		if !counted {
+		if !counted && !lingers {
 			entry.Serf = "left"
 		}
 		reportHealthy = reportHealthy && entry.Healthy
@@ -298,6 +310,7 @@ func (w *nomadWorld) syncServers(now time.Time, servers []machine, want func() i
 		if _, found := byID[r.id]; r.running() && (!found || w.cloud.Halted(r.id)) {
 			r.down = now
 		}
+		w.readd(r, now)
 		at, stopped := r.failedAt(d)
 		if !stopped || now.Before(at) {
 			continue
@@ -362,7 +375,7 @@ func laterOf(a, b time.Time) time.Time {
 // elect makes the first running server that is in the Raft configuration and votes the leader.
 func (c *raftCluster) elect(now time.Time, d serverDelays) {
 	if r := c.firstPeer(now, d, func(r *raftServer) bool { return !r.running() }); r != nil {
-		c.leader = r.id
+		c.leader, c.ledAt = r.id, now
 	}
 }
 
@@ -383,7 +396,7 @@ func (w *nomadWorld) transferred(raftID string) {
 			return
 		}
 	}
-	c.leader = target.id
+	c.leader, c.ledAt = target.id, now
 	for _, r := range c.servers {
 		r.stable = now
 	}
@@ -411,6 +424,7 @@ func (w *nomadWorld) memberForced(name string) {
 		if r.memberName() != name {
 			continue
 		}
+		r.cancelPromotion(now)
 		switch r.memberStatus(now, w.delays) {
 		case "failed":
 			r.left = true
