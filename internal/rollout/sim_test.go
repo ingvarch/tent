@@ -72,8 +72,9 @@ type world struct {
 	nextNode    int
 	nextRaft    int
 	unplaced    int
-	lastChange  time.Time // when a server last joined the Raft configuration
-	noCleanup   bool      // autopilot does not remove the peers of failed servers
+	// leaderSince is when the leader took the leadership: the reconcile of the leader runs every 6 ticks from then.
+	leaderSince time.Time
+	noCleanup   bool // autopilot does not remove the peers of failed servers
 	// keepsBudget has the groups that start with all their nodes available: the budget invariant holds for them.
 	keepsBudget map[string]bool
 	// startSize is how many machines each group had when arm was called.
@@ -162,7 +163,9 @@ func (w *world) addControl(group, hash, version string) {
 		age: 100, version: version,
 	}
 	w.machines = append(w.machines, m)
-	w.joinRaft(id, w.newRaftID(), len(w.servers) == 0, true, w.now.Add(-time.Hour))
+	w.joinRaft(simServer{
+		machine: id, id: w.newRaftID(), leader: len(w.servers) == 0, voter: true, since: w.now.Add(-time.Hour),
+	})
 	if role.RunsClient() {
 		w.register(m)
 	}
@@ -326,12 +329,13 @@ func (w *world) tick() {
 			}
 		}
 		if m.Role.RunsServer() && m.age == 2 {
-			w.joinRaft(m.ID, w.newRaftID(), false, false, w.now)
-			w.serverJoined()
+			w.joinRaft(simServer{
+				machine: m.ID, id: w.newRaftID(), since: w.now, joined: w.now, promoteAfter: newServerPromoteAfter,
+			})
 		}
 	}
 	w.tickMembers()
-	w.readdServers()
+	w.reconcile()
 	for i := range w.nodes {
 		n := &w.nodes[i]
 		if w.machineIndex(n.owner) < 0 {

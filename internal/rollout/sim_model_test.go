@@ -269,8 +269,7 @@ func memberOf(s rollout.State, name string) (rollout.Member, bool) {
 
 func TestSimNewServerJoinsAsANonvoterAndVotesTwoTicksLater(t *testing.T) {
 	w := serverWorld(3)
-	create := rollout.Step{Action: rollout.Create, Group: "servers", Machine: rollout.Machine{
-		Name: "prod-servers-3", Zone: "ams"}}
+	create := serverCreate()
 	if err := w.apply(create); err != nil {
 		t.Fatal(err)
 	}
@@ -397,59 +396,192 @@ func TestSimForceLeave(t *testing.T) {
 	})
 }
 
-func TestSimRemovedPeerOfARunningServerComesBackAsANonvoter(t *testing.T) {
-	w := serverWorld(3)
-	if err := w.apply(w.serverStep(rollout.RemovePeer, "prod-servers-1")); err != nil {
+// mustApply carries out a step that must not break an invariant.
+func (w *world) mustApply(t *testing.T, step rollout.Step) {
+	t.Helper()
+	if err := w.apply(step); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// serverCreate is the step that creates the server prod-servers-3 of the group servers.
+func serverCreate() rollout.Step {
+	return rollout.Step{Action: rollout.Create, Group: "servers", Machine: rollout.Machine{
+		Name: "prod-servers-3", Zone: "ams"}}
+}
+
+func TestSimLeaderReconcilesEverySixTicksAndAddsARemovedLivePeerAsANonvoter(t *testing.T) {
+	w := serverWorld(3)
+	w.mustApply(t, w.serverStep(rollout.RemovePeer, "prod-servers-1"))
+	w.ticks(5)
 	if got := len(w.observe().Nomad.Servers); got != 2 {
-		t.Fatalf("servers after the removal = %d, want 2", got)
-	}
-	w.ticks(3)
-	if got := len(w.observe().Nomad.Servers); got != 2 {
-		t.Fatalf("servers after 3 ticks = %d, want 2", got)
+		t.Fatalf("servers after 5 ticks = %d, want 2", got)
 	}
 	w.ticks(1)
 	back := w.now
 	srv := serverOf(t, w.observe(), "prod-servers-1")
 	if srv.Voter || !srv.Healthy || srv.ID != "r-2" || !srv.StableSince.Equal(back) {
-		t.Errorf("after 4 ticks: server %+v, want the same Raft ID back as a healthy nonvoter since %s", srv, back)
+		t.Errorf("after 6 ticks: server %+v, want the same Raft ID back as a healthy nonvoter since %s", srv, back)
 	}
-	w.ticks(2)
+	w.ticks(1)
 	if !serverOf(t, w.observe(), "prod-servers-1").Voter {
-		t.Error("after 2 more ticks: the server does not vote, want it promoted")
+		t.Error("after 7 ticks: the server does not vote, want it promoted a tick after the re-add")
+	}
+}
+
+func TestSimRemovalAfterAReconcileWaitsForTheNextOne(t *testing.T) {
+	w := serverWorld(3)
+	w.ticks(7)
+	w.mustApply(t, w.serverStep(rollout.RemovePeer, "prod-servers-1"))
+	w.ticks(4)
+	if got := len(w.observe().Nomad.Servers); got != 2 {
+		t.Fatalf("servers 4 ticks after the removal = %d, want 2", got)
+	}
+	w.ticks(1)
+	if got := len(w.observe().Nomad.Servers); got != 3 {
+		t.Errorf("servers at the reconcile of 12 ticks = %d, want 3", got)
+	}
+}
+
+func TestSimTransferStartsTheSixTicksOfTheReconcileAgain(t *testing.T) {
+	w := serverWorld(3)
+	w.ticks(3)
+	w.mustApply(t, w.serverStep(rollout.TransferLeadership, "prod-servers-2"))
+	w.mustApply(t, w.serverStep(rollout.RemovePeer, "prod-servers-1"))
+	w.ticks(5)
+	if got := len(w.observe().Nomad.Servers); got != 2 {
+		t.Fatalf("servers 5 ticks after the transfer = %d, want 2: the old leader's reconcile no longer counts", got)
+	}
+	w.ticks(1)
+	if got := len(w.observe().Nomad.Servers); got != 3 {
+		t.Errorf("servers 6 ticks after the transfer = %d, want 3", got)
+	}
+}
+
+func TestSimTransferToTheLeaderDoesNotStartTheSixTicksAgain(t *testing.T) {
+	w := serverWorld(3)
+	w.mustApply(t, w.serverStep(rollout.RemovePeer, "prod-servers-1"))
+	w.ticks(3)
+	w.mustApply(t, w.serverStep(rollout.TransferLeadership, "prod-servers-0"))
+	w.ticks(3)
+	if got := len(w.observe().Nomad.Servers); got != 3 {
+		t.Errorf("servers at the reconcile of 6 ticks = %d, want 3", got)
+	}
+}
+
+func TestSimReaddedServerVotesATickLaterOnlyIfItWasAddedWhileItsMachineRan(t *testing.T) {
+	t.Run("added while the machine ran, which stopped meanwhile", func(t *testing.T) {
+		w := serverWorld(3)
+		w.mustApply(t, w.serverStep(rollout.RemovePeer, "prod-servers-1"))
+		w.ticks(6)
+		if serverOf(t, w.observe(), "prod-servers-1").Voter {
+			t.Fatal("the server votes at the re-add, want a nonvoter")
+		}
+		w.stopMachine("prod-servers-1")
+		w.ticks(1)
+		if !serverOf(t, w.observe(), "prod-servers-1").Voter {
+			t.Error("the server does not vote a tick after the re-add, want it promoted while its member is alive")
+		}
+	})
+	t.Run("added while the machine ran, whose member was forced out meanwhile", func(t *testing.T) {
+		w := serverWorld(3)
+		w.mustApply(t, w.serverStep(rollout.RemovePeer, "prod-servers-1"))
+		w.ticks(6)
+		w.mustApply(t, w.serverStep(rollout.ForceLeave, "prod-servers-1"))
+		w.ticks(1)
+		if serverOf(t, w.observe(), "prod-servers-1").Voter {
+			t.Error("the server votes a tick after the re-add, want a nonvoter: its member is not alive")
+		}
+	})
+	for _, tt := range []struct {
+		name string
+		prep func(t *testing.T, w *world)
+	}{
+		{"removed while the machine ran, which stopped before the re-add", func(t *testing.T, w *world) {
+			w.mustApply(t, w.serverStep(rollout.RemovePeer, "prod-servers-1"))
+			w.ticks(5)
+			w.stopMachine("prod-servers-1")
+		}},
+		{"removed when the machine was stopped", func(t *testing.T, w *world) {
+			w.ticks(5)
+			w.stopMachine("prod-servers-1")
+			w.mustApply(t, w.serverStep(rollout.RemovePeer, "prod-servers-1"))
+		}},
+	} {
+		t.Run("added while the machine was stopped, "+tt.name, func(t *testing.T) {
+			w := serverWorld(3)
+			tt.prep(t, w)
+			w.ticks(1)
+			if srv := serverOf(t, w.observe(), "prod-servers-1"); srv.Voter || !srv.Healthy {
+				t.Fatalf("after the re-add: server %+v, want a healthy nonvoter", srv)
+			}
+			w.ticks(2)
+			s := w.observe()
+			srv := serverOf(t, s, "prod-servers-1")
+			if m, _ := memberOf(s, "prod-servers-1"); m.Status != "alive" || srv.Voter {
+				t.Errorf("2 ticks after the re-add: member %+v, server %+v, want it alive and never a voter", m, srv)
+			}
+		})
+	}
+}
+
+func TestSimStopAndPeerRemovalWaitOnlyForServersOtherThanTheMachinesOwn(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		voters  int
+		action  rollout.Action
+		target  string
+		violate bool
+	}{
+		{"a stop after the machine's own re-add", 3, rollout.Stop, "prod-servers-1", false},
+		{"a stop after another server's re-add", 4, rollout.Stop, "prod-servers-2", true},
+		{"a removal of the running machine's server after its own re-add", 3, rollout.RemovePeer, "prod-servers-1", false},
+		{"a removal of another running machine's server after a re-add", 3, rollout.RemovePeer, "prod-servers-2", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			w := serverWorld(tt.voters)
+			w.mustApply(t, w.serverStep(rollout.RemovePeer, "prod-servers-1"))
+			w.ticks(6)
+			step := w.serverStep(tt.action, tt.target)
+			err := w.apply(step)
+			var v *violation
+			if got := errors.As(err, &v); got != tt.violate || (err != nil && !got) {
+				t.Errorf("%s right after the re-add = %v, want a violation: %t", step, err, tt.violate)
+			}
+		})
+	}
+}
+
+func TestSimARemovalStartsNoWindow(t *testing.T) {
+	w := serverWorld(4)
+	w.mustApply(t, w.serverStep(rollout.RemovePeer, "prod-servers-1"))
+	if err := w.apply(w.serverStep(rollout.Stop, "prod-servers-2")); err != nil {
+		t.Errorf("a stop right after a removal: %v", err)
+	}
+}
+
+func TestSimMachineWithoutAServerStopsBesideOneVoter(t *testing.T) {
+	w := serverWorld(1)
+	w.mustApply(t, serverCreate())
+	if err := w.apply(w.serverStep(rollout.Stop, "prod-servers-3")); err != nil {
+		t.Errorf("a stop of a machine that has no server: %v", err)
 	}
 }
 
 func TestSimPeerOfAMachineThatIsDownGoesWithoutTheWindow(t *testing.T) {
 	// The window protects the nodes that still list the removed server as reachable; a machine that is down is not.
 	w := serverWorld(3)
-	w.lastChange = w.now
+	w.mustApply(t, serverCreate())
+	w.ticks(2)
 	w.stopMachine("prod-servers-1")
-	if err := w.apply(w.serverStep(rollout.RemovePeer, "prod-servers-1")); err != nil {
-		t.Errorf("removing the peer of a stopped machine right after a join: %v", err)
-	}
+	w.mustApply(t, w.serverStep(rollout.RemovePeer, "prod-servers-1"))
 	var v *violation
 	if err := w.apply(w.serverStep(rollout.RemovePeer, "prod-servers-2")); !errors.As(err, &v) {
 		t.Errorf("removing the peer of a running machine right after a join = %v, want a violation", err)
 	}
 }
 
-func TestSimOnlyAServerThatJoinsStartsTheWindow(t *testing.T) {
-	w := serverWorld(3)
-	if err := w.apply(w.serverStep(rollout.RemovePeer, "prod-servers-1")); err != nil {
-		t.Fatal(err)
-	}
-	if !w.lastChange.IsZero() {
-		t.Errorf("a removal set the last change to %s, want it left alone", w.lastChange)
-	}
-	w.ticks(4)
-	if !w.lastChange.Equal(w.now) {
-		t.Errorf("after the server came back, the last change is %s, want %s", w.lastChange, w.now)
-	}
-}
-
-func TestSimRemovedPeerDoesNotComeBackWithoutAnAliveMemberOnARunningMachine(t *testing.T) {
+func TestSimRemovedPeerDoesNotComeBackWithoutAnAliveMember(t *testing.T) {
 	t.Run("the member was forced out", func(t *testing.T) {
 		w := serverWorld(3)
 		if err := w.apply(w.serverStep(rollout.RemovePeer, "prod-servers-1")); err != nil {
@@ -463,7 +595,7 @@ func TestSimRemovedPeerDoesNotComeBackWithoutAnAliveMemberOnARunningMachine(t *t
 			t.Errorf("servers = %d, want 2", got)
 		}
 	})
-	t.Run("the machine was stopped", func(t *testing.T) {
+	t.Run("the member of the stopped machine failed before the reconcile", func(t *testing.T) {
 		w := serverWorld(3)
 		w.noCleanup = true
 		if err := w.apply(w.serverStep(rollout.RemovePeer, "prod-servers-1")); err != nil {
@@ -563,8 +695,7 @@ func TestSimSummaryShowsServersAndMembers(t *testing.T) {
 func TestSimServerCreateIgnoresTheVersionOfOlderServers(t *testing.T) {
 	w := serverWorld(3)
 	w.version = "2.0.8"
-	create := rollout.Step{Action: rollout.Create, Group: "servers", Machine: rollout.Machine{
-		Name: "prod-servers-3", Zone: "ams"}}
+	create := serverCreate()
 	if err := w.apply(create); err != nil {
 		t.Errorf("creating a server that runs a newer Nomad than the others: %v", err)
 	}
@@ -673,5 +804,18 @@ func TestSimDrainOfACombinedNodeMovesItsAllocations(t *testing.T) {
 	if w.nodes[1].allocs != 0 || w.nodes[0].allocs != 2*allocsOfNode || w.unplaced != 0 {
 		t.Errorf("allocations = %d, %d, unplaced %d, want 0, %d, 0", w.nodes[1].allocs, w.nodes[0].allocs, w.unplaced,
 			2*allocsOfNode)
+	}
+}
+
+func TestSimPeerOfADeletedMachineDoesNotComeBack(t *testing.T) {
+	w := serverWorld(3)
+	w.ticks(4)
+	w.stopMachine("prod-servers-1")
+	w.mustApply(t, w.serverStep(rollout.RemovePeer, "prod-servers-1"))
+	w.mustApply(t, w.machineStep(rollout.Delete, "prod-servers-1"))
+	w.ticks(2)
+	s := w.observe()
+	if m, _ := memberOf(s, "prod-servers-1"); len(s.Nomad.Servers) != 2 || m.Status != "alive" {
+		t.Errorf("at the reconcile: %d servers, member %+v, want 2 servers beside the alive member", len(s.Nomad.Servers), m)
 	}
 }

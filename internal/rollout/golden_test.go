@@ -325,6 +325,7 @@ func TestRollsEndUpToDate(t *testing.T) {
 			if got, want := len(w.servers), w.countServers(); got != want || voters != want {
 				t.Errorf("the Raft configuration has %d servers and %d voters, want %d of each", got, voters, want)
 			}
+			w.tick() // a force-leave of a live member shows a tick later
 			for _, mem := range w.members {
 				if mem.status != memberAlive || w.serverIndexByMachine(mem.machine) < 0 {
 					t.Errorf("member %s is %s and has a server: %t", mem.name, mem.status,
