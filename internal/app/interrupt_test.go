@@ -164,8 +164,9 @@ func eachCutAt(t *testing.T, calls []string, keep func(index int) bool, test fun
 // or just after the fake carried it out, when the call fails as the client fails for an ended context and loses its
 // answer, as a request in flight does when tent is interrupted. w may be nil for a use case that calls no Nomad. It
 // fails the test unless the run made the call and stopped with an error that matches context.Canceled, and changed
-// nothing in the store s but for writing the secrets that s lacked, the completed spec and the mark of the Nomad
-// bootstrap, and deleting a stale mark, as an update does. It returns the secrets that the run wrote.
+// nothing in the store s but for writing the secrets that s lacked, the completed spec, the highest index of the
+// names of the server and combined machines and the mark of the Nomad bootstrap, and deleting a stale mark, as an
+// update does. It returns the secrets that the run wrote.
 func runCut(t *testing.T, f *vultrfake.Fake, w *nomadWorld, s statestore.Store, c cutCase,
 	run func(context.Context) error,
 ) (wrote map[string][]byte) {
@@ -212,6 +213,7 @@ func runCut(t *testing.T, f *vultrfake.Fake, w *nomadWorld, s statestore.Store, 
 	if _, ok := stored[completedPath]; !ok && slices.Contains(paths, completedPath) {
 		stored[completedPath] = string(get(t, s, completedPath))
 	}
+	allowGrownNames(t, s, stored)
 	if slices.Contains(paths, markPath) {
 		stored[markPath] = string(get(t, s, markPath))
 	} else {
@@ -335,14 +337,15 @@ func TestUpdateCutAtEveryCallOfARebuild(t *testing.T) {
 // errCut is why a put or a delete that a test cut failed.
 var errCut = errors.New("the test cut the call")
 
-// cutStore fails the first put or delete of path: just before the call reaches the store, or just after the store
-// carried it out, as a call whose answer is lost. It records the secrets it receives.
+// cutStore fails the nth put or delete of path (the first when nth is 0): just before the call reaches the store, or
+// just after the store carried it out, as a call whose answer is lost. It records the secrets it receives.
 type cutStore struct {
 	statestore.Store
 	sent
 	path  string
+	nth   int
 	after bool
-	cut   atomic.Bool
+	calls atomic.Int32
 }
 
 func (s *cutStore) Put(ctx context.Context, p string, data []byte, opts statestore.PutOptions) (
@@ -364,9 +367,9 @@ func (s *cutStore) Delete(ctx context.Context, p string) error {
 	return s.call("delete", p, func() error { return s.Store.Delete(ctx, p) })
 }
 
-// call carries out the call op of p, or cuts it when it is the first call of the store's path.
+// call carries out the call op of p, or cuts it when it is the nth call of the store's path.
 func (s *cutStore) call(op, p string, carry func() error) error {
-	if p != s.path || s.cut.Swap(true) {
+	if p != s.path || int(s.calls.Add(1)) != max(s.nth, 1) {
 		return carry()
 	}
 	if s.after {
@@ -447,6 +450,64 @@ func TestUpdateCutAtEveryStateWrite(t *testing.T) {
 						if p == markPath && after && countNomad(w, "Bootstrap") != before {
 							t.Error("the next run bootstrapped again although the mark was stored")
 						}
+					})
+				})
+			}
+		}
+	}
+}
+
+// TestUpdateCutAtEveryWriteOfTheNames builds each example cluster with a run cut at each write of the highest index of
+// its group's machine names, just before the store writes it and just after, when the answer is lost. The cut run sends
+// no create request for the server of that write and stops with an error that names the object. The store holds the
+// index of the write before it when the cut came first and the index of the write when it came after. The next run
+// leaves the cloud as an uninterrupted build does.
+func TestUpdateCutAtEveryWriteOfTheNames(t *testing.T) {
+	groups := map[string]string{"servers and workers": "servers", "combined": "all"}
+	for _, ex := range exampleClusters {
+		_, _, want := buildExample(t, ex.docs...)
+		_, template := exampleStore(t, ex.docs...)
+		names := "prod/names/" + groups[ex.name]
+		for _, after := range []bool{false, true} {
+			when := "before"
+			if after {
+				when = "after"
+			}
+			for nth := 1; nth <= 3; nth++ {
+				t.Run(fmt.Sprintf("%s %s write %d", ex.name, when, nth), func(t *testing.T) {
+					t.Parallel()
+					synctest.Test(t, func(t *testing.T) {
+						svc, f, w := newExampleFrom(t, template)
+						store := svc.Store
+						svc.Store = &cutStore{Store: store, path: names, nth: nth, after: after}
+						created := countCalls(f, "CreateInstance")
+
+						_, err := svc.Update(t.Context(), "prod", true)
+
+						if cause := cutError("put", names).Error(); !errors.Is(err, errCut) ||
+							!strings.Contains(err.Error(), "write "+names+": "+cause) {
+							t.Fatalf("the cut run returned %v, want an error that names %s and matches %v", err, names,
+								errCut)
+						}
+						if got, want := countCalls(f, "CreateInstance")-created, nth-1; got != want {
+							t.Errorf("the cut run sent %d creates, want %d", got, want)
+						}
+						held := nth - 2 // the index of the write before the cut one
+						if after {
+							held = nth - 1
+						}
+						if held < 0 {
+							if got := list(t, store, names); len(got) != 0 {
+								t.Errorf("the store holds %v, want no object of the names", got)
+							}
+						} else {
+							wantStored(t, store, names, []byte(fmt.Sprintf("%d\n", held)))
+						}
+						wantLockFree(t, store)
+
+						svc.Store = store
+						mustUpdate(t, svc)
+						wantBuilt(t, svc, f, w, want, nil)
 					})
 				})
 			}

@@ -194,7 +194,8 @@ func rollTestBuilder() *nodeBuilder {
 
 // TestRolloutGroups takes size, role and zones from the model, the hash from the builder and the settings from the
 // specs: a client group's two limits and drain timeout, a combined group's drain timeout alone, a server group's
-// nothing. A limit that a spec leaves out is 0, and the groups come in the order of the names.
+// nothing. A limit that a spec leaves out is 0, and the groups come in the order of the names. The next index is left
+// 0: rollRun.state sets it.
 func TestRolloutGroups(t *testing.T) {
 	t.Parallel()
 	names := []string{"workers", "servers", "all", "batch"}

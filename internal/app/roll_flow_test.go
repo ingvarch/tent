@@ -514,7 +514,8 @@ func TestRollFlowPlansAgainUnderTheLock(t *testing.T) {
 }
 
 // TestRollFlowStopsWhenOnRollPlanFails returns the error of OnRollPlan before the roll changes anything, writes no
-// replace label also with Force, and releases the lock.
+// replace label also with Force, leaves the store as it was, also the tent version of a newer tent and the names of a
+// store that lacks them, and releases the lock.
 func TestRollFlowStopsWhenOnRollPlanFails(t *testing.T) {
 	t.Parallel()
 	for name, opts := range map[string]app.RollOptions{
@@ -525,6 +526,11 @@ func TestRollFlowStopsWhenOnRollPlanFails(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
 				svc, f, w := outdatedWorld(t)
+				if err := svc.Store.Delete(t.Context(), namesPath); err != nil {
+					t.Fatalf("delete %s: %v", namesPath, err)
+				}
+				svc.Version = "v0.5.1"
+				stored := snapshot(t, svc.Store)
 				cloudCalls, nomadCalls := len(f.Calls()), len(w.Log())
 				declined := errors.New("declined")
 				svc.OnRollPlan = func(app.RollPlan) error { return declined }
@@ -548,6 +554,7 @@ func TestRollFlowStopsWhenOnRollPlanFails(t *testing.T) {
 					t.Errorf("events %q, applied %v, rolled %+v; want nothing after the refusal", events, plan.Applied,
 						plan.Rolled)
 				}
+				wantSnapshot(t, svc.Store, stored)
 				wantLockFree(t, svc.Store)
 			})
 		})

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -192,6 +193,29 @@ func wantSnapshot(t *testing.T, s statestore.Store, want map[string]string) {
 	t.Helper()
 	if diff := cmp.Diff(want, snapshot(t, s)); diff != "" {
 		t.Errorf("the store (-want +got):\n%s", diff)
+	}
+}
+
+// allowGrownNames sets the objects of want that hold the highest index of a group's machine names to what the store s
+// holds now, and fails the test when an index fell. The names are the one thing that a run which creates a server may
+// write besides its lock.
+func allowGrownNames(t *testing.T, s statestore.Store, want map[string]string) {
+	t.Helper()
+	index := func(content string) int {
+		n, err := strconv.Atoi(strings.TrimSpace(content))
+		if err != nil {
+			t.Fatalf("the object of the names holds %q, want an index", content)
+		}
+		return n
+	}
+	for p, now := range snapshot(t, s) {
+		if !strings.HasPrefix(p, "prod/names/") {
+			continue
+		}
+		if was, ok := want[p]; ok && index(now) < index(was) {
+			t.Errorf("%s fell from %s to %s", p, strings.TrimSpace(was), strings.TrimSpace(now))
+		}
+		want[p] = now
 	}
 }
 

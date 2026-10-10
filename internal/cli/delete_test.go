@@ -148,6 +148,7 @@ func teardownOf(t *testing.T, f *vultrfake.Fake, n int) string {
 	fmt.Fprintf(&b, "- vultr.FirewallGroup/prod-servers (ID %s)\n", firewallID(t, f, "server"))
 	b.WriteString("- vultr.VPC/prod (ID vpc-1)\n" +
 		"- state prod/cluster.completed.yaml\n" +
+		"- state prod/names/servers\n" +
 		"- state prod/nodegroups/servers.yaml\n" +
 		"- state prod/nodegroups/workers.yaml\n" +
 		"- state prod/nomad/bootstrapped\n" +
@@ -159,7 +160,7 @@ func teardownOf(t *testing.T, f *vultrfake.Fake, n int) string {
 		"\n")
 	fmt.Fprintf(&b, "Nodes: %d to delete.\n", n)
 	b.WriteString("Plan: 0 to create, 0 to update, 0 to replace, 3 to delete.\n" +
-		"State: 9 objects to delete.\n")
+		"State: 10 objects to delete.\n")
 	return b.String()
 }
 
@@ -168,7 +169,7 @@ func teardownOf(t *testing.T, f *vultrfake.Fake, n int) string {
 func TestDeleteClusterPlansTwice(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
-		want := teardown(t, f) + "\nDeleted: 6 nodes, 3 infrastructure objects, 9 state objects.\n"
+		want := teardown(t, f) + "\nDeleted: 6 nodes, 3 infrastructure objects, 10 state objects.\n"
 		before := len(f.Calls())
 
 		got := runOn(t, f, "delete", "cluster", "prod", "--yes", "--state", s.url)
@@ -187,7 +188,7 @@ func TestDeleteClusterPlansTwice(t *testing.T) {
 func TestDeleteClusterPrintsThePlanItApplies(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
-		want := teardownOf(t, f, 5) + "\nDeleted: 5 nodes, 3 infrastructure objects, 9 state objects.\n"
+		want := teardownOf(t, f, 5) + "\nDeleted: 5 nodes, 3 infrastructure objects, 10 state objects.\n"
 		f.SetHook(func(ctx context.Context, c vultrfake.Call, next func(context.Context) error) error {
 			if c.Name == "ListSSHKeys" { // the inventory, after the list of the nodes
 				f.SetHook(nil)
@@ -220,7 +221,7 @@ func TestDeleteClusterWithItsCloud(t *testing.T) {
 
 		got := runOn(t, f, "delete", "cluster", "prod", "--yes", "--state", s.url)
 
-		deleted := want + "\nDeleted: 6 nodes, 3 infrastructure objects, 9 state objects.\n"
+		deleted := want + "\nDeleted: 6 nodes, 3 infrastructure objects, 10 state objects.\n"
 		if got.code != 0 || got.out != deleted {
 			t.Errorf("exit code = %d, stdout\n%s\nwant 0 and\n%s", got.code, got.out, deleted)
 		}

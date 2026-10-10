@@ -169,12 +169,16 @@ func (s NodeStep) String() string {
 // no server or combined machine of the cluster is left: the servers that come are a new Nomad, so it bootstraps again.
 // After the bootstrap it is part of the plan when the plan creates or waits for a server or combined node. Without
 // apply, or when nothing changes, Update returns the plan and writes nothing.
+// A plan fails, with and without apply, when the object of a server or combined group's highest name index holds
+// no index.
 //
 // With apply it takes the cluster's lock and plans again under it. When that plan has changes, it calls OnUpdatePlan
 // with it, then OnWarning with each warning about the cluster, such as a Nomad API that the whole internet may reach or
 // a Nomad version that the channel has not tested. Then it raises the tent version, writes the missing secrets and the
-// completed spec, and applies the plan in this order: the infrastructure's changes other than its deletes; the deletion
-// of a stale mark of the bootstrap; the waits that repeat a create, then the creates, of the server and combined nodes;
+// completed spec, raises the highest index of the machine names of each server and combined group to the highest among
+// the listed machines (a create of such a machine raises it again, before the request), and applies the plan in this
+// order: the infrastructure's changes other than its deletes; the deletion of a stale mark of the bootstrap; the waits
+// that repeat a create, then the creates, of the server and combined nodes;
 // the Nomad step, which waits for a leader, bootstraps the ACL system with the stored secret, waits for healthy servers
 // that all vote and for an active key in Nomad's keyring, reads the Raft configuration when the plan has a server or
 // combined change, and then, for each server and combined node of the plan in order, waits for a combined node to
@@ -312,6 +316,10 @@ func (s *Service) planUpdate(ctx context.Context, l statestore.Layout, cache ass
 	if err != nil {
 		return updateRun{}, err
 	}
+	names, err := s.readNames(ctx, l, serverGroups(m, nil))
+	if err != nil {
+		return updateRun{}, err
+	}
 	access := nomadAccess{cluster: m.Name, region: objs.Cluster.Spec.Nomad.Region, secrets: secrets}
 	plan, found, err := s.planChanges(ctx, p, m, access)
 	if err != nil {
@@ -330,7 +338,7 @@ func (s *Service) planUpdate(ctx context.Context, l statestore.Layout, cache ass
 		plan: plan, layout: l, completed: completed, warnings: s.updateWarnings(objs.Cluster, objs.NodeGroups, ch),
 		servers: found.servers, listed: found.listed, staleMark: marked && plan.Nomad != nil && plan.Nomad.Bootstrap,
 		nodeKit: nodeKit{
-			cluster: m.Name, region: objs.Cluster.Spec.Nomad.Region, nodes: p.Nodes(), secrets: secrets,
+			cluster: m.Name, region: objs.Cluster.Spec.Nomad.Region, nodes: p.Nodes(), secrets: secrets, names: names,
 		},
 	}
 	changes := changesNodes(plan.Nodes)
@@ -487,6 +495,9 @@ func (s *Service) applyUpdate(ctx context.Context, l statestore.Layout, u update
 		if _, err := s.Store.Put(ctx, l.Completed(), u.completed, statestore.PutOptions{}); err != nil {
 			return fmt.Errorf("write the completed spec: %w", err)
 		}
+	}
+	if err := u.names.raiseToListed(ctx, u.listed); err != nil {
+		return err
 	}
 	opts := s.applyOptions()
 	if err := u.plan.Infra.ApplyTaskChanges(ctx, opts); err != nil {

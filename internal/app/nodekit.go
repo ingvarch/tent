@@ -12,6 +12,7 @@ import (
 	"github.com/ingvarch/tent/internal/nodeconfig"
 	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/pki"
+	"github.com/ingvarch/tent/internal/rollout"
 )
 
 // scrubTimeout is how long the scrub of one node may take.
@@ -27,6 +28,8 @@ type nodeKit struct {
 	// builder makes the NodeConfig of the nodes that the run creates, or waits for with an operation id; it is nil when
 	// the run could not make it, which only a run that creates no node may do.
 	builder *nodeBuilder
+	// names is what tent remembers of the machine names of the server and combined groups. A server's create needs it.
+	names *nameIndexes
 }
 
 // joinPoint is where a new node finds the servers that it joins, and the API that issues its intro token.
@@ -84,15 +87,39 @@ func (s *Service) bootClient(ctx context.Context, k nodeKit, j joinPoint, c Node
 }
 
 // bootServer creates the server or combined node of c, or repeats its create with c's operation id, with the seed of
-// j and no intro token, and returns its machine.
+// j and no intro token, and returns its machine. It stores the index of the node's name as the highest of its group
+// before the create request, after the seed and the user data are made.
 func (s *Service) bootServer(ctx context.Context, k nodeKit, j joinPoint, c NodeChange) (cloud.Instance, error) {
-	return s.applyNodeWith(ctx, k.nodes, k.cluster, c, func(context.Context) (cloud.UserData, error) {
+	return s.applyNodeWith(ctx, k.nodes, k.cluster, c, func(ctx context.Context) (cloud.UserData, error) {
 		seed, err := j.seed(c.Name, false)
 		if err != nil {
 			return nil, err
 		}
-		return k.userData(c, s.now(), seed, nil)
+		data, err := k.userData(c, s.now(), seed, nil)
+		if err != nil {
+			return nil, err
+		}
+		if err := k.rememberName(ctx, c); err != nil {
+			return nil, err
+		}
+		return data, nil
 	})
+}
+
+// rememberName stores the index in the name of the node c as the highest of its group. It stores nothing when the
+// specs give the group a role that runs no server: only the groups that run a server have names to read.
+func (k nodeKit) rememberName(ctx context.Context, c NodeChange) error {
+	if !k.builder.role(c.Group).RunsServer() {
+		return nil
+	}
+	if k.names == nil {
+		return fmt.Errorf("node %s: no record of the names of node group %s", c.Name, c.Group)
+	}
+	index, ok := rollout.NodeIndex(k.cluster, c.Group, c.Name)
+	if !ok {
+		return fmt.Errorf("node %s: its name has no index in node group %s", c.Name, c.Group)
+	}
+	return k.names.raise(ctx, c.Group, index)
 }
 
 // markJoined replaces the user data of the machine in with the stub and labels the machine as joined, and reports the

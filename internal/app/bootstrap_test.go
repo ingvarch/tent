@@ -234,7 +234,9 @@ func TestUpdateBuildsANomadCluster(t *testing.T) {
 			t.Error("the completed spec was not stored when the first node was created")
 		}
 		// The lock is written when it is taken, renewed and released; the other writes come in this order.
-		wantWrites := []string{versionPath, caKeyPath, caBundlePath, gossipPath, aclPath, completedPath, markPath}
+		// Each server's name is stored as the highest index of its group before the server is created.
+		wantWrites := []string{versionPath, caKeyPath, caBundlePath, gossipPath, aclPath, completedPath,
+			namesPath, namesPath, namesPath, markPath}
 		writes := slices.DeleteFunc(slices.Clone(rec.writes), func(p string) bool { return p == lockPath })
 		if diff := cmp.Diff(wantWrites, writes); diff != "" {
 			t.Errorf("writes to the store (-want +got):\n%s", diff)
