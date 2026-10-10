@@ -367,6 +367,68 @@ func TestNewServerNameIsAboveEveryIndexTheGroupHas(t *testing.T) {
 	}
 }
 
+// A new server or combined node takes the index that tent remembers when it is above every name that something lists,
+// and the index above the highest listed name when that is higher.
+func TestNewServerNameTakesTheRememberedIndex(t *testing.T) {
+	bases := []struct {
+		name string
+		base func() rollout.State
+	}{
+		{"server group", func() rollout.State { return serversState(3) }},
+		{"combined group", func() rollout.State { return combinedState(3) }},
+	}
+	tests := []struct {
+		name      string
+		nextIndex int
+		build     func(s *rollout.State)
+		want      int
+	}{
+		{"nothing remembered", 0, func(*rollout.State) {}, 3},
+		{"the remembered index is above every name", 7, func(*rollout.State) {}, 7},
+		{"the remembered index is the one above the highest name", 3, func(*rollout.State) {}, 3},
+		{"the remembered index is below the highest name", 2, func(*rollout.State) {}, 3},
+		{"a member above the remembered index", 7, func(s *rollout.State) {
+			s.Nomad.Members = append(s.Nomad.Members, rollout.Member{Name: serverName(9) + ".global",
+				Address: ip(40), Status: "failed"})
+		}, 10},
+		{"a server of the Raft configuration above the remembered index", 7, func(s *rollout.State) {
+			s.Nomad.Servers = append(s.Nomad.Servers, rollout.Server{ID: "r-9", Name: serverName(8) + ".global",
+				Address: netip.AddrPortFrom(ip(41), 4647), Healthy: true, Version: "2.0.7"})
+		}, 9},
+	}
+	for _, b := range bases {
+		for _, tt := range tests {
+			t.Run(b.name+": "+tt.name, func(t *testing.T) {
+				s := b.base()
+				s.Machines[0].SpecHash = oldHash
+				s.Groups[0].NextIndex = tt.nextIndex
+				tt.build(&s)
+				checkOutcome(t, nextRoll(t, s), outcome{Action: rollout.Create, Group: "servers",
+					Machine: serverName(tt.want), Zone: "ams"})
+			})
+		}
+	}
+}
+
+// A client group takes the lowest free name whatever index is remembered for it.
+func TestClientGroupIgnoresTheRememberedIndex(t *testing.T) {
+	s := baseState()
+	addWorker(&s, 0, oldHash)
+	addWorker(&s, 1, newHash)
+	s.Groups[0].NextIndex = 7
+	checkOutcome(t, nextRoll(t, s), outcome{Action: rollout.Create, Group: "workers", Machine: workerName(2), Zone: "fra"})
+}
+
+// With no machine, server or member of the group listed, the next index is the remembered one.
+func TestNextIndexIsTheRememberedOneWhenNothingOfTheGroupIsListed(t *testing.T) {
+	s := rollout.State{Cluster: "prod", Machines: []rollout.Machine{{Name: workerName(9)}}}
+	for _, remembered := range []int{0, 4} {
+		if got := rollout.NextIndex(s, rollout.Group{Name: "servers", NextIndex: remembered}); got != remembered {
+			t.Errorf("NextIndex with %d remembered = %d, want %d", remembered, got, remembered)
+		}
+	}
+}
+
 // A server group of three with five machines, three of them outdated, loses two outdated servers before it creates
 // another, which takes a name above every name that the group had.
 func TestAServerGroupAboveItsSizeByTwoRemovesBeforeItCreates(t *testing.T) {

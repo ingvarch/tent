@@ -86,9 +86,12 @@ type world struct {
 	reuseAddresses bool
 	// downAfter is how many ticks the node of a deleted machine stays ready; 0 means defaultDownAfter.
 	downAfter int
-	// named holds every name that a machine, a server or a member of the run has had; a new server or combined node
-	// may not take one of them.
+	// named holds every name that a machine, a server or a member of the world has had, in all its runs; a new server
+	// or combined node may not take one of them.
 	named map[string]bool
+	// remembered is, for each server and combined group, the index above the highest that a name of the group has
+	// had, as tent keeps it in the state store across runs; observe gives it as Group.NextIndex.
+	remembered map[string]int
 }
 
 func newWorld(version string) *world {
@@ -99,6 +102,7 @@ func newWorld(version string) *world {
 		keepsBudget: map[string]bool{},
 		startSize:   map[string]int{},
 		named:       map[string]bool{},
+		remembered:  map[string]int{},
 	}
 }
 
@@ -117,17 +121,28 @@ func (w *world) clone() *world {
 	}
 	c.startSize = maps.Clone(w.startSize)
 	c.named = maps.Clone(w.named)
+	c.remembered = maps.Clone(w.remembered)
 	return &c
 }
 
-// noteNames records the names that the machines and members have now; a server has its machine's name. A run calls it
-// before each step, so a name that a step removes is recorded before.
+// noteNames records the names that the machines and members have now; a server has its machine's name. It raises the
+// remembered index of each server and combined group above the names it records. A run calls it before each step, so a
+// name that a step removes is recorded before.
 func (w *world) noteNames() {
 	for _, m := range w.machines {
-		w.named[m.Name] = true
+		w.note(m.Name)
 	}
 	for _, mem := range w.members {
-		w.named[strings.TrimSuffix(mem.name, ".global")] = true
+		w.note(strings.TrimSuffix(mem.name, ".global"))
+	}
+}
+
+func (w *world) note(name string) {
+	w.named[name] = true
+	for _, g := range w.groups {
+		if index, ok := rollout.NodeIndex(w.cluster, g.Name, name); ok && g.Role.RunsServer() {
+			w.remembered[g.Name] = max(w.remembered[g.Name], index+1)
+		}
 	}
 }
 
@@ -306,7 +321,10 @@ func (w *world) availableCount(g rollout.Group) int {
 // observe returns what the cloud and Nomad report now.
 func (w *world) observe() rollout.State {
 	s := rollout.State{
-		Cluster: w.cluster, Groups: w.groups, Version: w.version, Refresh: refreshInterval, Now: w.now,
+		Cluster: w.cluster, Groups: slices.Clone(w.groups), Version: w.version, Refresh: refreshInterval, Now: w.now,
+	}
+	for i := range s.Groups {
+		s.Groups[i].NextIndex = w.remembered[s.Groups[i].Name]
 	}
 	for _, m := range w.machines {
 		s.Machines = append(s.Machines, m.Machine)

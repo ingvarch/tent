@@ -115,3 +115,36 @@ func TestCompareCreatedSortsUnknownLast(t *testing.T) {
 		t.Errorf("sorted = %v, want early, late, unknown", times)
 	}
 }
+
+func TestNodeIndex(t *testing.T) {
+	tests := []struct {
+		name  string
+		node  string
+		index int
+		ok    bool
+	}{
+		{"the first index", "prod-servers-0", 0, true},
+		{"a larger index", "prod-servers-12", 12, true},
+		{"the highest index", "prod-servers-2147483647", 2147483647, true},
+		{"an index above the highest", "prod-servers-2147483648", 0, false},
+		{"an index of 2 to the power of 32", "prod-servers-4294967296", 0, false},
+		{"an index far above the highest", "prod-servers-99999999999999999999", 0, false},
+		{"a letter", "prod-servers-x", 0, false},
+		{"no index", "prod-servers-", 0, false},
+		{"a minus sign", "prod-servers--9", 0, false},
+		{"a plus sign", "prod-servers-+9", 0, false},
+		{"a suffix", "prod-servers-9-b", 0, false},
+		{"another cluster", "other-servers-9", 0, false},
+		{"another group", "prod-workers-9", 0, false},
+		{"no cluster", "servers-9", 0, false},
+		{"no dash before the index", "prod-servers9", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			index, ok := rollout.NodeIndex("prod", "servers", tt.node)
+			if index != tt.index || ok != tt.ok {
+				t.Errorf("NodeIndex(%q) = %d, %t, want %d, %t", tt.node, index, ok, tt.index, tt.ok)
+			}
+		})
+	}
+}

@@ -1,9 +1,12 @@
 package rollout_test
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"slices"
+	"strings"
+	"testing"
 	"time"
 
 	"github.com/ingvarch/tent/internal/rollout"
@@ -353,4 +356,115 @@ func (w *world) observeNomad() rollout.Nomad {
 		n.Nodes = append(n.Nodes, node.Node)
 	}
 	return n
+}
+
+// tickAfterDelete is decide with one tick of the world between the delete of a machine and the next decision, so that
+// the member of the deleted server has left the gossip pool and nothing lists its name any more.
+func (w *world) tickAfterDelete(decide decider) decider {
+	deleted := false
+	return func(s rollout.State, mode rollout.Mode) (rollout.Step, error) {
+		if deleted {
+			w.tick()
+			s = w.observe()
+		}
+		step, err := decide(s, mode)
+		deleted = err == nil && step.Action == rollout.Delete
+		return step, err
+	}
+}
+
+// dropsFloor is decide without the index that tent remembers: the decisions see every group with NextIndex 0.
+func dropsFloor(decide decider) decider {
+	return func(s rollout.State, mode rollout.Mode) (rollout.Step, error) {
+		s.Groups = slices.Clone(s.Groups)
+		for i := range s.Groups {
+			s.Groups[i].NextIndex = 0
+		}
+		return decide(s, mode)
+	}
+}
+
+// firstCreate returns the line of the first create in the lines of a run.
+func firstCreate(t *testing.T, lines []string) string {
+	t.Helper()
+	for _, line := range lines {
+		if strings.HasPrefix(line, "create node ") {
+			return line
+		}
+	}
+	t.Fatalf("no create among the lines: %q", lines)
+	return ""
+}
+
+// rollRun rolls the world with the decider that newDecider makes for it. A roll that ends refused is an error.
+func rollRun(w *world, newDecider func(*world) decider) ([]string, error) {
+	res, err := w.run(rollout.Roll, newDecider(w), false)
+	if err == nil && res.refused {
+		err = fmt.Errorf("the roll ended with %q", res.lines[len(res.lines)-1])
+	}
+	return res.lines, err
+}
+
+// nameScenarios are the runs in which a server is removed, nothing lists its name any more when the next create is
+// decided, and the highest name of the group would be taken again but for the index that tent remembers. want is the
+// name of the first create, and reused the name that it takes without the remembered index.
+var nameScenarios = []struct {
+	name   string
+	run    func(newDecider func(*world) decider) ([]string, error)
+	want   string
+	reused string
+}{
+	// Both servers of a group of one are outdated and the old one leads, as a forced roll that was cut after the create
+	// and forced again leaves it: the new server goes first.
+	{"two outdated servers in a group of one", func(newDecider func(*world) decider) ([]string, error) {
+		w := newWorld(curVersion)
+		w.addGroup(serversGroup(1))
+		w.addServer(oldHash, oldVersion)
+		w.addServer(oldHash, oldVersion)
+		return rollRun(w.arm(), newDecider)
+	}, serverName(2), serverName(1)},
+	// Four outdated machines in a group of three in three zones, the first leading, as a forced roll that was cut after
+	// the create and forced again leaves it: the newest is in the leader's zone, the fullest, and goes first.
+	{"the newest of four servers in three zones", func(newDecider func(*world) decider) ([]string, error) {
+		w := newWorld(curVersion)
+		g := serversGroup(3)
+		g.Zones = []string{"ams", "fra", "lon"}
+		w.addGroup(g)
+		for range 4 {
+			w.addServer(oldHash, oldVersion)
+		}
+		return rollRun(w.arm(), newDecider)
+	}, serverName(4), serverName(3)},
+	{"five servers shrunk to three", rollAfterShrink, serverName(5), serverName(3)},
+}
+
+// With the remembered index the run of each scenario names its first new server above every name that its group has
+// had, breaks no invariant and is not refused.
+func TestARollNamesNoServerTwice(t *testing.T) {
+	for _, sc := range nameScenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			lines, err := sc.run(func(w *world) decider { return w.tickAfterDelete(rollout.Next) })
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := firstCreate(t, lines); !strings.HasPrefix(got, "create node "+sc.want+" ") {
+				t.Errorf("first create = %q, want a server named %s", got, sc.want)
+			}
+		})
+	}
+}
+
+// A decider that drops the remembered index takes the name of a removed server in each scenario, and the invariant
+// of the world finds it.
+func TestADeciderWithoutTheRememberedIndexNamesAServerTwice(t *testing.T) {
+	for _, sc := range nameScenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			_, err := sc.run(func(w *world) decider { return w.tickAfterDelete(dropsFloor(rollout.Next)) })
+			want := ": " + sc.reused + " was the name of a machine, a server or a member before"
+			var v *violation
+			if !errors.As(err, &v) || !strings.HasSuffix(v.msg, want) {
+				t.Errorf("run error = %v, want one that ends with %q", err, want)
+			}
+		})
+	}
 }

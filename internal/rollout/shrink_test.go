@@ -520,3 +520,20 @@ func dropMachine(s *rollout.State, id string) {
 	}
 	s.Machines = kept
 }
+
+// rollAfterShrink shrinks five servers to three, lets the world settle and then rolls the three with the decider that
+// newDecider makes for the world. It returns the lines of the roll.
+func rollAfterShrink(newDecider func(*world) decider) ([]string, error) {
+	w := shrinkServers(5, 3)
+	res, err := w.run(rollout.Shrink, rollout.Next, false)
+	if err != nil {
+		return nil, fmt.Errorf("shrink: %w", err)
+	}
+	if n := w.countOf("servers"); res.refused || n != 3 {
+		return nil, fmt.Errorf("the shrink left %d servers, want 3: %q", n, res.lines)
+	}
+	w.tick()
+	w.tick()
+	w.groups[0].SpecHash = "newer"
+	return rollRun(w.arm(), newDecider)
+}
