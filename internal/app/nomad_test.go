@@ -302,12 +302,20 @@ func (w *nomadWorld) line(c nomadfake.Call) string {
 	return strings.TrimSpace("nomad "+c.Name+" "+c.Arg) + " (" + w.nodeName(c.Server) + ")"
 }
 
-// nodeName returns the hostname of the instance whose public address is the host of addr, or addr when none is.
+// nodeName returns the hostname of the instance whose public address is the host of addr, or of the server that the
+// world saw at that address when the instance is gone, or addr when there is neither.
 func (w *nomadWorld) nodeName(addr string) string {
 	host, _, _ := strings.Cut(addr, ":")
 	for _, m := range w.machines() {
 		if m.address == host {
 			return m.name
+		}
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, r := range w.raft.servers {
+		if r.address == host {
+			return r.name
 		}
 	}
 	return addr

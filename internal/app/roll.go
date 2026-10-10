@@ -41,8 +41,8 @@ type RollOptions struct {
 // Each plan lists the machines once and reads Nomad's Raft configuration, autopilot's report, gossip members and nodes,
 // in that order. The plan holds the selected groups with their outdated machines, and in Next the step that comes next.
 // Next is nil when nothing is left to roll. A failed check or read returns no plan. The plan comes with an error and no
-// Next when the decisions of rollout refuse the run, when the next step is one of a server or combined group, which a
-// roll does not replace yet, and when the next step waits for a machine to join that a run would refuse to wait for.
+// Next when the decisions of rollout refuse the run, when the next step is one of a combined group, which a roll does
+// not replace yet, and when the next step waits for a machine to join that a run would refuse to wait for.
 // Without Apply it changes nothing in the cloud, in Nomad and in the store, and takes no lock.
 //
 // With Apply, a plan that has no next step or an error ends the run as it is, without a lock; a plan without a next
@@ -308,10 +308,10 @@ func (r *rollRun) state(reading nomadReading) rollout.State {
 	}
 }
 
-// refuse returns why the run cannot carry out the step, or nil: see refuseRole, which refuses server groups here too. A
-// wait for a machine to join is refused as its first poll would refuse it, given the nodes that Nomad lists.
+// refuse returns why the run cannot carry out the step, or nil: see refuseRole. A wait for a machine to join is refused
+// as its first poll would refuse it, given the nodes that Nomad lists.
 func (r *rollRun) refuse(step rollout.Step, nodes []nomadops.Node) error {
-	if err := r.refuseRole(step, true); err != nil || step.Action != rollout.WaitJoined {
+	if err := r.refuseRole(step); err != nil || step.Action != rollout.WaitJoined {
 		return err
 	}
 	in, _ := instanceByID(r.listed, step.Machine.ID)
@@ -320,17 +320,13 @@ func (r *rollRun) refuse(step rollout.Step, nodes []nomadops.Node) error {
 }
 
 // refuseRole returns why the run cannot carry out the step of a group of its role, or nil. A roll replaces no combined
-// group yet; with servers it replaces no server group either.
-func (r *rollRun) refuseRole(step rollout.Step, servers bool) error {
+// group yet.
+func (r *rollRun) refuseRole(step rollout.Step) error {
 	g, _ := findGroup(r.model, step.Group)
-	if g.Role == v1alpha1.RoleClient || g.Role == v1alpha1.RoleServer && !servers {
+	if g.Role != v1alpha1.RoleCombined {
 		return nil
 	}
-	what := "combined"
-	if servers {
-		what = "server and combined"
-	}
-	msg := fmt.Sprintf("node group %s: tent cannot roll %s groups yet", step.Group, what)
+	msg := fmt.Sprintf("node group %s: tent cannot roll combined groups yet", step.Group)
 	if r.model.HasClientGroup() {
 		msg += "; select client groups with --nodegroups"
 	}

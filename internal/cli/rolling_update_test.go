@@ -354,33 +354,65 @@ func TestRollingUpdateClusterForce(t *testing.T) {
 	})
 }
 
-// serverRefusal is why tent does not roll the servers yet.
-const serverRefusal = "node group servers: tent cannot roll server and combined groups yet; " +
-	"select client groups with --nodegroups"
+// combinedRefusal is why tent does not roll the combined group of the combined test cluster yet; the cluster has no
+// client group, so the refusal gives no advice about --nodegroups.
+const combinedRefusal = "node group nodes: tent cannot roll combined groups yet"
 
-// TestRollingUpdateClusterRefusesToRollServers prints the plan, then the error, and exits with 1, with and without
-// --yes and without a lock: for outdated servers, and for --force with the default selection. The client groups roll
-// when they are selected.
-func TestRollingUpdateClusterRefusesToRollServers(t *testing.T) {
+// combinedRollRunner returns what executes tent against a built combined test cluster in the store s: the machines
+// are in the Vultr fake f, and Nomad is the static one of three servers that are the clients too.
+func combinedRollRunner(t *testing.T) (state, *vultrfake.Fake, func(args ...string) result) {
+	t.Helper()
+	s := withCombinedCluster(t)
+	f := vultrfake.New()
+	if got := runWithNomad(t, onVultr(f), combinedNomad(), update(s, "--yes")...); got.code != 0 {
+		t.Fatalf("update --yes: exit code %d\n%s", got.code, got.errOut)
+	}
+	return s, f, func(args ...string) result {
+		t.Helper()
+		return runWithNomad(t, onVultr(f), combinedNomad(), args...)
+	}
+}
+
+// TestRollingUpdateClusterPlansTheRollOfServers prints the plan of outdated servers with the creation of a new server
+// as the first step, and, with --force and the default selection, of every group, servers first.
+func TestRollingUpdateClusterPlansTheRollOfServers(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		tent := rollRunner(t, f)
+		const first = "\nNext: create node prod-servers-3 (server of servers, ams).\n"
+
 		s.put(t, clusterPath, slowServersYAML)
 		if got := runOn(t, f, update(s, "--yes")...); got.code != 0 {
 			t.Fatalf("update --yes: exit code %d\n%s", got.code, got.errOut)
 		}
+		wantResult(t, tent(roll(s)...), 0,
+			"node group servers (server, size 3): 3 outdated: prod-servers-0 (ID instance-1), "+
+				"prod-servers-1 (ID instance-2) and prod-servers-2 (ID instance-3)\n"+
+				"node group workers (client, size 3): up to date\n"+first,
+			rollHint)
+
+		clean, g := builtCluster(t)
+		wantResult(t, rollRunner(t, g)(roll(clean, "--force")...), 0,
+			"node group servers (server, size 3): 3 outdated: prod-servers-0 (ID instance-1, forced), "+
+				"prod-servers-1 (ID instance-2, forced) and prod-servers-2 (ID instance-3, forced)\n"+
+				"node group workers (client, size 3): 3 outdated: prod-workers-0 (ID instance-4, forced), "+
+				"prod-workers-1 (ID instance-5, forced) and prod-workers-2 (ID instance-6, forced)\n"+first,
+			rollHint)
+	})
+}
+
+// TestRollingUpdateClusterRefusesToRollCombinedGroups prints the plan, then the error, and exits with 1, with and
+// without --yes and without a lock, also for --force. Nothing is written.
+func TestRollingUpdateClusterRefusesToRollCombinedGroups(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, f, tent := combinedRollRunner(t)
 		holdLock(t, s)
 		calls := len(f.Calls())
-		const plan = "node group servers (server, size 3): 3 outdated: prod-servers-0 (ID instance-1), " +
-			"prod-servers-1 (ID instance-2) and prod-servers-2 (ID instance-3)\n" +
-			"node group workers (client, size 3): up to date\n"
+		const plan = "node group nodes (combined, size 3): 3 outdated: prod-nodes-0 (ID instance-1, forced), " +
+			"prod-nodes-1 (ID instance-2, forced) and prod-nodes-2 (ID instance-3, forced)\n"
 
-		for _, more := range [][]string{nil, {"--yes", "--lock-timeout", "0"}} {
-			wantResult(t, tent(roll(s, more...)...), 1, plan, "Error: "+serverRefusal+"\n")
-		}
-		forced := tent(roll(s, "--force")...)
-		if forced.code != 1 || !strings.HasSuffix(forced.errOut, "Error: "+serverRefusal+"\n") {
-			t.Errorf("--force: exit code = %d, stderr\n%s\nwant 1 and the refusal", forced.code, forced.errOut)
+		for _, more := range [][]string{{"--force"}, {"--force", "--yes", "--lock-timeout", "0"}} {
+			wantResult(t, tent(roll(s, more...)...), 1, plan, "Error: "+combinedRefusal+"\n")
 		}
 
 		wantNoWritesIn(t, f.Calls()[calls:])
@@ -545,11 +577,19 @@ func TestRollingUpdateClusterHelp(t *testing.T) {
 		"Usage:\n  tent rolling-update cluster [NAME] [flags]\n",
 		"--yes", "--nodegroups", "--force", "--exit-code", "--allow-single-server", "VULTR_API_KEY",
 		"Replace the outdated nodes of the cluster named by NAME or --name.",
-		"tent cannot roll server groups yet",
+		"A server group rolls one node at a time: tent creates a new server, waits until it votes and every node has " +
+			"had time to learn of it, moves the leadership away from the old server when it leads, stops it, removes " +
+			"it from the Raft configuration and the gossip pool, waits until the servers that stay are healthy, and " +
+			"deletes it.",
+		"The servers roll before the clients.",
+		"tent cannot roll combined groups yet: select the client groups with --nodegroups.",
 	} {
 		if got.code != 0 || !strings.Contains(got.out, want) {
 			t.Errorf("exit code = %d, stdout\n%s\nwant 0 and it to hold %q", got.code, got.out, want)
 		}
+	}
+	if strings.Contains(got.out, "cannot roll server groups") {
+		t.Errorf("the help says that tent cannot roll server groups:\n%s", got.out)
 	}
 }
 
@@ -571,16 +611,11 @@ func TestRollingUpdateClusterExitCode(t *testing.T) {
 // TestRollingUpdateClusterExitCodeKeepsTheRefusalAnError exits with 1, not 2, when the decisions refuse the roll.
 func TestRollingUpdateClusterExitCodeKeepsTheRefusalAnError(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		s, f := builtCluster(t)
-		tent := rollRunner(t, f)
-		s.put(t, clusterPath, slowServersYAML)
-		if got := runOn(t, f, update(s, "--yes")...); got.code != 0 {
-			t.Fatalf("update --yes: exit code %d\n%s", got.code, got.errOut)
-		}
+		s, _, tent := combinedRollRunner(t)
 
-		got := tent(roll(s, "--exit-code")...)
+		got := tent(roll(s, "--force", "--exit-code")...)
 
-		if got.code != 1 || !strings.HasSuffix(got.errOut, "Error: "+serverRefusal+"\n") {
+		if got.code != 1 || !strings.HasSuffix(got.errOut, "Error: "+combinedRefusal+"\n") {
 			t.Errorf("exit code = %d, stderr\n%s\nwant 1 and the refusal", got.code, got.errOut)
 		}
 	})
