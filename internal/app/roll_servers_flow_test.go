@@ -645,7 +645,7 @@ func TestRollServersFlowStopsNoServerWhenTheNewServerIsHaltedDuringTheWindow(t *
 		plan, err := applyRoll(svc, app.RollOptions{})
 
 		const refusal = "node group servers: node prod-servers-3 is not running; " +
-			"run tent update cluster or tent validate cluster first"
+			"run tent validate cluster to see what is wrong"
 		wantError(t, err, refusal)
 		if halted := instanceNamed(t, f, "prod-servers-3"); !slices.Equal(callsOf(f, "HaltInstance"), []string{halted}) {
 			t.Errorf("the cloud halted %v, want only the new server %s that the test halted", callsOf(f, "HaltInstance"), halted)

@@ -39,9 +39,9 @@ func TestStepText(t *testing.T) {
 			"force prod-servers-1.global out of the gossip pool"},
 		{rollout.Step{Action: rollout.WaitHealthy, Machine: leader, Voters: 3}, "wait until 3 healthy servers vote"},
 		{rollout.Step{Action: rollout.WaitStable, Machine: leader, Until: epoch.Add(4*time.Minute + 20*time.Second)},
-			"wait until 12:04:20 for the servers to be stable"},
+			"wait until 12:04:20 UTC for the servers to be stable"},
 		{rollout.Step{Action: rollout.WaitStable, Until: epoch.In(time.FixedZone("far", 5*3600))},
-			"wait until 12:00:00 for the servers to be stable"},
+			"wait until 12:00:00 UTC for the servers to be stable"},
 		{rollout.Step{}, "unknown action 0"},
 	}
 	for _, tt := range tests {

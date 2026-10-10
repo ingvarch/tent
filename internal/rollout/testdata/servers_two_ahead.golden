@@ -19,9 +19,9 @@ force prod-servers-1.global out of the gossip pool
 delete node prod-servers-1 (ID m-2)
 create node prod-servers-5 (server of servers, ams)
 wait until node prod-servers-5 joins
-wait until 12:02:50 for the servers to be stable
+wait until 12:02:50 UTC for the servers to be stable
 move the leadership from prod-servers-0 to prod-servers-3
-wait until 12:04:00 for the servers to be stable
+wait until 12:04:00 UTC for the servers to be stable
 stop node prod-servers-0 (ID m-1)
 wait until autopilot no longer counts prod-servers-0 as a healthy voter
 remove prod-servers-0 from the Raft configuration

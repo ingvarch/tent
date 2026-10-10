@@ -146,7 +146,7 @@ func nomadText(p app.Progress) string {
 		}
 	case app.NomadStable:
 		lines = [3]string{
-			"waiting until " + e.Until.UTC().Format(time.TimeOnly) + " for the servers to be stable",
+			"waiting until " + e.Until.UTC().Format(time.TimeOnly) + " UTC for the servers to be stable",
 			"the servers are stable", "failed to wait for the servers to be stable",
 		}
 	case app.NomadTransfer:

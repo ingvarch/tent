@@ -301,7 +301,7 @@ func (sg *serverGroup) checkHealthy() error {
 func (sg *serverGroup) checkMachines(why func(Machine) string) error {
 	for _, m := range sg.ms {
 		if reason := why(m); reason != "" {
-			return refuse("node group %s: node %s %s; run tent update cluster or tent validate cluster first",
+			return refuse("node group %s: node %s %s; run tent validate cluster to see what is wrong",
 				sg.g.Name, m.Name, reason)
 		}
 	}

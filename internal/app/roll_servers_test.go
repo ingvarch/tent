@@ -487,7 +487,7 @@ func TestRollLoopRefusesAfterTheListShowsANewServerHalted(t *testing.T) {
 		_, err := roll(svc, app.RollOptions{})
 
 		wantError(t, err, "node group servers: node prod-servers-3 is not running; "+
-			"run tent update cluster or tent validate cluster first")
+			"run tent validate cluster to see what is wrong")
 		stops := 0
 		for _, old := range []string{"prod-servers-0", "prod-servers-1", "prod-servers-2"} {
 			stops += count(*lines, "node started stop "+old)
@@ -509,7 +509,7 @@ func TestRollLoopListsTheMachinesAgainBeforeATransfer(t *testing.T) {
 		_, err := roll(svc, app.RollOptions{})
 
 		wantError(t, err, "node group servers: node prod-servers-5 is not running; "+
-			"run tent update cluster or tent validate cluster first")
+			"run tent validate cluster to see what is wrong")
 		for _, c := range w.Log() {
 			if c.Name == "TransferLeadership" {
 				t.Errorf("the run sent a transfer of the leadership")
