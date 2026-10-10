@@ -139,6 +139,7 @@ type nomadConfig struct {
 		Enabled            bool   `hcl:"enabled"`
 		Encrypt            string `hcl:"encrypt"`
 		RaftMultiplier     int    `hcl:"raft_multiplier"`
+		HeartbeatGrace     string `hcl:"heartbeat_grace"`
 		ClientIntroduction *struct {
 			Enforcement string `hcl:"enforcement"`
 		} `hcl:"client_introduction"`
@@ -156,6 +157,9 @@ type nomadConfig struct {
 			Deadline string `hcl:"deadline"`
 		} `hcl:"drain_on_shutdown"`
 	} `hcl:"client"`
+	RPC *struct {
+		KeepAliveInterval string `hcl:"keep_alive_interval"`
+	} `hcl:"rpc"`
 	ACL *struct {
 		Enabled bool `hcl:"enabled"`
 	} `hcl:"acl"`
@@ -209,6 +213,7 @@ func TestRenderAgentReadsBack(t *testing.T) {
 			}
 			checkServer(t, a, got)
 			checkClient(t, a, got)
+			checkRPC(t, a, got)
 		})
 	}
 }
@@ -223,6 +228,9 @@ func merge(got *nomadConfig, one nomadConfig) {
 	}
 	if one.DisableUpdateCheck {
 		got.DisableUpdateCheck = true
+	}
+	if one.RPC != nil {
+		got.RPC = one.RPC
 	}
 	if one.ACL != nil {
 		got.ACL = one.ACL
@@ -267,8 +275,25 @@ func checkServer(t *testing.T, a nodeconfig.Agent, got nomadConfig) {
 		t.Error("server.encrypt is not the gossip key")
 	case s.ClientIntroduction == nil || s.ClientIntroduction.Enforcement != string(a.ClientIntroduction):
 		t.Errorf("server.client_introduction = %+v, want enforcement %q", s.ClientIntroduction, a.ClientIntroduction)
+	case s.HeartbeatGrace != "20s":
+		t.Errorf("server.heartbeat_grace = %q, want 20s", s.HeartbeatGrace)
 	case s.RaftMultiplier != 2:
 		t.Errorf("server.raft_multiplier = %d, want 2 from the extra server configuration", s.RaftMultiplier)
+	}
+}
+
+// checkRPC checks that a node that runs a client pings its server every 5 s, so that it leaves a server that stopped
+// answering before the servers count its node as down, and that a node without a client sets no rpc block.
+func checkRPC(t *testing.T, a nodeconfig.Agent, got nomadConfig) {
+	t.Helper()
+	if !a.Role.RunsClient() {
+		if got.RPC != nil {
+			t.Errorf("a %s has an rpc block: %+v", a.Role, got.RPC)
+		}
+		return
+	}
+	if got.RPC == nil || got.RPC.KeepAliveInterval != "5s" {
+		t.Errorf("rpc = %+v, want keep_alive_interval 5s", got.RPC)
 	}
 }
 

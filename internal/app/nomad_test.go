@@ -122,8 +122,8 @@ type nomadWorld struct {
 	downAfter    time.Duration
 }
 
-// defaultDownAfter is how long the node of a machine that is gone reads ready: Nomad marks a node down 14 to 19 s
-// after its last heartbeat.
+// defaultDownAfter is how long the node of a machine that is gone reads ready in the test world. A real node reads
+// ready for 20 to 40 s: the rest of its heartbeat TTL and the servers' heartbeat_grace of 20 s.
 const defaultDownAfter = 20 * time.Second
 
 // withNomad gives svc the Nomad of the test cluster prod, which follows f, and returns it.

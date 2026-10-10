@@ -75,8 +75,8 @@ const header = "# Rendered by tent. Do not edit: changes are overwritten on the 
 
 // RenderAgent returns the group-level Nomad agent configuration of a node group, the files that are alike on every
 // node of the group, sorted by path:
-//   - 00-tent.hcl, tent's settings: a server block for server and combined groups, a client block for client and
-//     combined groups, and ACLs, mTLS and telemetry for all;
+//   - 00-tent.hcl, tent's settings: a server block for server and combined groups, a client block and an rpc block
+//     for client and combined groups, and ACLs, mTLS and telemetry for all;
 //   - 01-gossip.hcl, the gossip key, for server and combined groups; the only secret file;
 //   - 98-user-server.hcl and 99-user-client.hcl, the extra configuration of the role's parts, when there is any.
 //
@@ -286,7 +286,8 @@ advertise {
 {{- if .Server}}
 
 server {
-  enabled = true
+  enabled         = true
+  heartbeat_grace = "20s" # after a missed heartbeat a client has 20 s to reach another server before it reads down
 
   client_introduction {
     enforcement = {{.Enforcement}}
@@ -320,6 +321,12 @@ client {
     {{.}}
 {{- end}}
   }
+}
+
+# A client pings its server every 5 s, so that it drops a server that stopped answering and heartbeats another one
+# before the servers' heartbeat_grace runs out and they count its node as down.
+rpc {
+  keep_alive_interval = "5s"
 }
 {{- end}}
 

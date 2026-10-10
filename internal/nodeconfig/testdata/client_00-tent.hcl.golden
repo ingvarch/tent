@@ -45,6 +45,12 @@ client {
   }
 }
 
+# A client pings its server every 5 s, so that it drops a server that stopped answering and heartbeats another one
+# before the servers' heartbeat_grace runs out and they count its node as down.
+rpc {
+  keep_alive_interval = "5s"
+}
+
 acl {
   enabled = true
 }
