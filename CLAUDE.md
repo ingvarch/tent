@@ -99,12 +99,12 @@ packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries that
     cloud and Nomad report, and reaches nothing itself. A simulator with golden step sequences, invariants and a
     resume test from every state proves it. It also added `spec.rollingUpdate` of a node group (`maxSurge`,
     `maxUnavailable`, `drainTimeout`), which never changes the spec hash. M3.3 wired them into `tent rolling-update
-    cluster` for client groups. Two voters and a single server are refused until M3.4 builds the maintainer's answer
-    (decisions 37 and 38, ADR-0035).
+    cluster` for client groups, and M3.4 for server groups. M3.4 also built the maintainer's answer for two voters and
+    a single server (decisions 37 and 38, ADR-0035).
   - M3.2 added the Nomad calls of a roll (`internal/nomadops`, `nomadfake`, ADR-0036): nine calls, reads with the Raft
     IDs, the failure tolerance, `StableSince` and the drain state, and a third error class, `ErrGone`. Snapshots are
-    `secret.Secret` with a 5-minute bound. M3.3 calls the node calls; M3.4 wires the Raft and gossip calls into `tent
-    rolling-update cluster`, and M3.8 the snapshots into `tent backup`.
+    `secret.Secret` with a 5-minute bound. M3.3 calls the node calls; M3.4 wired the Raft and gossip calls into `tent
+    rolling-update cluster`, and M3.8 wires the snapshots into `tent backup`.
   - M3.3 added `tent rolling-update cluster` for client groups (`internal/app` `roll*.go`, `nodekit.go`, `outdated.go`;
     `internal/cli/rolling_update.go`; ADR-0037; maintainer decisions 39 to 42): a loop that observes the cloud and
     Nomad, maps them into `rollout.State`, asks `Next` at every poll and carries the step out.
@@ -112,10 +112,35 @@ packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries that
     - A new node never takes a name that Nomad lists a node of.
     - `--force` labels each machine `tent/replace=true` (`cloud.Nodes.MarkReplace`), so a plain run after a cut replaces
       every labelled machine.
-    - It refuses until `update` has applied the specs, and refuses a step of a server group until M3.4 and of a
-      combined group until M3.5.
+    - It refuses until `update` has applied the specs, and refuses a step of a combined group until M3.5.
     - `update` reports outdated nodes without exit code 2 and `validate cluster` warns about them; `update`'s delete
       guard names `rolling-update`.
+  - M3.4 added the roll of server groups (`internal/app` `roll_servers.go`, `roll_hold.go`; `internal/rollout`
+    `servers.go`, `order.go`, `next.go`; `internal/cli` `progress.go`; ADR-0038; maintainer decisions 37, 38, 43, 44
+    and 48): a server group rolls one server at a time with the new one first, a group of one server included.
+    - The loop lists the machines afresh before a stop or a transfer, makes the Nomad API follow the servers, sends a
+      stop once and waits for a stop that the cloud lists late, and waits up to a minute for a refusal of the decisions
+      after it has sent a write.
+    - With fewer than two other voters the old server's peer is removed while it runs, and its stop is held until a
+      reconcile of Nomad's leader that the run saw (`roll_hold.go`). A server that joins a cluster of one gets no
+      `bootstrap_expect`.
+    - A new server or combined node takes the index above the highest name that a machine, a server or a member has
+      and above the index that tent remembers for its group (decisions 43 and 48). The waits of a removal name their
+      victim. `Next` refuses a group that lists a machine of another role.
+    - tent keeps the highest index of each server and combined group's machine names in the state store, at
+      `names/<nodegroup>` (`internal/app/name_index.go`, `statestore.Layout.NameIndex`). Plans only read it. It is
+      raised under the lock before every server create, in every apply of `update` that has changes and in every apply
+      of `rolling-update` that has a next step. Such a roll also raises `tent-version`, so an older tent is refused
+      after it. `delete cluster` deletes it. `update`'s
+      planner does not read it yet, so M3.6 builds that.
+    - A running voter's server waits for the stability window before it stops or loses its peer (line e1).
+    - `--nodegroups` rolls the clients alone and defers the servers, which every tent release makes outdated.
+    - The test world models servers over time and the leader's reconcile; flows and cuts run under quorum invariants
+      at every call.
+    - `00-tent.hcl` sets `rpc { keep_alive_interval = "5s" }` on client and combined nodes and `heartbeat_grace =
+      "20s"` on server and combined nodes (ADR-0038, item 19), so a hard stop of a server does not mark the clients
+      that talk to it down. The spec hash of every group moved with it.
+    - The real-cloud checks ran on Vultr on 2026-10-10 (platform notes §3.16).
 
 ## Read before changing anything
 

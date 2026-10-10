@@ -10,7 +10,11 @@
   two VMs is part of the real-cloud check) and by [ADR-0032](0032-joined-label-scrub-and-delete-guard.md) (the scrub
   that the VM check lacked is built for clusters that `update` builds; the VM of `hack/tent-node-userdata` is still not
   scrubbed) and by [ADR-0033](0033-operator-commands.md) (`validate cluster` makes no warning about `drain_on_shutdown`
-  in `extraConfig`)
+  in `extraConfig`) and by [ADR-0038](0038-rolling-update-of-server-groups.md) (item 10: the joining forms of
+  `10-node.hcl` for server and combined nodes, with no `server` block, are two more goldens that the weekly online job
+  validates; Nomad 2.0.7 accepted both on 2026-10-10; item 19: `00-tent.hcl` gains `heartbeat_grace = "20s"` in the
+  `server` block of server and combined nodes and `rpc { keep_alive_interval = "5s" }` on client and combined nodes,
+  and the hash of every group moved)
 - **Date:** 2026-10-02
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md) and
@@ -273,6 +277,9 @@ checks the Nomad agent. The facts that shaped it, with their sources in
       goes to that role as `<file>`, and `11-instance.hcl.golden` to client and combined nodes. `nomad config validate
       <dir>` must exit 0 for each. A server's directory with an extra file that sets `tent_unknown_key` must fail and
       name the key.
+    - A server or combined node that joins a cluster of one has the joining form of `10-node.hcl` (no `server` block,
+      [ADR-0038](0038-rolling-update-of-server-groups.md), item 10). `server_10-node.joining.hcl.golden` and
+      `combined_10-node.joining.hcl.golden` take the place of `10-node.hcl` in a second directory of the role.
     - `TestNomadAgentFiles` runs on every pull request: a golden that no role takes, or a role without goldens, fails
       it, so a new golden must be given its roles.
     - It passed on darwin/arm64 on 2026-10-02 ([platform notes §1.6](../platform-notes.md#16-the-agent-on-a-node)).

@@ -11,7 +11,10 @@
   wait runs before the creates of its role; a client gets every known server) and by
   [ADR-0035](0035-rollout-decisions.md) (the rollout guard is the stability window: a server is removed only when
   every other voter's `StableSince` is at least the refresh interval plus 10 s old; before a server roll tent checks
-  the servers, not every node)
+  the servers, not every node) and by [ADR-0038](0038-rolling-update-of-server-groups.md) (the rollout guard is built
+  in M3.4, and the window also comes before the removal of a running voter's peer and before a drained combined
+  victim stops; the follow-up check ran on 2026-10-10: a worker rebooted after a roll of three servers came back under
+  the same node ID with only the new servers in its `05-join.hcl`)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** complements [ADR-0009](0009-server-discovery-fixed-ip-slots.md) (Hetzner slots become a provider

@@ -14,6 +14,10 @@
   batches) and by [ADR-0037](0037-rolling-update-of-client-groups.md) (clients as built in M3.3: the new nodes first
   when `maxSurge` allows (the default 1), a drain with the meta `tent_machine` within `drainTimeout`, a limit on every
   wait; it refuses until `update` has applied the specs; server groups wait for M3.4 and combined groups for M3.5)
+  and by [ADR-0038](0038-rolling-update-of-server-groups.md) (server groups as built in M3.4: the new server first, a
+  fresh list before a stop or a transfer, the Nomad API follows the servers, a refusal after a write is polled for up to
+  a minute, new server names only grow, and two voters and a group of one server roll, the peer of the live server
+  going first; the refusals that ADR-0035 had for the last two are gone)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0004](0004-layered-architecture.md), [ADR-0009](0009-server-discovery-fixed-ip-slots.md),

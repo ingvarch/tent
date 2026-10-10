@@ -1,6 +1,9 @@
 # ADR-0036: The Nomad calls of a roll
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by [ADR-0038](0038-rolling-update-of-server-groups.md) (M3.4 uses the transfer, the
+  peer removal, the members and the force-leave: a call to a server that does not answer waits the call timeout of 30 s
+  before `Servers` moves on, so the loop leaves a stopped server, and a server whose peer it removes while the server
+  runs, out of its API)
 - **Date:** 2026-10-08
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0017](0017-api-driven-server-removal.md), [ADR-0031](0031-bootstrap-in-update.md) and
@@ -135,8 +138,8 @@ holds. M3.2 adds them. Nothing calls them yet: M3.3 and M3.4 wire the node, Raft
   with the node calls, and observes again after `ErrGone`.
 - **M3.4** uses the transfer, the peer removal, the members and force-leave for server removals.
 - **M3.8** stores the snapshots.
-- **Two voters to one** (ADR-0035, item 15) was answered on 2026-10-08 (decisions 37 and 38), and M3.4 builds it; the
-  facts are in platform notes §1.2.
+- **Two voters to one** (ADR-0035, item 15) was answered on 2026-10-08 (decisions 37 and 38), and M3.4 built it
+  ([ADR-0038](0038-rolling-update-of-server-groups.md), items 12 and 13); the facts are in platform notes §1.2.
 - **Where a restore may go** stays open for the maintainer; the restore facts are in platform notes §1.2.
 
 ## Alternatives considered

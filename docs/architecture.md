@@ -332,7 +332,7 @@ This table is also the check that the abstraction survives several providers.
 |---|---|---|
 | Cluster name | `^[a-z][a-z0-9-]{0,18}[a-z0-9]$` (≤ 20), except `con`, `prn`, `aux`, `nul`, `com1`–`com9` and `lpt1`–`lpt9` | prefix of every resource name. Names become state store keys, and Windows reserves the excluded ones ([10.1](#101-backends)). |
 | NodeGroup name | same rules (≤ 20) | a state store key too |
-| Machines | `<cluster>-<group>-<index>` (≤ 63) | Hetzner servers: index = slot. Otherwise the lowest free index. Also the hostname and the Nomad node name. |
+| Machines | `<cluster>-<group>-<index>` (≤ 63) | Hetzner servers: index = slot. Otherwise the lowest free index; a roll gives a new server or combined node the index above the highest that its group has had ([13.3](#133-tent-rolling-update-cluster---yes)). Also the hostname and the Nomad node name. |
 | Network | `<cluster>` | Vultr: VPC description carries the ownership marker |
 | Firewalls | Hetzner: `<cluster>-nodes`, `<cluster>-servers`; Vultr: `<cluster>-servers`, `<cluster>-clients` | Vultr: the clients' group exists only with a client group ([11.5](#115-firewall-and-host-firewall)) |
 | Placement groups (Hetzner) | `<cluster>-<group>-<shard>` | shards of ≤ 10 servers |
@@ -1122,7 +1122,9 @@ type NodeConfig struct {
   intro token when it is given one: `update` gives one to clients only ([9.3](#93-client-introduction)).
   - One node builder runs these steps. It reads the assets once per architecture, makes a template per group, and
     returns a node's config from its group, name, zone, certificate, seed and intro token. `bootstrap_expect` is the
-    size of the server group, or of the combined group, in the specs.
+    size of the server group, or of the combined group, in the specs. A server of a cluster of one server that has a
+    seed gets none, 0: it joins the server that exists, and with 1 Nomad would start a cluster of its own
+    ([ADR-0038](adr/0038-rolling-update-of-server-groups.md), item 10). The first server has no seed and keeps 1.
   - `update` uses the builder, and so does `NodeConfigOf` (with `NewNode`), which builds one new node with every group
     on one architecture. `NodeConfigOf` refuses a missing Nomad version, a missing group and an empty architecture
     before any request. `hack/tent-node-userdata` uses it.
@@ -1159,10 +1161,10 @@ type NodeConfig struct {
   with `user data: node group <group> needs <n> bytes, more than the 24576 that fit`.
   - The largest config of each role leaves at least 8 KiB for `extraConfig`. With `nomad.service`, two CAs, a 2 KiB
     intro token, a 1.5 KiB presigned tent-node URL, a mirror per asset, 5 seeds, 12 meta keys and every firewall rule,
-    the user data takes 9.4 KiB on a server, 11.8 KiB on a client and 12.0 KiB on a combined node, which leaves
-    12.0 KiB for `extraConfig` (tests, 2026-10-03). A combined node built from real data, with 621 bytes of
-    `extraConfig`, takes about 10.7 KiB (10858 to 11042 bytes in five runs, since the size varies with the real
-    keys).
+    the user data takes 9.5 KiB on a server, 11.9 KiB on a client and 12.3 KiB on a combined node, which leaves
+    11.7 KiB for `extraConfig` (`TestUserDataWorstCases`, 2026-10-10). A combined node built from real data, with 621
+    bytes of `extraConfig`, takes about 11 KiB (11126 to 11338 bytes in fifteen runs of `TestNodeConfigUserDataFits`,
+    since the size varies with the real keys).
   - Vultr's API accepts at least 4 MiB, and 64 KiB worked end to end ([11.6](#116-user_data)). A provider that allows
     less than 24 KiB, such as AWS with 16 KB, brings `Capabilities.MaxUserDataBytes`.
   - Fallback if a provider's limit is too small: user data carries only a short-lived presigned URL and a key for an
@@ -1188,15 +1190,27 @@ type NodeConfig struct {
   that stops stays a voter until autopilot's `cleanup_dead_servers` removes it, about 40 s on 2026-10-03
   ([platform notes §1.6](platform-notes.md#16-the-agent-on-a-node)), or until tent removes it through the API
   ([13.3](#133-tent-rolling-update-cluster---yes)).
+- **Heartbeats survive a hard stop of a server** ([ADR-0038](adr/0038-rolling-update-of-server-groups.md), item 19).
+  `00-tent.hcl` sets `heartbeat_grace = "20s"` in the `server` block of server and combined agents (Nomad's default is
+  10 s) and `rpc { keep_alive_interval = "5s" }` on client and combined agents (the default is 30 s). A client sends
+  every RPC to one server and its heartbeat has no deadline, so a client of a server that stopped answering waits for
+  the keepalive of its session before it tries another server. With the two settings the session ends 10 to 15 s after
+  the halt, well inside the leader's TTL of 10 to 20 s plus the grace of 20 s. A killed client reads `ready` for about
+  20 to 40 s from the kill, where the defaults give 10 to 30 s (derived, not measured). On a combined node the `rpc`
+  block also sets the keepalive of the server part. `extraConfig` can override both, since Nomad takes the later file's
+  value; tent's waits and the host firewall do not follow an override. The measurements are in [platform notes
+  §1.2](platform-notes.md#12-features-tent-relies-on). A cluster that an earlier tent built gets the settings only as
+  its nodes are replaced, and the clients may lose plain allocations in that one roll
+  ([ADR-0038](adr/0038-rolling-update-of-server-groups.md), Consequences).
 - **Files in `/etc/nomad.d/`**, merged by Nomad in the order of their names. Root owns every file
   (`nodeconfig.Owner`, `root:root`).
 
   | File | Contents | Scope | Mode | Roles | Written by |
   |---|---|---|---|---|---|
-  | `00-tent.hcl` | tent's settings: `server` and `client` blocks by role, ACL, TLS, Consul auto-join off, no update check, telemetry | group, in the hash | 0644 | all | tent |
+  | `00-tent.hcl` | tent's settings: `server` and `client` blocks by role, heartbeat settings, ACL, TLS, Consul auto-join off, no update check, telemetry | group, in the hash | 0644 | all | tent |
   | `01-gossip.hcl` | `server { encrypt }` | group, secret, not in the hash | 0600 | server, combined | tent |
   | `05-join.hcl` | `server_join { retry_join = [...] }` | node, kept current by tent-node | 0644 | all | tent-node |
-  | `10-node.hcl` | `name`, `datacenter`; `bootstrap_expect` on servers | node | 0644 | all | tent |
+  | `10-node.hcl` | `name`, `datacenter`; `bootstrap_expect` on servers, but not on a server that joins a cluster of one | node | 0644 | all | tent |
   | `11-instance.hcl` | the meta `tent_instance_id` | node | 0644 | client, combined | tent-node |
   | `98-user-server.hcl` | `extraConfig.server` as given | group, in the hash | 0600 | server, combined | tent |
   | `99-user-client.hcl` | `extraConfig.client` as given | group, in the hash | 0600 | client, combined | tent |
@@ -1242,7 +1256,11 @@ type NodeConfig struct {
 - **ACLs on every role.** `acl { enabled = true }` is in the `00-tent.hcl` of clients too: a client with ACLs off
   grants every request to its own endpoints ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)).
 - **`bootstrap_expect`** is per node, in `10-node.hcl`, so a resize of the server group does not mark every server out
-  of date.
+  of date. A server or combined node with a seed in a cluster of one server gets none: a new agent with
+  `bootstrap_expect = 1` that joined a running single server led a cluster of its own 1.4 s after its start and was
+  never added (95 s watched, 2026-10-09). The agent without it joined as a nonvoter after 0.5 s and voted after 12.8 s.
+  `RenderNode` writes no `server` block for 0, and a server with neither a `bootstrap_expect` nor a seed is refused:
+  `a server with no bootstrap_expect needs servers to join`.
 - **The operator's files come last** and can override tent's settings, such as `data_dir`, `client.state_dir`, the
   `tls` file paths, the dynamic ports and Nomad's bridge subnet (`bridge_network_subnet`); they cannot turn off a
   boolean that Nomad merges with OR, such as a client's `leave_on_terminate`.
@@ -1839,6 +1857,7 @@ type Capabilities struct {
   cluster.yaml                           # user spec
   nodegroups/<name>.yaml                 # user specs
   cluster.completed.yaml                 # last applied, with all defaults
+  names/<nodegroup>                      # the highest index that a machine name of a server or combined group has had
   lock                                   # the lock's lease, with a conditional-put or best-effort lock (10.4)
   pki/ca-bundle.pem                      # public
   pki/private/ca.key                     # secret
@@ -1859,17 +1878,46 @@ all vote, Nomad's keyring has an active key, and the server and combined machine
 or combined machine of the cluster stays. Only its existence is read; it holds the time in RFC 3339 and a newline.
 `tent delete cluster` knows it ([13.7](#137-tent-delete-cluster---yes)).
 
+`names/<nodegroup>` holds the highest index that a machine name of a server or combined group has had (M3.4,
+maintainer decision 48, [ADR-0038](adr/0038-rolling-update-of-server-groups.md) item 22): decimal digits and a newline,
+at most 2147483647. `statestore.Layout` names it (`NameIndexes`, `NameIndex`), and `internal/app/name_index.go` reads
+and writes it. A server group's new machine takes the index above it ([13.3](#133-tent-rolling-update-cluster---yes)).
+- **Reads.** Every plan of `update` and of `rolling-update` reads the object of each server and combined group it
+  concerns, with one `Get` each. It makes no `Capabilities` call and writes nothing, so a plan works with a key that
+  may only read, and an s3 store gets no probe. A group without an object has no remembered index. An object that does
+  not parse fails the plan: `prod/names/servers holds "x", which is no index of a node name; it must hold the highest
+  index that a machine name of node group servers has had`. A failed read is `read prod/names/servers: <error>`. A roll
+  reads only the groups it rolls, so `--nodegroups workers` reads none.
+- **Writes**, under the cluster's lock only, and only up (a lower index writes nothing).
+  - Before every create request of a server or combined machine, as the last thing before the request: a failed write
+    sends no create, and a create that fails afterwards leaves a gap in the names. The node's name must have an index
+    in its group, or the write fails with `node prod-servers-x: its name has no index in node group servers`; a run
+    that has no record of the names fails with `node prod-servers-3: no record of the names of node group servers`.
+  - In every apply of `update` that has changes, to the highest listed name of each group, after the completed spec
+    and before the infrastructure and the nodes. This is how a cluster that an earlier tent built gets its objects.
+  - In every apply of `rolling-update` that has a next step, to the highest listed name of each group it rolls, right
+    after the tent version and before the first replace label. A plan without `--yes`, or an apply without a next
+    step, writes nothing.
+- **The write asks the store for its capabilities** only when it has a higher index to write, right before the put. A
+  store with conditional puts gets `IfNoneMatch` for an object that the run found missing and `IfMatch` with the
+  version that the run read or wrote last. A failed condition is `prod/names/servers changed meanwhile; run the command
+  again`; a failed put is `write prod/names/servers: <error>`. Under the lock an s3 store has its answer already, so an
+  apply sends no extra request.
+- **A run uses the index it stored itself:** the decisions of a roll take the stored value at every poll, so the
+  create of a run moves the floor of the same run.
+- **The planner of `update` does not read it to name a machine yet;** see [13.4](#134-scaling).
+
 Names that start with `.` belong to the backends, and `List` never returns them: `.tent-store.lock` and
 `.tent-locks/` in the root of a `file://` store, the temp files of its writes (`.tent-tmp-*`), and the objects that
 the s3 backend's probe writes below `.tent-probe/` ([10.4](#104-locking)).
 
 **Version guard.** `CheckVersion` fails when `tent-version` names a newer tent than the running one, for example
-`cluster prod needs tent v0.4.0 or newer; this is v0.3.1`. `RaiseVersion` records the running version when it is
-newer, under the cluster's lock. A release, a pre-release and `git describe` output are checked, and
-`v0.3.0-4-gabc1234` counts as `v0.3.0`. Development builds, such as `dev` and GoReleaser `-SNAPSHOT` builds, skip the
-guard and never raise the version. The rule is `buildinfo.Release`. tent-node's assets use the stricter
-`buildinfo.IsRelease`, under which `git describe` output is a development build
-([8.5](#85-artifacts-and-verification)).
+`cluster prod needs tent v0.4.0 or newer; this is v0.3.1`. `RaiseVersion` records the running version when it is newer,
+under the cluster's lock. `update` raises it, and since M3.4 so does an apply of `rolling-update` that has a next step,
+so an older tent is refused after a roll by a newer one. A release, a pre-release and `git describe` output are checked,
+and `v0.3.0-4-gabc1234` counts as `v0.3.0`. Development builds, such as `dev` and GoReleaser `-SNAPSHOT` builds, skip
+the guard and never raise the version. The rule is `buildinfo.Release`. tent-node's assets use the stricter
+`buildinfo.IsRelease`, under which `git describe` output is a development build ([8.5](#85-artifacts-and-verification)).
 
 `tent delete cluster` removes the state last. It refuses to remove files it does not recognise unless `--force` is
 given.
@@ -2018,7 +2066,8 @@ tent therefore uses the generic seed-and-refresh strategy
    - `update` seeds a server or combined node with the private addresses of every other server that the run knows,
      by name: the servers that exist, and the ones it created before. On first bootstrap `server-0` is created first
      with an empty seed, and each later server gets the servers created so far. Serf join is transitive, so
-     `bootstrap_expect` sees every server. A client gets every known server
+     `bootstrap_expect` sees every server. A server that a roll adds to a cluster of one server has a seed and no
+     `bootstrap_expect` ([8.4](#84-nomad-configuration-rendering)). A client gets every known server
      ([13.2](#132-tent-update-cluster---yes)).
    - A server that is not ready has no private address yet. So `update` waits for the interrupted servers before it
      creates more, and fails a server's create when servers are listed and none has an address. A client's create
@@ -2028,7 +2077,9 @@ tent therefore uses the generic seed-and-refresh strategy
    ([8.2](#82-tent-node-phases)). `refresh-join` does it every 60 seconds, and on server and combined nodes asks the
    node's own agent first, so the cluster's first server learns its peers. Neither restarts Nomad.
 3. **Rollout guard.** A server is removed only when every other voter has been stable for the refresh interval plus
-   10 s, read from autopilot's `StableSince` ([13.3](#133-tent-rolling-update-cluster---yes)).
+   10 s, read from autopilot's `StableSince` ([13.3](#133-tent-rolling-update-cluster---yes)). On a real cloud (Vultr,
+   2026-10-10) a worker that was rebooted after a roll of three servers came back under the same node ID, with its
+   allocation running, 53 s after the call, and its `05-join.hcl` named exactly the three new servers.
 
 ### 11.3 Creating a node
 
@@ -2515,7 +2566,8 @@ its machine, replaces a client that never registered, and refuses to delete a no
     config per group and the size of each node's user data
  3. without --yes: print the plan and stop
  4. lock → check the tent version → steps 1 and 2 again; the plan made under the lock is the one applied
- 5. raise the tent version → write the missing secrets → write the completed spec when the plan says so
+ 5. raise the tent version → write the missing secrets → write the completed spec when the plan says so → raise the
+    highest name index of each server and combined group to the highest listed name ([10.2](#102-layout))
  6. the infrastructure's task changes (Plan.ApplyTaskChanges); then, when the plan bootstraps and the store holds a
     stale mark, the delete of the mark
  7. server and combined nodes: the waits that repeat a create, by name; then the creates, one at a time, by group
@@ -2735,7 +2787,7 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
   denied` before the bootstrap, and lists each token it issued, also one whose answer was lost, by name, TTL and
   accessor and never by secret (`Issued()`).
 - **Built in M3.2** ([ADR-0036](adr/0036-nomad-calls-of-a-roll.md)). The calls that a roll needs. M3.3 calls the node
-  calls from the loop of `rolling-update` ([13.3](#133-tent-rolling-update-cluster---yes)); M3.4 wires the Raft and
+  calls from the loop of `rolling-update` ([13.3](#133-tent-rolling-update-cluster---yes)); M3.4 wired the Raft and
   gossip calls into it, and M3.8 the snapshots into `tent backup` ([13.8](#138-backups)).
   - **The calls.** `nomadops.API` gains nine methods, each one Nomad call over the client's mTLS:
     `MarkIneligible`, `Drain` (with a `DrainRequest` of a deadline and meta), `Purge`, `TransferLeadership`,
@@ -2916,11 +2968,13 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
 
 Built in parts: M3.1 built the decisions (`internal/rollout`, [ADR-0035](adr/0035-rollout-decisions.md)), M3.2 the
 Nomad calls ([ADR-0036](adr/0036-nomad-calls-of-a-roll.md)) and M3.3 the command for client groups, with its loop
-([ADR-0037](adr/0037-rolling-update-of-client-groups.md)). M3.4 adds the steps of server groups and the Raft and gossip
-calls, M3.5 combined groups, and M3.6 wires the removals into `update`.
+([ADR-0037](adr/0037-rolling-update-of-client-groups.md)). M3.4 added the steps of server groups, a group of one
+server included, and the Raft and gossip calls ([ADR-0038](adr/0038-rolling-update-of-server-groups.md)). M3.5 adds
+combined groups, and M3.6 wires the removals into `update`.
 
-**Built in M3.3.** `tent rolling-update cluster [NAME] [--yes] [--nodegroups a,b] [--force] [--exit-code]
-[--allow-single-server]`, in `internal/app` (`Service.RollingUpdate`) and `internal/cli`. It rolls client groups.
+**Built in M3.3 and M3.4.** `tent rolling-update cluster [NAME] [--yes] [--nodegroups a,b] [--force] [--exit-code]
+[--allow-single-server]`, in `internal/app` (`Service.RollingUpdate`) and `internal/cli`. It rolls client groups (M3.3)
+and server groups (M3.4). Combined groups are refused until M3.5.
 - **The command.**
   - `--nodegroups` takes names separated by commas or given more than once; every group of the specs by default. A
     name that the specs lack fails before any cloud call: `node group db is not in the specs of cluster prod; its node
@@ -2933,35 +2987,47 @@ calls, M3.5 combined groups, and M3.6 wires the removals into `update`.
   loads them; the selection; the provider's live API; the mark of the Nomad bootstrap (`cluster prod has no Nomad yet;
   run tent update cluster first`); the completed spec, which must equal the one that the specs make (`cluster prod has
   no completed spec; run tent update cluster first`, or `the specs of cluster prod changed since the last tent update
-  cluster; run it first`); the stored secrets; the node builder (the release files); `Nodes.List`; and a server that
-  has joined (`cluster prod has no server that joined; run tent update cluster first`). So `update` comes first, also
-  after an upgrade of tent ([ADR-0037](adr/0037-rolling-update-of-client-groups.md), decision 42).
+  cluster; run it first`); the stored secrets; the node builder (the release files); `Nodes.List`; the highest name
+  index of each selected server and combined group ([10.2](#102-layout)); and a server that has joined and runs, with a
+  public address (`cluster prod has no server that joined and runs; run tent validate cluster to see what is wrong`).
+  The checks of the mark and of the completed spec send the operator to `update`, which comes first also after an
+  upgrade of tent ([ADR-0037](adr/0037-rolling-update-of-client-groups.md), decision 42).
 - **Plan and apply.**
   - Without `--yes` it plans: it lists the machines once, reads Nomad, and shows the outdated machines of each group
     and the next step. It changes nothing and takes no lock.
   - With `--yes` it plans without the lock first. A failed check, a refusal or a plan without a next step ends there
     without a lock. Otherwise it takes the lock `rolling-update` (`update` waits up to `--lock-timeout` while a roll
     holds it, and a drain may hold it for `drainTimeout`), plans again under it, tells `OnRollPlan` and the warnings
-    of the cluster, labels the forced machines, and runs the loop.
+    of the cluster, raises the tent version and the highest name index of each selected server and combined group
+    ([10.2](#102-layout)), labels the forced machines, and runs the loop. So a roll with `--yes` that has a step writes
+    the state store, and an older tent is refused after it.
   - A refusal that the plan finds is the refusal that the first poll of the run would find: the plan, with or without
     `--yes`, never shows a next step that the run would refuse at once.
 - **The loop** observes, maps, decides and carries out ([ADR-0037](adr/0037-rolling-update-of-client-groups.md)).
   - **Observing.** It lists the machines at the start and after each cloud step (a create, a repeated create, a scrub,
-    a delete), and at every observation while a machine that it created is not listed or one that it deleted still is.
-    It reads Nomad at every observation: `Peers`, `Health`, `Members` and `Nodes`, in that order. A read that fails
+    a stop, a delete), and at every observation while a machine that it created is not listed, one that it deleted
+    still is, one that it stopped is still listed as running, a refusal is waited for (below) or a stop is held. A
+    `Stop` or a `TransferLeadership` that `Next` gives on an observation that did not list the machines is not carried
+    out: the loop lists them and asks `Next` again, since the old list may be a wait of a minute old and a server that
+    someone halted meanwhile still reads ready in it and healthy in autopilot. The first observation of a run counts as
+    one that did not list. It reads Nomad at every observation: `Peers`, `Health`, `Members` and `Nodes`, in that
+    order. A read that fails
     with `ErrNotReady` is tried again a poll later for up to 10 minutes; any other failed read ends the run.
   - **Deciding.** `rollout.Next(state, Roll)` runs at every observation, so also at every poll of a wait, every 2 s.
     `State.Groups` holds the selected groups, and `Machines` and `Nomad` the whole cluster. The drain's meta is
     `tent_machine=<machine ID>`.
-  - **Carrying out.** A create is `bootClient` with an operation id that the loop makes. A mark, a drain and a purge
-    are the calls of [ADR-0036](adr/0036-nomad-calls-of-a-roll.md). A delete is `Nodes.Delete` without `update`'s
-    guard, which refuses joined nodes because `update` does not drain them.
+  - **Carrying out.** A client's create is `bootClient` with an operation id that the loop makes, and a server's is
+    `bootServer`, which `update` uses too: the seed and no intro token. A mark, a drain, a purge, a transfer, a peer
+    removal and a force-leave are the calls of [ADR-0036](adr/0036-nomad-calls-of-a-roll.md). A stop is `Nodes.Stop`. A
+    delete is `Nodes.Delete` without `update`'s guard, which refuses joined nodes because `update` does not drain them.
   - **Waiting for a new node to join.** At each poll, the first that applies: the cloud reports the machine not ready
     and its operation id is valid, so the create is repeated with it; the cloud reports no private address (`node
     prod-workers-2: the cloud reports no private address for it yet; run the command again`); Nomad lists a ready and
     eligible node of its name and private address, so the machine is scrubbed and labelled; it is a client older than
     31 minutes (`node prod-workers-2 has not joined within 31 minutes of its creation; run tent update cluster, which
-    deletes it and creates it again`); otherwise it waits.
+    deletes it and creates it again`); otherwise it waits. A server has no node: it is scrubbed and labelled once the
+    Raft configuration lists a voter at its private address and autopilot counts it healthy, which is 10 to 23 s after
+    its agent starts ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)).
 - **Deadlines.** A wait counts from the first time that this run met it, and a wait that comes again after it ended
   counts from its new start; a new run counts again.
 
@@ -2970,15 +3036,28 @@ calls, M3.5 combined groups, and M3.6 wires the removals into `update`.
   | `WaitJoined` | 10 minutes |
   | `WaitDrained` | the group's `drainTimeout` plus 5 minutes |
   | `WaitNodeDown` | 6 minutes |
-  | `WaitHealthy` of a client group | 10 minutes |
+  | `WaitHealthy` | 10 minutes |
+  | `WaitStable` | 5 minutes |
+  | `WaitServerDown` | 5 minutes |
   | a machine that the run created and no list shows | 1 minute |
   | a machine whose delete the cloud took and still lists | 5 minutes |
+  | a machine that the run stopped and the cloud still lists as running | 2 minutes |
+  | a refusal of the decisions after a write | 1 minute |
+  | the holds of one victim's stop, together | 5 minutes |
 
   At a limit the run ends with an error such as `node prod-workers-0 did not finish draining within 1h5m0s (Nomad lists
   it draining); run tent rolling-update cluster again to go on waiting`. A machine that no list shows ends the run
   with `the cloud does not list node prod-workers-3 (ID instance-9), which this run created`, and a delete that the
   cloud still lists with `the cloud still lists node prod-workers-0 (ID instance-4) 5m0s after its delete`. A wait
-  without a limit fails the run with `no deadline for the wait <step>`. The deadlines use the wall clock.
+  without a limit fails the run with `no deadline for the wait <step>`. The deadlines use the wall clock. Each
+  `WaitStable` and each server `WaitHealthy` counts from its own first sight: the steps name their victim, so the waits
+  of two victims never share a start, and a victim that leads has two `WaitStable`, before and after its transfer.
+  The server waits end with `node prod-servers-3 did not vote within 10m0s (its server does not vote yet); run tent
+  rolling-update cluster again to go on waiting`, `the servers did not become stable within 5m0s (the window ends at
+  12:04:20 UTC); …`, `autopilot did not stop counting prod-servers-0 as a healthy voter within 5m0s (autopilot counts it
+  a healthy voter); …` and `the servers did not become healthy and vote within 10m0s (autopilot reports 2 voters and the
+  servers not healthy); …`. A stop that the cloud still lists ends with `the cloud still lists node prod-servers-0 (ID
+  instance-2) as running 2m0s after tent stopped it; run tent rolling-update cluster again`.
 - **Safe repeats.**
   - A created machine stays in the state as pending until a list shows its ID, so a list that misses it (Vultr lists a
     new instance by tag up to about 1 s after the answer of its create, [platform notes
@@ -2992,18 +3071,138 @@ calls, M3.5 combined groups, and M3.6 wires the removals into `update`.
     or user data, a create that fails after its request was sent, and any other failed write end the run with the
     step's text, such as `drain node prod-workers-0 within 1h0m0s: <error>`.
   - A delete that the cloud took is not sent again.
-  - A cut a second after a create's answer, followed by a run whose list misses the machine, can leave two machines
-    of one name. `rollout` refuses them. `update` deletes the twin that has not joined; when both joined, its guard
-    refuses ([13.4](#the-delete-guard)) and the operator removes one from Nomad and deletes it in the cloud.
+  - **The repeat of a server step after a lost answer or a cut.** `TransferLeadership`: Nomad answers 200 with `Noop`
+    when the target leads already, and `ErrGone` for a target that left counts as a try. `RemovePeer`: a peer that is
+    gone counts as removed. `ForceLeave`: Nomad answers 200 to a repeat and to an unknown name, and a member that is
+    still listed counts as a try. `Stop`: a second Vultr halt of a halted machine answers 204, the provider counts a
+    machine that is gone as stopped, and a run sends it once (below). A cut loses the deadlines, which the next run
+    counts again, and the set of machines that the run stopped, so the next run sends a stop again. A lost answer of a
+    held `RemovePeer` is not repeated: the victim is out of the API, so no other server gets the call. The run takes it
+    back into the API (one read of 5 s to the removed server), sees at the next poll that the peer is gone and holds as
+    usual. After a lost answer of the removal of a re-added server the run does not count the removal, holds for one
+    more reconcile and removes the server a third time, so its stop goes a minute later.
+  - **Who removes the peer.** Autopilot's `cleanup_dead_servers` often removes a stopped server's peer before tent
+    does: it counted a killed server healthy until Serf marked it failed, 36 to 66 s after the kill, and removed its
+    peer 1.3 to 6.4 s later. The decisions then skip `RemovePeer`; when tent's comes first, autopilot finds nothing to
+    remove. `WaitServerDown` stays, since it shows that the machine stopped before its peer goes.
+  - A cut a second after a create's answer, followed by a run whose list misses the machine, can leave two machines of
+    one name: a roll of a client group names from the listed machines and Nomad's nodes, and `update` names from the
+    listed machines alone. `rollout` refuses them
+    (`node group servers: machines instance-9 and instance-10 share the name prod-servers-3; run tent update cluster
+    first`). `update` deletes the twin that has not joined, since its guard asks
+    Nomad and not the label; when both joined, its guard refuses ([13.4](#the-delete-guard)). When both booted and
+    entered the Raft configuration, the operator deletes one machine in the cloud and removes it from Nomad. Whether
+    two live servers of one name can both join the gossip pool is not measured. A roll of a server or combined group
+    makes no twin: it reads the remembered index, so a run whose list misses a server that a cut run created takes the
+    next name. The group then has `size + 2` machines for a round, and the decisions remove two old servers before the
+    next create.
 - **Names.** A new node takes the lowest `<cluster>-<group>-<index>` that no machine of the cluster has and of which
   Nomad lists no node, in any status. A purge frees a name. A group of 3 with `maxSurge` 1 may so have
-  `prod-workers-4`, and keeps such names. `update`'s planner still names from the machines alone.
-- **Server groups are refused until M3.4 and combined groups until M3.5.** A step of such a group ends the run, and a
-  plan shows the error after its groups: `node group servers: tent cannot roll server and combined groups yet; select
-  client groups with --nodegroups`. The advice is left out when the specs have no client group. An up-to-date server
-  group has no step, so the clients roll. After every tent release the servers are outdated, so the default selection is
-  refused and `--nodegroups workers` rolls the clients; `--force` with the default selection gives the server group a
-  step too.
+  `prod-workers-4`, and keeps such names. `update`'s planner still names from the machines alone ([13.4](#134-scaling)).
+  - **Server and combined groups** take the index above the highest of these (decisions 43 and 48): the index that
+    tent remembers for the group ([10.2](#102-layout)), and the highest `<cluster>-<group>-<digits>` that a listed
+    machine, a server of the Raft configuration or a member of the gossip pool has (the region is cut off a server's and
+    a member's name). A roll of three servers makes `prod-servers-3`, `-4` and `-5`, the next roll `-6`, `-7` and `-8`.
+    The lists alone miss the highest name once its machine is deleted, and a new server under a removed name failed to
+    join the Raft configuration: the leader added it as a nonvoter and autopilot removed it within 40 ms, at every
+    reconcile for the 2.6 minutes watched ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)). The
+    remembered index is written before each create, so a roll never takes a name that a server of the group had, also
+    after a cut, a shrink or an operator's delete.
+- **Combined groups are refused until M3.5.** A step of a combined group ends the run, and a plan shows the error after
+  its groups: `node group nodes: tent cannot roll combined groups yet; select client groups with --nodegroups`. The
+  advice is left out when the specs have no client group. An up-to-date combined group has no step, so the clients
+  roll. After every tent release the servers are outdated (decision 44), so the default selection rolls them first and
+  `--exit-code` exits 2; `--nodegroups workers` rolls the clients alone and defers the servers.
+- **A group whose role changed is refused.** `replace` and `edit` let a role change, the rules go by the group's role
+  and machines keep the role they were made with, so a group changed from combined to server would have its machines
+  stopped with no drain. `rollout` refuses a group that lists a machine of another role, naming the first such machine
+  of the first such group: `node group servers: node prod-servers-0 was created as a combined node and the group is now
+  server; tent does not replace or remove the nodes of a group whose role changed; give the group the role its nodes
+  were created with`. The roles read `as a server`, `as a combined node`, `as a client`. A machine with no role label
+  reads `without a role` and one with an unknown role `with the role "x"`; for these two the text ends with `give
+  the machine the label tent/role with the role that it runs`.
+- **The Nomad API follows the servers.** The loop calls the machines of the server and combined groups that joined,
+  run and have a public address, without those it stopped or whose peer it removes while they run. It makes the API
+  again after a list that changes them and before a stop, each time with a new operator certificate. `Servers` starts
+  at the server that answered last and a halted server answers nothing, so the first call after a halt would wait the
+  call timeout of 30 s, and a deleted server's public address may later belong to another machine. A new server joins
+  the API at the first list that shows its joined label; a victim leaves it before its stop and before the removal of
+  its peer while it runs.
+- **A stop is sent once, and a stop that the cloud lists late is waited for.** Vultr lists a halted instance as
+  running 4 to 19 s after the call (the machine itself stops within a second), and three tries 2 s apart would end the
+  run before that. While the cloud lists a machine that the run stopped as running, every observation lists the
+  machines and the `Stop` that `Next` gives again is not sent: the loop polls, with no try of the repeat guard, for
+  2 minutes from the stop. A new run sends the stop again. The summary counts a machine when its stop call has answered.
+- **A refusal after a write is waited for.** A refusal of `rollout` before the run has sent a write ends the run at once
+  (the plan shows it too). After a write, whatever its answer, a refusal starts a settle wait: every poll the loop
+  lists the machines, reads Nomad and asks `Next`, until it gives a step, a wait or `Done`, or until the refusal has
+  lasted a minute from its first showing. The wait is no try of the repeat guard, forgets no deadline and ends no open
+  wait. At the limit the run ends with the refusal of its last poll. Autopilot answered 429 for about 2 s (2.07 to
+  2.29 s) after 8 of 52 leadership transfers, so without the wait about one roll in seven of a leading victim would
+  end right after its transfer. A cut right after a transfer meets the blip at the next run's first decision, and
+  that run ends at once; running the command again goes on. The scrub of a `WaitJoined` is no write for this rule: a
+  run that begins at a `WaitJoined`, scrubs and then meets a refusal ends at once.
+- **The stop beside fewer than two voters is held** ([ADR-0038](adr/0038-rolling-update-of-server-groups.md), item 13).
+  It applies to a `Stop` of a running machine with no server in the Raft configuration, beside fewer than two voters,
+  that the run has not sent. Nomad's leader adds a removed server whose member is alive again at its reconcile, every
+  60 s from the moment it took the leadership, and autopilot promotes it 10 to 20 s later, also after its machine has
+  stopped. The loop sends the stop in one of two cases:
+  1. **Right after a re-add that it saw.** An observation showed the server out of the Raft configuration, the next one
+     at most 10 s later (`reAddGap`) showed it as a nonvoter, the run has removed that peer since, and the observation
+     of the re-add is at most 10 s old (`stopAfterReAdd`). The call then goes out at most 20 s after the reconcile, and
+     the next one is 40 s or more away.
+  2. **After 65 s without a re-add** (`absentBeforeStop`), counted over observations that are each at most `reAddGap`
+     after the one before, when the victim's member is not `alive` and the last observation is at most `reAddGap` old.
+     The leader adds only a member that reads alive, and a pass that fails adds nothing for a minute, so the 65 s alone
+     prove nothing. The stop goes at the first poll 65 s or more after the first removal, about 66 s on the 2 s poll.
+
+  Otherwise the loop polls: it lists the machines, leaves the victim out of the API, and forgets the step it carried out
+  last, so that the removal of a server the leader added again is a first try with no poll before it. A nonvoter that
+  the run did not see appear is removed and lets no stop go. Ages are the larger of the monotonic and the wall-clock
+  difference, since Go's monotonic clock stops while the machine sleeps, and an observation counts from the moment
+  before its first Nomad read. The holds of one victim last 5 minutes together (`holdTimeout`); then the run ends with
+  `tent could not stop node prod-servers-0 right after a reconcile of Nomad's leader within 5m0s; both servers run; run
+  tent rolling-update cluster again`, and no stop was sent.
+  - **A victim whose member reads alive and that the leader never adds again** (a failing reconcile; a server in
+    bootstrap mode, which the leader never adds) is held until that limit. Stop the Nomad agent on that node and run
+    the command again: case 2 then lets the stop go.
+  - **What the rule rests on:** after a cut right at the stop call, the cloud carries the halt out before the leader's
+    next reconcile, 40 s or more later, or not at all (nine Vultr halts took effect within 0.24 to 0.47 s of the call's
+    start); while the run stays, the cloud carries it out within 2 minutes or not at all and the run's reads answer, so
+    it removes a re-added victim before its promotion, 9.6 s at the earliest; no reconcile but the timer's adds the
+    victim between the re-add and the stop (a change of the leader does, and so does a restart of the victim's own
+    agent, read in Nomad's source and not run); in case 2 the victim's member stays not alive while its machine is
+    halted.
+- **A held stop whose call fails counts as sent.** The call has 10 s (`haltCallTimeout`). A failure while the run lives,
+  an error or no answer, may still be carried out later, and `internal/app` cannot tell a refused halt from an unknown
+  outcome. So the machine stays among those being stopped and out of the API, the CLI shows `failed to stop node
+  prod-servers-0 (ID instance-2): <error>` and one warning (`the stop of node prod-servers-0 (ID instance-2) may still
+  be carried out; tent waits up to 2m0s for the cloud to list it as stopped and removes it from the Raft configuration
+  if Nomad's leader adds it again`), and the run goes on, with a list at every observation, until the list shows the
+  machine stopped, which then counts, or 2 minutes have passed. If the list shows it stopped before the leader's next
+  reconcile, the run forces the member out and the re-add never happens; if the list still shows it running at the
+  reconcile, the run removes the victim again. The end at the limit reads: `stop node prod-servers-0 (ID instance-2):
+  <error>; the cloud still lists it as running after 2m0s; run tent rolling-update cluster again`. A victim that the
+  leader adds again meanwhile is removed at once. A call that fails because the run's context ended ends the run. A stop
+  beside two or more other voters is not held and keeps the older rule: a failed call ends the run, since the quorum
+  does not depend on when that machine stops.
+- **No server answers while a server machine is stopped.** When the reads of an observation or of the plan fail with
+  `ErrNotReady` and the last list shows a joined machine of a server or combined group not running, the error gains
+  `; node prod-servers-0 (ID instance-2) is stopped: if the servers have lost their quorum, start that instance again
+  and run the command again`, naming the first such machine by name. The cloud interface has no start.
+- **The clock.** The window compares the servers' `StableSince` with the clock of the operator's machine. A clock that
+  runs ahead shortens the window by as much. The certificates that tent issues need a clock in sync already.
+- **What a fresh list does not see.** A server that someone else halts in the seconds before tent's stop (Vultr lists it
+  running for 4 to 19 s, autopilot counts it healthy for about 40 s), and a failure that the cloud never shows, such as
+  a hung agent whose machine stays `running` (36 to 66 s until Serf fails it), are not seen; with three voters either
+  can leave two of four voters down.
+- **The clients of a stopped server.** The heartbeat settings of `00-tent.hcl`
+  ([8.4](#84-nomad-configuration-rendering)) keep the clients of a halted server ready.
+- **The observation log.** `Service.Log`, set from the logger that `-v` and `-vv` configure, gets one debug line per
+  observation: `rolling update observed` with `cluster`, `leader` (the leader's node name, or `none`), `voters`,
+  `healthy`, `tolerance` and `next` (the next step, or the refusal in its place). An observation whose reads no server
+  answered logs nothing, and the observation that lists again before a stop logs one too, so a stop shows as `next`
+  twice. `-vv` shows them.
 - **The label `tent/replace=true`** ([3.4](#34-naming-and-ownership-markers), decision 40). `Nodes.MarkReplace` sets
   it, `Instance.Replace` reports it, and it is safe to repeat; on Vultr it is a `GetInstance` and an `UpdateInstance` of
   the tags, with the user data untouched. A forced run under the lock labels each machine of its selected groups that
@@ -3012,8 +3211,9 @@ calls, M3.5 combined groups, and M3.6 wires the removals into `update`.
   with or without `--force`, and computes that set once, from its first list. The machines that the run creates carry
   no label. The plan without `--yes` writes none and shows every selected machine as outdated, with the reason
   `forced` for those whose hash is current.
-- **Progress** ([14](#14-cli)). The cloud steps send the node events of `update`; the Nomad steps and waits send Nomad
-  events: `ineligible`, `drain`, `drained`, `down` and `purge`, besides `register` and `healthy`.
+- **Progress** ([14](#14-cli)). The cloud steps send the node events of `update`, with the action `stop` besides; the
+  Nomad steps and waits send Nomad events: `ineligible`, `drain`, `drained`, `down`, `purge`, `vote`, `stable`,
+  `transfer`, `server-down`, `remove-peer`, `force-leave`, `settle` and `reconcile`, besides `register` and `healthy`.
 
 **Order.** All server groups roll before any client group. This follows Nomad's upgrade guide, and the decisions refuse
 a client group's create or the start of a new victim's removal (C4, C5) while a server runs an older Nomad than a new
@@ -3024,51 +3224,84 @@ differs from the desired hash, when it has none, when it carries `tent/replace=t
 
 ```
 checks at rest (a machine that has not joined is waited for first): autopilot healthy, every server runs and
-votes, failure tolerance >= 1
-→ create the replacement (Hetzner: free slot; Vultr: seeded with the current servers)
-→ wait until it has joined (the checks at rest need it to vote)
+votes, failure tolerance >= 1 (a group of one server needs none)
+→ create the replacement, seeded with the servers that exist (a cluster of one server: no bootstrap_expect)
+→ wait until its server votes and autopilot counts it healthy; scrub the machine
 → wait until every voter but the victim has been stable for the window: the refresh interval plus 10 s,
      read from autopilot's StableSince
-→ if the old server is the leader: PUT /v1/operator/raft/transfer-leadership to a healthy, updated voter,
-     then the window again (a transfer resets StableSince on every server; combined groups: no window after
-     the transfer)
-→ stop the old server: ACPI shutdown where GracefulShutdown, otherwise hard stop/DELETE (Vultr); the server
-  does not leave Raft either way (leave_on_terminate is false on servers, decision 26)
-→ wait until autopilot no longer counts it a healthy voter
-     (a 429 still carries the report: read the server's Healthy and Voter from its body)
-→ if it is still a peer: DELETE /v1/operator/raft/peer?id=<raft id>
+→ if the old server leads: PUT /v1/operator/raft/transfer-leadership to the first healthy, updated voter by name,
+     then the window again (a transfer resets StableSince on every server)
+→ with two or more other voters:
+     stop the old server (a hard halt on Vultr: no graceful shutdown; the server does not leave Raft either way,
+     decision 26)
+     → wait until autopilot no longer counts it a healthy voter
+        (a 429 still carries the report: read the server's Healthy and Voter from its body)
+     → if it is still a peer: DELETE /v1/operator/raft/peer?id=<raft id>
+  with fewer than two other voters:
+     DELETE /v1/operator/raft/peer?id=<raft id> while it runs
+     → stop it, held until a reconcile of Nomad's leader that the run saw, with no wait for autopilot
 → PUT /v1/agent/force-leave?node=<name>.<region>&prune=1
 → wait until the servers are healthy with N voters
      (GET /v1/operator/autopilot/health answers HTTP 429 while unhealthy: treat as "not yet")
 → delete the old VM → next
 ```
 
-See [ADR-0017](adr/0017-api-driven-server-removal.md) and [ADR-0035](adr/0035-rollout-decisions.md).
+See [ADR-0017](adr/0017-api-driven-server-removal.md), [ADR-0035](adr/0035-rollout-decisions.md) and
+[ADR-0038](adr/0038-rolling-update-of-server-groups.md).
 
 - **The calls of a server removal** (M3.2, [13.2](#132-tent-update-cluster---yes)): the transfer and the removal take
   the Raft ID, and the force-leave name is `<node name>.<region>` with `prune=1`.
-
 - **The window** replaces a sleep, so a cut run sees it. It makes sure that every node has refreshed its `05-join.hcl`
   since the servers last changed ([11.2](#112-server-discovery-seed-and-refresh)). A peer removal starts no window; a
-  server that joins and a leadership transfer do (a combined group checks the window before the drain only).
+  server that joins and a leadership transfer do. A victim that runs and whose server votes is neither stopped nor
+  loses its peer while the window over the other voters is open (line e1): a server victim has not started, so its
+  window comes with its checks at rest, and a drained combined victim waits about 70 s after its transfer. After a
+  leader change Nomad gives every node a heartbeat timer of 300 s (`failover_heartbeat_ttl`), so a drained combined
+  leader waits 70 s for the window ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)).
 - **Combined groups** roll like servers, and each victim is drained first: marked ineligible, drained with the group's
-  `drainTimeout`, waited for, then removed as a server. A combined victim that leads hands the leadership over after
-  its drain. The node of the deleted machine is purged once Nomad lists it down. A drain may last the whole
-  `drainTimeout` and a cut run may resume days later, so before a drained victim that still runs and votes hands its
-  leadership over or stops, the server half of the checks at rest runs again, and with more than two voters the
-  failure tolerance must be at least 1.
-- **Two voters and a single server are refused for now.** The maintainer answered on 2026-10-08 (decisions 37 and 38
-  of [18](#18-open-questions)), and M3.4 builds the answer ([ADR-0035](adr/0035-rollout-decisions.md), item 15).
+  `drainTimeout`, waited for, then removed as a server. The command refuses them until M3.5. A combined victim that
+  leads hands the leadership over after its drain. The node of the deleted machine is purged once Nomad lists it down.
+  A drain may last the whole `drainTimeout` and a cut run may resume days later, so before a drained victim that still
+  runs and votes hands its leadership over or stops, the server half of the checks at rest runs again, and with more
+  than two voters the failure tolerance must be at least 1.
+- **Two voters and a group of one server** (decisions 37 and 38). With fewer than two other voters a stop would leave
+  one of two voters, with no leader to remove the peer, so the peer goes first while the server runs. A running victim
+  with a server in the Raft configuration, voter or nonvoter, gets its `RemovePeer` then: a nonvoter that autopilot
+  counts healthy was promoted after the leader added it again, also after its machine had stopped, and the leader then
+  lost its quorum ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)). A server that never read
+  healthy was not promoted. The stop then waits for the hold above. A group of one server rolls with
+  `--allow-single-server`, which the specs' validation asks for: without it the command fails before any cloud call
+  with the validation's error. A server that joins a cluster of one server gets no `bootstrap_expect`
+  ([8.4](#84-nomad-configuration-rendering)). The order for a group of one whose server leads: create, vote, window,
+  transfer, window of 70 s, `RemovePeer`, the hold, a second `RemovePeer` after the leader's re-add, `Stop`,
+  `ForceLeave`, the wait for one healthy voter, delete. A single-server roll waits about 50 s in the hold, and each
+  later removal of this kind up to a minute.
+- **A stopped victim that votes again** beside one other voter is refused, since Nomad then has no leader: `node group
+  servers: node prod-servers-0 is stopped and its server votes beside one other voter, so the servers have no quorum;
+  start its instance again (ID m-1), which tent has not deleted, and run the command again`. Start the stopped instance;
+  the cluster had a leader 0.3 to 1.3 s after the stopped agent was started again (2026-10-10, local Nomad 2.0.7).
+  The next run finds two voters that run and goes on.
+- **The victim at a later observation,** also in a run that resumes after a cut. A run that resumes at a victim
+  without a peer spends 10 s before its first observation: its two plans (without the lock and under it) each read the
+  Raft configuration from the removed server, which answers after 5 s. The victim runs and has no server: `Stop`
+  (held). It runs and is a nonvoter again: `RemovePeer` at once. It runs and is a voter again: the checks at rest and
+  the window first (a combined victim: `checkServing` and the window), then `RemovePeer`. It is stopped and has no
+  server, and its member reads alive or failed: `ForceLeave`. It is stopped and a nonvoter again: `RemovePeer`, then
+  `ForceLeave`.
 - **Refusals.** Before a removal starts or a replacement is created, a run is refused, not waited for, when autopilot
-  reports a server unhealthy, a server does not run or does not vote, or a server group has fewer nodes than its size
-  (run `tent update cluster` first); a replacement also needs a failure tolerance of at least 1. During a removal these
-  are waits, except that a drained combined victim is checked again before its leadership moves or it stops: a server
-  that is unhealthy, does not run or does not vote, or a failure tolerance of 0 with more than two voters, is then a
-  refusal. A run is also refused when no healthy updated voter can take the leadership, or when a version rule fails: a
-  new node older than a server or than a node that is not down, and a client create or a new victim's removal while a
-  server runs an older Nomad than a new node. A server that reports no version, as a server does for a moment after it
-  joins, before autopilot reports it, is skipped by these rules, and a client group waits for it before a create or a
-  new removal.
+  reports a server unhealthy, a server does not run or does not vote (`node group servers: node prod-servers-0 is not
+  running; run tent validate cluster to see what is wrong`), or a server group has fewer nodes than its size (run `tent
+  update cluster` first); a replacement also needs a failure tolerance of at least 1, unless the group has one server.
+  During a removal these are waits, except that a drained combined victim is checked again before its leadership moves
+  or it stops: a server that is unhealthy, does not run or does not vote, or a failure tolerance of 0 with more than two
+  voters, is then a refusal. A run is also refused when no healthy updated voter can take the leadership, or when a
+  version rule fails: a new node older than a server or than a node that is not down, and a client create or a new
+  victim's removal while a server runs an older Nomad than a new node. A server that reports no version, as a server
+  does for a moment after it joins, before autopilot reports it, is skipped by these rules, and a client group waits for
+  it before a create or a new removal. After a write, a refusal is waited for up to a minute (above).
+- **Tent releases.** tent-node's version is in every node's spec hash (decision 44), so each release makes the servers
+  outdated and the default selection rolls them, about 4 minutes per server on Vultr (12 min 5 s for three on
+  2026-10-10). An operator who wants to defer them rolls the client groups with `--nodegroups`.
 
 **Clients**, per group, honouring `maxSurge` and `maxUnavailable` ([3.3](#33-api-rules)):
 
@@ -3127,8 +3360,9 @@ instances with the cluster's label count. A node group's nodes are the instances
 planner is in `internal/app`; its shared helpers are in `internal/rollout`
 ([5](#5-repository-layout-and-dependency-rules)).
 - **Scale up.** A missing node gets the lowest free index: its name `<cluster>-<group>-<index>` is one that no listed
-  instance of the cluster has, whatever its group. It goes into the group's zone with the fewest nodes, the zone
-  listed first on a tie.
+  instance of the cluster has, whatever its group. The planner does not read the highest name index of a server or
+  combined group ([10.2](#102-layout)) yet, so a new server can take the name of a removed one; M3.6 builds that. It
+  goes into the group's zone with the fewest nodes, the zone listed first on a tie.
 - **Scale down.** A group with more nodes than its size loses the newest ones, by creation time, then by id. Until
   M3.6 `update` drains nothing, so it deletes only machines that never joined: a delete of a machine that carries the
   joined label fails the plan ([the guard](#the-delete-guard) below).
@@ -3397,8 +3631,11 @@ while something does. It is `Service.ValidateCluster` in `internal/app`.
 - **Nodes that joined.** `delete cluster` deletes machines that carry the joined label as it deletes the others. The
   guard of `update` ([13.4](#134-scaling)) does not apply, and the command calls no Nomad.
 - **State.** The state is `tent-version`, the specs, the completed spec, since M2.1 the four secrets: the CA's key and
-  bundle, the gossip key and the ACL bootstrap secret, and since M2.7a the bootstrap mark `nomad/bootstrapped`
-  ([10.2](#102-layout)). The mark goes with the first objects, after the node group specs and before the secrets.
+  bundle, the gossip key and the ACL bootstrap secret, since M2.7a the bootstrap mark `nomad/bootstrapped`, and since
+  M3.4 the objects `names/<nodegroup>` ([10.2](#102-layout)). The mark and the name objects go with the first objects,
+  in the order of their paths and before the secrets. The command deletes every object directly under `names/` without
+  `--force`, also one of a group that the specs no longer have; `names` itself or an object deeper than a node group's
+  counts as unknown.
   Other objects under the cluster in the store, such as another object under `pki/`, make tent refuse before it calls
   the cloud, unless `--force` is given; then they are deleted with the rest. The lock's lease goes when the lock is
   released.
@@ -3430,8 +3667,9 @@ while something does. It is `Service.ValidateCluster` in `internal/app`.
   State: 8 objects to delete.
   ```
 
-  - The store of a cluster that `update` has bootstrapped also holds the mark. The plan then lists
-    `- state prod/nomad/bootstrapped` after the node group specs, and the state count is one higher.
+  - The store of a cluster that `update` has bootstrapped also holds the mark and the highest index of the names of
+    each server group. The plan then lists `- state prod/nomad/bootstrapped` and `- state prod/names/servers` among the
+    first objects, in the order of the paths, and the state count is two higher.
   - Without `--yes`, a hint follows on stderr: `run with --yes to delete them`, or `--yes --force` with `--force`.
   - With `--yes`, tent prints the plan made under the lock (step 3), deletes with each step on stderr as it happens
     ([14](#14-cli)), and then prints a blank line and a line such as `Deleted: 2 nodes, 3 infrastructure objects, 8
@@ -3474,7 +3712,7 @@ The last column names the milestone that built the command. The spec commands of
 | `tent replace -f FILE` | `replace` | GitOps: replace stored specs with those of a file | M0 |
 | `tent apply -f FILE` | — | `replace` + `update` | — |
 | `tent update cluster [NAME] [--yes] [--exit-code]` | `update cluster` | infrastructure, node counts, the Nomad cluster: servers, ACL bootstrap, clients, the scrub of user data, the delete guard ([13.2](#132-tent-update-cluster---yes)) | M1; Nomad in M2.7a; scrub and guard in M2.7b; the report of outdated nodes in M3.3 |
-| `tent rolling-update cluster [NAME] [--yes] [--nodegroups a,b] [--force] [--exit-code] [--allow-single-server]` | `rolling-update cluster` | Nomad-aware replacement of the outdated nodes: client groups by `maxSurge` and `maxUnavailable` ([13.3](#133-tent-rolling-update-cluster---yes)) | M3.3 for client groups; server groups in M3.4 |
+| `tent rolling-update cluster [NAME] [--yes] [--nodegroups a,b] [--force] [--exit-code] [--allow-single-server]` | `rolling-update cluster` | Nomad-aware replacement of the outdated nodes: client groups by `maxSurge` and `maxUnavailable`, server groups one server at a time ([13.3](#133-tent-rolling-update-cluster---yes)) | M3.3 for client groups; M3.4 for server groups |
 | `tent upgrade cluster [--yes]` | `upgrade cluster` | version bumps from the channel | — |
 | `tent validate cluster [NAME] [--wait DURATION] [--allow-single-server]` | `validate cluster` | the machines and Nomad against the specs; exits with 2 while they differ ([13.6](#136-tent-validate-cluster---wait-duration)) | M2.8 |
 | `tent delete cluster [NAME] [--yes] [--force]` | `delete cluster` | full cleanup by ownership markers ([13.7](#137-tent-delete-cluster---yes)) | M1 |
@@ -3508,10 +3746,12 @@ The last column names the milestone that built the command. The spec commands of
 
 **Output**
 - Results go to stdout. Warnings, notices, progress and logs go to stderr.
-- Warnings are plain lines that start with `WARNING:`, and `--log-format` does not change them. Logs use `log/slog`,
-  as text or JSON by `--log-format`; `-v` shows info logs and `-vv` debug logs. tent's own logs are debug logs. The
-  Vultr provider logs its warnings at the level `WARN`, which shows without `-v`, such as an object that it skips
-  because its marker does not parse.
+- Warnings are plain lines that start with `WARNING:`, and `--log-format` does not change them. Logs use `log/slog`, as
+  text or JSON by `--log-format`; `-v` shows info logs and `-vv` debug logs. tent's own logs are debug logs;
+  `rolling-update cluster` logs one line per observation, `level=DEBUG msg="rolling update observed" cluster=prod
+  leader=prod-servers-1 voters=4 healthy=true tolerance=1 next="wait until 12:04:20 UTC for the servers to be stable"`
+  ([13.3](#133-tent-rolling-update-cluster---yes)). The Vultr provider logs its warnings at the level `WARN`, which
+  shows without `-v`, such as an object that it skips because its marker does not parse.
 - `-o table`, the default, prints tables and lines of text, such as `node group workers created`. `-o yaml` and
   `-o json` print the same results as data. JSON never escapes HTML characters such as `<` and `&`.
 - `tent get [NAME]` prints the Cluster and its node groups as YAML documents, the file that `create -f` and
@@ -3555,18 +3795,44 @@ The last column names the milestone that built the command. The spec commands of
     `purging node prod-workers-0 (10.64.0.6) from Nomad`, `purged node prod-workers-0 (10.64.0.6) from Nomad`,
     `failed to purge node prod-workers-0 (10.64.0.6) from Nomad`. The creates, the waits for a node to register, the
     scrubs and the deletes of a roll use the lines above.
-  - JSON: `{"type":"infrastructure","event":"started","kind":"vultr.VPC","name":"prod","action":"create"}` with
-    `id`, `wait`, `cause` and `error` when they apply,
+  - Lines of a server roll, each step started, done and failed, the failed one with `: <error>` at its end:
+    `stopping node prod-servers-0 (ID instance-2)`, `stopped node prod-servers-0 (ID instance-2)`, `failed to stop node
+    prod-servers-0 (ID instance-2)`; `waiting for node prod-servers-3 to vote`, `node prod-servers-3 votes`, `failed to
+    wait for node prod-servers-3 to vote`; `waiting until 12:04:20 UTC for the servers to be stable` (the end of the
+    window), `the servers are stable`, `failed to wait for the servers to be stable`; `moving the leadership from
+    prod-servers-0 to prod-servers-3`, `moved the leadership from prod-servers-0 to prod-servers-3`, `failed to move
+    the leadership from prod-servers-0 to prod-servers-3`; `waiting until autopilot no longer counts prod-servers-0 as
+    a healthy voter`, `autopilot no longer counts prod-servers-0 as a healthy voter`, `failed to wait for autopilot to
+    stop counting prod-servers-0`; `removing prod-servers-0 from the Raft configuration`, `removed prod-servers-0 from
+    the Raft configuration`, `failed to remove prod-servers-0 from the Raft configuration`; `forcing
+    prod-servers-0.global out of the gossip pool`, `forced prod-servers-0.global out of the gossip pool`, `failed to
+    force prod-servers-0.global out of the gossip pool`. The wait for the servers to be healthy uses the line of
+    `update`.
+  - Lines of a wait for a refusal to clear: `waiting up to 1m0s for the cluster to settle: node group servers:
+    autopilot reports the servers unhealthy (prod-servers-1); tent replaces a server only while every server is
+    healthy`, `the cluster settled`, `failed to wait for the cluster to settle`. Lines of a held stop: `waiting up to
+    5m0s for the leader's next reconcile before node prod-servers-0 stops` (what is left of the 5 minutes), `the
+    leader's reconcile has passed`, `failed to wait for the leader's reconcile`. A held stop whose call failed shows the
+    line `failed to stop node prod-servers-0 (ID instance-2): <error>` and then the `WARNING:` line of
+    [13.3](#133-tent-rolling-update-cluster---yes).
+  - JSON: `{"type":"infrastructure","event":"started","kind":"vultr.VPC","name":"prod","action":"create"}` with `id`,
+    `wait`, `cause` and `error` when they apply,
     `{"type":"node","step":"done","action":"create","name":"prod-servers-0","id":"<id>","address":"10.64.0.3"}` with
-    `error` for a failed step, `{"type":"node","step":"done","action":"scrub","name":"prod-workers-0","id":"<id>"}`
-    for a scrub, which has no `address`, `{"type":"wait","nodes":3}` for the wait of a delete, and
+    `error` for a failed step, `{"type":"node","step":"done","action":"scrub","name":"prod-workers-0","id":"<id>"}` for
+    a scrub, which has no `address`, `{"type":"wait","nodes":3}` for the wait of a delete, and
     `{"type":"nomad","step":"done","action":"leader","leader":"10.64.0.3:4647"}` for the Nomad step. Its `action` is
-    `leader`, `bootstrap`, `healthy`, `keyring`, `register`, `ineligible`, `drain`, `drained`, `down` or `purge`;
-    `name` names the node of a `register` and of the steps of a roll, `address` its address for `down` and `purge`,
-    `deadline` the deadline of a `drain` as a duration, such as `1h0m0s`, `voters` the servers of a `healthy` (the
-    number waited for when it starts, the number that vote when it is done), and `error` a failed step. A drain starts
-    as `{"type":"nomad","step":"started","action":"drain","name":"prod-workers-0","deadline":"1h0m0s"}`. `address`
-    and `deadline` are left out when empty.
+    `leader`, `bootstrap`, `healthy`, `keyring`, `register`, `ineligible`, `drain`, `drained`, `down`, `purge`, `vote`,
+    `stable`, `transfer`, `server-down`, `remove-peer`, `force-leave`, `settle` or `reconcile`; `name` names the node of
+    a `register` and of the steps of a roll (for a `force-leave` the member's name in the gossip pool, such as
+    `prod-servers-0.global`), `address` its address for `down` and `purge`, `deadline` the deadline of a `drain` as a
+    duration, such as `1h0m0s`, the limit of a `settle` and what is left of the limit of a `reconcile`, `until` the end
+    of the window of a `stable`, in UTC (RFC 3339), `leader` the node name of the server that takes the leadership in a
+    `transfer`, `reason` the refusal that a `settle` waits on, `voters` the servers of a `healthy` (the number waited
+    for when it starts, the number that vote when it is done), and `error` a failed step. A node event has the action
+    `stop` besides, with the machine's `id`. The keys come in the order `type`, `step`, `action`, `name`, `address`,
+    `deadline`, `until`, `leader`, `voters`, `reason`, `error`. A drain starts as
+    `{"type":"nomad","step":"started","action":"drain","name":"prod-workers-0","deadline":"1h0m0s"}`. A field that is
+    empty is left out.
   - With `-o json`, stderr mixes the JSON progress lines with plain `WARNING:` lines and the logs. A program reads
     the lines that start with `{`. The logs are text unless `--log-format json` makes them JSON objects too; they
     carry `level` and `msg`, which progress lines never have.
@@ -3575,10 +3841,11 @@ The last column names the milestone that built the command. The spec commands of
   any output format, in a log or in an error. `export nomad` prints the six shell lines, or with `-o json` and `-o yaml`
   its paths, address and end; `ui` prints the URL, or with `-o json` and `-o yaml` the cluster, the URL and the end of
   the session.
-- Then `-o table` prints a blank line and one line in the past tense on stdout: `Applied: …`, `Nodes: …`, `Nomad: …`
-  and `Wrote …` (the objects written to the state store) for `update`, `Deleted: …` for `delete`, and `Rolled: 2
-  created, 2 drained, 2 deleted, 2 purged.` for `rolling-update`. `-o yaml` and `-o json` print the plan that was
-  applied instead, with `"applied": true`.
+- Then `-o table` prints a blank line and one line in the past tense on stdout: `Applied: …`, `Nodes: …`, `Nomad: …` and
+  `Wrote …` (the objects written to the state store) for `update`, `Deleted: …` for `delete`, and `Rolled: 2 created, 2
+  drained, 0 stopped, 2 deleted, 2 purged.` for `rolling-update` (a server roll: `Rolled: 1 created, 0 drained, 1
+  stopped, 1 deleted, 0 purged.`). `-o yaml` and `-o json` print the plan that was applied instead, with `"applied":
+  true`.
 - **`rolling-update cluster`** ([13.3](#133-tent-rolling-update-cluster---yes)) prints, for each group of the run, a
   line with its outdated machines, then the next step:
 
@@ -3595,8 +3862,9 @@ The last column names the milestone that built the command. The spec commands of
   "next": {"action": "create", "group": "workers", "node": "prod-workers-2", "text": "create node prod-workers-2
   (client of workers, ams)"}}` (`outdated` is `[]` for a group without any; the reason is `spec hash`, `no spec hash` or
   `forced`; `action` is one of the sixteen names of `rollout`'s actions, such as `mark-ineligible`). With `--yes` the
-  applied plan adds `"applied": true` and `"rolled": {"created": 2, "drained": 2, "deleted": 2, "purged": 2}`.
-  - A refusal of the decisions, of a server or combined group, or of a wait that would fail at once prints the plan,
+  applied plan adds `"applied": true` and `"rolled": {"created": 2, "drained": 2, "stopped": 0, "deleted": 2,
+  "purged": 2}`.
+  - A refusal of the decisions, of a combined group, or of a wait that would fail at once prints the plan,
     then `Error: …`, and exits with 1. A failed check prints only the error.
   - With `--yes`, `-o table` prints the plan made under the lock, the steps on stderr, a blank line and the `Rolled:`
     line; or only `cluster prod has nothing to roll`, when the plan, without or under the lock, has no next step. A
@@ -3677,9 +3945,12 @@ The last column names the milestone that built the command. The spec commands of
 - The long help of `update cluster` says that tent replaces the user data of a node that has joined with a stub, that
   a client that did not register within 31 minutes of its creation is deleted and created again, and that an update
   that would delete a node that joined fails, and that it lists the nodes that `rolling-update cluster` replaces. The
-  long help of `rolling-update cluster` says what makes a node outdated, how a client group rolls, that server and
-  combined groups are not rolled yet and `--nodegroups` selects client groups, that `update` comes first, what `--yes`
-  and `--force` do, and that a run that stops is finished by running the command again. The long help of `validate
+  long help of `rolling-update cluster` says what makes a node outdated, how a server group rolls (a new server, its
+  vote, the leadership moved away, the stop, the removal from the Raft configuration and the gossip pool, the wait for
+  the servers that stay, the delete) and how a group of one server does (it needs `--allow-single-server` and takes
+  about a minute more), how a client group rolls, that the servers roll before the clients, that combined groups are
+  not rolled yet and `--nodegroups` selects client groups, that `update` comes first, what `--yes` and `--force` do, and
+  that a run that stops is finished by running the command again. The long help of `validate
   cluster`, `export nomad` and `ui` says what they check or write, what they print, and that they need the cloud's
   credentials and a way to port 4646 of the servers; the help of `validate cluster` also gives its exit codes.
 - Exit codes: 0 success, 1 error, 2 when `update cluster --exit-code` finds a plan with changes, `rolling-update
@@ -3710,17 +3981,30 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
      - golden step sequences of the roll of client, server and combined groups, of servers then clients in one roll, of
        the removal of surplus nodes, of a server roll with two stopped servers, and of the main refusals (unhealthy,
        failure tolerance 0, a client newer than the servers, a downgrade, a group that cannot go on, a short server
-       group, duplicate names, a single server, two voters); the other refusals have unit tests;
+       group, duplicate names); the other refusals, the one of a group whose role changed among them, have unit tests.
+       Since M3.4 the roll of
+       a group of one server (`server1`), the shrink from three servers to one (`shrink_servers_3_1`) and a roll that
+       finds two new servers already in the group (`servers_two_ahead`) have goldens, and the new server names show in
+       `servers3`, `servers5`, `combined3` and `cluster`;
      - a simulator with a model of the cloud and of Nomad and a clock of its own, which checks the invariants after
        every step and every tick: a leader and a quorum at every point, the leader never stopped or deleted, no server
        deleted while it is a peer, no client deleted while its node holds allocations, the availability budget, the
        machine limits, no client step before the servers are done and no client created before they run the new
-       version, a shrink that creates nothing, the stability window, no two machines of one name;
+       version, a shrink that creates nothing, the stability window, no two machines of one name. Since M3.4 the
+       window goes by server (a machine's own join does not count against its stop) and counts a transfer, a created
+       server or combined name was never the name of a machine or member in the run, and a machine whose server is in
+       the Raft configuration stops only while at least two other voters run;
      - a resume test: from the world after every step and every tick, a new run ends in the same cluster and prints
        exactly the rest of the full run; when it starts after up to 12 ticks without a step, it ends with the same
        last line in the same cluster, though the steps in between may differ;
-     - quorum tests: in the roll of three servers and of three combined nodes, a voter whose machine stops at any
-       point, before or after autopilot notices it, never leads to a stop or a leadership transfer while it is down;
+     - quorum tests: in the roll of three servers, of three combined nodes and of one server, a voter whose machine
+       stops at any point, before or after autopilot notices it, never leads to a stop or a leadership transfer while it
+       is down;
+     - since M3.4, the simulator has Nomad's leader: every 6 ticks (a tick is 10 s) from the start of the world or the
+       last transfer to another server it adds each removed peer whose member is alive back as a nonvoter with its Raft
+       ID, and, as the worst case, such a server that was added while its machine ran votes a tick later, also after the
+       machine stopped, while its member is alive; one added while its machine was stopped never votes. Its steps take
+       no time, so it proves the order of the decisions, and the flows of `internal/app` prove the hold of the stop;
      - since M3.3, the naming rule ([ADR-0037](adr/0037-rolling-update-of-client-groups.md)): a create skips a name
        that a machine has or of which Nomad lists a node, in any status, and takes it again once no node is listed. The
        scenario `clients_reuse` (a new machine gets the address of a deleted one, whose node goes down only after its
@@ -3939,7 +4223,7 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
        the world's last read lists it, so a purge sticks. Peers and autopilot entries carry `r-<instance id>`, the first
        ready server leads, `StableSince` is when the world first saw the server ready, and the members are the ready
        servers, `alive`, as `<hostname>.global`. Reads count in `SetDrainReads`. The world still sets peers, health and
-       members at every call, so a removal of a peer or a force-leave does not last: that is M3.4's world.
+       members at every call, so a removal of a peer or a force-leave does not last: that is the world of M3.4 below.
        `internal/cli` has its own small follower in `helpers_test.go` that registers each ready worker with an ID and
        lists a node `down` once its instance is gone.
      - **The flows** roll the two outdated workers of the example cluster. With `maxSurge` 1 and `maxUnavailable` 0,
@@ -3966,10 +4250,12 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
        and each first read of an observation, 47 of its 196 calls and 94 subtests. A cut at a later read of an
        observation leaves what a cut at the first one leaves, and the selection test fails for a write of a roll that is
        missing from `rollWrites`. The next run finishes with as many `CreateInstance` calls in both runs as an
-       uninterrupted roll makes, and each worker has its group's hash, the joined label and the stub. A forced run
-       that is cut and started again without `--force` finishes and leaves no ineligible node. The state store's writes
-       and the lock calls have no cuts of their own: the roll writes nothing to the store but its lock, and a run
-       cut at the lock is the next run's first observation.
+       uninterrupted roll makes, and each worker has its group's hash, the joined label and the stub. A forced run that
+       is cut and started again without `--force` finishes and leaves no ineligible node. The state store's writes and
+       the lock calls have no cuts of their own: until M3.4 the roll wrote nothing to the store but its lock, and a run
+       cut at the lock is the next run's first observation. Since M3.4 its apply also raises `tent-version` and the
+       highest name indexes ([10.2](#102-layout)); `roll_names_test.go` checks that both come before the first label and
+       the first create.
        - A lost answer of Vultr's `UpdateInstance` (the scrub) or `DeleteInstance` ends the run, and the next run
          finishes; lost answers of `CreateInstance` (found by its operation id), `IntroToken`, `MarkIneligible`,
          `Drain` and `Purge` do not end it.
@@ -3985,6 +4271,68 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
      - **Parallel tests.** Every top-level test of the roll's test files calls `t.Parallel()` first, and
        `TestRollTestsRunInParallel` fails for one that does not. `go test -race ./internal/app/` took 177 s on the
        maintainer's machine on 2026-10-08, 146 s on main before M3.3, and 236 s before the tests ran in parallel.
+   - **Built in M3.4** ([ADR-0038](adr/0038-rolling-update-of-server-groups.md)): tests of the server roll, on the same
+     fakes.
+     - **The world follows servers over time** (`roll_servers_world_*_test.go`; every delay is 0 by default, so the
+       tests of M2 and M3.3 do not change). A new server joins as a healthy nonvoter with `StableSince` in whole seconds
+       and votes later (`ServersOverTime`: after 15 s; `SetVoteAfter`). The leader stays until a transfer through the
+       world moves it, and the world fails the test when the leader's machine halts (`FailOnLeaderLoss`). A halted or
+       deleted server stays `alive` and healthy for 40 s (`SetFailAfter`), then its member is `failed` and its report
+       entry `left`; autopilot removes its peer 2 s later (`SetCleanupAfter`, `NoCleanup`) and the report keeps it 2 s
+       (`SetReportLag`). `RemovePeer` and `ForceLeave` through the world last, and a dropped member does not come back.
+       `SetTransferBlip` makes one follower unhealthy for a while after a transfer, with the failure tolerance by the
+       formula (the voters beyond a majority, at least 0). A call to the address of a halted server fails with
+       `ErrNotReady` and shows in `HaltedCalls`. `vultrfake.SetHaltReads(tb, n)` lists a halted instance as running for
+       its next `n` reads. A server created with `bootstrap_expect = 1` while the cluster has a leader starts a cluster
+       of its own: it never enters the Raft configuration, its member is `alive` and its node never registers, and a
+       call to its address fails with `<name> started a cluster of its own`.
+     - **The leader's reconcile** (`SetReconcile(every, promote)`, off by default): from the moment the leader took the
+       leadership, each `every`, a removed server whose member is alive is added again as a nonvoter with its Raft ID,
+       and votes `promote` later, also when its machine has stopped meanwhile, as the worst case; a server added while
+       its machine was stopped reads unhealthy and never votes. `SetHaltLag(d)` keeps a halted machine running as far as
+       Nomad goes for `d` more. A removed server that runs reads alive and healthy in the report for the report lag,
+       and its own API answers for 2 s, then fails each call but `Members` after 5 s (`RemovedCalls`).
+     - **The flows** (`roll_servers_flow_test.go`) roll the three servers of the example cluster through
+       `RollingUpdate`, with golden files for the plan, the progress lines and the calls
+       (`flow_roll_servers.plan.golden`, `.steps.golden`, `.calls.golden`), and the servers and the workers together
+       (`flow_roll_cluster.steps.golden`, servers first); the leader as the last victim with a transfer blip, which
+       gives one settle; a new server halted from outside during the window (no stop is sent, and the run is refused
+       after the settle) and an old one (it becomes the victim and is removed); an unhealthy cluster at the start (the
+       plan's refusal, no lock); the peer removed by autopilot first, by tent first, and with no cleanup (the timings
+       put the failure and the cleanup between two polls, and each case checks from the calls who removed it);
+       `--force`; a group of one server and the workers, with the reconcile every minute, a promotion 10 s later and a
+       halt lag of 9 s; a roll whose removed peers the report keeps for six minutes, so that each wait for health ends
+       before its limit and the three together pass it.
+     - **The invariants** hold at every call of both fakes: a leader exists and its machine runs; the voters that run
+       are a quorum; the server group has at most `size + 1` machines; no call reaches a server that the run stopped;
+       and a server stops only once the servers other than it have been unchanged for the window, less the second that
+       whole seconds can take off (a change is a join as a nonvoter or a transfer). At every `HaltInstance`, also one
+       whose answer a hook loses: a machine whose server is in the Raft configuration has at least two other voters that
+       run, and beside fewer than two voters the leader's next reconcile is 40 s or more away unless the member is not
+       alive. `wantQuorumFor(d)` lets the clock run and reads the voters every 5 s. After each roll `rolling-update` has
+       nothing to roll, `validate cluster` passes, Nomad lists exactly the new servers as voters and `alive` members, no
+       peer, member or node of an old machine, and no new server has the name of an old one or of any machine that the
+       world has had.
+     - **The loop**: a stop decided on an old list is not sent when the new list shows another server halted; the
+       victim leaves the API before its stop and before its peer is removed; a stop that the cloud lists late (after
+       `SetHaltReads`) is sent once and listed until it reads stopped, and one that never shows ends the run at 2
+       minutes; each limit of a server wait; a refusal at the first decision ends the run at once, one after a step
+       clears or lasts a minute, and the series of tries and a wait's deadline go on through it; the hold, with the
+       readings and steps made by hand, the re-add seen or not, the gaps between observations, the two clocks (moments
+       whose clocks differ are built by hand), the stop call that answers late or fails, and the limit; the observation
+       log, one line each.
+     - **Cuts, lost answers and deadlines** (`roll_servers_cut_test.go`). The roll of the servers is cut before and
+       after each of its writes, 38 subtests, and not at every read: the cloud and Nomad change only at writes. Each
+       next run finishes with as many `CreateInstance` calls in both runs as an uninterrupted roll makes. A lost answer
+       of the first write of each kind: `CreateInstance` goes on (found by its operation id), a lost `UpdateInstance`,
+       `HaltInstance` or `DeleteInstance` ends the run and the next run finishes, and the Nomad writes go on. A cut
+       right after a stop that the cloud lists late sends the stop again. The six deadlines end the run and the next run
+       goes on. A cut right after a create whose new server a list then misses gives the next run the next name
+       (`TestServersRollNamesTheNextServerWhenTheListsMissTheOneItCreated`: two old servers go before the third new one
+       is created), and a forced roll of a group of one that is cut after its create and forced again, also on a store
+       without the names object, creates no second server of one name (`roll_names_test.go`).
+     - **The simulator** has the reconcile and the promotion above; its resume tests run over `server1` and
+       `shrink_servers_3_1` with up to 12 idle ticks.
 4. **tent-node tests.** Phases run with an abstracted filesystem and exec. Occasionally they run in a
    systemd-enabled container or a VM.
    - **Built in M2.5.** `internal/nodeup/nodeuptest` holds the fakes: an in-memory filesystem that behaves as
@@ -4137,7 +4485,8 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
     key, and fail when the key expires within 180 days ([8.5](#85-artifacts-and-verification)). They also run
     `nomad config validate` of the channel's minimum and recommended Nomad on each role's goldens of
     `internal/nodeconfig` (`TestNomadConfigValidateOnline` in `internal/assets`, decision 23 of
-    [18](#18-open-questions)). The job can also be run by hand (`workflow_dispatch`); a manual run starts only this
+    [18](#18-open-questions)), and for a server and a combined node again with the joining form of `10-node.hcl` (no
+    `server` block) in its place. The job can also be run by hand (`workflow_dispatch`); a manual run starts only this
     job, and every other job of `ci.yml` skips it.
     `internal/buildconfig` checks that every test that reads `TENT_TEST_ONLINE` has such a name;
   - the licences of every module tent or tent-node links, on each platform the release builds for: each must be
@@ -4341,9 +4690,9 @@ Decided on 2026-10-07:
     be healthy again before the next one. It refuses when the cluster is unhealthy or the removal would lose quorum.
     Going to one server needs `--allow-single-server`, as today. A scale-down of clients drains them first. This lifts
     decision 27's guard for the nodes that tent drains or removes safely. The decisions are built in M3.1 and
-    `update` uses them from M3.6. The step from two voters to one and the roll of a single server are refused until
-    M3.4 builds the maintainer's answer (decisions 37 and 38; [13.3](#133-tent-rolling-update-cluster---yes),
-    [ADR-0035](adr/0035-rollout-decisions.md)).
+    `update` uses them from M3.6. The step from two voters to one and the roll of a single server were refused until
+    M3.4 built the maintainer's answer (decisions 37 and 38; [13.3](#133-tent-rolling-update-cluster---yes),
+    [ADR-0038](adr/0038-rolling-update-of-server-groups.md)).
 35. **`rolling-update` is its own command,** as [13.3](#133-tent-rolling-update-cluster---yes) and ADR-0005 say.
     `update` never replaces a node; it reports how many are outdated.
 
@@ -4352,9 +4701,13 @@ Decided on 2026-10-08 (the maintainer took every recommendation put to them at t
 37. **From two voters to one.** With two voters, the live server's peer is removed first, the machine is stopped at
     once, and then it is forced out of the gossip pool with prune. This amends ADR-0017 for two voters. The machine is
     stopped at once because autopilot promotes the re-added server about 18 s after the peer is removed (2026-10-08,
-    [ADR-0035](adr/0035-rollout-decisions.md), item 15). Built in M3.4.
+    [ADR-0035](adr/0035-rollout-decisions.md), item 15). Built in M3.4 as the peer removed first, while the server
+    runs, whenever fewer than two other voters vote; the stop is held until a reconcile of Nomad's leader that the run
+    saw, since the leader adds the server again every 60 s and autopilot promotes it 10 to 20 s later, also after its
+    machine has stopped ([13.3](#133-tent-rolling-update-cluster---yes),
+    [ADR-0038](adr/0038-rolling-update-of-server-groups.md), items 12 to 16).
 38. **A single-server group rolls,** without the failure-tolerance check, through two voters (decision 37), with
-    `--allow-single-server` as the specs' validation asks. Built in M3.4.
+    `--allow-single-server` as the specs' validation asks. Built in M3.4. The new server gets no `bootstrap_expect`.
 39. **The outdated report and the exit codes.** `update` prints the outdated nodes as a line of its plan and a JSON
     field; they do not make `update --exit-code` exit 2. `rolling-update --exit-code` exits 2 while a roll is due.
     `validate cluster` warns about them. When the release files cannot be read, `validate` and an `update` that
@@ -4370,10 +4723,17 @@ Decided on 2026-10-08 (the maintainer took every recommendation put to them at t
 42. **`update` before `rolling-update`.** `rolling-update` refuses until `update` has applied the current specs, also
     after an upgrade of tent. Built in M3.3 ([13.3](#133-tent-rolling-update-cluster---yes)).
 43. **Server and combined names only grow:** a roll of three servers makes `prod-servers-3`, `-4` and `-5`. Built in
-    M3.4.
+    M3.4: the index above the highest that a machine, a server or a member has. A new server under the name of a
+    removed one failed to join. The rule sees only names still listed, so decision 48 adds the remembered index
+    ([13.3](#133-tent-rolling-update-cluster---yes), [ADR-0038](adr/0038-rolling-update-of-server-groups.md), item 7).
 44. **tent-node stays in every node's spec hash.** Each tent release rolls the servers too; an operator who wants to
     defer them rolls the client groups with `--nodegroups`. The hash already holds it; M3.4 lets the default selection
-    roll the servers.
+    roll the servers ([ADR-0038](adr/0038-rolling-update-of-server-groups.md), item 17).
+48. **tent remembers the highest index of each server and combined group** in the state store
+    (`names/<nodegroup>`, [10.2](#102-layout)), so that the names of such a group only grow, also after a shrink or an
+    operator's delete (decided on 2026-10-09; the limit that M3.4 found in decision 43's rule). Built in M3.4 for the
+    roll ([ADR-0038](adr/0038-rolling-update-of-server-groups.md), item 22); the planner of `update` follows with the
+    scale-down part ([13.4](#134-scaling)).
 
 Open for the maintainer: where `tent backup restore` may restore a snapshot ([13.8](#138-backups); the facts are in
 [platform notes §1.2](platform-notes.md#12-features-tent-relies-on)), what `upgrade cluster` writes, and what backups
@@ -4384,8 +4744,8 @@ Decisions 18 to 20 are recorded in [ADR-0028](adr/0028-tent-node-agent-units-and
 [ADR-0030](adr/0030-nomad-on-nodes.md), decision 26 in [ADR-0031](adr/0031-bootstrap-in-update.md), decisions 27 and 28
 in [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md), and decisions 29 to 32 in
 [ADR-0033](adr/0033-operator-commands.md), decisions 33 to 35 in [ADR-0035](adr/0035-rollout-decisions.md), decisions 39
-to 42 in [ADR-0037](adr/0037-rolling-update-of-client-groups.md), and decisions 37 and 38 in ADR-0035 (item 15).
-Decisions 37, 38, 43 and 44 are built in M3.4.
+to 42 in [ADR-0037](adr/0037-rolling-update-of-client-groups.md), and decisions 37, 38, 43, 44 and 48 in
+[ADR-0038](adr/0038-rolling-update-of-server-groups.md) (decisions 37 and 38 were first named in ADR-0035, item 15).
 
 ---
 
@@ -4402,6 +4762,7 @@ backslashes, `%{`, `{{` and Unicode, and a seed with an IPv6 address.
 | `01-gossip.hcl` | [`server_01-gossip.hcl`](../internal/nodeconfig/testdata/server_01-gossip.hcl.golden) | — | [`combined_01-gossip.hcl`](../internal/nodeconfig/testdata/combined_01-gossip.hcl.golden) |
 | `05-join.hcl` | [`server_05-join.hcl`](../internal/nodeconfig/testdata/server_05-join.hcl.golden) | [`client_05-join.hcl`](../internal/nodeconfig/testdata/client_05-join.hcl.golden) | [`combined_05-join.hcl`](../internal/nodeconfig/testdata/combined_05-join.hcl.golden) |
 | `10-node.hcl` | [`server_10-node.hcl`](../internal/nodeconfig/testdata/server_10-node.hcl.golden) | [`client_10-node.hcl`](../internal/nodeconfig/testdata/client_10-node.hcl.golden) | [`combined_10-node.hcl`](../internal/nodeconfig/testdata/combined_10-node.hcl.golden) |
+| `10-node.hcl`, joining a cluster of one server (no `server` block) | [`server_10-node.joining.hcl`](../internal/nodeconfig/testdata/server_10-node.joining.hcl.golden) | — | [`combined_10-node.joining.hcl`](../internal/nodeconfig/testdata/combined_10-node.joining.hcl.golden) |
 | `11-instance.hcl` | — | [`11-instance.hcl`](../internal/nodeconfig/testdata/11-instance.hcl.golden) | [`11-instance.hcl`](../internal/nodeconfig/testdata/11-instance.hcl.golden) |
 | `98-user-server.hcl` | [`server_98-user-server.hcl`](../internal/nodeconfig/testdata/server_98-user-server.hcl.golden) | — | [`combined_98-user-server.hcl`](../internal/nodeconfig/testdata/combined_98-user-server.hcl.golden) |
 | `99-user-client.hcl` | — | [`client_99-user-client.hcl`](../internal/nodeconfig/testdata/client_99-user-client.hcl.golden) | [`combined_99-user-client.hcl`](../internal/nodeconfig/testdata/combined_99-user-client.hcl.golden) |
@@ -4454,6 +4815,12 @@ client {
   }
 }
 
+# A client pings its server every 5 s, so that it drops a server that stopped answering and heartbeats another one
+# before the servers' heartbeat_grace runs out and they count its node as down.
+rpc {
+  keep_alive_interval = "5s"
+}
+
 acl {
   enabled = true
 }
@@ -4485,13 +4852,14 @@ telemetry {
 A server's `00-tent.hcl` differs:
 - `addresses` has `http = "0.0.0.0"`, which the tent CLI reaches through the cloud firewall, and a `serf` address, and
   `advertise` a `serf` address too;
-- it has `server { enabled = true }` with `client_introduction { enforcement = "strict" }` instead of the `client`
-  block, and `autopilot { cleanup_dead_servers = true }`.
+- it has `server { enabled = true }` with `heartbeat_grace = "20s" # after a missed heartbeat a client has 20 s to reach
+  another server before it reads down` and `client_introduction { enforcement = "strict" }` instead of the `client`
+  block, no `rpc` block, and `autopilot { cleanup_dead_servers = true }`.
 - it has `leave_on_terminate   = false # a stopped server stays a Raft peer; tent removes servers through the Nomad API`
   where the client has `true` (decision 26 of [18](#18-open-questions)).
 
-A combined node's has the server's `leave_on_terminate` line and addresses and both blocks, with
-`enforcement = "warn"` by default.
+A combined node's has the server's `leave_on_terminate` line and addresses, both blocks with the server's
+`heartbeat_grace`, and the client's `rpc` block, with `enforcement = "warn"` by default.
 
 **Server and combined: `01-gossip.hcl`** (the only secret file of the group, mode 0600):
 
