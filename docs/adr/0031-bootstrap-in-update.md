@@ -8,7 +8,11 @@
   `hack/tent-operator`) and by [ADR-0034](0034-e2e-suite-on-vultr.md) (the Nomad step waits for an active key in
   Nomad's keyring after the health wait) and by [ADR-0036](0036-nomad-calls-of-a-roll.md) (item 7: a third class of
   errors, `ErrGone` (ADR-0036 items 4 and 5), beside `ErrNotReady` and the permanent one; it is permanent, so
-  `Servers` returns it at once)
+  `Servers` returns it at once) and by
+  [ADR-0038](0038-rolling-update-of-server-groups.md) (item 2 of this ADR: a server of a cluster of one server that has
+  a seed gets no `bootstrap_expect`, 0 where the item says the size of the group; the first server and the servers of
+  groups of three and five are as before; item 22: `update` writes the highest name index of each server and combined
+  group to the state store, before the infrastructure and before each server create)
 - **Date:** 2026-10-05
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),
@@ -57,7 +61,8 @@ The facts that shaped it. The ones about Nomad were verified on 2026-10-05 on a 
    knows, by name. The first server of a cluster without servers has an empty seed. When servers are listed and none has
    a private address, the change fails and says to run the command again. A client is seeded with every known server,
    and fails the same way when it knows none.
-   `bootstrap_expect` is the size of the server group on every server.
+   `bootstrap_expect` is the size of the server group on every server, except that a server of a cluster of one
+   server that has a seed gets none ([ADR-0038](0038-rolling-update-of-server-groups.md), item 10).
 
 ### Node configuration
 

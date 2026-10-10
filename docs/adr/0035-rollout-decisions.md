@@ -1,12 +1,18 @@
 # ADR-0035: Rollout decisions
 
-- **Status:** Accepted; the refusal of two voters and of single-server groups is **provisional** (see
-  [Server removal](#server-removal)); amended by [ADR-0036](0036-nomad-calls-of-a-roll.md) (the M3.2 follow-up is
+- **Status:** Accepted; the refusal of two voters and of single-server groups (item 15) was provisional and is gone
+  (see [Server removal](#server-removal)); amended by [ADR-0036](0036-nomad-calls-of-a-roll.md) (the M3.2 follow-up is
   built: `nomadops` reads the Raft IDs, `StableSince`, the failure tolerance, the gossip members and the drain state);
   amended by [ADR-0037](0037-rolling-update-of-client-groups.md) (a new node never takes a name that Nomad lists a
-  node of, in any status, which changes the name that a roll's create takes), and the maintainer answered the two open
-  questions on 2026-10-08 (decisions 37 and 38, item 15): M3.4 builds the answer, and item 15's refusals stand until
-  then
+  node of, in any status, which changes the name that a roll's create takes); amended by
+  [ADR-0038](0038-rolling-update-of-server-groups.md): the maintainer answered the two open questions on 2026-10-08
+  (decisions 37 and 38, item 15) and M3.4 built the answer, so a removal from two voters removes the live server's peer
+  first, and a group of one server rolls; a new server or combined node takes the index above the highest name that a
+  machine, a server or a member has and above the index that tent remembers for its group (`Group.NextIndex`,
+  [ADR-0038](0038-rolling-update-of-server-groups.md) items 7 and 22); `WaitStable` and the `WaitHealthy` of a server
+  removal carry the victim; `Next` refuses a group that lists a machine of another role than its own; and line e1 (item
+  14 below) makes a running voter's server wait for the window before it stops or loses its peer, a drained combined
+  victim after its transfer included
 - **Date:** 2026-10-08
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0004](0004-layered-architecture.md),
@@ -122,26 +128,33 @@ last run did.
     ([ADR-0016](0016-server-discovery-seed-and-refresh.md)). Otherwise the step is `WaitStable` until that time.
     - The window is read from autopilot, so a cut run sees it (see Alternatives for why not a sleep).
     - In a server group a leadership transfer resets `StableSince` on every server, so a roll of a server group waits
-      once more after its one transfer: the window is checked again before the stop. In a combined group it is checked
-      before the drain only (item 16).
+      once more after its one transfer: the window is checked again before the stop. In a combined group it was checked
+      before the drain only until M3.4; since line e1 (below) a drained victim also waits for it before it stops or
+      loses its peer (item 16).
     - A peer removal starts no window: a node keeps a dead address in its join list without harm while live servers
       are in it. A server that joins starts one.
-15. **Two voters and single-server groups are refused for now (provisional).**
-    - A removal that would take a group from two voters to one is refused: `removing <name> would leave one voter of
+    - **Line e1** ([ADR-0038](0038-rolling-update-of-server-groups.md), item 11): a victim that runs and whose server
+      votes is neither stopped nor removed from the Raft configuration while this window is open, whatever the number
+      of voters.
+15. **Two voters and single-server groups were refused until M3.4.**
+    - A removal that would take a group from two voters to one was refused: `removing <name> would leave one voter of
       two: tent does not take a group from two voters to one yet`.
-    - A roll of a group of one server is refused: `a group of one server cannot roll: its failure tolerance is 0`.
-    - Open for the maintainer: the order of a removal from two voters, and whether single servers may roll. The other
-      answer is in Alternatives.
+    - A roll of a group of one server was refused: `a group of one server cannot roll: its failure tolerance is 0`.
+    - Open for the maintainer then: the order of a removal from two voters, and whether single servers may roll.
+      The other answer is in Alternatives.
     - **Answered on 2026-10-08** (decisions 37 and 38 of [architecture §18](../architecture.md#18-open-questions)): the
       other answer. With two voters the live server's peer is removed first and the machine is stopped at once; a group
       of one server rolls without the failure-tolerance check, through two voters, with `--allow-single-server`. M3.4
-      builds it and changes the two refusals and the goldens `server1` and `shrink_servers_3_1`; until then they stand.
+      built it ([ADR-0038](0038-rolling-update-of-server-groups.md), items 12, 13 and 16): the two refusals are gone,
+      and the goldens `server1` and `shrink_servers_3_1` hold the rolls. The stop of a server with no peer is held
+      until a reconcile of Nomad's leader that the run saw.
 16. **A combined group rolls like servers and is drained first.** The victim's node is marked ineligible (or drained at
     once when its drain meta already holds the machine's ID), drained with the group's `drainTimeout` and waited for,
     then the machine is removed as a server. A combined victim that leads hands the leadership over after the drain.
-    The window is checked before the drain only: the victim has started with its mark, and neither the drain nor the
-    transfer after it changes a member of the Raft configuration, so no window follows the transfer. The deleted
-    machine's node becomes an orphan, which is purged once down.
+    The window is checked before the drain, and, since line e1 of [ADR-0038](0038-rolling-update-of-server-groups.md),
+    again before the drained victim stops or loses its peer: a transfer gives every server a new `StableSince`, so a
+    drained leader waits about 70 s after its transfer. The deleted machine's node becomes an orphan, which is purged
+    once down.
     - A drain may last the whole `drainTimeout`, and a cut run may resume days later. So before a drained victim that
       still runs and votes hands its leadership over or stops, the server half of the checks at rest runs again
       (autopilot is healthy, every machine of the group runs and votes), and with more than two voters the failure
@@ -150,8 +163,8 @@ last run did.
 17. **`Shrink` takes the same rules** with these differences: it creates nothing, it needs no failure tolerance, it
     ignores Nomad versions, and its victims are any machines while a group has more than its size. A machine that
     never joined is deleted or waited for as rule C7 says. A client shrink marks the whole batch before any drain. A
-    server group shrinks one server at a time (5 to 3; 3 to 1 stops at two servers for now, item 15). A group of one
-    server needs `--allow-single-server`, as the specs' validation asks today.
+    server group shrinks one server at a time (5 to 3; 3 to 1 stopped at two servers until M3.4, item 15). A group of
+    one server needs `--allow-single-server`, as the specs' validation asks today.
 
 ### Drains and purges
 
@@ -207,8 +220,8 @@ last run did.
 
 ### Negative / trade-offs
 
-- **A shrink from three servers to one and a roll of a single server are refused** until M3.4 builds the maintainer's
-  answer (decisions 37 and 38).
+- **A shrink from three servers to one and a roll of a single server** were refused until M3.4 built the maintainer's
+  answer (decisions 37 and 38, [ADR-0038](0038-rolling-update-of-server-groups.md)).
 - **A roll is slow per server.** The window is at least 70 s after a change, and `WaitServerDown` costs about 36 to
   66 s ([platform notes §1.2](../platform-notes.md#12-features-tent-relies-on)): Serf marked a killed server failed
   after 36.7 s, 41.2 s and 65.7 s. The wait proves that the machine stopped before its peer goes.
@@ -222,9 +235,9 @@ last run did.
   drains or removes safely.
 - The loop of M3.3 calls `Next` at every poll of a wait, never only once per wait: the voters that a `WaitHealthy`
   names can drop while it waits, when autopilot removes the peer of a dead server.
-- The maintainer answered the two questions (item 15). M3.4 changes the two rules and the goldens `server1` and
-  `shrink_servers_3_1`. A group of one server then rolls without the tolerance check, with `--allow-single-server`,
-  and ADR-0017's order for two voters changes.
+- The maintainer answered the two questions (item 15). M3.4 changed the two rules and the goldens `server1` and
+  `shrink_servers_3_1`. A group of one server rolls without the tolerance check, with `--allow-single-server`, and
+  ADR-0017's order for two voters changed.
 
 ## Alternatives considered
 
@@ -237,11 +250,11 @@ last run did.
 - **Stop first with two voters, as ADR-0017 orders.** It leaves one of two voters alive, so no leader can remove the
   peer, and the cluster has no quorum.
 - **Remove the peer before the stop with two voters.** It kept the quorum on 2026-10-07, and it is the answer that would
-  let single servers roll. It is the maintainer's answer of 2026-10-08 (decisions 37 and 38), which M3.4 builds; until
-  then item 15 refuses it. The leader re-adds the removed live server as a nonvoter, and autopilot promotes it 18 s
-  (2026-10-08) and 49 s (2026-10-07) after the removal. If the promotion lands between the observation and the stop, two
-  voters remain with one of them stopped and the quorum is lost. The stop must come before the shortest time seen, or a
-  guard must see the promotion.
+  let single servers roll. It is the maintainer's answer of 2026-10-08 (decisions 37 and 38), which M3.4 built
+  ([ADR-0038](0038-rolling-update-of-server-groups.md), items 12 and 13); item 15 refused it until then. The leader
+  re-adds the removed live server as a nonvoter, and autopilot promotes it 18 s (2026-10-08) and 49 s (2026-10-07) after
+  the removal. If the promotion lands between the observation and the stop, two voters remain with one of them stopped
+  and the quorum is lost. The stop must come before the shortest time seen, or a guard must see the promotion.
 - **Purge a node that is not down.** Without client introduction a purged live node registers again, so the purge
   would not remove it. Under strict introduction, once its introduction token had expired, it could not register
   again (2026-10-08), so the purge would cut off a node whose agent still runs.

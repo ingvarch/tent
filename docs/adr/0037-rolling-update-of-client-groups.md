@@ -1,6 +1,10 @@
 # ADR-0037: Rolling update of client groups
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by [ADR-0038](0038-rolling-update-of-server-groups.md) (item 1 and the follow-ups:
+  server groups roll and only combined groups end the run; item 7: the names of server and combined groups
+  grow; item 17: the default selection rolls the servers; item 22: `rolling-update --yes` writes the state store;
+  the loop gains the API that follows the servers, a stop that the cloud lists late, the wait for a refusal after a
+  write, and the hold of a stop beside fewer than two voters; its observation log is the field `Service.Log`)
 - **Date:** 2026-10-08
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),
@@ -38,7 +42,8 @@ must come from what the cloud and Nomad report now.
 ## Decision
 
 This ADR records maintainer decisions 39 to 42 as built in M3.3. Decisions 37 and 38 are in
-[ADR-0035](0035-rollout-decisions.md) (item 15), and 43 and 44 are named in items 12 and 14; M3.4 builds all four.
+[ADR-0035](0035-rollout-decisions.md) (item 15), and 43 and 44 are named in items 12 and 14; M3.4 built all four
+([ADR-0038](0038-rolling-update-of-server-groups.md)).
 
 ### The loop
 
@@ -96,6 +101,8 @@ This ADR records maintainer decisions 39 to 42 as built in M3.3. Decisions 37 an
 
 11. **A step of a server or combined group ends the run until M3.4 (servers) and M3.5 (combined).** An up-to-date
     server group has no step, so one rule covers the default selection and a named one, and M3.4 deletes one check.
+    M3.4 did: server groups roll, and a step of a combined group ends the run
+    ([ADR-0038](0038-rolling-update-of-server-groups.md), item 1 and Follow-ups).
 
 ### Names (decision 41)
 
@@ -103,7 +110,8 @@ This ADR records maintainer decisions 39 to 42 as built in M3.3. Decisions 37 an
     frees the name. Names can pass the group's range (`prod-workers-4` for a group of 3 with `maxSurge` 1) and keep
     them. Without the rule the new machine matched the old node, which Nomad still listed `ready` and ineligible, so
     the group read one node short and a `maxUnavailable` of 0 refused the next step. `update`'s planner names from
-    machines only until M3.6, and the names of server and combined groups (decision 43) are M3.4's.
+    machines only until M3.6, and the names of server and combined groups (decision 43) are M3.4's
+    ([ADR-0038](0038-rolling-update-of-server-groups.md), item 7).
 
 ### The shared create path
 
@@ -117,7 +125,8 @@ This ADR records maintainer decisions 39 to 42 as built in M3.3. Decisions 37 an
     2 while a next step is due, without `--yes` only. When the release files cannot be read, `validate` and an
     `update` that creates no node warn and go on, since the report changes nothing that `update` does; an `update`
     that creates a node fails, as before. After every tent release the servers
-    are outdated (decision 44), so the default selection is refused until M3.4, and `--nodegroups` rolls the clients.
+    are outdated (decision 44), so the default selection was refused until M3.4, and `--nodegroups` rolls the clients.
+    Since M3.4 the default selection rolls the servers first.
 
 ### The delete guard
 
@@ -153,12 +162,17 @@ This ADR records maintainer decisions 39 to 42 as built in M3.3. Decisions 37 an
   tent's checksums.txt, plus a call to the provider's `Arch` per machine type; and a warning when they fail.
 - **A forced run writes one label per machine** before its first step, a cloud write that can fail.
 - **The cut tests do not cut at the state store's writes and lock calls.** The roll writes nothing to the store but
-  its lock, and a run cut at the lock is the next run's first observation.
+  its lock, and a run cut at the lock is the next run's first observation. Since M3.4 an apply of a roll also raises
+  `tent-version` and the highest name indexes of server groups ([ADR-0038](0038-rolling-update-of-server-groups.md),
+  item 22). The roll's cut tests do not cut at these two writes either: `roll_names_test.go` checks that both come
+  before the first label and the first create, and `TestUpdateCutAtEveryWriteOfTheNames` cuts an `update` at each
+  write of the names.
 
 ### Follow-ups
 
 - **M3.4** rolls server groups with the steps of [ADR-0035](0035-rollout-decisions.md), makes the Nomad API follow the
-  servers as they change, shares the server create path with `applyServer`, and builds decisions 37, 38, 43 and 44.
+  servers as they change, shares the server create path with `applyServer`, and builds decisions 37, 38, 43 and 44
+  ([ADR-0038](0038-rolling-update-of-server-groups.md)).
 - **M3.5** rolls combined groups. **M3.6** moves `update`'s names into `rollout` and lifts the guard where tent
   drains or removes a node safely (decision 34).
 

@@ -16,7 +16,11 @@
   `tent/spec-hash` label, and writes the completed spec before the first node; the M2.7 follow-ups are done; the
   hash of server and combined groups moved with `leave_on_terminate = false`, and the format stays 1) and by
   [ADR-0032](0032-joined-label-scrub-and-delete-guard.md) (the scrub of user data is built: it runs once a node has
-  joined its cluster)
+  joined its cluster) and by [ADR-0038](0038-rolling-update-of-server-groups.md) (`RenderNode` takes a
+  `bootstrap_expect` of 0 on a server or combined node and then writes no `server` block; `update` and the roll give
+  that to a server that has a seed and joins a cluster of one server, since with 1 Nomad starts a cluster of its own;
+  item 19: `00-tent.hcl` gains `heartbeat_grace = "20s"` on server and combined nodes and `rpc { keep_alive_interval =
+  "5s" }` on client and combined nodes, and the hash of every group moved)
 - **Date:** 2026-09-29
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0006](0006-two-binaries-and-nodeconfig.md) (the size budget, the instance id),
@@ -160,7 +164,8 @@ Every file is owned by `root:root` (`nodeconfig.Owner`): the Nomad agent runs as
   `11-instance.hcl` (`nodeconfig.RenderInstance`). These two are not among NodeConfig's files, and both binaries use
   the same code for them.
 - **`00-tent.hcl`** holds tent's settings: a `server` block on server and combined nodes, a `client` block on client
-  and combined nodes, and `acl`, `tls` and `telemetry` on all. Appendix A points to the golden files.
+  and combined nodes, `acl`, `tls` and `telemetry` on all, and the heartbeat settings of
+  [ADR-0038](0038-rolling-update-of-server-groups.md), item 19. Appendix A points to the golden files.
 - **`01-gossip.hcl`** holds only `server { encrypt = "…" }`, so the key stays out of the hash and of any diff, and
   only root reads it.
 - **`05-join.hcl`.** A server joins the servers' Serf port in `server { server_join { retry_join } }`, a client their
@@ -168,7 +173,8 @@ Every file is owned by `root:root` (`nodeconfig.Owner`): the Nomad agent runs as
   the RPC address of the server in the same agent. tent never writes `server.retry_join`, which Nomad 2.1 removes.
 - **`10-node.hcl`** holds the name, the datacenter (the node's zone) and, on server and combined nodes,
   `server { bootstrap_expect }`. `bootstrap_expect` is per node, so a resize of the server group does not mark every
-  server out of date.
+  server out of date. A server of a cluster of one server that has a seed gets none
+  ([ADR-0038](0038-rolling-update-of-server-groups.md), item 10).
 - **ACLs on every role.** `acl { enabled = true }` is in `00-tent.hcl` of clients too
   ([ADR-0007](0007-security-baseline.md)). A client with ACLs off grants every request to its own endpoints.
 - **The operator's files.** Nomad merges the files of `/etc/nomad.d` in the order of their names, so the operator's

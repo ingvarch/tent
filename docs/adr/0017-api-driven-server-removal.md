@@ -10,7 +10,11 @@
   the live server's peer before its stop, is not built; a server is stopped only after the stability window; the
   leadership goes to a healthy, up-to-date voter; a client's VM is deleted after its drain and its node purged only
   once Nomad lists it down) and by [ADR-0036](0036-nomad-calls-of-a-roll.md) (the `nomadops` calls are built; a peer
-  that is gone counts as removed; the force-leave name is `<node name>.<region>`)
+  that is gone counts as removed; the force-leave name is `<node name>.<region>`) and by
+  [ADR-0038](0038-rolling-update-of-server-groups.md) (the removal is built in M3.4: autopilot's cleanup and tent's
+  `RemovePeer` may come in either order, and the decisions skip a peer that is gone; with fewer than two other voters
+  the order is the window, `RemovePeer` while the server runs, `Stop` held until a reconcile of Nomad's leader that
+  the run saw, `ForceLeave`, with no wait for autopilot, which settles the two voters that ADR-0035 left open)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md); [ADR-0016](0016-server-discovery-seed-and-refresh.md),

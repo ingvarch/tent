@@ -278,6 +278,150 @@ Nomad forwarded it to the leader, which did what it does when asked directly.
   restore into a cluster that was rebuilt from the same state store, the size of a snapshot of a large cluster,
   `prune=false`, and tokens narrower than management.
 
+**Servers in a roll** (v2.0.7, local on macOS darwin/arm64, `nomad` revision `9dcbdc5e`; every agent on 127.0.0.1 with
+ACL, mTLS and gossip encryption, `leave_on_terminate = false` and `cleanup_dead_servers = true`; every request used the
+management token and the operator certificate). The runs of 2026-10-08 had servers `s1` to `s5` with `bootstrap_expect
+= 3`; the runs of 2026-10-09 and 2026-10-10 had one or two servers. Times are from the start of each step or from the
+transfer. The roll of server groups rests on them ([ADR-0038](adr/0038-rolling-update-of-server-groups.md)).
+- **Leadership transfers** (2026-10-08): 52 transfers (`PUT /v1/operator/raft/transfer-leadership?id=<raft id>`), 17 at
+  three voters, 23 at four (three old servers and a new one, as in a roll of a group of three) and 12 at five, each
+  through a follower, the leader or the target. Each answered 200 with `Noop` false in 0.03 to 0.18 s, and the new
+  leader answered the first read after it. Reads in flight during a transfer were held 0.1 to 0.46 s and then answered;
+  none answered 5xx.
+  - **The blip.** After 8 of the 52 (2 at three voters, 3 at four, 3 at five) every server answered 429 with `Healthy`
+    false from the first read after the transfer, within 0.1 s, until 2.07 to 2.29 s after its start, then 200 healthy.
+    In those reads one server (once two) was unhealthy, `alive` and a voter: the old leader, the server that took the
+    request, or another follower. `FailureTolerance` was 0 at three and four voters, 1 at five voters with one
+    unhealthy server and 0 with two. The other 44 transfers read healthy at every read.
+  - **`StableSince`** of every server read the nearest whole second to the transfer, and did not change when the blip
+    cleared. A peer removal did not change it.
+- **New servers** (2026-10-08, six, each joining a cluster with a leader): a healthy nonvoter in the report 0.5 to 1.6 s
+  after the agent started, except one that read unhealthy first, with autopilot answering 429 for 2 s; a voter 10.3 to
+  22.9 s after the start (22.9, 18, 20.8, 18.5, 20.8 and 10.3 s; the report showed the vote up to 2 s after Raft).
+  `FailureTolerance` was 2 with five voters.
+- **A killed server** (SIGKILL; seven runs at four and five voters, 2026-10-08): autopilot removed its peer about 38 to
+  51 s after the kill. In the three runs whose Serf failure was recorded, Serf marked it failed after 38.2, 41.7 and
+  49.3 s, and autopilot counted it healthy until then. At five voters autopilot removed its peer 1.3 s after the
+  failure and answered 429 with `FailureTolerance` 1 and the server `left` for about 2 s. At four voters it answered 429
+  with `FailureTolerance` 0 and the server `left` from the failure on, removed the peer 6.2 s and 6.4 s later, and was
+  healthy about 2 s after that. A force-leave with prune right after the removal dropped the member within 0.3 s.
+- **A removed server's name** (2026-10-08): each time the old server was a voter, killed, its peer removed by autopilot
+  and its member forced out with `prune=1`, and the new agent had an empty data directory.
+  - Same name and address, started 22 s after the prune: Serf joined it at once; the leader added it as a nonvoter 18 s
+    later and autopilot removed it within 40 ms (`nomad.autopilot: removed server`), again at each reconcile a minute
+    apart, for the 2.6 minutes watched; autopilot answered 429 for about 2 s each time. The same when started 20 s and
+    94 s after the prune.
+  - Same name, another address, 21 s after the prune: the leader logged `memberlist: Conflicting address for s7.global
+    ... Old state: 2` and `serf: Name conflict`; no Raft entry within 75 s; a voter when looked at again between 95
+    and 152 s after the prune.
+  - The reused name at the address of a holder that had never been in Raft, 49 s after its prune: it joined and voted
+    at 18.5 s.
+  - New names, at an address freed 2.5 minutes before and at one freed 14 s before: both joined at once and voted at
+    20.8 s.
+  - Not settled: the cause in Nomad, and how long the failure lasts.
+- **A server with `bootstrap_expect = 1` that joins a single server** (2026-10-09): it led a cluster of its own 1.4 s
+  after its start; the first server logged `skipping adding Raft peer because an existing peer is in bootstrap mode and
+  only one server should be in bootstrap mode` about once a minute and never added it (95 s watched). An agent without
+  `bootstrap_expect` joined the same server as a nonvoter after 0.5 s and voted after 12.8 s; as the only server,
+  stopped and started again, it led after 2.6 s. With `bootstrap_expect = 2` a new agent joined too (a voter after 20.2
+  s) and logged the error `peer has a conflicting expect value`. `nomad config validate` accepts a server with no
+  `bootstrap_expect` (exit 0, one warning about an odd number of servers); it accepted both joining goldens of
+  `internal/nodeconfig` (2026-10-10).
+- **The leader adds a removed server again at its reconcile** (2026-10-10, two servers; 2026-10-09 and 2026-10-08):
+  every 60 s from the moment it took the leadership, while the gossip pool lists the server's member alive.
+  - The peer of a running follower was removed 25.3 s after the other server took the leadership. The leader added it
+    again, as a nonvoter with its old Raft ID, at 60.1 s. Removed again at once (200 in 0.02 s), it was added again at
+    120.2 s. The leader's log has `added peer, starting replication` 60.04 s and 120.06 s after it took the leadership.
+    A second run saw three more re-adds, each 60 s after the leadership. A peer removed 0.5 s after a transfer was
+    added again 60.0 s after the transfer.
+  - The earlier runs saw 4.1 s after a removal (2026-10-08) and 39.8 s (2026-10-07): other phases of the same timer.
+  - By the source of v1.11.3 (`nomad/leader.go:247-330`, `leaderLoop`, not run on 2.0.7): the leader starts its 60 s
+    timer at the top of each pass and runs the first pass after it takes the leadership; it handles each Serf event of a
+    member between passes. A pass can add nothing: a barrier that fails skips it (line 259), and so does a reconcile
+    that fails (297-300), which stops at the first member whose handling fails (1496-1505). The next pass comes a
+    minute later.
+- **Autopilot promotes a running server that was added again** 9.6 s (2026-10-07), 14 s (2026-10-08) and 10.0 s
+  (2026-10-09) later.
+  - **A nonvoter that autopilot counts healthy is promoted after it stops** (2026-10-10, three trials). The leader added
+    the running follower again 56.1, 57.0 and 56.9 s after the removal, each time 60 s after the other server had
+    taken the leadership. The report listed the nonvoter healthy at the first read or 1.9 s later; the agent was stopped
+    (SIGKILL) 5.0, 3.1 and 3.1 s after the re-add. Autopilot promoted the stopped server 19.9, 10.2 and 20.2 s after the
+    re-add (`nomad.autopilot: Promoting server`), and the leader logged `cluster leadership lost` 0.40, 0.51 and 0.43 s
+    after each promotion: two voters, one stopped. Reads answered 500 `No cluster leader` from then on. Each time the
+    stopped agent was started again, the leader had the leadership back 1.3, 0.3 and 0.3 s after its start.
+  - By the source (v1.11.3): autopilot gets no stats from a server that does not answer (`nomad/stats_fetcher.go:68-72`)
+    and counts a member that Serf lists alive or leaving as alive (`nomad/autopilot.go:255`). The runs fit a server that
+    keeps the health it last had until Serf fails its member.
+  - **A server that never read healthy is not promoted.** A nonvoter stopped 0.1 s after its re-add, while the report
+    still listed it unhealthy, stayed a nonvoter: autopilot answered 429 with `FailureTolerance` 0 while it was
+    listed, and removed it 40.0 s after the stop, when Serf marked it failed (2026-10-10).
+- **The removed server's own API** (2026-10-09): it answered every read in under 10 ms for 2.2 s after its removal.
+  From 2.4 s on, each read that needs the leader (`raft/configuration`, `autopilot/health`, `nodes`) answered 500 `No
+  cluster leader` after 5.0 to 5.3 s; `agent/members` answered at once.
+- **Autopilot's report after the removal of a live server** listed it as before (alive, healthy) for 0.9 to 2.8 s and
+  then left it out; the cluster read healthy throughout (four removals, 2026-10-09).
+- **The order by hand with two voters** (2026-10-09): transfer (200 in 0.06 s), the peer removed 0.75 s later while both
+  ran (200 in 0.01 s), the old agent killed 0.7 s after that, force-leave with prune: one healthy voter 3.5 s after the
+  transfer, the member gone after 7.7 s, nothing added again in the time watched.
+- **Heartbeat timers after a leader change** (2026-10-10, two runs): the node of a combined leader that was drained and
+  stopped 1 to 2 s after its transfer read `ready` for 300.4 and 300.7 s, which fits `failover_heartbeat_ttl` (300 s;
+  read in the code). Stopped 70.2 and 70.5 s after the transfer, such a node read `down` 13.4 and 15.3 s after the stop.
+- **Not measured:** two live servers of one name both joining the gossip pool; a re-add that a Serf event of the
+  removed member starts (read in the source, not run); what a server in bootstrap mode answers to the cluster's token;
+  clients of a removed live server; the source of 2.0.7.
+
+**Heartbeats of a client whose server stops** (lab of 2026-10-10 on local Nomad 2.0.7, darwin/arm64, `nomad` revision
+`9dcbdc5e`: four servers and twelve clients on 127.0.0.1 with ACL, mTLS, gossip encryption and strict client
+introduction, one plain `raw_exec` job pinned to each client; the source lines are of v1.11.3, the closest on disk, and
+of yamux v0.1.2, and every timer below matched what the lab did). The lab froze the server's process with SIGSTOP in
+place of powering a machine off, because packets cannot be dropped on macOS without root. A frozen process answers
+nothing and sends no FIN or RST, as a powered-off host does, so the session ends by yamux's keepalive in both cases.
+The kernel of a frozen process still accepts new TCP connections, which then hang in the TLS handshake; a powered-off
+host gives no answer and the pool's dial gives up after 10 s (`helper/pool/pool.go:375`). A real power-off may also be
+reported unreachable by the network before the keepalive fires. A real power-off was not measured.
+- **Which server a client talks to.** Every RPC goes to the first server of the client's list (`client/rpc.go:103`,
+  `client/servers/manager.go:236-250`). The list is the leader's Serf view, sent with every heartbeat answer; it is
+  reshuffled when its members change, rotated when an RPC fails (`rpc.go:124`) and rebalanced every 5 to 10 minutes. The
+  agent's API does not show the order: `nomad agent-info` and `GET /v1/agent/servers` sort the list
+  (`client/client.go:1274-1281`). On the node, the TCP connection to the RPC port that carries traffic tells. The
+  allocation watch (`Node.GetClientAllocs`, blocking up to 5 minutes) stays on the server it started on, so a client
+  can heartbeat through one server and watch through another.
+- **The timers.** The leader marks a node down after its heartbeat TTL (10 to 20 s: `nomad/heartbeat.go:107-108`,
+  `nomad/config.go:628-629`) plus `heartbeat_grace` (10 s: `heartbeat.go:111`, `config.go:630`) since its last
+  heartbeat. The heartbeat RPC has no deadline (`helper/pool/pool.go:498-513`). Only yamux's keepalive ends a session
+  to a server that stopped answering: a ping every 30 s that fails after 10 s (yamux `session.go:349, 364-380`;
+  `command/agent/config.go:1728-1731`; `agent.go:890-899`). The keys are `server.heartbeat_grace`
+  (`command/agent/config.go:641`) and `rpc.keep_alive_interval` (`config.go:836-845`). A failed heartbeat is not
+  retried inside the RPC; the next one comes 0 to 3 s after the session ends when another RPC of the client is
+  pending, else after the heartbeat loop's own retry (1 to 2 s, or a random time up to 30 s when the heartbeat is more
+  than 30 s overdue).
+- **Defaults** (6 trials, 24 clients of the frozen server): 19 read down, 10.2 to 26.6 s after the freeze. The session
+  ended 10.1 to 39.9 s after the freeze (103 rows). A plain allocation was marked `lost`; when the node heartbeated
+  again it read ready, a replacement was created on the same node within 0.9 s and the old task was killed. Of 345 rows
+  of clients on other servers, 344 were untouched.
+- **A job with `disconnect { lost_after = "3m" }`** (defaults, 5 allocations, with and without `replace = false`): the
+  node read `disconnected` and the allocation `unknown`, then `running` again with a `Reconnected` event; the task was
+  never killed. Plain allocations on the same node were lost and replaced.
+- **`heartbeat_grace` alone** (clients at defaults, 3 trials each): 20 s, 8 of 13 down; 30 s, 2 of 12; 45 s, 2 of 13;
+  60 s, 0 of 13. The worst client needed 66.1 s.
+- **`rpc { keep_alive_interval = "5s" }` on the clients:** the session ended 10.0 to 14.8 s after the freeze. With a
+  grace of 10 s, 4 of 13 read down; with a grace of 20 s, 0 of 13 (the worst needed 12.4 s). These are tent's values.
+- **A graceful end of the server's process** (SIGTERM and SIGINT, 12 clients): the server stopped accepting
+  connections 0.39 to 0.47 s after the signal, the clients moved within 1.7 s, and 12 of 12 nodes stayed ready.
+- **The Raft peer removed first, then the freeze** (4 trials, 19 clients whose heartbeat failed on that server): the
+  server lost its leader 1.1 to 2.2 s after the removal and answered its own reads `500 No cluster leader` after 5.0 to
+  5.2 s (`nomad/rpc.go:646`). The first heartbeat through another server came 9.7 to 27.4 s after the removal, and 19 of
+  19 nodes stayed ready. The leader added the server again as a nonvoter 34.1 to 39.8 s after the removal, and a
+  nonvoter serves clients.
+- **A leader change right before or after the freeze** gives every node `failover_heartbeat_ttl`, 300 s: with the old
+  leader frozen 1.6 s after a transfer, 0 of 5 clients read down, and with a transfer between two other servers 2.1 s
+  after the freeze of a follower, 0 of 11 (they would have needed up to 35.5 and 36.6 s).
+- **A killed client** read `ready` for 13.9 to 26.3 s at a grace of 10 s and 51.7 to 61.2 s at 45 s (4 each): the grace
+  plus what was left of the TTL. With tent's 20 s that is 20 to 40 s from the kill, derived from these timers and not
+  measured.
+- **Not measured:** a real power-off; more than 12 clients (the TTL grows above 500 nodes); a grace of 75 s; the `rpc`
+  block under load or on a slow network.
+
 **ACL tokens that expire** (v2.0.7, run on 2026-10-06 with curl and the operator certificate; source at the tag):
 - **The create.** `PUT /v1/acl/token {"Name", "Type": "management", "ExpirationTTL": "24h"}` with the bootstrap secret
   answers 200 with an `AccessorID`, a `SecretID` of 36 characters (a UUID) and an `ExpirationTime` exactly 24 hours
@@ -754,9 +898,11 @@ and python over mTLS; the source is the v2.0.7 tag:
 matches `nomad_2.0.7_SHA256SUMS`): three servers, region `global`, TLS on HTTP and RPC, ACLs on, `strict` client
 introduction unless said otherwise, the default heartbeat and garbage-collection settings. The source is the v2.0.7
 tag:
-- **A killed client reads `down` after 14 to 16 s.** SIGKILL at t=0, polled every 2 s: `ready` at 14.1 s, `down` at
-  16.1 s. The defaults allow 20 to 30 s: a heartbeat TTL of 10 s plus a random stagger of up to 10 s, plus a grace of
-  10 s (`nomad/config.go`, `nomad/heartbeat.go`). After a leader change every node that is not terminal gets
+- **A killed client reads `down` after 14 to 16 s.** SIGKILL at t=0, polled every 2 s: `ready` at 14.1 s, `down` at 16.1
+  s. The defaults allow 20 to 30 s from the last heartbeat, which is 10 to 30 s from the kill: a heartbeat TTL of 10 s
+  plus a random stagger of up to 10 s, plus a grace of 10 s (`nomad/config.go`, `nomad/heartbeat.go`). tent sets a grace
+  of 20 s, which allows about 20 to 40 s from the kill (derived, not measured; see the block on heartbeats in
+  [1.2](#12-features-tent-relies-on)). After a leader change every node that is not terminal gets
   `failover_heartbeat_ttl`, 300 s (read, not run), so a dead client can read `ready` for up to 5 minutes then.
 - **The node stays listed.** 5 minutes later it was still `down`; `node_gc_threshold` is 24 h (not waited for).
 - **A new client of the same name registers at once**, as a second node. With an empty data directory, the same HTTP
@@ -1172,7 +1318,8 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
     docs call a restart a "hard reboot". **Spike 2026-09-25:** `halt` is a hard power-off.
     - A systemd unit's `ExecStop` marker was not written, although the unit was active.
     - The journal of the halted boot ends mid-activity, with no shutdown messages.
-    - `power_status` read `stopped` 5–9 s after the call.
+    - `power_status` read `stopped` 5–9 s after the call. **M3.4 run 2026-10-10:** 4 to 19 s after the call (three
+      halts, [3.16](#316-spike-runs)); the machine itself stopped within a second, so the list is the late one.
     - `start` returned 204, and the instance was `running/ok` 15 s later.
   - **Spike 2026-09-28:** a second `halt` of a stopped instance also returned 204, so halting twice is not an error.
   - `DELETE` destroys a running instance immediately.
@@ -1988,7 +2135,108 @@ Times are the progress lines' and the poller's (UTC, to the second).
 - **Run times:** the cluster's create 7 minutes; the first roll of two workers with `maxSurge` 1 429 s (with the API's
   errors); the run after the cut 182 s; the whole check 21 minutes.
 
+**M3.4 server roll check (2026-10-10, an early run)**, a fish script run by the maintainer's session (not a `hack/`
+spike run; its logs are not in the repo), tent at `d18132f` with the tent-node of the same build, Nomad 2.0.7, region
+`ams`, plan `vc2-1c-1gb`, ubuntu-24.04: three servers and a worker, a job of one allocation with an HTTP check, the
+servers made outdated by a change of `spec.nomad.extraConfig.server`, then `tent rolling-update cluster --yes -vv` under
+a poller that read the leader and the job (every 1 to 6.5 s, 422 polls). The cut that the script was to make did not
+reach tent (the wrapper that fish started blocked SIGINT: a fault of the script, fixed), so this run is the uncut one.
+Times are the progress lines' and the poller's.
+- **The roll** ended by itself in 12 min 5 s with `Rolled: 3 created, 0 drained, 3 stopped, 3 deleted, 0 purged.`
+  Then `Nothing to roll.`, `validate cluster` exit 0, four instances, the servers `-3`, `-4` and `-5` as voters at their
+  private addresses, autopilot healthy with failure tolerance 1, three `alive` members and no other.
+- **Per server** (`-0`, `-2`, then the leader `-1`): from the create call to the machine's address 52, 52 and 42 s;
+  from there to the vote 59 to 61 s; the window 52 to 53 s (71 s after the transfer); the halt call 2.2 s; the wait
+  until autopilot no longer counted the stopped server 35, 35 and 37 s; the force-leave about 1 s, then healthy within
+  2 s; the delete 0.4 s.
+- **Who removed the peer:** autopilot for `-0` (no `RemovePeer` by tent), tent for `-2` and `-1`.
+- **The transfer** answered in 55 ms. No unhealthy read followed it and no settle wait came. Autopilot read unhealthy,
+  with the stopped server `left` and failure tolerance 0, at three polls only, each right when the stopped server's peer
+  went.
+- **Leader and job:** the poller got a leader from a server at every poll, also at the transfer; the allocation ran
+  with its check passing at each of the 409 polls that read the job (13 reads went to a server that had just been
+  halted and timed out; the poller now asks the next server). Every one of the roll's 261 observation lines named a
+  leader.
+- **A halted machine stops at once:** a probe that connected to the stopped server's port 4646 every 200 ms was
+  accepted for the last time 0.25 to 0.31 s after tent's `stopping` line, about 2 s before the halt call returned
+  (three halts). Vultr listed `power_status` `stopped` 4 to 19 s after the call.
+- **The pace of the loop:** an observation that does not list the machines took 0.17 to 0.29 s (229 polls of waits); one
+  that lists took 2.2 to 2.9 s (the one before each stop and the one after it).
+- **Private addresses:** the third new server got 10.64.0.3, the private address of the first old server, which was
+  deleted 3 min 48 s before; it joined under its new name and voted in the usual time.
+- **ADR-0016's follow-up:** the worker was rebooted through Vultr after the roll: its node read `down` 20 s after the
+  call and `ready` again, under the same node ID and with its allocation running, 53 s after the call (uptime 36 s). Its
+  `05-join.hcl` then named exactly the three new servers' addresses.
+
+**M3.4 server roll checks, second run (2026-10-10, 12:31 to 13:18 UTC)**, the same kind of script as the early run, tent
+at `069f100`, region `ams`, Nomad 2.0.7, with a poller on the leader and the job. Times are the progress lines' and the
+poller's.
+- **Three servers and a worker, cut during the second server's wait for autopilot.** The cut run ended with `Error:
+  interrupted`. The next run finished in 337 s with `Rolled: 1 created, 0 drained, 1 stopped, 2 deleted, 0 purged.`
+  Then `Nothing to roll.`, `validate cluster` exit 0, the servers `-3` to `-5` as voters, autopilot healthy with failure
+  tolerance 1 and three `alive` members. A leader answered at each of 430 polls, and every observation line named one.
+- **Halts:** the call took 2.1 to 2.5 s; the last connection that the stopped server accepted began 0.25 to 0.47 s after
+  the call began; Vultr listed `stopped` 6 to 7 s after the call.
+- **The worker's reboot** through Vultr: down after 29 s, back after 61 s with its node ID, and its `05-join.hcl` held
+  the three new servers.
+- **The job's allocation was lost once.** The first old server was halted at 12:40:53. From 12:41:12 to 12:41:30 the
+  servers listed no running allocation: the worker's node had been marked down and its allocation `lost` (`alloc is lost
+  since its node is down`). A replacement was created on the same node at 12:41:31 and started at 12:41:32, and the old
+  task was stopped by 12:41:37. The worker was healthy all along; the server it talked to had been powered off, and its
+  heartbeats did not reach another server in time with Nomad's defaults. The lab above measured the mechanism; tent's
+  `heartbeat_grace` and `rpc` settings are the fix.
+
+**M3.4 single-server rolls (2026-10-10, 12:31 to 13:18 UTC, the same session)**: a cluster of one server and a worker,
+three rolls, each with a new server (`-1`, `-2`, `-3`). None of the new servers' `10-node.hcl` had `bootstrap_expect`;
+the first server's had `bootstrap_expect = 1`.
+- **All three rolls:** a leader answered at every poll of the rolls (the one gap, 44 s, is the reboot at the end); the
+  same allocation ran from the start to the end (792 polls read it); the Raft configuration never held two voters with
+  one stopped.
+- **Run 1, uncut, 5 min 14 s:** the transfer at 13:00:11.57; the first `RemovePeer` 72.5 s later; the hold 48.7 s; the
+  poller saw the old server a nonvoter again at 13:02:11, 120 s after the transfer; tent removed it at 13:02:14.58 and
+  sent the halt at 13:02:16.06, 4.5 s after the reconcile.
+- **Run 2, cut right after the first `RemovePeer` and left for 80 s:** the leader added the old server 120 s after the
+  transfer and autopilot promoted it 9 s later (two voters, both running). The next run removed it, held for 22 s until
+  the reconcile at 180 s, removed it again and sent the halt 5.8 s after that reconcile; it took 39 s.
+- **Run 3, cut in the window after the transfer:** the next run's first `RemovePeer` came 119.476 s after the
+  transfer, 0.5 s before a reconcile. The leader added the server at once; tent removed it 3.5 s later, held the stop
+  because it had not seen the server absent first, and stopped it 4.3 s after the next reconcile, 60 s later.
+- **Halts:** the call took 2.2 to 2.4 s; the last accepted connection began 0.24 to 0.30 s after the call began; Vultr
+  listed `stopped` about 4 s after. The worker's `05-join.hcl` held the new server's address alone 1 to 40 s after each
+  roll. The server that was rebooted through Vultr led again 54 s after the call, with the worker ready and its
+  allocation running.
+
+**M3.4 client check (2026-10-10, 16:26 to 16:51 UTC)**, tent at `7c6f61d` with the heartbeat settings of
+[ADR-0038](adr/0038-rolling-update-of-server-groups.md) item 19, region `ams`, Nomad 2.0.7: three servers and three
+workers, the job `e2e-web` with three allocations on distinct hosts, the servers rolled uncut.
+- **The roll** took 757 s: `Rolled: 3 created, 0 drained, 3 stopped, 3 deleted, 0 purged.` Every worker's `00-tent.hcl`
+  had the `rpc` block.
+- **At each of 325 polls** (one every 2.1 s, the longest gap 13.1 s) a leader answered, the three nodes read ready and
+  the three allocations of the start read running. The job had no other allocation at the end.
+- **The workers did lose their server:** after each of the three halts the checks of one or two workers could not be
+  read through the servers for 32 to 37 s (workers 1 and 2 after the first halt, worker 1 after the second, worker 0
+  after the third). So four times a worker's server was powered off and its node stayed ready. With Nomad's defaults
+  the lab lost 19 of 24 such clients, and the second run above lost its one.
+
+**M3.4 check of the names (2026-10-10, 20:15 to 20:29 UTC)**, tent at `0c6363d`, region `ams`, Nomad 2.0.7: one server
+and one worker, a job with one allocation.
+- **The cut:** `rolling-update --force --nodegroups servers --yes` was cut 3 s into the window, after `servers-1` had
+  joined (`Error: interrupted`; three instances ran).
+- **The second run:** the same command ran to its end in 355 s with `Rolled: 1 created, 0 drained, 2 stopped, 2
+  deleted, 0 purged.` It removed `servers-1` first (the peer, a hold of 32 s for the leader's reconcile, the peer again,
+  the stop, the member, the delete), created `servers-2` 1.2 s after that delete, moved the leadership to it and removed
+  `servers-0` the same way (a hold of 51 s). Without the remembered index, the tests of the code show that create
+  taking `servers-1` again.
+- **After it:** the two creates of the two runs were `servers-1` and `servers-2`; the store's `names/servers` held `2`;
+  the server group had one instance, the one voter; `validate cluster` was valid and a plain `rolling-update` had
+  nothing to roll.
+- **The job:** at each of 275 polls a leader answered, the worker's node read ready and the allocation of the start ran
+  with its check passing; the job had no other allocation. The check deleted its cluster with 0 instances left.
+- **The second run sent the first removal without a window:** the window counts the voters other than the victim, and
+  the other voter had been stable for long.
+
 **Still open:**
+- A halt whose call gets no answer, and how late Vultr may carry one out.
 - Object Storage conditional writes ([3.12](#312-object-storage-)).
 - Images other than Ubuntu 24.04 and 26.04 were not checked.
 - Account limits beyond 5 concurrent instances were not tested (the M2.7a check and the three M2.7b runs ran 5).

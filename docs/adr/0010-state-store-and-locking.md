@@ -4,7 +4,8 @@
   The M0 follow-up (the `Store` interface, the file and S3 backends, and the lease locking with shared conformance
   tests) was built on 2026-09-26 in `internal/statestore`;
   [architecture §10](../architecture.md#10-state-store-and-locking) describes it as built. The Hetzner firewall
-  mutex comes with the Hetzner provider in M4, not M1 ([ADR-0014](0014-vultr-first-provider-and-e2e.md)).
+  mutex comes with the Hetzner provider in M4, not M1 ([ADR-0014](0014-vultr-first-provider-and-e2e.md)). The layout
+  gained `names/<nodegroup>` in M3.4 ([ADR-0038](0038-rolling-update-of-server-groups.md), item 22).
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0003](0003-cloud-is-source-of-truth.md), [ADR-0007](0007-security-baseline.md),
@@ -34,7 +35,7 @@ Facts:
   - `s3://bucket/prefix?endpoint=…&region=…` through aws-sdk-go-v2, for Hetzner Object Storage, AWS S3, R2 and
     MinIO. Credentials come from the standard AWS credential chain.
 - **Layout per cluster:** `tent-version`, `cluster.yaml`, `nodegroups/<name>.yaml`, `cluster.completed.yaml`,
-  `pki/…`, `secrets/…`, `backups/…` and `history/…`. See architecture §10.2.
+  `names/<nodegroup>`, `pki/…`, `secrets/…`, `backups/…` and `history/…`. See architecture §10.2.
 - **Version guard.** `tent-version` records the minimum tent version that may operate the cluster. Older CLIs
   refuse to run mutating commands.
 - **Safe deletion.** `tent delete cluster` removes the state last and refuses to delete unknown files without
