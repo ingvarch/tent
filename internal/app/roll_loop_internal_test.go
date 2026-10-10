@@ -311,8 +311,8 @@ type listsNodes struct {
 
 func (n listsNodes) List(context.Context, string) ([]cloud.Instance, error) { return n.listed, nil }
 
-// TestListDropsWhatTheCloudShows drops the pending machines that the list shows and the deleted machines that it does
-// not, and keeps the others.
+// TestListDropsWhatTheCloudShows drops the pending machines that the list shows and the deleted machines and those
+// without a peer that it does not, and keeps the others.
 func TestListDropsWhatTheCloudShows(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
@@ -322,6 +322,7 @@ func TestListDropsWhatTheCloudShows(t *testing.T) {
 		r.pending["op-b"] = pendingMachine{in: cloud.Instance{ID: "i-3"}, since: time.Now()}
 		r.deleting["i-5"] = time.Now()
 		r.deleting["i-6"] = time.Now()
+		r.unpeered["i-5"], r.unpeered["i-7"] = true, true
 		r.relist = true
 
 		if err := r.list(t.Context()); err != nil {
@@ -339,6 +340,12 @@ func TestListDropsWhatTheCloudShows(t *testing.T) {
 		}
 		if _, ok := r.deleting["i-6"]; ok {
 			t.Error("the machine that the list does not show is still among the deleted ones")
+		}
+		if !r.unpeered["i-5"] {
+			t.Error("the machine that the list still shows is not among those without a peer any more")
+		}
+		if r.unpeered["i-7"] {
+			t.Error("the machine that the list does not show is still among those without a peer")
 		}
 		if r.relist {
 			t.Error("the next observation lists again")

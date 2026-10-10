@@ -125,6 +125,7 @@ type rollLoop struct {
 	pending  map[string]pendingMachine // by operation id; kept until a list shows the machine
 	deleting map[string]time.Time      // the machines whose delete was sent and that the cloud still lists, by ID
 	stopping map[string]time.Time      // the machines whose stop was sent and that the cloud may list as running, by ID
+	unpeered map[string]bool           // the running machines that the run knows to have no peer, by ID
 	seen     map[stepKey]seenWait      // when the run first met each wait that has not ended
 	last     stepKey                   // the step carried out last
 	tries    int                       // how often in a row it was carried out
@@ -143,7 +144,7 @@ type rollLoop struct {
 func newRollLoop() rollLoop {
 	return rollLoop{
 		pending: map[string]pendingMachine{}, deleting: map[string]time.Time{}, stopping: map[string]time.Time{},
-		seen: map[stepKey]seenWait{},
+		unpeered: map[string]bool{}, seen: map[stepKey]seenWait{},
 		rolled: rollTally{
 			created: map[string]bool{}, drained: map[string]bool{}, stopped: map[string]bool{}, deleted: map[string]bool{},
 			purged: map[string]bool{},
@@ -338,8 +339,9 @@ func (r *rollRun) observe(ctx context.Context) (nomadReading, bool, error) {
 }
 
 // list reads the machines, drops the pending machines that the cloud shows and the deleted ones that it no longer
-// shows, drops the stopped ones that it shows not running or no longer, makes the API follow the servers, and fails for
-// a pending machine that the lists have missed for pendingTimeout.
+// shows, drops the stopped ones that it shows not running or no longer, drops the machines without a peer that it no
+// longer shows, makes the API follow the servers, and fails for a pending machine that the lists have missed for
+// pendingTimeout.
 func (r *rollRun) list(ctx context.Context) error {
 	listed, err := r.kit.nodes.List(ctx, r.kit.cluster)
 	if err != nil {
@@ -359,6 +361,11 @@ func (r *rollRun) list(ctx context.Context) error {
 	for id := range r.stopping {
 		if in, ok := instanceByID(listed, id); !ok || !in.Ready {
 			delete(r.stopping, id)
+		}
+	}
+	for id := range r.unpeered {
+		if _, ok := instanceByID(listed, id); !ok {
+			delete(r.unpeered, id)
 		}
 	}
 	for _, op := range slices.Sorted(maps.Keys(r.pending)) {
@@ -636,9 +643,7 @@ func (r *rollRun) carry(ctx context.Context, step rollout.Step) error {
 		event := NomadEvent{Action: NomadTransfer, Node: step.Machine.Name, Leader: nodeOfServer(step.Server.Name)}
 		return r.write(event, func() error { return r.api.TransferLeadership(ctx, step.Server.ID) })
 	case rollout.RemovePeer:
-		return r.write(NomadEvent{Action: NomadRemovePeer, Node: step.Machine.Name}, func() error {
-			return r.api.RemovePeer(ctx, step.Server.ID)
-		})
+		return r.removePeer(ctx, step)
 	case rollout.ForceLeave:
 		return r.write(NomadEvent{Action: NomadForceLeave, Node: step.Member.Name}, func() error {
 			return r.api.ForceLeave(ctx, step.Member.Name)
