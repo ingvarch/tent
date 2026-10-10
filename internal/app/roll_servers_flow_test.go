@@ -611,28 +611,6 @@ func TestRollServersFlowMovesTheLeadershipOnceAndSettlesAfterTheBlip(t *testing.
 	})
 }
 
-// haltDuringStable halts the machine called name from outside the roll 40 s after the nth start of the wait for the
-// window: autopilot still counts the halted server healthy when the window ends, and the list that the run took before
-// the wait shows it running.
-func haltDuringStable(t *testing.T, svc *app.Service, f *vultrfake.Fake, inv *serverInvariants, name string, nth int) {
-	t.Helper()
-	starts := 0
-	inner := svc.OnProgress
-	svc.OnProgress = func(p app.Progress) {
-		if inner != nil {
-			inner(p)
-		}
-		if p.Step != app.NodeStarted || p.Nomad == nil || p.Nomad.Action != app.NomadStable {
-			return
-		}
-		if starts++; starts != nth {
-			return
-		}
-		id := instanceNamed(t, f, name)
-		time.AfterFunc(40*time.Second, func() { inv.halt(id) })
-	}
-}
-
 // TestRollServersFlowStopsNoServerWhenTheNewServerIsHaltedDuringTheWindow ends the roll with the refusal after the
 // settle when the new server is halted from outside while the roll waits for the window: the roll halts no server.
 func TestRollServersFlowStopsNoServerWhenTheNewServerIsHaltedDuringTheWindow(t *testing.T) {
@@ -640,7 +618,7 @@ func TestRollServersFlowStopsNoServerWhenTheNewServerIsHaltedDuringTheWindow(t *
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _, inv := serversFlowWorld(t)
 		lines := recordProgress(svc)
-		haltDuringStable(t, svc, f, inv, "prod-servers-3", 1)
+		haltAtStable(t, svc, f, "prod-servers-3", 1, inv.halt)
 
 		plan, err := applyRoll(svc, app.RollOptions{})
 
@@ -673,7 +651,7 @@ func TestRollServersFlowRemovesAnOldServerThatWasHaltedDuringTheWindow(t *testin
 		svc, f, _, inv := serversFlowWorld(t)
 		old := serverMachines(f)
 		lines := recordProgress(svc)
-		haltDuringStable(t, svc, f, inv, "prod-servers-2", 1)
+		haltAtStable(t, svc, f, "prod-servers-2", 1, inv.halt)
 		halted := instanceNamed(t, f, "prod-servers-2")
 
 		plan, err := applyRoll(svc, app.RollOptions{})

@@ -411,13 +411,11 @@ func TestRollLoopTriesTheTransferAgainWhenItsTargetLeft(t *testing.T) {
 	})
 }
 
-// haltAtStable halts the machine called name, from outside the run, 40 s after the nth start of the wait for the
-// window: autopilot still counts the halted server healthy when the window ends, and the list that the run took before
-// the wait shows it running. Once it has, the returned slice records each halt of the run that finds another server of
-// the cluster halted beside.
-func haltAtStable(t *testing.T, svc *app.Service, f *vultrfake.Fake, name string, nth int) *[]string {
+// haltAtStable calls halt with the ID of the machine called name, from outside the run, 40 s after the nth start of the
+// wait for the window: autopilot still counts the halted server healthy when the window ends, and the list that the run
+// took before the wait shows it running.
+func haltAtStable(t *testing.T, svc *app.Service, f *vultrfake.Fake, name string, nth int, halt func(id string)) {
 	t.Helper()
-	var beside []string
 	starts := 0
 	inner := svc.OnProgress
 	svc.OnProgress = func(p app.Progress) {
@@ -431,23 +429,30 @@ func haltAtStable(t *testing.T, svc *app.Service, f *vultrfake.Fake, name string
 			return
 		}
 		id := instanceNamed(t, f, name)
-		time.AfterFunc(40*time.Second, func() {
-			if err := f.HaltInstance(context.Background(), id); err != nil {
-				t.Errorf("HaltInstance: %v", err)
-			}
-			f.SetHook(func(ctx context.Context, c vultrfake.Call, next func(context.Context) error) error {
-				if c.Name == "HaltInstance" {
-					for _, in := range f.Instances() {
-						if in.ID != c.Arg && f.Halted(in.ID) {
-							beside = append(beside, fmt.Sprintf("%s halted beside %s", c.Arg, in.Hostname))
-						}
+		time.AfterFunc(40*time.Second, func() { halt(id) })
+	}
+}
+
+// haltRecordingBeside returns a halt for haltAtStable that halts the machine and records, in the returned slice, each
+// later halt of the run that finds another server of the cluster halted beside.
+func haltRecordingBeside(t *testing.T, f *vultrfake.Fake) (func(id string), *[]string) {
+	t.Helper()
+	var beside []string
+	return func(id string) {
+		if err := f.HaltInstance(context.Background(), id); err != nil {
+			t.Errorf("HaltInstance: %v", err)
+		}
+		f.SetHook(func(ctx context.Context, c vultrfake.Call, next func(context.Context) error) error {
+			if c.Name == "HaltInstance" {
+				for _, in := range f.Instances() {
+					if in.ID != c.Arg && f.Halted(in.ID) {
+						beside = append(beside, fmt.Sprintf("%s halted beside %s", c.Arg, in.Hostname))
 					}
 				}
-				return next(ctx)
-			})
+			}
+			return next(ctx)
 		})
-	}
-	return &beside
+	}, &beside
 }
 
 // TestRollLoopListsTheMachinesAgainBeforeAStop does not stop the planned server when another server was halted while
@@ -458,7 +463,8 @@ func TestRollLoopListsTheMachinesAgainBeforeAStop(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := serversWorld(t, (*nomadWorld).ServersOverTime)
 		lines := recordProgress(svc)
-		beside := haltAtStable(t, svc, f, "prod-servers-2", 1)
+		halt, beside := haltRecordingBeside(t, f)
+		haltAtStable(t, svc, f, "prod-servers-2", 1, halt)
 
 		_, err := rollUntil(svc, "node done delete prod-servers-2")
 
@@ -482,7 +488,8 @@ func TestRollLoopRefusesAfterTheListShowsANewServerHalted(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := serversWorld(t, (*nomadWorld).ServersOverTime)
 		lines := recordProgress(svc)
-		beside := haltAtStable(t, svc, f, "prod-servers-3", 1)
+		halt, beside := haltRecordingBeside(t, f)
+		haltAtStable(t, svc, f, "prod-servers-3", 1, halt)
 
 		_, err := roll(svc, app.RollOptions{})
 
@@ -504,7 +511,8 @@ func TestRollLoopListsTheMachinesAgainBeforeATransfer(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := serversWorld(t, (*nomadWorld).ServersOverTime)
-		haltAtStable(t, svc, f, "prod-servers-5", 3)
+		halt, _ := haltRecordingBeside(t, f)
+		haltAtStable(t, svc, f, "prod-servers-5", 3, halt)
 
 		_, err := roll(svc, app.RollOptions{})
 
