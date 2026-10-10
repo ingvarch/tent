@@ -62,7 +62,8 @@ type nomadCall struct {
 // removed peer for reportLag. The cluster is healthy when no peer is unhealthy, no removed peer is still reported and
 // no blip after a transfer is under way, and its failure tolerance is the healthy voters beyond a quorum. A call to the
 // address of a server whose machine is halted or gone fails at once with ErrNotReady. Every delay is 0 by default, so a
-// server joins and votes, and a halted or deleted one is out of the Raft configuration, at the next call.
+// server joins and votes, and a halted or deleted one is out of the Raft configuration, at the next call. SetReconcile
+// and SetHaltLag turn on the worst case of a leader that adds a removed server again (see them).
 //
 // The servers are named <hostname>.global at their private address:4647, with the Raft ID r-<instance id>, and each
 // runs the world's Nomad version, as each node does. A TransferLeadership, RemovePeer or ForceLeave that succeeds
@@ -94,11 +95,13 @@ type nomadWorld struct {
 	// seen holds the ids of the server machines at the last call.
 	seen []string
 	// delays and raft are the model of the servers; haltedCalls are the calls to the address of a halted or gone
-	// server; tb is the test that a loss of the leader fails.
-	delays      serverDelays
-	raft        raftCluster
-	haltedCalls []nomadfake.Call
-	tb          testing.TB
+	// server and removedCalls those to the address of a running server that is no peer; tb is the test that a loss of
+	// the leader fails.
+	delays       serverDelays
+	raft         raftCluster
+	haltedCalls  []nomadfake.Call
+	removedCalls []nomadfake.Call
+	tb           testing.TB
 	// unhealthy keeps the servers from being healthy, whatever the instances show.
 	unhealthy bool
 	// version is the Nomad version that every server and node reports; empty for the one of the stable channel.
@@ -461,12 +464,23 @@ type worldClient struct {
 }
 
 // do carries out the call through the world's hook, and logs what reached the Nomad fake. A call to the address of a
-// halted or gone server fails at once.
+// halted or gone server fails at once, and one to a removed server that runs fails as reachesRemoved says.
 func (c *worldClient) do(ctx context.Context, call nomadfake.Call, run func(context.Context) error) error {
 	call.Server = c.server
 	c.w.follow()
 	if c.w.reachesHalted(call) {
 		return errHalted(c.server)
+	}
+	if wait, err := c.w.reachesRemoved(call); err != nil {
+		if wait == 0 {
+			return err
+		}
+		select {
+		case <-time.After(wait):
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	c.w.mu.Lock()
 	hook := c.w.hook
