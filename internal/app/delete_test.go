@@ -22,6 +22,9 @@ import (
 
 const completedPath = "prod/cluster.completed.yaml"
 
+// namesPath is the object that holds the highest index of the machine names of the group servers.
+const namesPath = "prod/names/servers"
+
 // markPath is the object that marks the cluster's ACL system as bootstrapped.
 const markPath = "prod/nomad/bootstrapped"
 
@@ -38,12 +41,14 @@ func newCluster(t *testing.T) (*app.Service, *vultrfake.Fake) {
 }
 
 // newBuilt returns a service whose store holds the test cluster with the SSH keys ops and dev, built on the returned
-// Vultr fake by an update of tent v0.5.0. Call it in a synctest bubble, where the update does not wait in real time.
+// Vultr fake by an update of tent v0.5.0. The store also holds the highest index of the names of its servers, which
+// that update does not write. Call it in a synctest bubble, where the update does not wait in real time.
 func newBuilt(t *testing.T) (*app.Service, *vultrfake.Fake) {
 	t.Helper()
 	svc, f := newUpdate(t)
 	svc.Version = "v0.5.0"
 	mustUpdate(t, svc)
+	put(t, svc.Store, namesPath, []byte("2\n"))
 	return svc, f
 }
 
@@ -53,8 +58,8 @@ var allState = []string{completedPath, serversPath, workersPath, clusterPath, ve
 // builtState is every object of the test cluster as newBuilt leaves it, with its secrets, in the order DeleteCluster
 // deletes them.
 var builtState = []string{
-	completedPath, serversPath, workersPath, markPath, aclPath, gossipPath, caBundlePath, caKeyPath, clusterPath,
-	versionPath,
+	completedPath, namesPath, serversPath, workersPath, markPath, aclPath, gossipPath, caBundlePath, caKeyPath,
+	clusterPath, versionPath,
 }
 
 // builtNodes are the node deletes of the test cluster as newBuilt builds it.
@@ -248,6 +253,31 @@ func TestDeleteClusterSecrets(t *testing.T) {
 		wantDeletePlan(t, plan, err, nil, nil, want)
 	}
 	wantPaths(t, svc.Store)
+}
+
+// TestDeleteClusterNameIndexes deletes the objects that hold the highest index of the names of a group without force,
+// with the objects that the store lists first, also for a group that the specs no longer have.
+func TestDeleteClusterNameIndexes(t *testing.T) {
+	svc, _ := newCluster(t)
+	put(t, svc.Store, namesPath, []byte("4\n"))
+	put(t, svc.Store, "prod/names/old", []byte("2\n"))
+	want := []string{completedPath, "prod/names/old", namesPath, serversPath, workersPath, clusterPath, versionPath}
+	for _, apply := range []bool{false, true} {
+		plan, err := svc.DeleteCluster(t.Context(), "prod", apply, false)
+		wantDeletePlan(t, plan, err, nil, nil, want)
+	}
+	wantPaths(t, svc.Store)
+}
+
+// TestDeleteClusterUnknownNameObjects refuses the object names and an object that is deeper than a node group's
+// under names/.
+func TestDeleteClusterUnknownNameObjects(t *testing.T) {
+	for _, unknown := range []string{"prod/names", "prod/names/servers/x"} {
+		svc, _ := newCluster(t)
+		put(t, svc.Store, unknown, []byte("?"))
+		_, err := svc.DeleteCluster(t.Context(), "prod", true, false)
+		wantError(t, err, "cluster prod holds objects tent does not know: "+unknown+"; delete them yourself or use --force")
+	}
 }
 
 // nomadMarkPath is the store path of the mark that the cluster's ACL system is bootstrapped.
