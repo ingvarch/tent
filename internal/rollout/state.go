@@ -39,6 +39,9 @@ type Group struct {
 	MaxSurge       int           // client groups: how many machines beyond Size may exist
 	MaxUnavailable int           // client groups: how many below Size may be unavailable
 	DrainTimeout   time.Duration // client and combined groups: Nomad's drain deadline
+	// NextIndex is the lowest index that a new machine of a server or combined group may take, by what tent
+	// remembers of the group's names; 0 when it remembers none. Client groups ignore it.
+	NextIndex int
 }
 
 // Machine is a machine of the cluster as the cloud lists it.
