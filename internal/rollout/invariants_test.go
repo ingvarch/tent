@@ -88,25 +88,43 @@ func TestRunBreaksOnInvariants(t *testing.T) {
 				return []rollout.Step{w.serverStep(rollout.RemovePeer, "prod-servers-0")}
 			},
 			"it is the leader"},
-		{"a second server is stopped and the quorum is lost", func() *world { return serverWorld(3) },
+		{"a second server is stopped beside one other voter", func() *world { return serverWorld(3) },
 			func(w *world) []rollout.Step {
 				return []rollout.Step{
 					w.serverStep(rollout.Stop, "prod-servers-1"), w.serverStep(rollout.Stop, "prod-servers-2"),
 				}
 			},
-			"no quorum: 1 of 3 voters run"},
+			"its server is in the Raft configuration and 1 other voters run, fewer than the 2 it needs"},
+		{"a running nonvoter is stopped beside one voter", func() *world {
+			w := serverWorld(2)
+			w.servers[1].voter = false
+			return w
+		}, func(w *world) []rollout.Step { return []rollout.Step{w.serverStep(rollout.Stop, "prod-servers-1")} },
+			"its server is in the Raft configuration and 1 other voters run, fewer than the 2 it needs"},
+		{"a nonvoter beside one voter does not count as a voter", func() *world {
+			w := serverWorld(3)
+			w.servers[2].voter = false
+			return w
+		}, func(w *world) []rollout.Step { return []rollout.Step{w.serverStep(rollout.Stop, "prod-servers-1")} },
+			"its server is in the Raft configuration and 1 other voters run, fewer than the 2 it needs"},
+		{"the quorum is gone after a step", func() *world {
+			w := serverWorld(3)
+			w.stopMachine("prod-servers-1")
+			w.stopMachine("prod-servers-2")
+			return w
+		}, func(*world) []rollout.Step {
+			return []rollout.Step{{Action: rollout.ForceLeave, Member: rollout.Member{Name: "prod-servers-9.global"}}}
+		}, "no quorum: 1 of 3 voters run"},
 		{"a server is stopped right after another joined", func() *world { return serverWorld(3) },
 			func(w *world) []rollout.Step {
-				create := rollout.Step{Action: rollout.Create, Group: "servers", Machine: rollout.Machine{
-					Name: "prod-servers-3", Zone: "ams"}}
+				create := serverCreate()
 				wait := rollout.Step{Action: rollout.WaitJoined}
 				return []rollout.Step{create, wait, wait, w.serverStep(rollout.Stop, "prod-servers-1")}
 			},
 			"a server joined the Raft configuration 0s ago, less than the refresh interval of 1m0s"},
 		{"a peer is removed right after another joined", func() *world { return serverWorld(3) },
 			func(w *world) []rollout.Step {
-				create := rollout.Step{Action: rollout.Create, Group: "servers", Machine: rollout.Machine{
-					Name: "prod-servers-3", Zone: "ams"}}
+				create := serverCreate()
 				wait := rollout.Step{Action: rollout.WaitJoined}
 				return []rollout.Step{create, wait, wait, w.serverStep(rollout.RemovePeer, "prod-servers-1")}
 			},
@@ -116,8 +134,7 @@ func TestRunBreaksOnInvariants(t *testing.T) {
 			"its server is still in the Raft configuration"},
 		{"a server group has more machines than size plus one", func() *world { return serverWorld(3) },
 			func(*world) []rollout.Step {
-				create := rollout.Step{Action: rollout.Create, Group: "servers", Machine: rollout.Machine{
-					Name: "prod-servers-3", Zone: "ams"}}
+				create := serverCreate()
 				second := create
 				second.Machine.Name = "prod-servers-4"
 				return []rollout.Step{create, second}

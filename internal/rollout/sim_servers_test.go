@@ -16,9 +16,11 @@ import (
 //   - A stopped machine keeps its alive member and its healthy server for 4 ticks, then the member is failed and
 //     autopilot reports the server unhealthy; a tick later autopilot removes the peer (noCleanup turns that off).
 //   - Force-leave turns an alive member into leaving and drops it a tick later, and drops a failed one at once.
-//   - A removed peer whose machine runs and whose member is alive comes back as a healthy nonvoter after 4 ticks, with
-//     the same Raft ID, and votes 2 ticks later.
-//   - A transfer of the leadership sets the StableSince of every server to the clock.
+//   - The leader reconciles every 6 ticks from the moment it took the leadership (the start of the world, or the last
+//     transfer to another server): each removed peer whose member is alive comes back as a healthy nonvoter with the
+//     same Raft ID. A server that comes back while its machine runs votes 1 tick later, also when the machine has
+//     stopped meanwhile, as long as its member is alive. One that comes back while its machine is stopped never votes.
+//   - A transfer of the leadership to another server sets the StableSince of every server to the clock.
 //   - Autopilot is healthy when every server of the Raft configuration has an alive member, and the failure
 //     tolerance is the number of healthy voters beyond a majority, at least 0.
 
@@ -35,7 +37,10 @@ type simServer struct {
 	leader  bool
 	voter   bool
 	since   time.Time // autopilot's StableSince
+	joined  time.Time // when it joined the Raft configuration; zero for a server the world started with
 	ticks   int       // ticks it has been a healthy nonvoter
+	// promoteAfter is how many ticks as a healthy nonvoter make it a voter; 0 means never.
+	promoteAfter int
 }
 
 // simMember is a member of the gossip pool.
@@ -47,11 +52,17 @@ type simMember struct {
 	ticks   int    // alive: ticks its machine has been down; failed: ticks since it failed
 }
 
-// simRemoved is a peer that was removed while its machine ran, and that the leader may add again.
-type simRemoved struct {
-	machine, id string
-	ticks       int
-}
+// simRemoved is a peer that was removed, and that the leader adds again at a reconcile while its member is alive.
+type simRemoved struct{ machine, id string }
+
+const (
+	// newServerPromoteAfter and readdedServerPromoteAfter are the ticks as a healthy nonvoter that make a new server,
+	// and a server that the leader added again while its machine ran, a voter.
+	newServerPromoteAfter     = 2
+	readdedServerPromoteAfter = 1
+	// reconcileEvery is the ticks between two reconciles of the leader.
+	reconcileEvery = 6
+)
 
 func (w *world) newRaftID() string {
 	w.nextRaft++
@@ -88,13 +99,14 @@ func (w *world) healthy(srv simServer) bool {
 	return i >= 0 && w.members[i].status == memberAlive
 }
 
-// serverJoined records that a server joined the Raft configuration. A removal is no such change: every node that
-// knows the servers that stay can still reach the cluster.
-func (w *world) serverJoined() { w.lastChange = w.now }
-
-// joinRaft adds a server of a machine to the Raft configuration and gives its machine an alive member if it has none.
-func (w *world) joinRaft(machine, id string, leader, voter bool, since time.Time) {
-	w.servers = append(w.servers, simServer{machine: machine, id: id, leader: leader, voter: voter, since: since})
+// joinRaft adds a server to the Raft configuration and gives its machine an alive member if it has none. A server
+// that leads starts the leadership now.
+func (w *world) joinRaft(srv simServer) {
+	w.servers = append(w.servers, srv)
+	if srv.leader {
+		w.leaderSince = w.now
+	}
+	machine := srv.machine
 	if w.memberIndexByMachine(machine) < 0 {
 		m := w.machines[w.machineIndex(machine)]
 		w.members = append(w.members, simMember{
@@ -116,14 +128,14 @@ func (w *world) voterCounts() (voters, running int) {
 	return voters, running
 }
 
-// promoteServers makes a nonvoter that has been healthy for 2 ticks a voter, and labels its machine.
+// promoteServers makes a nonvoter that has been healthy for its promoteAfter ticks a voter, and labels its machine.
 func (w *world) promoteServers() {
 	for i := range w.servers {
 		srv := &w.servers[i]
-		if srv.voter || !w.healthy(*srv) {
+		if srv.voter || srv.promoteAfter == 0 || !w.healthy(*srv) {
 			continue
 		}
-		if srv.ticks++; srv.ticks >= 2 {
+		if srv.ticks++; srv.ticks >= srv.promoteAfter {
 			srv.voter = true
 			if m := w.machineIndex(srv.machine); m >= 0 {
 				w.machines[m].Joined = true
@@ -167,30 +179,58 @@ func (w *world) dropServer(i int) {
 	w.servers = slices.Delete(w.servers, i, i+1)
 }
 
-// readdServers adds a removed peer again after 4 ticks, while its machine runs and its member is alive.
-func (w *world) readdServers() {
+// reconcile is the pass of the leader: every reconcileEvery ticks from the moment it took the leadership it adds
+// each removed peer whose member is alive as a nonvoter with its old Raft ID. The peer of a deleted machine stays
+// out: the world has no server without a machine.
+func (w *world) reconcile() {
+	if w.now.Sub(w.leaderSince)%(reconcileEvery*tickLength) != 0 {
+		return
+	}
 	var kept []simRemoved
 	for _, r := range w.removed {
 		mem := w.memberIndexByMachine(r.machine)
-		if !w.up(r.machine) || mem < 0 || w.members[mem].status != memberAlive {
+		if mem < 0 || w.members[mem].status != memberAlive || w.machineIndex(r.machine) < 0 {
+			kept = append(kept, r)
 			continue
 		}
-		if r.ticks++; r.ticks >= 4 {
-			w.joinRaft(r.machine, r.id, false, false, w.now)
-			w.serverJoined()
-			continue
+		srv := simServer{machine: r.machine, id: r.id, since: w.now, joined: w.now}
+		if w.up(r.machine) {
+			srv.promoteAfter = readdedServerPromoteAfter
 		}
-		kept = append(kept, r)
+		w.joinRaft(srv)
 	}
 	w.removed = kept
 }
 
-// checkWindow is the invariant that a server is stopped, or removed while its machine runs, only when no server has
-// joined the Raft configuration for a refresh interval. The peer of a machine that is down goes at any time.
-func (w *world) checkWindow(step rollout.Step) error {
-	if age := w.now.Sub(w.lastChange); age < refreshInterval {
-		return violated("%s: a server joined the Raft configuration %s ago, less than the refresh interval of %s", step, age,
-			refreshInterval)
+// checkWindow is the invariant that a machine is stopped, or its server removed while it runs, only when no server
+// of another machine has joined the Raft configuration for a refresh interval. The peer of a machine that is down
+// goes at any time. A removal starts no window: every node that knows the servers that stay can still reach the
+// cluster.
+func (w *world) checkWindow(step rollout.Step, machine string) error {
+	for _, srv := range w.servers {
+		if age := w.now.Sub(srv.joined); srv.machine != machine && age < refreshInterval {
+			return violated("%s: a server joined the Raft configuration %s ago, less than the refresh interval of %s", step,
+				age, refreshInterval)
+		}
+	}
+	return nil
+}
+
+// checkVoters is the invariant that a machine whose server is in the Raft configuration is stopped only while at least
+// two other voters run: a nonvoter that autopilot promotes after its machine stopped would leave no quorum.
+func (w *world) checkVoters(step rollout.Step, machine string) error {
+	if w.serverIndexByMachine(machine) < 0 {
+		return nil
+	}
+	others := 0
+	for _, srv := range w.servers {
+		if srv.voter && srv.machine != machine && w.up(srv.machine) {
+			others++
+		}
+	}
+	if others < 2 {
+		return violated("%s: its server is in the Raft configuration and %d other voters run, fewer than the 2 it needs",
+			step, others)
 	}
 	return nil
 }
@@ -211,6 +251,7 @@ func (w *world) transfer(step rollout.Step) error {
 		w.servers[j].leader = j == i
 		w.servers[j].since = w.now
 	}
+	w.leaderSince = w.now
 	return nil
 }
 
@@ -222,7 +263,10 @@ func (w *world) stop(step rollout.Step) error {
 	if w.leads(step.Machine.ID) {
 		return violated("%s: it is the machine of the leader", step)
 	}
-	if err := w.checkWindow(step); err != nil {
+	if err := w.checkWindow(step, step.Machine.ID); err != nil {
+		return err
+	}
+	if err := w.checkVoters(step, step.Machine.ID); err != nil {
 		return err
 	}
 	w.machines[i].stopped, w.machines[i].Ready = true, false
@@ -239,14 +283,12 @@ func (w *world) removePeer(step rollout.Step) error {
 		return violated("%s: it is the leader", step)
 	}
 	if w.up(srv.machine) {
-		if err := w.checkWindow(step); err != nil {
+		if err := w.checkWindow(step, srv.machine); err != nil {
 			return err
 		}
 	}
 	w.dropServer(i)
-	if w.up(srv.machine) {
-		w.removed = append(w.removed, simRemoved{machine: srv.machine, id: srv.id})
-	}
+	w.removed = append(w.removed, simRemoved{machine: srv.machine, id: srv.id})
 	return nil
 }
 
