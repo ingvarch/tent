@@ -327,13 +327,7 @@ func TestRollLoopGivesUpWaitingForTheServersToBeHealthyAfterTheRemoval(t *testin
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w := serversWorld(t, (*nomadWorld).ServersOverTime)
-		w.SetHook(func(ctx context.Context, c nomadfake.Call, next func(context.Context) error) error {
-			err := next(ctx)
-			if c.Name == "ForceLeave" {
-				w.Unhealthy()
-			}
-			return err
-		})
+		w.SetHook(afterNomadCall("ForceLeave", w.Unhealthy))
 		lines := recordProgress(svc)
 		var began time.Time
 		inner := svc.OnProgress

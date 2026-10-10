@@ -151,7 +151,7 @@ func eachCutAt(t *testing.T, calls []string, keep func(index int) bool, test fun
 				continue
 			}
 			c := cutCase{index: i + 1, key: key, n: seen[key], after: after}
-			method, _, _ := strings.Cut(key, " ")
+			method, _, _ := strings.Cut(strings.TrimPrefix(key, "nomad "), " ")
 			t.Run(fmt.Sprintf("%s %03d %s", when, c.index, method), func(t *testing.T) {
 				t.Parallel()
 				synctest.Test(t, func(t *testing.T) { test(t, c) })
