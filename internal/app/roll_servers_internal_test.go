@@ -59,7 +59,7 @@ func TestApiMachinesKeepsTheJoinedRunningServersWithAnAddressByName(t *testing.T
 	}
 	stopping := map[string]time.Time{"i-3": {}}
 
-	got := apiMachines(apiModel, listed, stopping)
+	got := apiMachines(apiModel, listed, stopping, nil)
 
 	var names []string
 	for _, in := range got {
@@ -95,7 +95,7 @@ func TestFollowAPIMakesAnotherAPIOnlyWhenTheAddressesChange(t *testing.T) {
 	one, two, three := apiServer("i-1", "prod-servers-1", 1), apiServer("i-2", "prod-servers-2", 2),
 		apiServer("i-3", "prod-servers-3", 3)
 	r, built := apiRun(t, one, two)
-	r.apiAt = addressesOf(apiMachines(apiModel, r.listed, r.stopping))
+	r.apiAt = addressesOf(apiMachines(apiModel, r.listed, r.stopping, r.unpeered))
 	first := &introStub{}
 	r.api = first
 
@@ -311,7 +311,7 @@ func TestStopLeavesTheAPIBeforeItSendsTheStopAndCountsOnlyAStopThatSucceeds(t *t
 			r, _ := apiRun(t, one, two)
 			nodes := &apiRecordingStop{r: r, err: tc.cloudErr}
 			r.kit.nodes = nodes
-			r.apiAt = addressesOf(apiMachines(apiModel, r.listed, r.stopping))
+			r.apiAt = addressesOf(apiMachines(apiModel, r.listed, r.stopping, r.unpeered))
 
 			err := r.stop(t.Context(), rollout.Machine{ID: "i-1", Name: "prod-servers-1"})
 
@@ -339,5 +339,186 @@ func TestRollTallyCountsEachStoppedMachineOnce(t *testing.T) {
 
 	if got := tally.counts(); got != (RollCounts{Stopped: 2}) {
 		t.Errorf("counts = %+v, want two stopped machines and nothing else", got)
+	}
+}
+
+// TestApiMachinesLeavesOutTheMachinesWithoutAPeer keeps the other machines, in the order of their names, when some are
+// in the set of the machines that the run knows to have no peer.
+func TestApiMachinesLeavesOutTheMachinesWithoutAPeer(t *testing.T) {
+	t.Parallel()
+	listed := []cloud.Instance{
+		apiServer("i-3", "prod-servers-3", 3), apiServer("i-1", "prod-servers-1", 1), apiServer("i-2", "prod-servers-2", 2),
+	}
+
+	got := apiMachines(apiModel, listed, nil, map[string]bool{"i-1": true, "i-9": true})
+
+	var names []string
+	for _, in := range got {
+		names = append(names, in.Name)
+	}
+	if want := []string{"prod-servers-2", "prod-servers-3"}; !slices.Equal(names, want) {
+		t.Errorf("apiMachines = %v, want %v", names, want)
+	}
+}
+
+// removesPeers is a Nomad API of one server that notes the removals of peers it is asked for, with its address.
+type removesPeers struct {
+	nomadops.API
+	addr  string
+	calls *[]string
+	err   error
+}
+
+func (p removesPeers) RemovePeer(_ context.Context, raftID string) error {
+	*p.calls = append(*p.calls, p.addr+" "+raftID)
+	return p.err
+}
+
+// removeRun returns a run over the servers one and two whose API reaches removesPeers stubs that answer err, with the
+// API made, and the addresses that the stubs were asked to remove a peer at and the addresses built after that.
+func removeRun(t *testing.T, err error, one, two cloud.Instance) (*rollRun, *[]string, *[]string) {
+	t.Helper()
+	r, built := apiRun(t, one, two)
+	var calls []string
+	r.s.Nomad = func(cfg nomadops.Config) (nomadops.API, error) {
+		*built = append(*built, cfg.Address)
+		return removesPeers{addr: cfg.Address, calls: &calls, err: err}, nil
+	}
+	if e := r.followAPI(); e != nil {
+		t.Fatalf("followAPI: %v", e)
+	}
+	*built = nil
+	return r, &calls, built
+}
+
+// removePeerOf is the step that removes the peer of the server of the machine i-1.
+var removePeerOf = rollout.Step{
+	Action: rollout.RemovePeer, Group: "servers", Machine: rollout.Machine{ID: "i-1", Name: "prod-servers-1"},
+	Server: rollout.Server{ID: "raft-1"},
+}
+
+// TestCarryRemovePeerOfARunningMachineLeavesTheAPIBeforeTheCallIsSent makes the API again without the machine and notes
+// it as having no peer, so that the call goes to the other server and not to the machine, which is the first by name.
+func TestCarryRemovePeerOfARunningMachineLeavesTheAPIBeforeTheCallIsSent(t *testing.T) {
+	t.Parallel()
+	one, two := apiServer("i-1", "prod-servers-1", 1), apiServer("i-2", "prod-servers-2", 2)
+	r, calls, built := removeRun(t, nil, one, two)
+
+	if err := r.carry(t.Context(), removePeerOf); err != nil {
+		t.Fatalf("carry: %v", err)
+	}
+
+	if want := []string{"203.0.113.2:4646 raft-1"}; !slices.Equal(*calls, want) {
+		t.Errorf("the removals were sent as %v, want %v", *calls, want)
+	}
+	if want := []string{"203.0.113.2:4646"}; !slices.Equal(*built, want) || !slices.Equal(r.apiAt, want) {
+		t.Errorf("the API was made over %v and is over %v, want over %v only", *built, r.apiAt, want)
+	}
+	if got := slices.Sorted(maps.Keys(r.unpeered)); !slices.Equal(got, []string{"i-1"}) {
+		t.Errorf("the run knows %v to have no peer, want i-1", got)
+	}
+}
+
+// TestCarryRemovePeerSendsNoCallWhenTheAPICannotLeaveTheMachine returns the error of the API, sends nothing and leaves
+// the machine out of the set of those without a peer.
+func TestCarryRemovePeerSendsNoCallWhenTheAPICannotLeaveTheMachine(t *testing.T) {
+	t.Parallel()
+	r, calls, _ := removeRun(t, nil, apiServer("i-1", "prod-servers-1", 1), apiServer("i-2", "prod-servers-2", 2))
+	errNomad := errors.New("no client")
+	r.s.Nomad = func(nomadops.Config) (nomadops.API, error) { return nil, errNomad }
+
+	if err := r.carry(t.Context(), removePeerOf); !errors.Is(err, errNomad) {
+		t.Errorf("carry = %v, want %v", err, errNomad)
+	}
+
+	if len(*calls) != 0 {
+		t.Errorf("the removals were sent as %v, want none", *calls)
+	}
+	if len(r.unpeered) != 0 {
+		t.Errorf("the run knows %v to have no peer, want none", slices.Sorted(maps.Keys(r.unpeered)))
+	}
+}
+
+// TestCarryRemovePeerTakesTheMachineBackWhenTheCallFails keeps the error of the call and the machine out of the set of
+// those without a peer, so that the next list makes the API over it again.
+func TestCarryRemovePeerTakesTheMachineBackWhenTheCallFails(t *testing.T) {
+	t.Parallel()
+	errCall := errors.New("the server refused")
+	r, calls, built := removeRun(t, errCall, apiServer("i-1", "prod-servers-1", 1), apiServer("i-2", "prod-servers-2", 2))
+	r.kit.nodes = listsNodes{listed: r.listed}
+
+	if err := r.carry(t.Context(), removePeerOf); !errors.Is(err, errCall) {
+		t.Errorf("carry = %v, want %v", err, errCall)
+	}
+
+	if len(*calls) != 1 {
+		t.Errorf("the removals were sent as %v, want one", *calls)
+	}
+	if len(r.unpeered) != 0 {
+		t.Errorf("the run knows %v to have no peer, want none", slices.Sorted(maps.Keys(r.unpeered)))
+	}
+	*built = nil
+	if err := r.list(t.Context()); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if want := []string{"203.0.113.1:4646", "203.0.113.2:4646"}; !slices.Equal(*built, want) {
+		t.Errorf("the API was made over %v at the next list, want %v", *built, want)
+	}
+}
+
+// TestCarryRemovePeerKeepsAStoppedMachineAmongThoseWithoutAPeerWhenTheCallFails leaves the set as it is when the call
+// for a machine that the list shows stopped fails: the machine left the API when it stopped.
+func TestCarryRemovePeerKeepsAStoppedMachineAmongThoseWithoutAPeerWhenTheCallFails(t *testing.T) {
+	t.Parallel()
+	errCall := errors.New("the server refused")
+	one := apiServer("i-1", "prod-servers-1", 1)
+	one.Ready = false
+	r, _, _ := removeRun(t, errCall, one, apiServer("i-2", "prod-servers-2", 2))
+	r.unpeered["i-1"] = true
+
+	if err := r.carry(t.Context(), removePeerOf); !errors.Is(err, errCall) {
+		t.Errorf("carry = %v, want %v", err, errCall)
+	}
+
+	if !r.unpeered["i-1"] {
+		t.Error("the stopped machine is not among those without a peer any more")
+	}
+}
+
+// TestCarryRemovePeerOfAStoppedMachineChangesNeitherTheSetNorTheAPI sends the call over the API as it is when the list
+// shows the machine stopped, and when the run stopped it and the list still shows it running.
+func TestCarryRemovePeerOfAStoppedMachineChangesNeitherTheSetNorTheAPI(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		setup func(one *cloud.Instance, stopping map[string]time.Time)
+	}{
+		{"the list shows it stopped", func(one *cloud.Instance, _ map[string]time.Time) { one.Ready = false }},
+		{"the run stopped it", func(_ *cloud.Instance, stopping map[string]time.Time) { stopping["i-1"] = time.Time{} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			one, two := apiServer("i-1", "prod-servers-1", 1), apiServer("i-2", "prod-servers-2", 2)
+			stopping := map[string]time.Time{}
+			tc.setup(&one, stopping)
+			r, calls, built := removeRun(t, nil, one, two)
+			maps.Copy(r.stopping, stopping)
+			if err := r.followAPI(); err != nil {
+				t.Fatalf("followAPI: %v", err)
+			}
+			*built = nil
+
+			if err := r.carry(t.Context(), removePeerOf); err != nil {
+				t.Fatalf("carry: %v", err)
+			}
+
+			if want := []string{"203.0.113.2:4646 raft-1"}; !slices.Equal(*calls, want) {
+				t.Errorf("the removals were sent as %v, want %v", *calls, want)
+			}
+			if len(*built) != 0 || len(r.unpeered) != 0 {
+				t.Errorf("the API was made over %v and the run knows %v to have no peer, want neither", *built,
+					slices.Sorted(maps.Keys(r.unpeered)))
+			}
+		})
 	}
 }

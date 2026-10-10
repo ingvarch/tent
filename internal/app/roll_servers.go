@@ -91,6 +91,40 @@ func (r *rollRun) stop(ctx context.Context, m rollout.Machine) error {
 	return nil
 }
 
+// unpeer takes the machine m out of the run's API, so that no call goes to it once its peer is removed, and notes it
+// among the machines without a peer; it does neither for a machine that the last list shows not running or that the
+// run has stopped. It reports whether it did. When the API cannot be made without the machine it fails, and the
+// machine stays in the API.
+func (r *rollRun) unpeer(m rollout.Machine) (bool, error) {
+	in, _ := instanceByID(r.listed, m.ID)
+	if _, stopped := r.stopping[m.ID]; !in.Ready || stopped {
+		return false, nil
+	}
+	r.unpeered[m.ID] = true
+	if err := r.followAPI(); err != nil {
+		delete(r.unpeered, m.ID)
+		return false, err
+	}
+	return true, nil
+}
+
+// removePeer removes the peer of the server of the step's machine from the Raft configuration. A machine that runs
+// leaves the run's API first; one whose call fails is taken back, and the next list makes the API over it again.
+func (r *rollRun) removePeer(ctx context.Context, step rollout.Step) error {
+	m := step.Machine
+	left, err := r.unpeer(m)
+	if err != nil {
+		return err
+	}
+	err = r.write(NomadEvent{Action: NomadRemovePeer, Node: m.Name}, func() error {
+		return r.api.RemovePeer(ctx, step.Server.ID)
+	})
+	if err != nil && left {
+		delete(r.unpeered, m.ID)
+	}
+	return err
+}
+
 // waitStopped waits a poll for the cloud to list the machine, which the run stopped at since, as not running, and fails
 // once stopTimeout has passed.
 func (r *rollRun) waitStopped(ctx context.Context, step rollout.Step, since time.Time) error {
@@ -102,11 +136,13 @@ func (r *rollRun) waitStopped(ctx context.Context, step rollout.Step, since time
 }
 
 // apiMachines returns the machines whose Nomad API a roll calls: the machines of the server and combined groups of m
-// among listed that joined, run and have a public address, without those in stopping, in the order of their names.
-func apiMachines(m *model.Cluster, listed []cloud.Instance, stopping map[string]time.Time) []cloud.Instance {
+// among listed that joined, run and have a public address, without those in stopping and in unpeered, in the order
+// of their names.
+func apiMachines(m *model.Cluster, listed []cloud.Instance, stopping map[string]time.Time, unpeered map[string]bool,
+) []cloud.Instance {
 	machines := slices.DeleteFunc(slices.Clone(listed), func(in cloud.Instance) bool {
 		_, stopped := stopping[in.ID]
-		return stopped || !isServerMachine(m, in) || !in.Joined || !in.Ready || !in.PublicIP.IsValid()
+		return stopped || unpeered[in.ID] || !isServerMachine(m, in) || !in.Joined || !in.Ready || !in.PublicIP.IsValid()
 	})
 	slices.SortFunc(machines, compareName)
 	return machines
@@ -124,7 +160,7 @@ func addressesOf(machines []cloud.Instance) []string {
 // followAPI makes the run's API over apiMachines again when their addresses are not those it was made over. It fails,
 // and keeps the API, when there is no such machine.
 func (r *rollRun) followAPI() error {
-	machines := apiMachines(r.model, r.listed, r.stopping)
+	machines := apiMachines(r.model, r.listed, r.stopping, r.unpeered)
 	addrs := addressesOf(machines)
 	if slices.Equal(addrs, r.apiAt) {
 		return nil

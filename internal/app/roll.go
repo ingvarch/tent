@@ -185,7 +185,7 @@ func (s *Service) prepareRoll(ctx context.Context, l statestore.Layout, opts Rol
 	kit := nodeKit{
 		cluster: c.m.Name, region: c.objs.Cluster.Spec.Nomad.Region, nodes: nodes, secrets: secrets, builder: builder,
 	}
-	machines := apiMachines(c.m, listed, nil)
+	machines := apiMachines(c.m, listed, nil, nil)
 	api, err := s.rollAPI(c.m.Name, machines, kit)
 	if err != nil {
 		return nil, err
