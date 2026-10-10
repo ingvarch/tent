@@ -176,6 +176,11 @@ func nomadText(p app.Progress) string {
 			fmt.Sprintf("waiting up to %s for the cluster to settle: %s", e.Deadline, e.Reason),
 			"the cluster settled", "failed to wait for the cluster to settle",
 		}
+	case app.NomadReconcile:
+		lines = [3]string{
+			fmt.Sprintf("waiting up to %s for the leader's next reconcile before node %s stops", e.Deadline, e.Node),
+			"the leader's reconcile has passed", "failed to wait for the leader's reconcile",
+		}
 	default:
 		return fmt.Sprintf("%s %s Nomad", e.Action, p.Step)
 	}
@@ -250,9 +255,10 @@ type nodeEvent struct {
 
 // nomadEvent is a step that works on Nomad, as -o json prints it. Name is the node that a step works on, or for a
 // force-leave step the member's name in the gossip pool, Address the node's address for a down or purge step,
-// Deadline the deadline of a drain step or the limit of a settle wait, Leader the leader of a done leader wait or the
-// node name of the server that takes the leadership in a transfer, Voters the number of servers of a healthy wait,
-// Until the end of the window of a stable wait in UTC (RFC 3339), and Reason the refusal that a settle wait waits on.
+// Deadline the deadline of a drain step, the limit of a settle wait or what is left of a reconcile wait, Leader the
+// leader of a done leader wait or the node name of the server that takes the leadership in a transfer, Voters the
+// number of servers of a healthy wait, Until the end of the window of a stable wait in UTC (RFC 3339), and Reason the
+// refusal that a settle wait waits on.
 type nomadEvent struct {
 	Type     string          `json:"type"` // nomad
 	Step     string          `json:"step"`
