@@ -94,6 +94,7 @@ type serverInvariants struct {
 	transferred time.Time       // when the last transfer of the leadership was carried out
 	nomad       []nomadAt       // the calls to Nomad
 	checked     int             // how many calls were checked
+	cutBefore   int             // how many checked calls a cut ended the context before, so that no fake logged them
 	vultr, seen int             // how many calls had reached the Vultr fake and Nomad when the watch began
 }
 
@@ -103,27 +104,51 @@ func watchServers(tb testing.TB, f *vultrfake.Fake, w *nomadWorld) *serverInvari
 	inv := &serverInvariants{
 		tb: tb, f: f, w: w, outside: map[string]bool{}, vultr: len(f.Calls()), seen: len(w.Log()),
 	}
-	f.SetHook(func(ctx context.Context, c vultrfake.Call, next func(context.Context) error) error {
-		inv.check("Vultr " + c.Name + " " + c.Arg)
+	inv.watch(nil, nil)
+	return inv
+}
+
+// watch makes every call to the Vultr fake and to Nomad check the invariants before it runs and then go through the
+// hook for it, which a nil hook leaves out. A transfer of the leadership that the fake carried out counts as one
+// whatever the hook makes of its answer. It takes the hooks of both fakes.
+func (inv *serverInvariants) watch(onVultr vultrfake.Hook, onNomad nomadHook) {
+	inv.f.SetHook(func(ctx context.Context, c vultrfake.Call, next func(context.Context) error) error {
+		inv.check(ctx, "Vultr "+c.Name+" "+c.Arg)
 		if c.Name == "HaltInstance" {
 			inv.checkStop(c.Arg)
 		}
-		return next(ctx)
+		if onVultr == nil {
+			return next(ctx)
+		}
+		return onVultr(ctx, c, next)
 	})
-	w.SetHook(func(ctx context.Context, c nomadfake.Call, next func(context.Context) error) error {
-		inv.check("Nomad " + c.Name + " " + c.Arg)
+	inv.w.SetHook(func(ctx context.Context, c nomadfake.Call, next func(context.Context) error) error {
+		inv.check(ctx, "Nomad "+c.Name+" "+c.Arg)
 		inv.mu.Lock()
 		inv.nomad = append(inv.nomad, nomadAt{c.Name, time.Now()})
 		inv.mu.Unlock()
-		err := next(ctx)
-		if c.Name == "TransferLeadership" && err == nil {
-			inv.mu.Lock()
-			inv.transferred = time.Now()
-			inv.mu.Unlock()
+		carried := func(ctx context.Context) error {
+			err := next(ctx)
+			if c.Name == "TransferLeadership" && err == nil {
+				inv.mu.Lock()
+				inv.transferred = time.Now()
+				inv.mu.Unlock()
+			}
+			return err
 		}
-		return err
+		if onNomad == nil {
+			return carried(ctx)
+		}
+		return onNomad(ctx, c, carried)
 	})
-	return inv
+}
+
+// cutBeforeFake notes that a cut ended the context of the call that the hooks checked last, before it reached the
+// fake, which logged nothing of it.
+func (inv *serverInvariants) cutBeforeFake() {
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	inv.cutBefore++
 }
 
 // halt halts the machine id as a fault would, outside the roll: the roll's invariants about its own stops leave it be.
@@ -153,12 +178,15 @@ func (inv *serverInvariants) view() serverView {
 	return v
 }
 
-// check fails the test for each invariant that the cluster breaks before the call.
-func (inv *serverInvariants) check(call string) {
+// check fails the test for each invariant that the cluster breaks before the call. A call whose context has ended is
+// checked and not counted, since the fakes log no such call.
+func (inv *serverInvariants) check(ctx context.Context, call string) {
 	inv.tb.Helper()
-	inv.mu.Lock()
-	inv.checked++
-	inv.mu.Unlock()
+	if ctx.Err() == nil {
+		inv.mu.Lock()
+		inv.checked++
+		inv.mu.Unlock()
+	}
 	for _, msg := range inv.view().broken(serverGroupSize) {
 		inv.tb.Errorf("before %s: %s", strings.TrimSpace(call), msg)
 	}
@@ -202,10 +230,12 @@ func (inv *serverInvariants) reads(name string) []time.Time {
 func (inv *serverInvariants) wantKept() {
 	inv.tb.Helper()
 	inv.mu.Lock()
-	checked := inv.checked
+	checked, cutBefore := inv.checked, inv.cutBefore
 	inv.mu.Unlock()
-	if want := len(inv.f.Calls()) - inv.vultr + len(inv.w.Log()) - inv.seen; checked != want || want == 0 {
-		inv.tb.Errorf("the invariants checked %d calls, want the %d calls that reached the fakes", checked, want)
+	want := len(inv.f.Calls()) - inv.vultr + len(inv.w.Log()) - inv.seen + cutBefore
+	if checked != want || want == 0 {
+		inv.tb.Errorf("the invariants checked %d calls, want %d: the calls that reached the fakes and those that a cut "+
+			"ended before them", checked, want)
 	}
 	inv.mu.Lock()
 	outside := maps.Clone(inv.outside)

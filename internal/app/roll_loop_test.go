@@ -167,6 +167,22 @@ func wantPolls(t *testing.T, times []time.Time) {
 // notReadyError is an error that matches nomadops.ErrNotReady, as the one of a server that did not answer does.
 func notReadyError(call string) error { return fmt.Errorf("%s: %w", call, nomadops.ErrNotReady) }
 
+// hideFromList removes the cluster's tag from the instance id, so that the lists by the tag leave it out, until the
+// function that it returns puts the tag back. It does nothing for an instance that the fake does not hold.
+func hideFromList(t *testing.T, f *vultrfake.Fake, id string) (restore func()) {
+	t.Helper()
+	clusterTag := cloud.LabelCluster + "=prod"
+	for _, in := range f.Instances() {
+		if in.ID == id {
+			f.SetInstanceTags(t, id, slices.DeleteFunc(slices.Clone(in.Tags), func(tag string) bool {
+				return tag == clusterTag
+			})...)
+			return func() { f.SetInstanceTags(t, id, in.Tags...) }
+		}
+	}
+	return func() {}
+}
+
 // hideNewest hides the first instance that a create makes from the next lists lists by the cluster's tag, and from
 // every list when lists is negative. created gets the instance's ID when the create returns. The provider's search by
 // operation id still finds it.
@@ -186,14 +202,7 @@ func hideNewest(t *testing.T, f *vultrfake.Fake, lists int, created func(id stri
 			return err
 		case c.Name == "ListInstances" && c.Arg == clusterTag && hidden != "" && lists != 0:
 			lists--
-			for _, in := range f.Instances() {
-				if in.ID == hidden {
-					f.SetInstanceTags(t, hidden, slices.DeleteFunc(slices.Clone(in.Tags), func(tag string) bool {
-						return tag == clusterTag
-					})...)
-					defer f.SetInstanceTags(t, hidden, in.Tags...)
-				}
-			}
+			defer hideFromList(t, f, hidden)()
 		}
 		return next(ctx)
 	})
@@ -473,14 +482,7 @@ func TestRollLoopKeepsAMachineItCreatedUntilTheCloudListsIt(t *testing.T) {
 				return err
 			case c.Name == "ListInstances" && c.Arg == clusterTag && hidden != "" && lists > 0:
 				lists--
-				for _, in := range f.Instances() {
-					if in.ID == hidden {
-						f.SetInstanceTags(t, hidden, slices.DeleteFunc(slices.Clone(in.Tags), func(tag string) bool {
-							return tag == clusterTag
-						})...)
-						defer f.SetInstanceTags(t, hidden, in.Tags...)
-					}
-				}
+				defer hideFromList(t, f, hidden)()
 			}
 			return next(ctx)
 		})
