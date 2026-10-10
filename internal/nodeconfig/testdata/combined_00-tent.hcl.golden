@@ -17,7 +17,8 @@ advertise {
 }
 
 server {
-  enabled = true
+  enabled         = true
+  heartbeat_grace = "20s" # after a missed heartbeat a client has 20 s to reach another server before it reads down
 
   client_introduction {
     enforcement = "warn"
@@ -42,6 +43,12 @@ client {
     "quote"          = "say \"hi\""
     "unicode"        = "東京"
   }
+}
+
+# A client pings its server every 5 s, so that it drops a server that stopped answering and heartbeats another one
+# before the servers' heartbeat_grace runs out and they count its node as down.
+rpc {
+  keep_alive_interval = "5s"
 }
 
 acl {

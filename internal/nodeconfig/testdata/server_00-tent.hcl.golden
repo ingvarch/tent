@@ -17,7 +17,8 @@ advertise {
 }
 
 server {
-  enabled = true
+  enabled         = true
+  heartbeat_grace = "20s" # after a missed heartbeat a client has 20 s to reach another server before it reads down
 
   client_introduction {
     enforcement = "strict"
