@@ -116,7 +116,8 @@ func TestUpdateWritesTheSecrets(t *testing.T) {
 		}
 		want := []string{
 			"put " + versionPath, "create " + caKeyPath, "create " + caBundlePath, "create " + gossipPath,
-			"create " + aclPath, "put " + completedPath, "put " + markPath,
+			"create " + aclPath, "put " + completedPath, "create " + namesPath, "put " + namesPath, "put " + namesPath,
+			"put " + markPath,
 		}
 		if diff := cmp.Diff(want, rec.puts); diff != "" {
 			t.Errorf("writes to the store (-want +got):\n%s", diff)

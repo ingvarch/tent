@@ -16,6 +16,7 @@ import (
 	"github.com/ingvarch/tent/internal/nodeconfig"
 	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/pki"
+	"github.com/ingvarch/tent/internal/statestore"
 )
 
 // recordingNodes is a cloud that records the creates and the scrubs it is asked for. A test that uses it calls no
@@ -26,10 +27,14 @@ type recordingNodes struct {
 	createErr error
 	joined    []cloud.Instance
 	joinErr   error
+	onCreate  func() // runs when a create reaches the cloud
 }
 
 func (n *recordingNodes) Create(_ context.Context, req cloud.CreateRequest) (cloud.Instance, error) {
 	n.creates = append(n.creates, req)
+	if n.onCreate != nil {
+		n.onCreate()
+	}
 	if n.createErr != nil {
 		return cloud.Instance{}, n.createErr
 	}
@@ -77,10 +82,15 @@ func (j *joinStub) nomadAPI() (nomadops.API, error) { return j.api, j.apiErr }
 // groups.
 func testKit(t *testing.T, nodes cloud.Nodes) nodeKit {
 	t.Helper()
+	svc, _, l := namesTestService(t)
+	names, err := svc.readNames(t.Context(), l, []string{"servers"})
+	if err != nil {
+		t.Fatalf("readNames: %v", err)
+	}
 	ca := testCA(t)
 	tmpls := templates(t, pki.NewGossipKey(), ca.Bundle(), nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
 	return nodeKit{
-		cluster: "prod", region: "global", nodes: nodes, secrets: clusterSecrets{ca: ca},
+		cluster: "prod", region: "global", nodes: nodes, secrets: clusterSecrets{ca: ca}, names: names,
 		builder: &nodeBuilder{templates: tmpls, pools: map[string]string{"workers": "batch"}, servers: 1},
 	}
 }
@@ -311,14 +321,15 @@ func TestBootServerCreatesTheNodeWithTheSeedAndNoIntroToken(t *testing.T) {
 }
 
 // TestBootServerFailsBeforeTheCloudIsAsked checks that a failure of the seed is reported as a failed create with its
-// own text, calls no cloud, and matches errNotSent and its cause.
+// own text, calls no cloud, stores no index, and matches errNotSent and its cause.
 func TestBootServerFailsBeforeTheCloudIsAsked(t *testing.T) {
 	t.Parallel()
 	var steps []string
 	seedErr := errors.New("no server has a private address")
 	nodes := &recordingNodes{}
+	kit := testKit(t, nodes)
 
-	_, err := testService(&steps).bootServer(t.Context(), testKit(t, nodes), &joinStub{seedErr: seedErr}, serverCreate())
+	_, err := testService(&steps).bootServer(t.Context(), kit, &joinStub{seedErr: seedErr}, serverCreate())
 
 	if !errors.Is(err, errNotSent) || !errors.Is(err, seedErr) || err.Error() != seedErr.Error() {
 		t.Fatalf("bootServer error = %v, want the seed's error that also matches errNotSent", err)
@@ -326,9 +337,32 @@ func TestBootServerFailsBeforeTheCloudIsAsked(t *testing.T) {
 	if len(nodes.creates) != 0 {
 		t.Errorf("bootServer asked the cloud for %d machines, want none", len(nodes.creates))
 	}
+	if got := namesOf(t, kit); got != "" {
+		t.Errorf("the store holds the index %q after a seed that failed, want none", got)
+	}
 	wantSteps := []string{"create prod-servers-0 started", "create prod-servers-0 failed: " + seedErr.Error()}
 	if diff := cmp.Diff(wantSteps, steps); diff != "" {
 		t.Errorf("the steps (-want +got):\n%s", diff)
+	}
+}
+
+// TestBootServerFailsWhenTheNameCannotBeRecorded matches errNotSent and the store's error, and sends no create, when
+// the store cannot tell what it can do.
+func TestBootServerFailsWhenTheNameCannotBeRecorded(t *testing.T) {
+	t.Parallel()
+	var steps []string
+	boom := errors.New("probe failed")
+	nodes := &recordingNodes{}
+	k := testKit(t, nodes)
+	k.names.store.(*watchedStore).capsErr = boom
+
+	_, err := testService(&steps).bootServer(t.Context(), k, &joinStub{}, serverCreate())
+
+	if !errors.Is(err, errNotSent) || !errors.Is(err, boom) {
+		t.Errorf("bootServer error = %v, want one that matches errNotSent and the store's error", err)
+	}
+	if len(nodes.creates) != 0 {
+		t.Errorf("bootServer asked the cloud for %d machines, want none", len(nodes.creates))
 	}
 }
 
@@ -347,6 +381,117 @@ func TestBootServerFailedCreateDoesNotMatchErrNotSent(t *testing.T) {
 	}
 	if len(nodes.creates) != 1 {
 		t.Errorf("bootServer asked the cloud for %d machines, want 1", len(nodes.creates))
+	}
+}
+
+// namesOf returns the highest index that the kit's store holds for the group servers, or "" when it holds none.
+func namesOf(t *testing.T, k nodeKit) string {
+	t.Helper()
+	data, _, err := k.names.store.Get(t.Context(), "prod/names/servers")
+	if errors.Is(err, statestore.ErrNotFound) {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("get the names of servers: %v", err)
+	}
+	return string(data)
+}
+
+// TestBootServerStoresTheIndexBeforeTheCloudIsAsked checks that the store holds the index of the new machine's name
+// when the create reaches the cloud, and that a repeated create of the machine writes nothing more.
+func TestBootServerStoresTheIndexBeforeTheCloudIsAsked(t *testing.T) {
+	t.Parallel()
+	var steps []string
+	nodes := &recordingNodes{}
+	kit := testKit(t, nodes)
+	store := kit.names.store.(*watchedStore)
+	var heldAtCreate string
+	nodes.onCreate = func() { heldAtCreate = namesOf(t, kit) }
+	c := serverCreate()
+	c.Name = "prod-servers-3"
+	c.Op = "4f6a2d5e-8c3b-4d1e-9a7f-0b2c3d4e5f60"
+	svc := testService(&steps)
+
+	if _, err := svc.bootServer(t.Context(), kit, &joinStub{}, c); err != nil {
+		t.Fatalf("bootServer: %v", err)
+	}
+	c.Action = NodeWait
+	if _, err := svc.bootServer(t.Context(), kit, &joinStub{}, c); err != nil {
+		t.Fatalf("bootServer of the wait: %v", err)
+	}
+
+	if heldAtCreate != "3\n" {
+		t.Errorf("the store held %q when the create reached the cloud, want %q", heldAtCreate, "3\n")
+	}
+	if len(store.puts) != 1 || len(nodes.creates) != 2 {
+		t.Errorf("bootServer wrote %v and asked the cloud %d times, want one write and two asks", store.puts,
+			len(nodes.creates))
+	}
+}
+
+// TestBootServerOfAClientGroupStoresNoIndex checks that a machine labelled as a server in a group that the specs call a
+// client group is created as before and leaves no record of names, which nothing reads for a client group.
+func TestBootServerOfAClientGroupStoresNoIndex(t *testing.T) {
+	t.Parallel()
+	var steps []string
+	nodes := &recordingNodes{}
+	kit := testKit(t, nodes)
+	store := kit.names.store.(*watchedStore)
+	c := serverCreate()
+	c.Name, c.Group = "prod-workers-3", "workers"
+
+	if _, err := testService(&steps).bootServer(t.Context(), kit, &joinStub{}, c); err != nil {
+		t.Fatalf("bootServer: %v", err)
+	}
+
+	if len(store.puts) != 0 {
+		t.Errorf("bootServer wrote %v, want nothing for a client group", store.puts)
+	}
+	if len(nodes.creates) != 1 {
+		t.Errorf("bootServer asked the cloud %d times, want 1", len(nodes.creates))
+	}
+}
+
+// TestBootServerFailsBeforeTheCloudIsAskedWhenTheIndexIsNotStored checks that a write that fails sends no create,
+// matches errNotSent and its cause, and keeps its text; and so does a kit without a record of the names, and a name
+// that has no index.
+func TestBootServerFailsBeforeTheCloudIsAskedWhenTheIndexIsNotStored(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	for _, tc := range []struct {
+		name   string
+		change func(*NodeChange)
+		kit    func(*nodeKit)
+		want   string
+	}{
+		{"a write that fails", nil, func(k *nodeKit) { k.names.store.(*watchedStore).putErr = boom },
+			"write prod/names/servers: boom"},
+		{"a kit without names", nil, func(k *nodeKit) { k.names = nil },
+			"node prod-servers-0: no record of the names of node group servers"},
+		{"a name without an index", func(c *NodeChange) { c.Name = "prod-servers-x" }, nil,
+			"node prod-servers-x: its name has no index in node group servers"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var steps []string
+			nodes := &recordingNodes{}
+			kit, c := testKit(t, nodes), serverCreate()
+			if tc.change != nil {
+				tc.change(&c)
+			}
+			if tc.kit != nil {
+				tc.kit(&kit)
+			}
+
+			_, err := testService(&steps).bootServer(t.Context(), kit, &joinStub{}, c)
+
+			if !errors.Is(err, errNotSent) || err.Error() != tc.want {
+				t.Errorf("bootServer error = %v, want %q that matches errNotSent", err, tc.want)
+			}
+			if len(nodes.creates) != 0 {
+				t.Errorf("bootServer asked the cloud for %d machines, want none", len(nodes.creates))
+			}
+		})
 	}
 }
 

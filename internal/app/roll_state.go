@@ -88,8 +88,9 @@ func rolloutMachines(listed []cloud.Instance) []rollout.Machine {
 }
 
 // rolloutGroups returns the node groups called names, in that order, as the decisions see them: size and zones from
-// the model, the spec hash from the builder, the rolling update settings from the specs. A setting that a spec leaves
-// out is 0. It fails for a name that is not a group of the model, a group whose spec is missing or nil, and a drain
+// the model, the spec hash from the builder and the rolling update settings from the specs. The next index of a
+// machine name is not set: rollRun.state gives it to the decisions. A setting that a spec leaves out is 0. It fails
+// for a name that is not a group of the model, a group whose spec is missing or nil, and a drain
 // timeout that does not parse.
 func rolloutGroups(m *model.Cluster, specs map[string]*v1alpha1.NodeGroup, b *nodeBuilder, names []string,
 ) ([]rollout.Group, error) {
@@ -104,7 +105,9 @@ func rolloutGroups(m *model.Cluster, specs map[string]*v1alpha1.NodeGroup, b *no
 			return nil, fmt.Errorf("node group %s: no spec", name)
 		}
 		mg := m.Groups[i]
-		g := rollout.Group{Name: name, Role: mg.Role, Size: mg.Size, Zones: mg.Zones, SpecHash: b.specHash(name)}
+		g := rollout.Group{
+			Name: name, Role: mg.Role, Size: mg.Size, Zones: mg.Zones, SpecHash: b.specHash(name),
+		}
 		ru := gs.Spec.RollingUpdate
 		if ru.MaxSurge != nil {
 			g.MaxSurge = *ru.MaxSurge

@@ -129,6 +129,13 @@ func whenLine(lines []stamped, line string) time.Time {
 // context.Canceled, and puts the plain hooks back.
 func (s *singleWorld) cutRun(t *testing.T, name string, nth int, after bool) {
 	t.Helper()
+	s.cutRunOf(t, app.RollOptions{}, name, nth, after)
+}
+
+// cutRunOf is cutRun for a rolling update with the options opts, which it applies.
+func (s *singleWorld) cutRunOf(t *testing.T, opts app.RollOptions, name string, nth int, after bool) {
+	t.Helper()
+	opts.Apply = true
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	var calls atomic.Int32
@@ -155,7 +162,7 @@ func (s *singleWorld) cutRun(t *testing.T, name string, nth int, after bool) {
 		return next(ctx)
 	})
 
-	_, err := s.svc.RollingUpdate(ctx, "prod", app.RollOptions{Apply: true})
+	_, err := s.svc.RollingUpdate(ctx, "prod", opts)
 
 	s.hooks(nil, nil)
 	if !cut.Load() {

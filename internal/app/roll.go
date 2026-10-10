@@ -38,18 +38,21 @@ type RollOptions struct {
 // cluster's secrets; and a server of the cluster has joined and runs. The completed spec and the infrastructure are the
 // business of tent update cluster, so specs that it has not applied fail the plan.
 //
-// Each plan lists the machines once and reads Nomad's Raft configuration, autopilot's report, gossip members and nodes,
-// in that order. The plan holds the selected groups with their outdated machines, and in Next the step that comes next.
-// Next is nil when nothing is left to roll. A failed check or read returns no plan. The plan comes with an error and no
-// Next when the decisions of rollout refuse the run, when the next step is one of a combined group, which a roll does
-// not replace yet, and when the next step waits for a machine to join that a run would refuse to wait for.
-// Without Apply it changes nothing in the cloud, in Nomad and in the store, and takes no lock.
+// Each plan reads the highest name index of each selected server and combined group from the store, and fails when an
+// object holds no index. It lists the machines once and reads Nomad's Raft configuration, autopilot's report, gossip
+// members and nodes, in that order. The plan holds the selected groups with their outdated machines, and in Next the
+// step that comes next. Next is nil when nothing is left to roll. A failed check or read returns no plan. The plan
+// comes with an error and no Next when the decisions of rollout refuse the run, when the next step is one of a combined
+// group, which a roll does not replace yet, and when the next step waits for a machine to join that a run would refuse
+// to wait for. Without Apply it changes nothing in the cloud, in Nomad and in the store, and takes no lock.
 //
 // With Apply, a plan that has no next step or an error ends the run as it is, without a lock; a plan without a next
 // step comes back applied. Otherwise it takes the cluster's lock and plans again under it. When that plan has a next
 // step, it calls OnRollPlan with it, then OnWarning with each warning about the cluster, such as a Nomad API that the
-// whole internet may reach, and, with Force, writes the replace label to each machine of the selected groups that lacks
-// it, one write each, and ends with the error of the first that fails. Then it carries the steps out until none is
+// whole internet may reach, raises the tent version and the highest index of the machine names of each selected server
+// and combined group to the highest among the listed machines (a create of such a machine raises it again, before the
+// request), and, with Force, writes the replace label to each machine of the selected groups that lacks it, one write
+// each. It ends with the error of the first of these writes that fails. Then it carries the steps out until none is
 // left. The plan that it returns is the one under the lock, or the one made without it when it cannot take the lock,
 // with Rolled holding what the roll did, also when it stopped, and Applied set once it reached its end.
 func (s *Service) RollingUpdate(ctx context.Context, cluster string, opts RollOptions) (_ RollPlan, err error) {
@@ -77,6 +80,9 @@ func (s *Service) RollingUpdate(ctx context.Context, cluster string, opts RollOp
 			if err := s.beginRoll(r, plan); err != nil {
 				return err
 			}
+			if err := r.remember(ctx, l); err != nil {
+				return err
+			}
 			if err := r.labelForced(ctx); err != nil {
 				return err
 			}
@@ -88,6 +94,15 @@ func (s *Service) RollingUpdate(ctx context.Context, cluster string, opts RollOp
 		return nil
 	})
 	return plan, err
+}
+
+// remember writes to the store what the run needs there before its first change: the tent version, and the highest
+// index of the machine names of each selected server and combined group that the listed machines show.
+func (r *rollRun) remember(ctx context.Context, l statestore.Layout) error {
+	if err := statestore.RaiseVersion(ctx, r.s.Store, l, r.s.Version); err != nil {
+		return err
+	}
+	return r.kit.names.raiseToListed(ctx, r.listed)
 }
 
 // labelForced writes the replace label to each machine that a forced run found without it, in the order of the list,
@@ -131,7 +146,7 @@ type rollRun struct {
 	s       *Service
 	kit     nodeKit
 	model   *model.Cluster
-	groups  []rollout.Group  // the selected groups, by name
+	groups  []rollout.Group  // the selected groups, by name; state sets NextIndex
 	version string           // the Nomad version that a new node runs
 	forced  map[string]bool  // the machines to replace whatever their hash, by ID; those with the label, or all with Force
 	listed  []cloud.Instance // the last list of the machines
@@ -152,7 +167,7 @@ func (s *Service) prepareRoll(ctx context.Context, l statestore.Layout, opts Rol
 	if err != nil {
 		return nil, err
 	}
-	names, err := selectGroups(c.m, opts.NodeGroups)
+	selected, err := selectGroups(c.m, opts.NodeGroups)
 	if err != nil {
 		return nil, err
 	}
@@ -182,15 +197,20 @@ func (s *Service) prepareRoll(ctx context.Context, l statestore.Layout, opts Rol
 	if err != nil {
 		return nil, err
 	}
+	names, err := s.readNames(ctx, l, serverGroups(c.m, selected))
+	if err != nil {
+		return nil, err
+	}
 	kit := nodeKit{
 		cluster: c.m.Name, region: c.objs.Cluster.Spec.Nomad.Region, nodes: nodes, secrets: secrets, builder: builder,
+		names: names,
 	}
 	machines := apiMachines(c.m, listed, nil, nil)
 	api, err := s.rollAPI(c.m.Name, machines, kit)
 	if err != nil {
 		return nil, err
 	}
-	groups, err := rolloutGroups(c.m, groupSpecs(c.objs.NodeGroups), builder, names)
+	groups, err := rolloutGroups(c.m, groupSpecs(c.objs.NodeGroups), builder, selected)
 	if err != nil {
 		return nil, err
 	}
@@ -300,10 +320,17 @@ func (r *rollRun) plan(ctx context.Context) (RollPlan, error) {
 }
 
 // state returns what the decisions see: the cluster as the cloud listed it, with the machines that the run created and
-// no list has shown yet, and as the reading of Nomad shows it.
+// no list has shown yet, and as the reading of Nomad shows it. The next index of each server group is what the store
+// holds at this moment, so it follows what the run itself stored.
 func (r *rollRun) state(reading nomadReading) rollout.State {
+	groups := slices.Clone(r.groups)
+	for i, g := range groups {
+		if g.Role.RunsServer() {
+			groups[i].NextIndex = r.kit.names.next(g.Name)
+		}
+	}
 	return rollout.State{
-		Cluster: r.kit.cluster, Groups: r.groups, Machines: rolloutMachines(r.machines()), Nomad: reading.state(),
+		Cluster: r.kit.cluster, Groups: groups, Machines: rolloutMachines(r.machines()), Nomad: reading.state(),
 		Version: r.version, Forced: r.forced, Refresh: joinRefresh, Now: r.s.now(),
 	}
 }

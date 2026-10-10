@@ -41,14 +41,12 @@ func newCluster(t *testing.T) (*app.Service, *vultrfake.Fake) {
 }
 
 // newBuilt returns a service whose store holds the test cluster with the SSH keys ops and dev, built on the returned
-// Vultr fake by an update of tent v0.5.0. The store also holds the highest index of the names of its servers, which
-// that update does not write. Call it in a synctest bubble, where the update does not wait in real time.
+// Vultr fake by an update of tent v0.5.0. Call it in a synctest bubble, where the update does not wait in real time.
 func newBuilt(t *testing.T) (*app.Service, *vultrfake.Fake) {
 	t.Helper()
 	svc, f := newUpdate(t)
 	svc.Version = "v0.5.0"
 	mustUpdate(t, svc)
-	put(t, svc.Store, namesPath, []byte("2\n"))
 	return svc, f
 }
 

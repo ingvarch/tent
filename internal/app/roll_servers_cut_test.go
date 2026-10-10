@@ -103,6 +103,7 @@ func cutServersRun(t *testing.T, svc *app.Service, f *vultrfake.Fake, w *nomadWo
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("the run cut at %s returned %v, want an error that matches context.Canceled", c.key, err)
 	}
+	allowGrownNames(t, svc.Store, stored)
 	wantSnapshot(t, svc.Store, stored)
 	wantLockFree(t, svc.Store)
 }
@@ -424,49 +425,43 @@ func rollUntilCreated(t *testing.T, svc *app.Service, f *vultrfake.Fake, hidden 
 	return created
 }
 
-// TestServersRollMakesTwinsWhenTheListsMissTheServersItCreated cuts a run right after the create of a new server whose
-// machine keeps booting, so that it is no Raft peer and no gossip member, and hides it from the lists of the next run
-// by the cluster's tag. That run sees no trace of the server and creates a twin of the same name, again a machine that
-// keeps booting, and is cut right after it. The run after that lists both and its first decision refuses them as
-// duplicates, with no write. Then update deletes both, which never joined, and a rolling update finishes the roll
-// with the names that no machine holds.
-func TestServersRollMakesTwinsWhenTheListsMissTheServersItCreated(t *testing.T) {
+// TestServersRollNamesTheNextServerWhenTheListsMissTheOneItCreated cuts a run right after the create of a new server
+// that is not yet a Raft peer or a gossip member, and hides it from the lists of the next run by the cluster's tag.
+// That run sees no trace of the server, but the store holds its index: the run creates the next name, not a twin, and
+// is cut right after it. The run after that lists both: the group has two servers more than its size, and the roll
+// removes two old servers before it creates the third new one and ends with the group at its size. No two machines
+// share a name, and the store holds the highest index.
+func TestServersRollNamesTheNextServerWhenTheListsMissTheOneItCreated(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, f, w := serversWorld(t, (*nomadWorld).ServersOverTime)
+		svc, f, _ := serversWorld(t, (*nomadWorld).ServersOverTime)
 		old := serverMachines(f)
-		f.SetBootReads(t, 1<<20, 1<<20)
 
 		first := rollUntilCreated(t, svc, f, "")
 		second := rollUntilCreated(t, svc, f, first)
-		f.SetBootReads(t, 1, 2)
-
-		cloudCalls, nomadCalls := len(f.Calls()), len(w.Log())
-		_, err := applyRoll(svc, app.RollOptions{})
-		wantError(t, err, fmt.Sprintf(
-			"node group servers: machines %s and %s share the name prod-servers-3; run tent update cluster first",
-			first, second))
-		wantNoWrites(t, f.Calls()[cloudCalls:])
-		if got := nomadWrites(w, nomadCalls); len(got) > 0 {
-			t.Errorf("the refused run wrote to Nomad: %q", got)
-		}
-
-		mustUpdate(t, svc)
-		if got := serverMachines(f); !slices.Equal(idsOf(got), idsOf(old)) {
-			t.Fatalf("update left the servers %v, want the old servers %v", got, idsOf(old))
-		}
+		lines := recordProgress(svc)
 		if _, err := applyRoll(svc, app.RollOptions{}); err != nil {
-			t.Fatalf("the rolling update after update failed: %v", err)
+			t.Fatalf("the run that lists both new servers failed: %v", err)
 		}
 
-		wantRollEnded(t, svc, f, append(idsOf(old), first, second))
+		create := slices.Index(*lines, "node started create prod-servers-5")
+		if create < 0 || count((*lines)[:create], "node done delete prod-servers-0")+
+			count((*lines)[:create], "node done delete prod-servers-1")+
+			count((*lines)[:create], "node done delete prod-servers-2") != 2 {
+			t.Errorf("the roll created prod-servers-5 at line %d of its progress, want it after the deletes of two "+
+				"old servers:\n%s", create, strings.Join(*lines, "\n"))
+		}
+
+		wantRollEnded(t, svc, f, idsOf(old))
 		wantServersRolled(t, svc, f, old, true)
 		var names []string
 		for _, m := range serverMachines(f) {
 			names = append(names, m.name)
 		}
 		if want := []string{"prod-servers-3", "prod-servers-4", "prod-servers-5"}; !slices.Equal(names, want) {
-			t.Errorf("the new servers are %v, want %v", names, want)
+			t.Errorf("the new servers are %v, want %v: the first run made %s and the second %s", names, want, first,
+				second)
 		}
+		wantStored(t, svc.Store, namesPath, []byte("5\n"))
 	})
 }
