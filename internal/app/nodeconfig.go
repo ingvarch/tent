@@ -290,7 +290,8 @@ type NewNode struct {
 
 // NodeConfigOf returns the NodeConfig of the new node n: the template of its group, with the assets that the
 // channel, the pinned Nomad version and the tent version give, and the node's own parts. The specs give the number of
-// servers. It sends no request when the specs lack the version or the group. Its errors are those of its steps: the
+// servers; a server of a cluster of one server that has a seed gets no bootstrap_expect, as it joins the server that
+// exists. It sends no request when the specs lack the version or the group. Its errors are those of its steps: the
 // specs' and the template's name the cluster, when there is one, or the group; the node's parts' name the node; the
 // assets' name the asset and the URL they read.
 // update must build a node's config with the same steps, or through this function, so that what the tools that check
@@ -344,7 +345,8 @@ type builderInput struct {
 type nodeBuilder struct {
 	templates map[string]nodeconfig.NodeConfig
 	pools     map[string]string
-	// servers is the number of Nomad servers that the specs give, which every server waits for before it bootstraps.
+	// servers is the number of Nomad servers that the specs give, which a server waits for before it bootstraps;
+	// bootstrapExpect says which server gets none.
 	servers int
 }
 
@@ -393,15 +395,25 @@ func newNodeBuilder(ctx context.Context, in builderInput, cache assetCache) (*no
 	return b, nil
 }
 
-// node returns the NodeConfig of the node called name in zone of group, as nodeConfig makes it, with the number of
-// servers of the builder. A group that the builder lacks is an error.
+// node returns the NodeConfig of the node called name in zone of group, as nodeConfig makes it, with the
+// bootstrap_expect that bootstrapExpect gives for the seed. A group that the builder lacks is an error.
 func (b *nodeBuilder) node(group, name, zone string, cert pki.Certificate, seed []netip.Addr, intro pki.Secret,
 ) (*nodeconfig.NodeConfig, error) {
 	tmpl, ok := b.templates[group]
 	if !ok {
 		return nil, fmt.Errorf("node group %s: not in the specs", group)
 	}
-	return nodeConfig(tmpl, name, zone, b.servers, cert, seed, intro)
+	return nodeConfig(tmpl, name, zone, b.bootstrapExpect(seed), cert, seed, intro)
+}
+
+// bootstrapExpect returns the bootstrap_expect of a server with the seed: the number of servers of the specs. A server
+// of a cluster of one server that has a seed gets none, 0: it joins the server that exists, and with 1 Nomad would
+// start a cluster of its own on it.
+func (b *nodeBuilder) bootstrapExpect(seed []netip.Addr) int {
+	if b.servers == 1 && len(seed) > 0 {
+		return 0
+	}
+	return b.servers
 }
 
 // specHash returns the spec hash of the nodes of group, "" for a group that the builder lacks.
@@ -415,9 +427,10 @@ func (b *nodeBuilder) nodePool(group string) string { return b.pools[group] }
 
 // nodeConfig returns the NodeConfig of the node called name in zone, from the template of its group: the template with
 // the node's name, its 10-node.hcl, its certificate and key, and the seed of servers to join. A node that runs a
-// client gets its intro token too, when intro holds one; a server takes none. bootstrapExpect is the number of servers,
-// which a client ignores. The node's own parts leave the spec hash as it is. An empty certificate or key, and a config
-// that does not validate, are errors.
+// client gets its intro token too, when intro holds one; a server takes none. bootstrapExpect is the number of
+// servers, which a client ignores; 0 leaves a server with no server block, and such a server needs a seed. The node's
+// own parts leave the spec hash as it is. An empty certificate or key, and a config that does not validate, are
+// errors.
 func nodeConfig(tmpl nodeconfig.NodeConfig, name, zone string, bootstrapExpect int, cert pki.Certificate,
 	seed []netip.Addr, intro pki.Secret,
 ) (*nodeconfig.NodeConfig, error) {
@@ -438,6 +451,9 @@ func withNode(nc nodeconfig.NodeConfig, name, zone string, bootstrapExpect int, 
 	}
 	if len(intro) > 0 && !nc.Role.RunsClient() {
 		return nil, errors.New("a server takes no intro token")
+	}
+	if nc.Role.RunsServer() && bootstrapExpect == 0 && len(seed) == 0 {
+		return nil, errors.New("a server with no bootstrap_expect needs servers to join")
 	}
 	node, err := nodeconfig.RenderNode(name, zone, nc.Role, bootstrapExpect)
 	if err != nil {

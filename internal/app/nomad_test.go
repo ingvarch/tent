@@ -53,14 +53,16 @@ type nomadCall struct {
 //
 // Its servers have a model that lasts across calls, by the time of the bubble (see raftServer). A server machine that
 // is ready joins the Raft configuration, and votes at once when the cluster has no leader yet and after voteAfter
-// otherwise. The cluster has its first leader once as many servers are ready as its specs give, and keeps it until a
-// transfer through the fake moves it; the world fails the test, if it has one (FailOnLeaderLoss), when the machine of
-// the leader halts or goes. A server whose machine halts or goes stays alive and healthy for failAfter, then fails;
-// cleanupAfter later autopilot removes its peer, and the report keeps the removed peer for reportLag. The cluster is
-// healthy when no peer is unhealthy, no removed peer is still reported and no blip after a transfer is under way, and
-// its failure tolerance is the healthy voters beyond a quorum. A call to the address of a server whose machine is
-// halted or gone fails at once with ErrNotReady. Every delay is 0 by default, so a server joins and votes, and a
-// halted or deleted one is out of the Raft configuration, at the next call.
+// otherwise. A server or combined machine whose create request carried a NodeConfig with bootstrap_expect = 1, and that
+// is ready while the cluster has a leader, starts a cluster of its own: it never enters the Raft configuration or the
+// report, its member reads alive, and its node never registers. The cluster has its first leader once as many servers
+// are ready as its specs give, and keeps it until a transfer through the fake moves it; the world fails the test, if it
+// has one (FailOnLeaderLoss), when the machine of the leader halts or goes. A server whose machine halts or goes stays
+// alive and healthy for failAfter, then fails; cleanupAfter later autopilot removes its peer, and the report keeps the
+// removed peer for reportLag. The cluster is healthy when no peer is unhealthy, no removed peer is still reported and
+// no blip after a transfer is under way, and its failure tolerance is the healthy voters beyond a quorum. A call to the
+// address of a server whose machine is halted or gone fails at once with ErrNotReady. Every delay is 0 by default, so a
+// server joins and votes, and a halted or deleted one is out of the Raft configuration, at the next call.
 //
 // The servers are named <hostname>.global at their private address:4647, with the Raft ID r-<instance id>, and each
 // runs the world's Nomad version, as each node does. A TransferLeadership, RemovePeer or ForceLeave that succeeds
@@ -393,8 +395,9 @@ func (w *nomadWorld) follow() {
 // nodeIDOf returns the ID of the node that the machine with the instance ID id registers.
 func nodeIDOf(id string) string { return "n-" + id }
 
-// registerClients registers each ready client that is not withheld and did not register in this cluster, and turns the
-// node of each registered client whose machine has been gone or not ready for downAfter to down. A node that the
+// registerClients registers each ready client that is not withheld, did not register in this cluster and did not start
+// a cluster of its own, and turns the node of each registered client whose machine has been gone or not ready for
+// downAfter to down. A node that the
 // world's view no longer lists, or that is down already, stays as it is.
 func (w *nomadWorld) registerClients(clients []machine) {
 	now := time.Now()
@@ -406,7 +409,7 @@ func (w *nomadWorld) registerClients(clients []machine) {
 			continue
 		}
 		ready[m.id] = true
-		if w.registered[m.id] || w.withheld[m.name] || w.withheldIDs[m.id] {
+		if w.registered[m.id] || w.withheld[m.name] || w.withheldIDs[m.id] || w.startedAlone(m.id) {
 			continue
 		}
 		n := nomadops.Node{

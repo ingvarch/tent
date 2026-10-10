@@ -1,6 +1,8 @@
 package app_test
 
 import (
+	"bytes"
+	"encoding/base64"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -8,9 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ingvarch/tent/internal/app"
+	"github.com/ingvarch/tent/internal/nodeconfig"
 	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/nomadops/nomadfake"
 )
+
+// nodeHCL is the path of the file that holds the settings of one node.
+const nodeHCL = "/etc/nomad.d/10-node.hcl"
 
 // serverDelays are the times of the world's model of its servers. Every delay is 0 by default, which makes each
 // change of a server take effect at once.
@@ -24,7 +31,8 @@ type serverDelays struct {
 }
 
 // raftServer is the world's record of a server machine that was ready once: its place in the Raft configuration, in
-// autopilot's report and in the gossip pool. A record stays for as long as its cluster lives.
+// autopilot's report and in the gossip pool. A record stays for as long as its cluster lives. A server that started a
+// cluster of its own has a record that is out of the Raft configuration and the report, with its member alive.
 type raftServer struct {
 	id, name, address string     // the instance ID, the hostname and the public address
 	private           netip.Addr // the address in the cluster's VPC
@@ -32,6 +40,7 @@ type raftServer struct {
 	joined, stable    time.Time  // when it joined, and StableSince before it is truncated to whole seconds
 	down              time.Time  // when the world first saw its machine halted or gone; zero while it runs
 	removed           bool       // its peer is out of the Raft configuration
+	alone             bool       // it started a cluster of its own: it never joined this one, and its node never registers
 	removedAt         time.Time
 	forced            bool // a ForceLeave turned its member to leaving
 	shown             bool // a read of Members showed it leaving, and it is not listed again
@@ -262,7 +271,8 @@ func (r *raftServer) memberStatus(now time.Time, d serverDelays) string {
 	return "alive"
 }
 
-// syncServers brings the records to now: a ready machine that has no record joins, a machine that stopped is noted,
+// syncServers brings the records to now: a ready machine that has no record joins, or starts a cluster of its own when
+// bootstrapsAlone says so and the cluster has a leader, a machine that stopped is noted,
 // a server that failed long enough has its peer removed by autopilot, and a leader is elected when the cluster has
 // none and as many servers are ready as the specs give. want reads the specs, so it is asked only while the cluster
 // has no leader. The caller holds w.mu.
@@ -277,8 +287,10 @@ func (w *nomadWorld) syncServers(now time.Time, servers []machine, want func() i
 		}
 		ready++
 		if c.find(m.id) == nil {
+			alone := c.leader != "" && w.bootstrapsAlone(m.id)
 			c.servers = append(c.servers, &raftServer{
 				id: m.id, name: m.name, address: m.address, private: m.private, bootstrap: c.leader == "", joined: now, stable: now,
+				alone: alone, removed: alone,
 			})
 		}
 	}
@@ -307,6 +319,36 @@ func (w *nomadWorld) syncServers(now time.Time, servers []machine, want func() i
 			c.elect(now, d)
 		}
 	}
+}
+
+// bootstrapsAlone reports whether the create request of the instance id carried a NodeConfig with bootstrap_expect = 1
+// in its 10-node.hcl: a server that starts with it and an empty data directory leads a cluster of its own. An
+// instance with no request or no NodeConfig does not.
+func (w *nomadWorld) bootstrapsAlone(id string) bool {
+	req, ok := w.cloud.CreateRequest(id)
+	if !ok {
+		return false
+	}
+	data, err := base64.StdEncoding.DecodeString(req.UserData)
+	if err != nil {
+		return false
+	}
+	payload, err := app.PayloadFrom(data)
+	if err != nil {
+		return false
+	}
+	nc, err := nodeconfig.Decode(payload)
+	if err != nil {
+		return false
+	}
+	f := fileOf(nc, nodeHCL)
+	return f != nil && bytes.Contains(f.Content, []byte("bootstrap_expect = 1\n"))
+}
+
+// startedAlone reports whether the machine with the instance ID id started a cluster of its own. The caller holds w.mu.
+func (w *nomadWorld) startedAlone(id string) bool {
+	r := w.raft.find(id)
+	return r != nil && r.alone
 }
 
 // laterOf returns the later of a and b.

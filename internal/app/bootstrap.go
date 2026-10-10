@@ -73,8 +73,9 @@ func (u updateRun) needsNomad() bool {
 
 // prepareNodes gives each create and each wait with an operation id of the plan the spec hash of its group, and builds
 // the user data of each as the apply will, with the longest seed and, for a client, an intro token of the size of a
-// large real one, so that a node whose user data does not fit fails the plan. The certificate that it issues for the
-// check is not kept.
+// large real one, so that a node whose user data does not fit fails the plan. A server of a cluster of one is checked
+// with a seed too, the form of the server that replaces it, which is never shorter than the form without one. The
+// certificate that it issues for the check is not kept.
 func (u *updateRun) prepareNodes(m *model.Cluster, now time.Time) error {
 	seed := lastAddresses(m.CIDR, u.builder.servers)
 	for i, c := range u.plan.Nodes {

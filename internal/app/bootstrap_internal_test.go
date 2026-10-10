@@ -9,6 +9,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
+	"github.com/ingvarch/tent/internal/assets/assetstest"
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/model"
 	"github.com/ingvarch/tent/internal/nomadops"
@@ -43,6 +44,39 @@ func TestLastAddresses(t *testing.T) {
 			got := texts(lastAddresses(netip.MustParsePrefix(tc.prefix), tc.n))
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("lastAddresses(%s, %d) (-want +got):\n%s", tc.prefix, tc.n, diff)
+			}
+		})
+	}
+}
+
+// TestPrepareNodesChecksWithTheLongestSeed checks that the plan builds the user data of a server with a seed, also of
+// the only server of a cluster: that is the form of the server that replaces it, which is never the shorter one. The
+// cluster's prefix gives no address, so a node built with a seed fails the check, as an address that is not one is
+// an error of the NodeConfig.
+func TestPrepareNodesChecksWithTheLongestSeed(t *testing.T) {
+	for _, size := range []int{1, 3} {
+		t.Run(fmt.Sprintf("a group of %d", size), func(t *testing.T) {
+			in := testBuilderInput(t, assetstest.New(), onArch("amd64", "dev"), nodeClusterYAML, nodeCombinedYAML)
+			in.Specs.NodeGroups[0].Spec.Size = size
+			b, err := newNodeBuilder(t.Context(), in, assetCache{})
+			if err != nil {
+				t.Fatalf("newNodeBuilder: %v", err)
+			}
+			m, err := model.New(in.Specs.Cluster, in.Specs.NodeGroups)
+			if err != nil {
+				t.Fatalf("model.New: %v", err)
+			}
+			m.CIDR = netip.Prefix{}
+			u := &updateRun{
+				plan:    UpdatePlan{Nodes: []NodeChange{{Action: NodeCreate, Name: "prod-dev-0", Group: "dev", Zone: "ams"}}},
+				nodeKit: nodeKit{builder: b, region: "eu", secrets: clusterSecrets{ca: testCA(t)}},
+			}
+
+			err = u.prepareNodes(m, testNow)
+
+			const want = "node prod-dev-0: node config: join servers[0]: not an address"
+			if err == nil || err.Error() != want {
+				t.Errorf("prepareNodes() error = %v, want %q: the node is built with a seed", err, want)
 			}
 		})
 	}

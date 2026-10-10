@@ -37,6 +37,23 @@ func TestRenderNodeGolden(t *testing.T) {
 	}
 }
 
+// TestRenderNodeJoiningGolden checks 10-node.hcl of a server or combined node that joins servers that exist, with
+// bootstrap_expect 0: the name and the datacenter and no server block.
+func TestRenderNodeJoiningGolden(t *testing.T) {
+	for _, role := range []v1alpha1.Role{v1alpha1.RoleServer, v1alpha1.RoleCombined} {
+		t.Run(string(role), func(t *testing.T) {
+			f, err := nodeconfig.RenderNode(nodeNames[role], "ams", role, 0)
+			if err != nil {
+				t.Fatalf("RenderNode(%s, 0): %v", role, err)
+			}
+			checkGolden(t, string(role)+"_10-node.joining.hcl.golden", string(f.Content))
+			if got := decodeNode(t, f.Content); got.Server != nil {
+				t.Errorf("RenderNode(%s, 0) has a server block: %+v", role, got.Server)
+			}
+		})
+	}
+}
+
 // TestPerNodeFiles checks the files that only one node has: 10-node.hcl, 05-join.hcl and 11-instance.hcl are
 // per-node files that every local user may read, as none holds a secret.
 func TestPerNodeFiles(t *testing.T) {
@@ -155,10 +172,10 @@ func TestRenderNodeErrors(t *testing.T) {
 			"10-node.hcl: datacenter has the control character U+000A"},
 		{"datacenter with an interpolation", "prod-a-0", "${dc}", v1alpha1.RoleCombined, 3,
 			"10-node.hcl: datacenter has ${, which HCL1 reads as the start of an interpolation"},
-		{"no bootstrap_expect", "prod-a-0", "ams", v1alpha1.RoleServer, 0,
-			"10-node.hcl: bootstrap_expect 0 is less than 1"},
+		{"negative bootstrap_expect on a server", "prod-a-0", "ams", v1alpha1.RoleServer, -1,
+			"10-node.hcl: bootstrap_expect -1 is less than 0"},
 		{"negative bootstrap_expect", "prod-a-0", "ams", v1alpha1.RoleCombined, -3,
-			"10-node.hcl: bootstrap_expect -3 is less than 1"},
+			"10-node.hcl: bootstrap_expect -3 is less than 0"},
 		{"the first problem", "prod-a-0", "", "worker", 0, "10-node.hcl: no datacenter"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
