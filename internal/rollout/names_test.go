@@ -14,6 +14,20 @@ func TestNodeName(t *testing.T) {
 	}
 }
 
+func TestNodeOfServer(t *testing.T) {
+	tests := []struct{ server, want string }{
+		{"prod-servers-0.global", "prod-servers-0"},
+		{"prod-servers-0.eu.west", "prod-servers-0"},
+		{"prod-servers-0", "prod-servers-0"},
+		{"", ""},
+	}
+	for _, tc := range tests {
+		if got := rollout.NodeOfServer(tc.server); got != tc.want {
+			t.Errorf("NodeOfServer(%q) = %q, want %q", tc.server, got, tc.want)
+		}
+	}
+}
+
 func TestFreeName(t *testing.T) {
 	tests := []struct {
 		name  string

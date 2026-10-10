@@ -286,7 +286,7 @@ func (r *rollRun) logObserved(reading nomadReading, step rollout.Step, refusal e
 	nomad := reading.state()
 	leader := "none"
 	if i := slices.IndexFunc(nomad.Servers, func(s rollout.Server) bool { return s.Leader }); i >= 0 {
-		leader = nodeOfServer(nomad.Servers[i].Name)
+		leader = rollout.NodeOfServer(nomad.Servers[i].Name)
 	}
 	next := step.String()
 	if refusal != nil {
@@ -669,7 +669,7 @@ func (r *rollRun) carry(ctx context.Context, step rollout.Step) error {
 	case rollout.Stop:
 		return r.stop(ctx, step.Machine)
 	case rollout.TransferLeadership:
-		event := NomadEvent{Action: NomadTransfer, Node: step.Machine.Name, Leader: nodeOfServer(step.Server.Name)}
+		event := NomadEvent{Action: NomadTransfer, Node: step.Machine.Name, Leader: rollout.NodeOfServer(step.Server.Name)}
 		return r.write(event, func() error { return r.api.TransferLeadership(ctx, step.Server.ID) })
 	case rollout.RemovePeer:
 		return r.removePeer(ctx, step)

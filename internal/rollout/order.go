@@ -177,10 +177,10 @@ func nextServerIndex(s State, g Group) int {
 		names = append(names, m.Name)
 	}
 	for _, srv := range s.Nomad.Servers {
-		names = append(names, nodeOfServer(srv.Name))
+		names = append(names, NodeOfServer(srv.Name))
 	}
 	for _, mem := range s.Nomad.Members {
-		names = append(names, nodeOfServer(mem.Name))
+		names = append(names, NodeOfServer(mem.Name))
 	}
 	next := 0
 	for _, name := range names {
@@ -234,7 +234,7 @@ func knownToNomad(s State, m Machine) bool {
 			slices.ContainsFunc(s.Nomad.Servers, func(srv Server) bool { return srv.Address.Addr() == m.PrivateIP })
 	}
 	return slices.ContainsFunc(s.Nomad.Nodes, func(n Node) bool { return n.Name == m.Name }) ||
-		slices.ContainsFunc(s.Nomad.Servers, func(srv Server) bool { return nodeOfServer(srv.Name) == m.Name })
+		slices.ContainsFunc(s.Nomad.Servers, func(srv Server) bool { return NodeOfServer(srv.Name) == m.Name })
 }
 
 // compareBool orders false before true.

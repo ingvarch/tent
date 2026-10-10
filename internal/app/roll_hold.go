@@ -32,9 +32,6 @@ const (
 	holdTimeout = 5 * time.Minute
 )
 
-// memberAlive is the status of a member of the gossip pool that Nomad's leader adds to the Raft configuration.
-const memberAlive = "alive"
-
 // moment is a time by both clocks of the operator's machine. Go's monotonic clock stops while the machine sleeps, so a
 // time by it alone can be too short; the wall clock can be set.
 type moment struct {
@@ -104,7 +101,7 @@ func (h *heldStop) allows(at, sent moment, alive bool) bool {
 // memberIsAlive reports whether the members list one at the private address addr as alive.
 func memberIsAlive(members []nomadops.Member, addr netip.Addr) bool {
 	for _, m := range members {
-		if m.Address == addr && m.Status == memberAlive {
+		if m.Address == addr && m.Status == rollout.MemberAlive {
 			return true
 		}
 	}

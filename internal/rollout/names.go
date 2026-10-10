@@ -57,8 +57,8 @@ func CompareCreated(a, b time.Time) int {
 	}
 }
 
-// nodeOfServer returns the node name in the name of a server, which is <node name>.<region>.
-func nodeOfServer(name string) string {
+// NodeOfServer returns the name of the node from the name of its server, which is <node name>.<region>.
+func NodeOfServer(name string) string {
 	node, _, _ := strings.Cut(name, ".")
 	return node
 }
