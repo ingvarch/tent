@@ -328,18 +328,17 @@ func TestRollFlowTakesNoLockWithNothingToRoll(t *testing.T) {
 }
 
 // TestRollFlowRefusesAtTheStartWithoutALock applies a forced roll of the default selection, which tent refuses at its
-// start because the server group has a step: it returns the refusal with the groups, only reads, and does not take
+// start because the combined group has a step: it returns the refusal with the groups, only reads, and does not take
 // the lock that the test holds.
 func TestRollFlowRefusesAtTheStartWithoutALock(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, f, w := rollWorld(t)
+		svc, f, w := combinedWorld(t, "")
 		u := watch(t, svc, f, w)
 
 		plan, err := applyRoll(svc, app.RollOptions{Force: true})
 
-		wantError(t, err, "node group servers: tent cannot roll server and combined groups yet; "+
-			"select client groups with --nodegroups")
+		wantError(t, err, "node group all: tent cannot roll combined groups yet; select client groups with --nodegroups")
 		u.check(t)
 		if len(plan.Groups) == 0 || plan.Next != nil || plan.Applied {
 			t.Errorf("plan = %+v, want the groups, no next step and not applied", plan)

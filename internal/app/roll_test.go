@@ -164,25 +164,29 @@ func TestRollingUpdateWithNothingOutdated(t *testing.T) {
 // another check: the rollout (a newer Nomad), the join check and the role check.
 func TestRollingUpdateRefusalOfAnUpToDateClusterIsNotNothingToRoll(t *testing.T) {
 	t.Parallel()
+	const example = "node group servers (server, size 3): up to date\n" +
+		"node group workers (client, size 2): up to date\n"
 	for _, tc := range []struct {
 		name  string
 		world func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld)
 		later bool   // the clock is past the time that a client has to join
 		cause string // a part of the refusal, which tells the check that refused
+		want  string // the group lines of the plan
 	}{
 		{"newer Nomad", func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
 			svc, f, w := rollWorld(t)
 			w.ChangeNode("prod-workers-0", func(n *nomadops.Node) { n.Version = "9.9.9" })
 			return svc, f, w
-		}, false, "tent never moves a node to an older Nomad"},
+		}, false, "tent never moves a node to an older Nomad", example},
 		{"unjoined client", func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
 			return unjoinedWorld(t, func(_ *vultrfake.Fake, w *nomadWorld) { w.DropNode("prod-workers-1") })
-		}, true, "has not joined within 31 minutes"},
-		{"unjoined server", func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
-			svc, f, w := rollWorld(t)
-			dropJoinedTag(t, f, instanceNamed(t, f, "prod-servers-0"))
+		}, true, "has not joined within 31 minutes", example},
+		{"unjoined combined node", func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
+			svc, f, w := combinedWorld(t, "")
+			dropJoinedTag(t, f, instanceNamed(t, f, "prod-all-0"))
 			return svc, f, w
-		}, false, "tent cannot roll server and combined groups yet"},
+		}, false, "tent cannot roll combined groups yet",
+			"node group all (combined, size 3): up to date\nnode group workers (client, size 2): up to date\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -196,9 +200,8 @@ func TestRollingUpdateRefusalOfAnUpToDateClusterIsNotNothingToRoll(t *testing.T)
 				if err == nil || !strings.Contains(err.Error(), tc.cause) {
 					t.Fatalf("RollingUpdate error = %v, want a refusal that says %q", err, tc.cause)
 				}
-				want := "node group servers (server, size 3): up to date\nnode group workers (client, size 2): up to date\n"
-				if got := rollText(t, plan); got != want {
-					t.Errorf("text = %q, want only the group lines %q", got, want)
+				if got := rollText(t, plan); got != tc.want {
+					t.Errorf("text = %q, want only the group lines %q", got, tc.want)
 				}
 			})
 		})
@@ -278,8 +281,7 @@ func TestRollingUpdateSelectsGroups(t *testing.T) {
 // and no change of the store. A refusal of the decisions comes with the plan of the groups, a failed check without.
 func TestRollingUpdateRefusesAtTheStart(t *testing.T) {
 	t.Parallel()
-	const server = "node group servers: tent cannot roll server and combined groups yet; " +
-		"select client groups with --nodegroups"
+	const combined = "node group all: tent cannot roll combined groups yet; select client groups with --nodegroups"
 	for _, tc := range []struct {
 		name   string
 		world  func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld)
@@ -352,16 +354,14 @@ func TestRollingUpdateRefusesAtTheStart(t *testing.T) {
 			}
 			return svc, f, w
 		}, app.RollOptions{}, noServerRuns, false},
-		{"outdated servers in the default selection", func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
-			svc, f, w := rollWorld(t)
-			mustReplace(t, svc, keyedClusterYAML+"  nomad:\n    extraConfig:\n      server: 'raft_multiplier = 3'\n")
-			mustUpdate(t, svc)
-			return svc, f, w
-		}, app.RollOptions{}, server, true},
+		{"outdated combined group in the default selection", func(
+			t *testing.T,
+		) (*app.Service, *vultrfake.Fake, *nomadWorld) {
+			return combinedWorld(t, serversExtraYAML)
+		}, app.RollOptions{}, combined, true},
 		{"force with the default selection", func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
-			svc, f, w := rollWorld(t)
-			return svc, f, w
-		}, app.RollOptions{Force: true}, server, true},
+			return combinedWorld(t, "")
+		}, app.RollOptions{Force: true}, combined, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -383,38 +383,110 @@ func TestRollingUpdateRefusesAtTheStart(t *testing.T) {
 	}
 }
 
-// TestRollingUpdateServerRefusalWithoutClientGroups leaves the advice about --nodegroups out when the specs have no
-// client group.
-func TestRollingUpdateServerRefusalWithoutClientGroups(t *testing.T) {
-	t.Parallel()
-	synctest.Test(t, func(t *testing.T) {
-		svc, f, w := newRelease(t, keyedClusterYAML, serversYAML)
+// combinedWorld is the test cluster with the combined group all and the workers, after an update. A non-empty extra
+// is spec lines of the cluster that change the hash of the combined group, applied by a second update.
+func combinedWorld(t *testing.T, extra string) (*app.Service, *vultrfake.Fake, *nomadWorld) {
+	t.Helper()
+	svc, f, w := newRelease(t, keyedClusterYAML, combinedYAML, workersYAML)
+	mustUpdate(t, svc)
+	if extra != "" {
+		mustReplace(t, svc, keyedClusterYAML+extra)
 		mustUpdate(t, svc)
-		u := watch(t, svc, f, w)
-
-		plan, err := rollingUpdate(svc, app.RollOptions{Force: true})
-
-		wantError(t, err, "node group servers: tent cannot roll server and combined groups yet")
-		u.check(t)
-		if len(plan.Groups) != 1 {
-			t.Errorf("groups = %+v, want the servers", plan.Groups)
-		}
-	})
+	}
+	return svc, f, w
 }
 
-// TestRollingUpdateRefusesACombinedGroup refuses a step of a combined group, without the advice about --nodegroups
-// when the specs have no client group.
+// TestRollingUpdateRefusesACombinedGroup refuses a step of a combined group, and gives the advice about --nodegroups
+// only when the specs have a client group. The refusal comes with the groups.
 func TestRollingUpdateRefusesACombinedGroup(t *testing.T) {
 	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		docs []string
+		want string
+	}{
+		{"with a client group", []string{keyedClusterYAML, combinedYAML, workersYAML},
+			"node group all: tent cannot roll combined groups yet; select client groups with --nodegroups"},
+		{"without a client group", []string{keyedClusterYAML, combinedYAML},
+			"node group all: tent cannot roll combined groups yet"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				svc, f, w := newRelease(t, tc.docs...)
+				mustUpdate(t, svc)
+				u := watch(t, svc, f, w)
+
+				plan, err := rollingUpdate(svc, app.RollOptions{Force: true})
+
+				wantError(t, err, tc.want)
+				u.check(t)
+				if len(plan.Groups) == 0 || plan.Next != nil {
+					t.Errorf("plan = %+v, want the groups and no next step", plan)
+				}
+			})
+		})
+	}
+}
+
+// TestRollingUpdatePlansTheRollOfAServerGroup names the creation of a new server as the first step for outdated
+// servers and, with Force, for servers that are up to date, in the default selection: the servers come before the
+// workers. It only reads.
+func TestRollingUpdatePlansTheRollOfAServerGroup(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		world func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld)
+		opts  app.RollOptions
+	}{
+		{"outdated servers", func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
+			return serversWorld(t, nil)
+		}, app.RollOptions{}},
+		{"force", rollWorld, app.RollOptions{Force: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				svc, f, w := tc.world(t)
+				u := watch(t, svc, f, w)
+
+				plan, err := rollingUpdate(svc, tc.opts)
+
+				if err != nil {
+					t.Fatalf("RollingUpdate: %v", err)
+				}
+				u.check(t)
+				want := &app.RollStep{
+					Action: "create", Group: "servers", Node: "prod-servers-3",
+					Text: "create node prod-servers-3 (server of servers, ams)",
+				}
+				if diff := cmp.Diff(want, plan.Next); diff != "" {
+					t.Errorf("Next (-want +got):\n%s", diff)
+				}
+			})
+		})
+	}
+}
+
+// TestRollingUpdateShowsTheWaitForAServerToJoin plans the wait for a server machine that has no joined label.
+func TestRollingUpdateShowsTheWaitForAServerToJoin(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, f, w := newRelease(t, keyedClusterYAML, combinedYAML)
-		mustUpdate(t, svc)
+		svc, f, w := rollWorld(t)
+		dropJoinedTag(t, f, instanceNamed(t, f, "prod-servers-0"))
 		u := watch(t, svc, f, w)
 
-		_, err := rollingUpdate(svc, app.RollOptions{Force: true})
+		plan, err := rollingUpdate(svc, app.RollOptions{})
 
-		wantError(t, err, "node group all: tent cannot roll server and combined groups yet")
+		if err != nil {
+			t.Fatalf("RollingUpdate: %v", err)
+		}
 		u.check(t)
+		want := &app.RollStep{
+			Action: "wait-joined", Group: "servers", Node: "prod-servers-0",
+			ID: instanceNamed(t, f, "prod-servers-0"), Text: "wait until node prod-servers-0 joins",
+		}
+		if diff := cmp.Diff(want, plan.Next); diff != "" {
+			t.Errorf("Next (-want +got):\n%s", diff)
+		}
 	})
 }
 

@@ -775,9 +775,9 @@ func TestOpenWaitOfAServerGroupIsOverWhenTheReadingShowsItsEnd(t *testing.T) {
 	}
 }
 
-// TestRefuseRoleRefusesCombinedGroupsAndServerGroupsOnlyForThePlan refuses a combined group whatever the caller, and a
-// server group only when the caller says that servers are refused too; a client group never.
-func TestRefuseRoleRefusesCombinedGroupsAndServerGroupsOnlyForThePlan(t *testing.T) {
+// TestRefuseRoleRefusesCombinedGroupsOnly refuses a combined group, with the advice about --nodegroups when the specs
+// have a client group; a server group and a client group never.
+func TestRefuseRoleRefusesCombinedGroupsOnly(t *testing.T) {
 	t.Parallel()
 	m := &model.Cluster{Name: "prod", Groups: []model.NodeGroup{
 		{Name: "servers", Role: v1alpha1.RoleServer}, {Name: "all", Role: v1alpha1.RoleCombined},
@@ -787,29 +787,21 @@ func TestRefuseRoleRefusesCombinedGroupsAndServerGroupsOnlyForThePlan(t *testing
 	serversOnly := &rollRun{model: &model.Cluster{Name: "prod", Groups: m.Groups[:2]}}
 	step := func(group string) rollout.Step { return rollout.Step{Action: rollout.Create, Group: group} }
 	for _, tc := range []struct {
-		name    string
-		r       *rollRun
-		group   string
-		servers bool
-		want    string
+		name  string
+		r     *rollRun
+		group string
+		want  string
 	}{
-		{"a combined group", withClients, "all", false,
+		{"a combined group", withClients, "all",
 			"node group all: tent cannot roll combined groups yet; select client groups with --nodegroups"},
-		{"a combined group of a cluster without clients", serversOnly, "all", false,
+		{"a combined group of a cluster without clients", serversOnly, "all",
 			"node group all: tent cannot roll combined groups yet"},
-		{"a server group", withClients, "servers", false, ""},
-		{"a client group", withClients, "workers", false, ""},
-		{"a combined group for the plan", withClients, "all", true,
-			"node group all: tent cannot roll server and combined groups yet; select client groups with --nodegroups"},
-		{"a server group for the plan", withClients, "servers", true,
-			"node group servers: tent cannot roll server and combined groups yet; select client groups with --nodegroups"},
-		{"a server group for the plan, without clients", serversOnly, "servers", true,
-			"node group servers: tent cannot roll server and combined groups yet"},
-		{"a client group for the plan", withClients, "workers", true, ""},
+		{"a server group", withClients, "servers", ""},
+		{"a client group", withClients, "workers", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := tc.r.refuseRole(step(tc.group), tc.servers)
+			err := tc.r.refuseRole(step(tc.group))
 			if (err == nil) != (tc.want == "") || err != nil && err.Error() != tc.want {
 				t.Errorf("refuseRole error = %v, want %q", err, tc.want)
 			}

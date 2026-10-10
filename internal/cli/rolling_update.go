@@ -24,11 +24,14 @@ func newRollingUpdateClusterCommand(opts *globalOptions) *cobra.Command {
 		Short: "Replace the outdated nodes of a cluster",
 		Long: "Replace the outdated nodes of the cluster named by NAME or --name. A node is outdated when its spec " +
 			"hash differs from its node group's, when it carries the label tent/replace=true that a run with " +
-			"--force writes, or when --force is given and its group rolls. A client group rolls by its maxSurge " +
-			"and maxUnavailable: tent creates new nodes first, marks each old node ineligible, drains it within " +
-			"the group's drainTimeout, deletes its machine and purges its node from Nomad once Nomad lists it " +
-			"down. tent cannot roll server groups yet: when the server or combined group has anything to do, which " +
-			"--force always gives it, select the client groups with --nodegroups. Run tent update cluster first " +
+			"--force writes, or when --force is given and its group rolls. A server group rolls one node at a " +
+			"time: tent creates a new server, waits until it votes and every node has had time to learn of it, " +
+			"moves the leadership away from the old server when it leads, stops it, removes it from the Raft " +
+			"configuration and the gossip pool, waits until the servers that stay are healthy, and deletes it. A " +
+			"client group rolls by its maxSurge and maxUnavailable: tent creates new nodes first, marks each old " +
+			"node ineligible, drains it within the group's drainTimeout, deletes its machine and purges its node " +
+			"from Nomad once Nomad lists it down. The servers roll before the clients. tent cannot roll combined " +
+			"groups yet: select the client groups with --nodegroups. Run tent update cluster first " +
 			"after a change of the specs. Without --yes it prints the outdated nodes of each group and the next " +
 			"step; with --exit-code it exits with 2 while a next step is due. With --yes it takes the cluster's " +
 			"lock, prints the plan, prints each step on stderr as it goes and then what it did; with -o json or -o " +
