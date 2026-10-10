@@ -51,6 +51,9 @@ func Next(s State, mode Mode) (Step, error) {
 	if err := checkDuplicates(s, groups); err != nil {
 		return Step{}, err
 	}
+	if err := checkRoles(s, groups); err != nil {
+		return Step{}, err
+	}
 	for _, g := range groups {
 		step, found, err := next[g.Role](s, mode, g)
 		if err != nil || found {
@@ -108,6 +111,46 @@ func checkDuplicates(s State, groups []Group) error {
 		}
 	}
 	return nil
+}
+
+// RoleLabel is the name of the label that holds the role of a machine, as a refusal tells a user. It must equal
+// cloud.LabelRole, which defines the label; internal/rollout cannot import internal/cloud, so a test in internal/app
+// checks that the two agree.
+const RoleLabel = "tent/role"
+
+// checkRoles refuses a group that lists a machine of another role than the group's: the rules of a group go by its
+// role, so a machine that runs a client in a server group would stop without a drain. It names the first such
+// machine of the first such group.
+func checkRoles(s State, groups []Group) error {
+	for _, g := range groups {
+		for _, m := range machinesOf(s, g) {
+			if m.Role != g.Role {
+				created, advice := createdAs(m.Role)
+				return refuse("node group %s: node %s was created %s and the group is now %s; tent does not replace "+
+					"or remove the nodes of a group whose role changed; %s", g.Name, m.Name, created, g.Role, advice)
+			}
+		}
+	}
+	return nil
+}
+
+// createdAs says how a refusal names the role a machine was created with, and what to do about it. A machine with no
+// role or an unknown one has a label to fix; the group's role cannot match it.
+func createdAs(role v1alpha1.Role) (created, advice string) {
+	const ofGroup = "give the group the role its nodes were created with"
+	switch role {
+	case v1alpha1.RoleServer:
+		return "as a server", ofGroup
+	case v1alpha1.RoleCombined:
+		return "as a combined node", ofGroup
+	case v1alpha1.RoleClient:
+		return "as a client", ofGroup
+	}
+	advice = "give the machine the label " + RoleLabel + " with the role that it runs"
+	if role == "" {
+		return "without a role", advice
+	}
+	return fmt.Sprintf("with the role %q", role), advice
 }
 
 // checkVersions refuses a version that is not a version number, and a new node that would run an older Nomad than

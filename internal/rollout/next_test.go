@@ -3,6 +3,7 @@ package rollout_test
 import (
 	"errors"
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 
@@ -247,4 +248,87 @@ func TestNextAcceptsAServerThatReportsNoVersion(t *testing.T) {
 	s := midRoll()
 	s.Nomad.Servers[0].Version = ""
 	checkServerStep(t, nextRoll(t, s), serverOutcome{Action: rollout.Stop, Machine: serverName(1)})
+}
+
+const (
+	roleChangedHead = "; tent does not replace or remove the nodes of a group whose role changed; "
+	roleChanged     = roleChangedHead + "give the group the role its nodes were created with"
+	// roleUnreadable ends the refusal for a machine whose role label is missing or not a role tent knows.
+	roleUnreadable = roleChangedHead + "give the machine the label tent/role with the role that it runs"
+)
+
+func TestNextRefusesAGroupThatListsAMachineOfAnotherRole(t *testing.T) {
+	tests := []refusalCase{
+		{"a combined group with a server machine", func(_ *testing.T, s *rollout.State) {
+			s.Groups[0].Role = v1alpha1.RoleCombined
+		}, "node group servers: node prod-servers-0 was created as a server and the group is now combined" +
+			roleChanged},
+		{"a server group with a combined machine", func(t *testing.T, s *rollout.State) {
+			machineOf(t, s, serverName(1)).Role = v1alpha1.RoleCombined
+		}, "node group servers: node prod-servers-1 was created as a combined node and the group is now server" +
+			roleChanged},
+		{"a server group with a client machine", func(t *testing.T, s *rollout.State) {
+			machineOf(t, s, serverName(1)).Role = v1alpha1.RoleClient
+		}, "node group servers: node prod-servers-1 was created as a client and the group is now server" +
+			roleChanged},
+		{"a client group with a server machine", func(t *testing.T, s *rollout.State) {
+			s.Groups[0].Role = v1alpha1.RoleClient
+			machineOf(t, s, serverName(0)).Role = v1alpha1.RoleClient
+			machineOf(t, s, serverName(1)).Role = v1alpha1.RoleClient
+		}, "node group servers: node prod-servers-2 was created as a server and the group is now client" +
+			roleChanged},
+		{"a machine without a role", func(t *testing.T, s *rollout.State) {
+			machineOf(t, s, serverName(2)).Role = ""
+		}, "node group servers: node prod-servers-2 was created without a role and the group is now server" +
+			roleUnreadable},
+		{"a machine of a role that tent does not know", func(t *testing.T, s *rollout.State) {
+			machineOf(t, s, serverName(2)).Role = "bogus"
+		}, `node group servers: node prod-servers-2 was created with the role "bogus" and the group is now server` +
+			roleUnreadable},
+		{"two machines of another role name the first by name", func(t *testing.T, s *rollout.State) {
+			machineOf(t, s, serverName(2)).Role = v1alpha1.RoleClient
+			machineOf(t, s, serverName(1)).Role = v1alpha1.RoleCombined
+			slices.Reverse(s.Machines)
+		}, "node group servers: node prod-servers-1 was created as a combined node and the group is now server" +
+			roleChanged},
+		{"duplicate names come first", func(t *testing.T, s *rollout.State) {
+			machineOf(t, s, serverName(1)).Role = v1alpha1.RoleClient
+			twin := *machineOf(t, s, serverName(2))
+			twin.ID = "m-9"
+			s.Machines = append(s.Machines, twin)
+		}, "node group servers: machines m-3 and m-9 share the name prod-servers-2; run tent update cluster first"},
+	}
+	base := func() rollout.State { return serversState(3) }
+	t.Run("roll", func(t *testing.T) { runRefusalCasesIn(t, rollout.Roll, base, tests) })
+	t.Run("shrink", func(t *testing.T) { runRefusalCasesIn(t, rollout.Shrink, base, tests) })
+}
+
+func TestNextRefusesAnotherRoleInAnyGroupBeforeActing(t *testing.T) {
+	s := baseState()
+	s.Groups = append(s.Groups, rollout.Group{Name: "zeta", Role: v1alpha1.RoleClient, Size: 1, Zones: []string{"ams"},
+		SpecHash: newHash, MaxSurge: 1})
+	addWorker(&s, 0, oldHash)
+	addWorker(&s, 1, oldHash)
+	s.Machines = append(s.Machines, rollout.Machine{ID: "m-50", Name: "prod-zeta-0", Group: "zeta",
+		Role: v1alpha1.RoleServer})
+	for _, mode := range []rollout.Mode{rollout.Roll, rollout.Shrink} {
+		checkRefusedIn(t, mode, s, "node group zeta: node prod-zeta-0 was created as a server and the group is now "+
+			"client"+roleChanged)
+	}
+
+	// The earlier group of the two is checked as well.
+	machineOf(t, &s, "prod-zeta-0").Role = v1alpha1.RoleClient
+	machineOf(t, &s, workerName(1)).Role = v1alpha1.RoleCombined
+	for _, mode := range []rollout.Mode{rollout.Roll, rollout.Shrink} {
+		checkRefusedIn(t, mode, s, "node group workers: node prod-workers-1 was created as a combined node and the "+
+			"group is now client"+roleChanged)
+	}
+}
+
+func TestNextDoesNotCheckTheRolesOfMachinesOutsideTheGroupsOfTheRun(t *testing.T) {
+	s := serversState(3)
+	s.Machines = append(s.Machines, rollout.Machine{ID: "m-50", Name: "prod-other-0", Group: "other"})
+	for _, mode := range []rollout.Mode{rollout.Roll, rollout.Shrink} {
+		checkOutcome(t, nextIn(t, mode, s), outcome{Action: rollout.Done})
+	}
 }
