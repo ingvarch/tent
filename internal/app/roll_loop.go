@@ -122,29 +122,34 @@ func (t rollTally) counts() RollCounts {
 
 // rollLoop is what a rolling update remembers from one step to the next.
 type rollLoop struct {
-	pending  map[string]pendingMachine // by operation id; kept until a list shows the machine
-	deleting map[string]time.Time      // the machines whose delete was sent and that the cloud still lists, by ID
-	stopping map[string]time.Time      // the machines whose stop was sent and that the cloud may list as running, by ID
-	unpeered map[string]bool           // the running machines that the run knows to have no peer, by ID
-	seen     map[stepKey]seenWait      // when the run first met each wait that has not ended
-	last     stepKey                   // the step carried out last
-	tries    int                       // how often in a row it was carried out
-	lastErr  error                     // why the last try failed; nil when it did not
-	settled  bool                      // the loop waited a poll since the last try
-	relist   bool                      // the next observation lists the machines
-	listing  bool                      // the last observation listed the machines
-	failing  time.Time                 // since when the reads of Nomad fail in a row; zero when they do not
-	open     *openWait
-	settling *openSettle // the wait for a refusal to clear; nil when the last decision was no refusal
-	wrote    bool        // act has sent a write in this run, whatever the answer
-	rolled   rollTally
+	pending    map[string]pendingMachine // by operation id; kept until a list shows the machine
+	deleting   map[string]time.Time      // the machines whose delete was sent and that the cloud still lists, by ID
+	stopping   map[string]time.Time      // the machines whose stop was sent and that the cloud may list as running, by ID
+	unpeered   map[string]bool           // the running machines that the run knows to have no peer, by ID
+	held       map[string]*heldStop      // the machines whose stop the run holds, by ID
+	heldSent   map[string]error          // the held stops that the run sent, by ID, each with its call's error or nil
+	holding    *NomadEvent               // the hold whose start the run has reported and whose end it has not
+	observedAt moment                    // when the last observation began
+	seen       map[stepKey]seenWait      // when the run first met each wait that has not ended
+	last       stepKey                   // the step carried out last
+	tries      int                       // how often in a row it was carried out
+	lastErr    error                     // why the last try failed; nil when it did not
+	settled    bool                      // the loop waited a poll since the last try
+	relist     bool                      // the next observation lists the machines
+	listing    bool                      // the last observation listed the machines
+	failing    time.Time                 // since when the reads of Nomad fail in a row; zero when they do not
+	open       *openWait
+	settling   *openSettle // the wait for a refusal to clear; nil when the last decision was no refusal
+	wrote      bool        // act has sent a write in this run, whatever the answer
+	rolled     rollTally
 }
 
 // newRollLoop returns the memory of a run that has done nothing.
 func newRollLoop() rollLoop {
 	return rollLoop{
 		pending: map[string]pendingMachine{}, deleting: map[string]time.Time{}, stopping: map[string]time.Time{},
-		unpeered: map[string]bool{}, seen: map[stepKey]seenWait{},
+		unpeered: map[string]bool{}, held: map[string]*heldStop{}, heldSent: map[string]error{},
+		seen: map[stepKey]seenWait{},
 		rolled: rollTally{
 			created: map[string]bool{}, drained: map[string]bool{}, stopped: map[string]bool{}, deleted: map[string]bool{},
 			purged: map[string]bool{},
@@ -156,13 +161,15 @@ func newRollLoop() rollLoop {
 // observes the cloud and Nomad, asks the decisions for a step, carries it out, and observes again; a wait polls every
 // rollPoll until the decisions move on or its limit passes. A step that the decisions give again after it was carried
 // out is tried again a poll later, and the third try in a row ends the run. A refusal of the decisions ends the run at
-// once, unless the run has sent a write: then it waits for the refusal to clear, for up to settleTimeout. It takes no
-// lock.
+// once, unless the run has sent a write: then it waits for the refusal to clear, for up to settleTimeout. The stop of
+// a server that has no peer beside fewer than two voters is held until the leader's reconcile has passed (see
+// holdStop). It takes no lock.
 func (r *rollRun) run(ctx context.Context) (RollCounts, error) {
 	r.rollLoop = newRollLoop()
 	err := r.loop(ctx)
 	r.endSettle(err)
 	r.endWait(err)
+	r.endHold(err)
 	return r.rolled.counts(), err
 }
 
@@ -211,6 +218,12 @@ func (r *rollRun) loop(ctx context.Context) error {
 		}
 		if err := r.refuseRole(step); err != nil {
 			return err
+		}
+		if handled, err := r.holdStop(ctx, step, reading); handled {
+			if err != nil {
+				return err
+			}
+			continue
 		}
 		if step.Action.Waits() {
 			err = r.poll(ctx, step, reading)
@@ -312,36 +325,43 @@ func (r *rollRun) group(name string) rollout.Group {
 
 // observe lists the machines when the last step changed them, or a machine that the run created is not listed yet or a
 // machine that it deleted still is, or one that it stopped is still listed as running, or the run waits for a refusal
-// to clear, and reads Nomad; it notes in listing whether it listed. It returns false, and no error, for reads that no
-// server answered, until they have failed for nomadTimeout.
+// to clear or holds a stop, and reads Nomad; it notes in listing whether it listed, and in observedAt when it began to
+// read. It notes what it reads in the held stops, and takes a machine that votes again out of those without a peer. It
+// returns false, and no error, for reads that no server answered, until they have failed for nomadTimeout.
 func (r *rollRun) observe(ctx context.Context) (nomadReading, bool, error) {
-	r.listing = r.relist || r.settling != nil || len(r.pending) > 0 || len(r.deleting) > 0 || len(r.stopping) > 0
+	r.listing = r.relist || r.settling != nil || len(r.pending) > 0 || len(r.deleting) > 0 || len(r.stopping) > 0 ||
+		len(r.held) > 0
 	if r.listing {
 		if err := r.list(ctx); err != nil {
 			return nomadReading{}, false, err
 		}
 	}
+	r.observedAt = now()
 	reading, err := readNomad(ctx, r.api)
 	switch {
 	case err == nil:
 		r.failing = time.Time{}
+		servers := reading.state().Servers
+		r.noteHeld(servers)
+		r.dropRejoined(servers)
 		return reading, true, nil
 	case errors.Is(err, nomadops.ErrNotReady):
 		if r.failing.IsZero() {
 			r.failing = time.Now()
 		}
 		if time.Since(r.failing) >= nomadTimeout {
-			return nomadReading{}, false, err
+			return nomadReading{}, false, r.withStoppedAdvice(err)
 		}
 		return nomadReading{}, false, nil
 	}
 	return nomadReading{}, false, err
 }
 
-// list reads the machines, drops the pending machines that the cloud shows and the deleted ones that it no longer
-// shows, drops the stopped ones that it shows not running or no longer, drops the machines without a peer that it no
-// longer shows, makes the API follow the servers, and fails for a pending machine that the lists have missed for
-// pendingTimeout.
+// list reads the machines and forgets what the run holds about them: the pending machines that the cloud shows, the
+// deleted ones that it no longer shows, the stopped ones and the held stops of machines that it shows not running or
+// no longer, and the machines without a peer that it no longer shows. It then fails for a pending machine that the
+// lists have missed for pendingTimeout, and otherwise makes the API follow the servers. A held stop whose call failed
+// counts as a stop once the cloud shows the machine not running.
 func (r *rollRun) list(ctx context.Context) error {
 	listed, err := r.kit.nodes.List(ctx, r.kit.cluster)
 	if err != nil {
@@ -361,6 +381,15 @@ func (r *rollRun) list(ctx context.Context) error {
 	for id := range r.stopping {
 		if in, ok := instanceByID(listed, id); !ok || !in.Ready {
 			delete(r.stopping, id)
+			if r.heldSent[id] != nil {
+				r.rolled.stopped[id] = true
+			}
+			delete(r.heldSent, id)
+		}
+	}
+	for id := range r.held {
+		if in, ok := instanceByID(listed, id); !ok || !in.Ready {
+			delete(r.held, id)
 		}
 	}
 	for id := range r.unpeered {

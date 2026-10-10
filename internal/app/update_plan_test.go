@@ -508,7 +508,8 @@ func TestNomadActionString(t *testing.T) {
 		app.NomadDrain: "drain", app.NomadDrained: "drained", app.NomadDown: "down", app.NomadPurge: "purge",
 		app.NomadVote: "vote", app.NomadStable: "stable", app.NomadTransfer: "transfer",
 		app.NomadServerDown: "server-down", app.NomadRemovePeer: "remove-peer", app.NomadForceLeave: "force-leave",
-		app.NomadSettle: "settle", app.NomadAction(0): "NomadAction(0)", app.NomadSettle + 1: "NomadAction(18)",
+		app.NomadSettle: "settle", app.NomadReconcile: "reconcile", app.NomadAction(0): "NomadAction(0)",
+		app.NomadReconcile + 1: "NomadAction(19)",
 	} {
 		if got := a.String(); got != want {
 			t.Errorf("NomadAction(%d).String() = %q, want %q", int(a), got, want)
