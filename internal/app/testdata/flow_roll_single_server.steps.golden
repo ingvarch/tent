@@ -1,0 +1,26 @@
+node started create prod-servers-1
+node done create prod-servers-1
+nomad started vote prod-servers-1
+nomad done vote prod-servers-1
+node started scrub prod-servers-1
+node done scrub prod-servers-1
+nomad started stable
+nomad done stable
+nomad started transfer prod-servers-0
+nomad done transfer prod-servers-0
+nomad started stable
+nomad done stable
+nomad started remove-peer prod-servers-0
+nomad done remove-peer prod-servers-0
+nomad started reconcile prod-servers-0
+nomad done reconcile prod-servers-0
+nomad started remove-peer prod-servers-0
+nomad done remove-peer prod-servers-0
+node started stop prod-servers-0
+node done stop prod-servers-0
+nomad started force-leave prod-servers-0.global
+nomad done force-leave prod-servers-0.global
+nomad started healthy
+nomad done healthy
+node started delete prod-servers-0
+node done delete prod-servers-0
