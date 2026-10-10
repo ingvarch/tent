@@ -203,14 +203,20 @@ func (w *world) reconcile() {
 }
 
 // checkWindow is the invariant that a machine is stopped, or its server removed while it runs, only when no server
-// of another machine has joined the Raft configuration for a refresh interval. The peer of a machine that is down
-// goes at any time. A removal starts no window: every node that knows the servers that stay can still reach the
-// cluster.
+// of another machine has joined the Raft configuration for a refresh interval, and, when its server votes, when the
+// leadership has not moved to another server for a refresh interval. The peer of a machine that is down goes at any
+// time. A removal starts no window: every node that knows the servers that stay can still reach the cluster.
 func (w *world) checkWindow(step rollout.Step, machine string) error {
 	for _, srv := range w.servers {
 		if age := w.now.Sub(srv.joined); srv.machine != machine && age < refreshInterval {
 			return violated("%s: a server joined the Raft configuration %s ago, less than the refresh interval of %s", step,
 				age, refreshInterval)
+		}
+	}
+	if i := w.serverIndexByMachine(machine); i >= 0 && w.servers[i].voter {
+		if age := w.now.Sub(w.transferredAt); age < refreshInterval {
+			return violated("%s: its server votes and the leadership moved %s ago, less than the refresh interval of %s",
+				step, age, refreshInterval)
 		}
 	}
 	return nil
@@ -251,7 +257,7 @@ func (w *world) transfer(step rollout.Step) error {
 		w.servers[j].leader = j == i
 		w.servers[j].since = w.now
 	}
-	w.leaderSince = w.now
+	w.leaderSince, w.transferredAt = w.now, w.now
 	return nil
 }
 

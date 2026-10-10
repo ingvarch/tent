@@ -351,15 +351,14 @@ func TestShrinkServerChecksAtRestAndTheWindowStillApply(t *testing.T) {
 	})
 }
 
-func TestShrinkTakesAGroupFromThreeServersToTwoAndRefusesTheLastOfTwo(t *testing.T) {
+func TestShrinkTakesAGroupFromThreeServersToTwoAndFromTwoToOne(t *testing.T) {
 	runServerCasesIn(t, rollout.Shrink, func() rollout.State { return shrinkServersState(3, 1) }, []serverCase{
-		{"3 to 1 starts with the removal of a server", func(*testing.T, *rollout.State) {},
+		{"3 to 2 starts with the stop of a server", func(*testing.T, *rollout.State) {},
 			serverOutcome{Action: rollout.Stop, Machine: serverName(2)}},
 	})
-	runRefusalCasesIn(t, rollout.Shrink, func() rollout.State { return shrinkServersState(2, 1) }, []refusalCase{
-		{"2 to 1 goes through line f", func(*testing.T, *rollout.State) {},
-			"node group servers: removing prod-servers-1 would leave one voter of two: tent does not take a group " +
-				"from two voters to one yet"},
+	runServerCasesIn(t, rollout.Shrink, func() rollout.State { return shrinkServersState(2, 1) }, []serverCase{
+		{"2 to 1 removes the peer while the server runs", func(*testing.T, *rollout.State) {},
+			serverOutcome{Action: rollout.RemovePeer, Machine: serverName(1), Server: "r-2"}},
 	})
 }
 

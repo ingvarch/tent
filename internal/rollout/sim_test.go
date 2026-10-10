@@ -74,7 +74,9 @@ type world struct {
 	unplaced    int
 	// leaderSince is when the leader took the leadership: the reconcile of the leader runs every 6 ticks from then.
 	leaderSince time.Time
-	noCleanup   bool // autopilot does not remove the peers of failed servers
+	// transferredAt is when the leadership last moved to another server; zero before the first move.
+	transferredAt time.Time
+	noCleanup     bool // autopilot does not remove the peers of failed servers
 	// keepsBudget has the groups that start with all their nodes available: the budget invariant holds for them.
 	keepsBudget map[string]bool
 	// startSize is how many machines each group had when arm was called.
