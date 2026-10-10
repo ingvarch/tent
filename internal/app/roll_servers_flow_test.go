@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -46,6 +47,15 @@ func (v serverView) broken(size int) []string {
 	if !v.leaderRuns {
 		out = append(out, fmt.Sprintf("the cluster has the leader %q, want one whose machine runs", v.leader))
 	}
+	if msg := v.lostQuorum(); msg != "" {
+		out = append(out, msg)
+	}
+	return out
+}
+
+// lostQuorum returns what the view breaks of the quorum, or nothing when the voters that run are a quorum of the
+// voters.
+func (v serverView) lostQuorum() string {
 	live := 0
 	for _, runs := range v.voters {
 		if runs {
@@ -53,14 +63,15 @@ func (v serverView) broken(size int) []string {
 		}
 	}
 	if quorum := len(v.voters)/2 + 1; live < quorum {
-		out = append(out, fmt.Sprintf("%d of %d voters run, want at least %d", live, len(v.voters), quorum))
+		return fmt.Sprintf("%d of %d voters run, want at least %d", live, len(v.voters), quorum)
 	}
-	return out
+	return ""
 }
 
 // raftVoters returns the instance IDs of the servers that vote in the Raft configuration as the world last saw it,
-// the instance ID of the leader, and when the last server joined as a nonvoter, which is zero if none did.
-func (w *nomadWorld) raftVoters() (voters []string, leader string, joined time.Time) {
+// the instance ID of the leader, and when the last server other than except joined as a nonvoter, which is zero if
+// none did. A server that the leader added again keeps the time of its first join.
+func (w *nomadWorld) raftVoters(except string) (voters []string, leader string, joined time.Time) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	now := time.Now()
@@ -68,7 +79,7 @@ func (w *nomadWorld) raftVoters() (voters []string, leader string, joined time.T
 		if !r.removed && r.votes(now, w.delays) {
 			voters = append(voters, r.id)
 		}
-		if !r.bootstrap && r.joined.After(joined) {
+		if !r.bootstrap && r.id != except && r.joined.After(joined) {
 			joined = r.joined
 		}
 	}
@@ -82,12 +93,14 @@ type nomadAt struct {
 }
 
 // serverInvariants checks, before every call to Vultr and to Nomad, what a roll of servers keeps (serverView.broken),
-// and that the roll stops a server only once the servers have not changed for stopWindow: a change is a server that
-// joins the Raft configuration as a nonvoter, or a transfer of the leadership.
+// and that the roll stops a server only once the servers other than it have not changed for stopWindow: a change is
+// a server that joins the Raft configuration as a nonvoter, or a transfer of the leadership. At every HaltInstance
+// it also checks haltFacts.broken, and wantQuorumFor judges the voters that run over time.
 type serverInvariants struct {
-	tb testing.TB
-	f  *vultrfake.Fake
-	w  *nomadWorld
+	tb   testing.TB
+	f    *vultrfake.Fake
+	w    *nomadWorld
+	size int // the size of the server group
 
 	mu          sync.Mutex
 	outside     map[string]bool // the machines that the test halted itself, by ID
@@ -98,11 +111,12 @@ type serverInvariants struct {
 	vultr, seen int             // how many calls had reached the Vultr fake and Nomad when the watch began
 }
 
-// watchServers makes every call to f and to w check the invariants before it runs, and takes the hooks of both.
-func watchServers(tb testing.TB, f *vultrfake.Fake, w *nomadWorld) *serverInvariants {
+// watchServers makes every call to f and to w check the invariants of a server group of the given size before it
+// runs, and takes the hooks of both.
+func watchServers(tb testing.TB, f *vultrfake.Fake, w *nomadWorld, size int) *serverInvariants {
 	tb.Helper()
 	inv := &serverInvariants{
-		tb: tb, f: f, w: w, outside: map[string]bool{}, vultr: len(f.Calls()), seen: len(w.Log()),
+		tb: tb, f: f, w: w, size: size, outside: map[string]bool{}, vultr: len(f.Calls()), seen: len(w.Log()),
 	}
 	inv.watch(nil, nil)
 	return inv
@@ -169,14 +183,16 @@ func (inv *serverInvariants) view() serverView {
 			v.machines++
 		}
 	}
-	voters, leader, _ := inv.w.raftVoters()
-	runs := func(id string) bool { return hasInstance(inv.f, id) && !inv.f.Halted(id) }
+	voters, leader, _ := inv.w.raftVoters("")
 	for _, id := range voters {
-		v.voters = append(v.voters, runs(id))
+		v.voters = append(v.voters, inv.runs(id))
 	}
-	v.leader, v.leaderRuns = leader, leader != "" && runs(leader)
+	v.leader, v.leaderRuns = leader, leader != "" && inv.runs(leader)
 	return v
 }
+
+// runs reports whether the cloud has the machine id and it is not halted.
+func (inv *serverInvariants) runs(id string) bool { return hasInstance(inv.f, id) && !inv.f.Halted(id) }
 
 // check fails the test for each invariant that the cluster breaks before the call. A call whose context has ended is
 // checked and not counted, since the fakes log no such call.
@@ -187,12 +203,14 @@ func (inv *serverInvariants) check(ctx context.Context, call string) {
 		inv.checked++
 		inv.mu.Unlock()
 	}
-	for _, msg := range inv.view().broken(serverGroupSize) {
+	for _, msg := range inv.view().broken(inv.size) {
 		inv.tb.Errorf("before %s: %s", strings.TrimSpace(call), msg)
 	}
 }
 
-// checkStop fails the test when the roll halts the machine id less than stopWindow after the servers last changed.
+// checkStop fails the test when the roll halts the machine id less than stopWindow after the servers other than it
+// last changed, or when the halt breaks haltFacts.broken. A machine that the test halted itself is left alone. The
+// checks run when the call is sent, whatever a hook makes of its answer.
 func (inv *serverInvariants) checkStop(id string) {
 	inv.tb.Helper()
 	inv.mu.Lock()
@@ -201,13 +219,93 @@ func (inv *serverInvariants) checkStop(id string) {
 	if outside {
 		return
 	}
-	_, _, joined := inv.w.raftVoters()
+	_, _, joined := inv.w.raftVoters(id)
 	changed := joined
 	if transferred.After(changed) {
 		changed = transferred
 	}
 	if since := time.Since(changed); since < stopWindow {
 		inv.tb.Errorf("the roll halted %s %v after the servers last changed, want at least %v", id, since, stopWindow)
+	}
+	for _, msg := range inv.haltFacts(id).broken(id) {
+		inv.tb.Errorf("%s", msg)
+	}
+}
+
+// reconcileClearance is the least time from a halt of a server beside fewer than two voters to the leader's next
+// reconcile: the minute between two reconciles, less 10 s for the gap between two observations of a held stop and 10 s
+// for the age of the re-add that releases it.
+const reconcileClearance = 40 * time.Second
+
+// haltFacts is what the checks at a halt read of the world at the moment the call is sent.
+type haltFacts struct {
+	inRaft      bool          // the server of the machine is in the Raft configuration
+	othersRun   int           // the voters other than that server whose machines run
+	memberAlive bool          // the server's member is alive in the gossip pool
+	passes      bool          // the world has the leader reconcile
+	untilPass   time.Duration // how long until the leader's next reconcile; set when passes
+}
+
+// haltFacts brings the world to now and returns what it shows of the server of the machine id.
+func (inv *serverInvariants) haltFacts(id string) haltFacts {
+	inv.w.follow()
+	inv.w.mu.Lock()
+	defer inv.w.mu.Unlock()
+	now, d, c := time.Now(), inv.w.delays, &inv.w.raft
+	var h haltFacts
+	for _, r := range c.servers {
+		switch {
+		case r.id == id:
+			h.inRaft = !r.removed
+			h.memberAlive = r.memberAliveAt(now, d)
+		case !r.removed && r.votes(now, d) && inv.runs(r.id):
+			h.othersRun++
+		}
+	}
+	if h.passes = d.reconcileEvery > 0; h.passes {
+		h.untilPass = d.reconcileEvery - now.Sub(c.ledAt)%d.reconcileEvery
+	}
+	return h
+}
+
+// broken returns what a halt of the machine id breaks. H1: the server is in the Raft configuration beside fewer than
+// two other voters that run. H2: fewer than two other voters run, the server's member is alive, and the leader's next
+// reconcile is less than reconcileClearance away, so the leader may add the server behind the stop. A halt that breaks
+// H1 can break H2 too.
+func (h haltFacts) broken(id string) []string {
+	var out []string
+	if h.inRaft && h.othersRun < 2 {
+		out = append(out, fmt.Sprintf("the roll halted %s, a server in the Raft configuration, beside %d other voters that "+
+			"run, want at least 2", id, h.othersRun))
+	}
+	if h.othersRun < 2 && h.memberAlive && h.passes && h.untilPass < reconcileClearance {
+		out = append(out, fmt.Sprintf("the roll halted %s %v before the leader's next reconcile beside %d other voters "+
+			"that run, want at least %v", id, h.untilPass, h.othersRun, reconcileClearance))
+	}
+	return out
+}
+
+// quorumReadEvery is how often wantQuorumFor reads the voters.
+const quorumReadEvery = 5 * time.Second
+
+// wantQuorumFor lets the clock of the bubble run for d and reads the voters at once, every quorumReadEvery and at the
+// end. At the first read in which the voters that run are no quorum of the voters it fails the test and returns. It
+// brings the world to each read, as a call to Nomad does, and a machine that was halted does not run, also within its
+// halt lag. It checks nothing else, so a flow may call it between two runs.
+func (inv *serverInvariants) wantQuorumFor(d time.Duration) {
+	inv.tb.Helper()
+	for waited := time.Duration(0); ; {
+		inv.w.follow()
+		if msg := inv.view().lostQuorum(); msg != "" {
+			inv.tb.Errorf("%v into the wait: %s", waited, msg)
+			return
+		}
+		if waited >= d {
+			return
+		}
+		step := min(quorumReadEvery, d-waited)
+		time.Sleep(step)
+		waited += step
 	}
 }
 
@@ -267,7 +365,7 @@ func serversFlowWorld(
 			setup(w)
 		}
 	})
-	return svc, f, w, watchServers(t, f, w)
+	return svc, f, w, watchServers(t, f, w, serverGroupSize)
 }
 
 // serverMachine is a server machine of the cluster as a roll sees it.
@@ -450,7 +548,7 @@ func clusterFlowWorld(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld,
 	svc, f, w, _ := serversFlowWorld(t)
 	mustReplace(t, svc, workersMetaYAML)
 	mustUpdate(t, svc)
-	return svc, f, w, watchServers(t, f, w)
+	return svc, f, w, watchServers(t, f, w, serverGroupSize)
 }
 
 // TestRollServersFlowRollsTheServersBeforeTheWorkers applies the roll of a cluster whose servers and workers are
@@ -727,7 +825,7 @@ func TestRollServersFlowForceReplacesEveryServerAndWorkerOnce(t *testing.T) {
 		svc, f, w := newRelease(t)
 		w.ServersOverTime()
 		mustUpdate(t, svc)
-		inv := watchServers(t, f, w)
+		inv := watchServers(t, f, w, serverGroupSize)
 		oldServers, oldWorkers := serverMachines(f), workerIDs(f)
 
 		plan, err := applyRoll(svc, app.RollOptions{Force: true})
@@ -856,41 +954,27 @@ func TestServerViewBreaksTheInvariants(t *testing.T) {
 	}
 }
 
-// TestServerInvariantsFailTheTestForWhatTheClusterBreaks makes each invariant fail on the world, so that the flows
-// cannot pass because their hooks look at nothing: a lost quorum, a leader that halted, a fifth server machine,
-// and a stop shortly after a transfer of the leadership. A stop once the window has passed fails nothing.
-func TestServerInvariantsFailTheTestForWhatTheClusterBreaks(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name    string
-		breakIt func(t *testing.T, b liveWorld, inv *serverInvariants)
-		want    string // a part of the failure, empty for none
-	}{
-		{"a lost quorum", func(t *testing.T, b liveWorld, inv *serverInvariants) {
-			for _, s := range b.followers(t) {
-				inv.halt(s.id)
-			}
-		}, "1 of 3 voters run, want at least 2"},
-		{"a leader that halted", func(t *testing.T, b liveWorld, inv *serverInvariants) {
-			inv.halt(b.leader(t).id)
-		}, `want one whose machine runs`},
-		{"too many machines", func(t *testing.T, b liveWorld, _ *serverInvariants) {
-			b.addServer(t, "prod-servers-3")
-			b.addServer(t, "prod-servers-4")
-		}, "the server group has 5 machines, want at most 4"},
-		{"a stop just before the window ends", func(t *testing.T, b liveWorld, _ *serverInvariants) {
-			stopAfterTransfer(t, b, stopWindow-time.Second)
-		}, "the roll halted"},
-		{"a stop when the window ends", func(t *testing.T, b liveWorld, _ *serverInvariants) {
-			stopAfterTransfer(t, b, stopWindow)
-		}, ""},
-	} {
+// invariantCase is a world that breaks one invariant, or none.
+type invariantCase struct {
+	name    string
+	setups  []func(*nomadWorld) // after the servers over time and the reconcile of reconcileWorld
+	breakIt func(t *testing.T, b liveWorld, inv *serverInvariants)
+	want    string // a part of the failure; empty when nothing fails
+	without string // a part that no failure has; empty for none
+}
+
+// wantInvariants runs each case on a healthy cluster of three servers with the invariants watching, which fail the
+// test only for what the case breaks.
+func wantInvariants(t *testing.T, cases []invariantCase) {
+	t.Helper()
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
 				ftb := &failureTB{TB: t}
-				b := newLiveWorldWith(t, func(w *nomadWorld) { w.ServersOverTime(); w.FailOnLeaderLoss(ftb) })
-				inv := watchServers(ftb, b.f, b.w)
+				b := reconcileWorld(t, append([]func(*nomadWorld){func(w *nomadWorld) { w.FailOnLeaderLoss(ftb) }},
+					tc.setups...)...)
+				inv := watchServers(ftb, b.f, b.w, serverGroupSize)
 				b.peers(t)
 				if got := ftb.failures(); len(got) > 0 {
 					t.Fatalf("the invariants failed for a healthy cluster: %q", got)
@@ -906,9 +990,332 @@ func TestServerInvariantsFailTheTestForWhatTheClusterBreaks(t *testing.T) {
 				if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
 					t.Errorf("the invariants failed with %q, want a failure that says %q", got, tc.want)
 				}
+				if tc.without != "" && strings.Contains(got, tc.without) {
+					t.Errorf("the invariants failed with %q, want no failure that says %q", got, tc.without)
+				}
 			})
 		})
 	}
+}
+
+// TestServerInvariantsFailTheTestForWhatTheClusterBreaks makes each invariant fail on the world, so that the flows
+// cannot pass because their hooks look at nothing: a lost quorum, a leader that halted, a fifth server machine,
+// and a stop shortly after a transfer of the leadership or after another server joined. A stop once the window has
+// passed fails nothing, and neither does a stop of the server that joined last.
+func TestServerInvariantsFailTheTestForWhatTheClusterBreaks(t *testing.T) {
+	t.Parallel()
+	wantInvariants(t, []invariantCase{
+		{name: "a lost quorum", breakIt: func(t *testing.T, b liveWorld, inv *serverInvariants) {
+			for _, s := range b.followers(t) {
+				inv.halt(s.id)
+			}
+		}, want: "1 of 3 voters run, want at least 2", without: "the roll halted"},
+		{name: "a leader that halted", breakIt: func(t *testing.T, b liveWorld, inv *serverInvariants) {
+			inv.halt(b.leader(t).id)
+		}, want: `want one whose machine runs`, without: "the roll halted"},
+		{name: "too many machines", breakIt: func(t *testing.T, b liveWorld, _ *serverInvariants) {
+			b.addServer(t, "prod-servers-3")
+			b.addServer(t, "prod-servers-4")
+		}, want: "the server group has 5 machines, want at most 4"},
+		{name: "a stop just before the window ends", breakIt: func(t *testing.T, b liveWorld, _ *serverInvariants) {
+			stopAfterTransfer(t, b, stopWindow-time.Second)
+		}, want: "after the servers last changed"},
+		{name: "a stop when the window ends", breakIt: func(t *testing.T, b liveWorld, _ *serverInvariants) {
+			stopAfterTransfer(t, b, stopWindow)
+		}},
+		{name: "a stop of another server just after a server joined",
+			breakIt: func(t *testing.T, b liveWorld, _ *serverInvariants) {
+				b.addServer(t, "prod-servers-3")
+				b.peers(t)
+				b.haltInstance(t, b.followers(t)[0])
+			}, want: "after the servers last changed"},
+		{name: "a stop of the server that has just joined", breakIt: func(t *testing.T, b liveWorld, _ *serverInvariants) {
+			s := b.addServer(t, "prod-servers-3")
+			b.peers(t)
+			b.haltInstance(t, s)
+		}},
+	})
+}
+
+// TestServerInvariantsTakeTheSizeOfTheGroup shows that the machines of a group are counted against its size: the
+// three servers of the test cluster are one beyond a group of one.
+func TestServerInvariantsTakeTheSizeOfTheGroup(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		size int
+		want string
+	}{
+		{"a group of three", 3, ""},
+		{"a group of one", 1, "the server group has 3 machines, want at most 2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				ftb := &failureTB{TB: t}
+				b := newLiveWorldWith(t, func(w *nomadWorld) { w.ServersOverTime() })
+				watchServers(ftb, b.f, b.w, tc.size)
+
+				b.peers(t)
+
+				got := strings.Join(ftb.failures(), "\n")
+				if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
+					t.Errorf("the invariants failed with %q, want a failure that says %q", got, tc.want)
+				}
+			})
+		})
+	}
+}
+
+// TestServerViewCountsTheMachinesOfAGroupBySize shows that a group of one has two machines at most.
+func TestServerViewCountsTheMachinesOfAGroupBySize(t *testing.T) {
+	t.Parallel()
+	one := func(machines int) serverView {
+		return serverView{machines: machines, voters: []bool{true}, leader: "i-1", leaderRuns: true}
+	}
+
+	if got := one(2).broken(1); len(got) > 0 {
+		t.Errorf("two machines of a group of one break %q, want nothing", got)
+	}
+	got := one(3).broken(1)
+	if want := []string{"the server group has 3 machines, want at most 2"}; !slices.Equal(got, want) {
+		t.Errorf("three machines of a group of one break %q, want %q", got, want)
+	}
+}
+
+// loseHaltAnswer makes a HaltInstance reach the fake and fail for the caller, as a halt whose answer is lost does.
+func loseHaltAnswer(ctx context.Context, c vultrfake.Call, next func(context.Context) error) error {
+	err := next(ctx)
+	if c.Name == "HaltInstance" && err == nil {
+		return errLost
+	}
+	return err
+}
+
+// Where the checks at a halt are tried: the leader reconciles every reconcileEvery, and a halt comes after the stop
+// window of the leadership is over.
+const (
+	reconcileEvery = 5 * time.Minute
+	afterWindow    = stopWindow + time.Second
+)
+
+// haltScene is a halt of one server, beside the other two that the test cluster has, tried after a transfer of the
+// leadership.
+type haltScene struct {
+	after     time.Duration // the halt comes this long after the transfer, and so does the removal of the peers
+	removeAll bool          // the peers of both servers that do not lead go; else only that of the server not halted
+	lose      bool          // a hook loses the answer of the halt
+}
+
+// run moves the leadership, waits, removes the peers and halts a server that followed before the move and after it.
+func (h haltScene) run(t *testing.T, b liveWorld, inv *serverInvariants) {
+	t.Helper()
+	at, victim := b.startLeadership(t)
+	sleepUntil(at, h.after)
+	for _, s := range b.followers(t) {
+		if h.removeAll || s != victim {
+			b.removePeer(t, s)
+		}
+	}
+	if !h.lose {
+		b.haltInstance(t, victim)
+		return
+	}
+	inv.watch(loseHaltAnswer, nil)
+	if err := b.f.HaltInstance(t.Context(), victim.id); !errors.Is(err, errLost) {
+		t.Fatalf("HaltInstance: %v, want its answer lost", err)
+	}
+}
+
+// TestServerInvariantsCheckEachHaltBesideFewVoters makes each check at a HaltInstance fail on the world: a server in
+// the Raft configuration beside one voter that runs, and a server out of it 39 s before the leader's next reconcile
+// beside one voter. The same halts with two other voters, with the server out of the configuration at once, 40 s
+// before the reconcile, with its member not alive, or with no reconcile at all, fail nothing. The checks run also
+// for a call whose answer a hook loses.
+func TestServerInvariantsCheckEachHaltBesideFewVoters(t *testing.T) {
+	t.Parallel()
+	const inRaft, beforePass = "in the Raft configuration", "before the leader's next reconcile"
+	every := func(w *nomadWorld) { w.SetReconcile(reconcileEvery, 10*time.Second) }
+	scene := func(h haltScene) func(*testing.T, liveWorld, *serverInvariants) { return h.run }
+	wantInvariants(t, []invariantCase{
+		{name: "a server in the Raft configuration beside one voter", setups: []func(*nomadWorld){every},
+			breakIt: scene(haltScene{after: afterWindow}), want: inRaft, without: beforePass},
+		{name: "a server in the Raft configuration beside one voter, the answer lost",
+			setups:  []func(*nomadWorld){every},
+			breakIt: scene(haltScene{after: afterWindow, lose: true}), want: inRaft, without: beforePass},
+		{name: "a server beside one voter that runs and one that halted", setups: []func(*nomadWorld){every},
+			breakIt: func(t *testing.T, b liveWorld, inv *serverInvariants) {
+				at, victim := b.startLeadership(t)
+				sleepUntil(at, afterWindow)
+				for _, s := range b.followers(t) {
+					if s != victim {
+						inv.halt(s.id)
+					}
+				}
+				b.haltInstance(t, victim)
+			}, want: inRaft, without: beforePass},
+		{name: "a server beside one voter and one that joined", setups: []func(*nomadWorld){every},
+			breakIt: func(t *testing.T, b liveWorld, _ *serverInvariants) {
+				at, victim := b.startLeadership(t)
+				sleepUntil(at, afterWindow)
+				for _, s := range b.followers(t) {
+					if s != victim {
+						b.removePeer(t, s)
+					}
+				}
+				b.addServer(t, "prod-servers-3")
+				b.peers(t)
+				b.haltInstance(t, victim)
+			}, want: inRaft, without: beforePass},
+		{name: "a server that the leader added again since the last call to Nomad", setups: []func(*nomadWorld){every},
+			breakIt: func(t *testing.T, b liveWorld, _ *serverInvariants) {
+				at, victim := b.startLeadership(t)
+				sleepUntil(at, afterWindow)
+				for _, s := range b.followers(t) {
+					b.removePeer(t, s)
+				}
+				sleepUntil(at, reconcileEvery+time.Second)
+				b.haltInstance(t, victim)
+			}, want: inRaft, without: beforePass},
+		{name: "a server beside two other voters", setups: []func(*nomadWorld){every},
+			breakIt: func(t *testing.T, b liveWorld, _ *serverInvariants) {
+				at, victim := b.startLeadership(t)
+				sleepUntil(at, afterWindow)
+				b.haltInstance(t, victim)
+			}},
+		{name: "a server beside two other voters 1 s before the reconcile", setups: []func(*nomadWorld){every},
+			breakIt: func(t *testing.T, b liveWorld, _ *serverInvariants) {
+				at, victim := b.startLeadership(t)
+				sleepUntil(at, reconcileEvery-time.Second)
+				b.haltInstance(t, victim)
+			}},
+		{name: "a server out of the Raft configuration at once", setups: []func(*nomadWorld){every},
+			breakIt: scene(haltScene{after: afterWindow, removeAll: true})},
+		{name: "a server out of the Raft configuration 39 s before the reconcile", setups: []func(*nomadWorld){every},
+			breakIt: scene(haltScene{after: reconcileEvery - 39*time.Second, removeAll: true}),
+			want:    beforePass, without: inRaft},
+		{name: "a server out of the Raft configuration 40 s before the reconcile", setups: []func(*nomadWorld){every},
+			breakIt: scene(haltScene{after: reconcileEvery - 40*time.Second, removeAll: true})},
+		{name: "a server out of the Raft configuration 39 s before the second reconcile",
+			setups:  []func(*nomadWorld){every},
+			breakIt: scene(haltScene{after: 2*reconcileEvery - 39*time.Second, removeAll: true}),
+			want:    beforePass, without: inRaft},
+		{name: "a server out of the Raft configuration 40 s before the second reconcile",
+			setups:  []func(*nomadWorld){every},
+			breakIt: scene(haltScene{after: 2*reconcileEvery - 40*time.Second, removeAll: true})},
+		{name: "a server out of the Raft configuration in the moment of a reconcile", setups: []func(*nomadWorld){every},
+			breakIt: scene(haltScene{after: reconcileEvery, removeAll: true})},
+		{name: "a server out of the Raft configuration 39 s before the reconcile, the answer lost",
+			setups:  []func(*nomadWorld){every},
+			breakIt: scene(haltScene{after: reconcileEvery - 39*time.Second, removeAll: true, lose: true}),
+			want:    beforePass, without: inRaft},
+		{name: "a server whose member is not alive, 1 s before the reconcile",
+			setups: []func(*nomadWorld){every},
+			breakIt: func(t *testing.T, b liveWorld, _ *serverInvariants) {
+				at, victim := b.startLeadership(t)
+				sleepUntil(at, afterWindow)
+				for _, s := range b.followers(t) {
+					b.removePeer(t, s)
+				}
+				b.forceLeave(t, victim)
+				sleepUntil(at, reconcileEvery-time.Second)
+				b.haltInstance(t, victim)
+			}},
+		{name: "a server out of the Raft configuration 39 s before a reconcile that never comes",
+			setups:  []func(*nomadWorld){func(w *nomadWorld) { w.SetReconcile(0, 0) }},
+			breakIt: scene(haltScene{after: reconcileEvery - 39*time.Second, removeAll: true})},
+	})
+}
+
+// quorumCase is a cluster of two voters whose leader the test moved: the third server is out of the Raft
+// configuration for good.
+type quorumCase struct {
+	name   string
+	setups []func(*nomadWorld)
+	scene  func(t *testing.T, b liveWorld, inv *serverInvariants, at time.Time, victim worldServer)
+	want   string // the one failure that wantQuorumFor makes; empty for none
+}
+
+// TestWantQuorumForJudgesTheVotersThatRun shows what the quorum check says in a cluster of two voters: it fails at the
+// read after the world promoted a server that was added again behind its stop, and at once for a voter that halted
+// within its halt lag; it passes for a server that the leader added again and the world does not promote, and for a
+// healthy cluster, which it may check twice.
+func TestWantQuorumForJudgesTheVotersThatRun(t *testing.T) {
+	t.Parallel()
+	lag := func(w *nomadWorld) { w.SetHaltLag(9 * time.Second) }
+	promotedLater := func(wait time.Duration) func(*testing.T, liveWorld, *serverInvariants, time.Time, worldServer) {
+		return func(t *testing.T, b liveWorld, inv *serverInvariants, at time.Time, victim worldServer) {
+			sleepUntil(at, 25*time.Second)
+			b.removePeer(t, victim)
+			sleepUntil(at, 59*time.Second)
+			inv.halt(victim.id)
+			inv.wantQuorumFor(wait)
+		}
+	}
+	for _, tc := range []quorumCase{
+		{name: "a server promoted after its halt", setups: []func(*nomadWorld){lag}, scene: promotedLater(30 * time.Second),
+			want: "15s into the wait: 1 of 2 voters run, want at least 2"},
+		{name: "a server promoted at the last read", setups: []func(*nomadWorld){lag}, scene: promotedLater(15 * time.Second),
+			want: "15s into the wait: 1 of 2 voters run, want at least 2"},
+		{name: "a server promoted after the last read", setups: []func(*nomadWorld){lag},
+			scene: promotedLater(10 * time.Second)},
+		{name: "a server added again and not promoted", setups: []func(*nomadWorld){
+			lag, func(w *nomadWorld) { w.SetReconcile(time.Minute, time.Hour) }}, scene: promotedLater(30 * time.Second)},
+		{name: "a voter that halted within its halt lag", setups: []func(*nomadWorld){lag},
+			scene: func(_ *testing.T, _ liveWorld, inv *serverInvariants, at time.Time, victim worldServer) {
+				sleepUntil(at, 5*time.Second)
+				inv.halt(victim.id)
+				inv.wantQuorumFor(10 * time.Second)
+			}, want: "0s into the wait: 1 of 2 voters run, want at least 2"},
+		{name: "a healthy cluster, checked twice",
+			scene: func(_ *testing.T, _ liveWorld, inv *serverInvariants, _ time.Time, _ worldServer) {
+				inv.wantQuorumFor(12 * time.Second)
+				inv.wantQuorumFor(12 * time.Second)
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				ftb := &failureTB{TB: t}
+				b := reconcileWorld(t, tc.setups...)
+				inv := watchServers(ftb, b.f, b.w, 2)
+				at, victim := b.startLeadership(t)
+				for _, s := range b.followers(t) {
+					if s != victim {
+						b.removePeer(t, s)
+						b.forceLeave(t, s)
+					}
+				}
+
+				tc.scene(t, b, inv, at, victim)
+
+				var want []string
+				if tc.want != "" {
+					want = []string{tc.want}
+				}
+				if diff := cmp.Diff(want, ftb.failures()); diff != "" {
+					t.Errorf("the invariants failed (-want +got):\n%s", diff)
+				}
+			})
+		})
+	}
+}
+
+// TestWantQuorumForLetsTheClockRunForTheTimeAsked shows that the check reads until the time is over, also when it is
+// no multiple of the time between two reads.
+func TestWantQuorumForLetsTheClockRunForTheTimeAsked(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b := newLiveWorldWith(t, func(w *nomadWorld) { w.ServersOverTime() })
+		inv := watchServers(t, b.f, b.w, serverGroupSize)
+		start := time.Now()
+
+		inv.wantQuorumFor(12 * time.Second)
+
+		if got := time.Since(start); got != 12*time.Second {
+			t.Errorf("wantQuorumFor let %v pass, want 12s", got)
+		}
+	})
 }
 
 // stopAfterTransfer moves the leadership to a follower, waits for d and halts another follower through the Vultr fake,
