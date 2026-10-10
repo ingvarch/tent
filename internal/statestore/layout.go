@@ -57,6 +57,18 @@ func (l Layout) NodeGroup(name string) (string, error) {
 // NodeGroups returns the prefix of the node groups' specs.
 func (l Layout) NodeGroups() string { return l.Prefix() + "nodegroups/" }
 
+// NameIndexes returns the prefix of the objects that hold the highest index of the machine names of a node group.
+func (l Layout) NameIndexes() string { return l.Prefix() + "names/" }
+
+// NameIndex returns the path of the highest index that a machine name of the node group has had. The name must be one
+// valid path segment.
+func (l Layout) NameIndex(group string) (string, error) {
+	if err := validName("node group", group); err != nil {
+		return "", err
+	}
+	return l.NameIndexes() + group, nil
+}
+
 // Completed returns the path of the spec last applied, with all defaults.
 func (l Layout) Completed() string { return l.Prefix() + "cluster.completed.yaml" }
 

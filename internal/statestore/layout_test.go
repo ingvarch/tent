@@ -27,6 +27,15 @@ func mustNodeGroup(t *testing.T, l statestore.Layout, name string) string {
 	return p
 }
 
+func mustNameIndex(t *testing.T, l statestore.Layout, group string) string {
+	t.Helper()
+	p, err := l.NameIndex(group)
+	if err != nil {
+		t.Fatalf("NameIndex(%q): %v", group, err)
+	}
+	return p
+}
+
 func TestLayoutPaths(t *testing.T) {
 	l := mustLayout(t, "prod")
 	for _, tc := range []struct{ name, got, want string }{
@@ -36,6 +45,8 @@ func TestLayoutPaths(t *testing.T) {
 		{"ClusterSpec", l.ClusterSpec(), "prod/cluster.yaml"},
 		{"NodeGroup", mustNodeGroup(t, l, "workers"), "prod/nodegroups/workers.yaml"},
 		{"NodeGroups", l.NodeGroups(), "prod/nodegroups/"},
+		{"NameIndexes", l.NameIndexes(), "prod/names/"},
+		{"NameIndex", mustNameIndex(t, l, "servers"), "prod/names/servers"},
 		{"Completed", l.Completed(), "prod/cluster.completed.yaml"},
 		{"Lock", l.Lock(), "prod/lock"},
 		{"CAKey", l.CAKey(), "prod/pki/private/ca.key"},
@@ -72,7 +83,8 @@ func TestLayoutPathsInStore(t *testing.T) {
 	s := openFile(t, t.TempDir())
 	l := mustLayout(t, "prod")
 	objects := append(
-		[]string{l.TentVersion(), l.ClusterSpec(), mustNodeGroup(t, l, "workers"), l.Completed(), l.Lock()},
+		[]string{l.TentVersion(), l.ClusterSpec(), mustNodeGroup(t, l, "workers"), l.Completed(), l.Lock(),
+			mustNameIndex(t, l, "servers")},
 		l.Secrets()...)
 	for _, p := range objects {
 		mustPut(t, s, p)
@@ -82,9 +94,10 @@ func TestLayoutPathsInStore(t *testing.T) {
 		want   []string
 	}{
 		{l.Prefix(), []string{"prod/cluster.completed.yaml", "prod/cluster.yaml", "prod/lock",
-			"prod/nodegroups/workers.yaml", "prod/pki/ca-bundle.pem", "prod/pki/private/ca.key",
+			"prod/names/servers", "prod/nodegroups/workers.yaml", "prod/pki/ca-bundle.pem", "prod/pki/private/ca.key",
 			"prod/secrets/acl-bootstrap-token", "prod/secrets/gossip.key", "prod/tent-version"}},
 		{l.NodeGroups(), []string{"prod/nodegroups/workers.yaml"}},
+		{l.NameIndexes(), []string{"prod/names/servers"}},
 	} {
 		got, err := s.List(t.Context(), tc.prefix)
 		if err != nil {
@@ -113,6 +126,10 @@ func TestNewLayoutRejects(t *testing.T) {
 
 func TestNodeGroupRejects(t *testing.T) {
 	l := mustLayout(t, "prod")
+	funcs := []struct {
+		name string
+		path func(string) (string, error)
+	}{{"NodeGroup", l.NodeGroup}, {"NameIndex", l.NameIndex}}
 	for _, tc := range []struct{ name, want string }{
 		{"", "invalid node group name: empty"},
 		{"a/b", `invalid node group name: segment "a/b": use only`},
@@ -120,9 +137,11 @@ func TestNodeGroupRejects(t *testing.T) {
 		{".x", `invalid node group name: segment ".x" starts with '.'`},
 		{"nul", `invalid node group name: segment "nul" is a Windows device name`},
 	} {
-		p, err := l.NodeGroup(tc.name)
-		if err == nil || p != "" || !strings.HasPrefix(err.Error(), tc.want) {
-			t.Errorf("NodeGroup(%q) = %q, %v; want an error starting with %s", tc.name, p, err, tc.want)
+		for _, f := range funcs {
+			p, err := f.path(tc.name)
+			if err == nil || p != "" || !strings.HasPrefix(err.Error(), tc.want) {
+				t.Errorf("%s(%q) = %q, %v; want an error starting with %s", f.name, tc.name, p, err, tc.want)
+			}
 		}
 	}
 }
