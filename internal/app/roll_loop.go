@@ -468,7 +468,7 @@ func showing(step rollout.Step, reading nomadReading) string {
 		}
 		return fmt.Sprintf("autopilot reports %d voters and the servers %s", reading.health.Voters, state)
 	case step.Action == rollout.WaitStable:
-		return "the window ends at " + step.Until.UTC().Format(time.TimeOnly)
+		return "the window ends at " + step.Until.UTC().Format(time.TimeOnly) + " UTC"
 	case step.Action == rollout.WaitServerDown || step.Action == rollout.WaitJoined && joinsByVote(step.Machine.Role):
 		return showingServer(step, reading)
 	}

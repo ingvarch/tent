@@ -296,7 +296,7 @@ var progressCases = []progressCase{
 			errBusy.Error() + `"}`},
 	{"Nomad stable wait started", serverStep(app.NomadEvent{Action: app.NomadStable, Until: stableUntil},
 		app.NodeStarted, nil),
-		"waiting until 12:04:20 for the servers to be stable",
+		"waiting until 12:04:20 UTC for the servers to be stable",
 		`{"type":"nomad","step":"started","action":"stable","until":"2026-10-09T12:04:20Z"}`},
 	{"Nomad servers stable", serverStep(app.NomadEvent{Action: app.NomadStable, Until: stableUntil},
 		app.NodeDone, nil),

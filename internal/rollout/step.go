@@ -102,7 +102,7 @@ func (s Step) String() string {
 	case WaitHealthy:
 		return fmt.Sprintf("wait until %d healthy servers vote", s.Voters)
 	case WaitStable:
-		return fmt.Sprintf("wait until %s for the servers to be stable", s.Until.UTC().Format(time.TimeOnly))
+		return fmt.Sprintf("wait until %s UTC for the servers to be stable", s.Until.UTC().Format(time.TimeOnly))
 	default:
 		return fmt.Sprintf("unknown action %d", s.Action)
 	}

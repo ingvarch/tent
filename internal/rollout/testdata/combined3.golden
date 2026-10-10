@@ -7,7 +7,7 @@
 # leader prod-control-0
 create node prod-control-3 (combined of control, ams)
 wait until node prod-control-3 joins
-wait until 12:01:30 for the servers to be stable
+wait until 12:01:30 UTC for the servers to be stable
 mark node prod-control-2 ineligible
 drain node prod-control-2 within 1h0m0s
 wait until node prod-control-2 is drained
@@ -20,7 +20,7 @@ wait until Nomad lists node prod-control-2 at 10.64.0.5 as down
 purge node prod-control-2 at 10.64.0.5 from Nomad
 create node prod-control-4 (combined of control, fra)
 wait until node prod-control-4 joins
-wait until 12:04:20 for the servers to be stable
+wait until 12:04:20 UTC for the servers to be stable
 mark node prod-control-1 ineligible
 drain node prod-control-1 within 1h0m0s
 wait until node prod-control-1 is drained
@@ -33,12 +33,12 @@ wait until Nomad lists node prod-control-1 at 10.64.0.4 as down
 purge node prod-control-1 at 10.64.0.4 from Nomad
 create node prod-control-5 (combined of control, ams)
 wait until node prod-control-5 joins
-wait until 12:07:10 for the servers to be stable
+wait until 12:07:10 UTC for the servers to be stable
 mark node prod-control-0 ineligible
 drain node prod-control-0 within 1h0m0s
 wait until node prod-control-0 is drained
 move the leadership from prod-control-0 to prod-control-3
-wait until 12:08:40 for the servers to be stable
+wait until 12:08:40 UTC for the servers to be stable
 stop node prod-control-0 (ID m-1)
 wait until autopilot no longer counts prod-control-0 as a healthy voter
 remove prod-control-0 from the Raft configuration

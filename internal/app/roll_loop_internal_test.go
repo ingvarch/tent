@@ -725,7 +725,7 @@ func TestShowingSaysWhatNomadListsOfAServerWait(t *testing.T) {
 			"autopilot does not count it a healthy voter"},
 		{"a stopped server that is no voter", down, at(false, true), "autopilot does not count it a healthy voter"},
 		{"a stopped server that has no peer", down, serversReading(true), "autopilot does not count it a healthy voter"},
-		{"the window", stable, at(true, true), "the window ends at 12:04:20"},
+		{"the window", stable, at(true, true), "the window ends at 12:04:20 UTC"},
 		{"a vote of a machine without an address", rollout.Step{Action: rollout.WaitJoined, Machine: rollout.Machine{
 			Name: "prod-servers-3", Role: v1alpha1.RoleServer}}, nomadReading{peers: []nomadops.Peer{{ID: "s-9"}}},
 			"the Raft configuration lists no server at its address"},

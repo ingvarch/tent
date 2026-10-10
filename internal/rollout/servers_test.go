@@ -184,7 +184,7 @@ func runRefusalCasesIn(t *testing.T, mode rollout.Mode, base func() rollout.Stat
 }
 
 const (
-	restAdvice      = "; run tent update cluster or tent validate cluster first"
+	restAdvice      = "; run tent validate cluster to see what is wrong"
 	unhealthyAdvice = "; tent replaces a server only while every server is healthy"
 )
 
