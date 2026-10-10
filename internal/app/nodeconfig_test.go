@@ -707,25 +707,28 @@ func TestNodeConfigErrors(t *testing.T) {
 	noCert, noKey := cert, cert
 	noCert.Cert, noKey.Key = nil, pki.Secret{}
 	for _, tc := range []struct {
-		name  string
-		node  string
-		cert  pki.Certificate
-		seed  []netip.Addr
-		intro pki.Secret
-		want  string
+		name   string
+		node   string
+		expect int // bootstrap_expect
+		cert   pki.Certificate
+		seed   []netip.Addr
+		intro  pki.Secret
+		want   string
 	}{
-		{"a name that is no host name", "Prod_1", cert, seeds(1), nil, `node Prod_1: 10-node.hcl: name "Prod_1" is ` +
+		{"a name that is no host name", "Prod_1", 3, cert, seeds(1), nil, `node Prod_1: 10-node.hcl: name "Prod_1" is ` +
 			"not a host name: 1 to 63 lower-case letters, digits and dashes, starting and ending with a letter or " +
 			"digit"},
-		{"an intro token for a server", "prod-servers-0", cert, seeds(1), introToken(64),
+		{"an intro token for a server", "prod-servers-0", 3, cert, seeds(1), introToken(64),
 			"node prod-servers-0: a server takes no intro token"},
-		{"a repeated seed", "prod-servers-0", cert, append(seeds(2), seeds(1)...), nil,
+		{"a repeated seed", "prod-servers-0", 3, cert, append(seeds(2), seeds(1)...), nil,
 			"node prod-servers-0: node config: join servers[2]: 10.10.0.10 is repeated"},
-		{"no certificate", "prod-servers-0", noCert, seeds(1), nil, "node prod-servers-0: no certificate or key"},
-		{"no key", "prod-servers-0", noKey, seeds(1), nil, "node prod-servers-0: no certificate or key"},
+		{"no certificate", "prod-servers-0", 3, noCert, seeds(1), nil, "node prod-servers-0: no certificate or key"},
+		{"no key", "prod-servers-0", 3, noKey, seeds(1), nil, "node prod-servers-0: no certificate or key"},
+		{"a server that neither bootstraps nor joins", "prod-servers-0", 0, cert, nil, nil,
+			"node prod-servers-0: a server with no bootstrap_expect needs servers to join"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			nc, err := nodeConfig(tmpls["servers"], tc.node, "ams", 3, tc.cert, tc.seed, tc.intro)
+			nc, err := nodeConfig(tmpls["servers"], tc.node, "ams", tc.expect, tc.cert, tc.seed, tc.intro)
 			if err == nil || err.Error() != tc.want {
 				t.Errorf("nodeConfig() error = %v, want %s", err, tc.want)
 			}
@@ -1046,10 +1049,19 @@ func wantIncompressible(t *testing.T, what string, data []byte) {
 	}
 }
 
-// payloadOf returns node.json as cloud-init writes it from the user data: the content of its only file, decoded
-// through base64 and gzip.
+// payloadOf returns node.json as cloud-init writes it from the user data, and fails the test when it cannot.
 func payloadOf(t *testing.T, userData []byte) []byte {
 	t.Helper()
+	node, err := payloadFrom(userData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return node
+}
+
+// payloadFrom returns node.json as cloud-init writes it from the user data: the content of its only file, decoded
+// through base64 and gzip.
+func payloadFrom(userData []byte) ([]byte, error) {
 	var cc struct {
 		WriteFiles []struct {
 			Path     string `json:"path"`
@@ -1058,25 +1070,25 @@ func payloadOf(t *testing.T, userData []byte) []byte {
 		} `json:"write_files"`
 	}
 	if err := yaml.Unmarshal(userData, &cc); err != nil {
-		t.Fatalf("the user data is not YAML: %v", err)
+		return nil, fmt.Errorf("the user data is not YAML: %w", err)
 	}
 	if len(cc.WriteFiles) != 1 || cc.WriteFiles[0].Path != "/etc/tent/node.json" ||
 		cc.WriteFiles[0].Encoding != "gz+b64" {
-		t.Fatalf("the user data writes %d files, want /etc/tent/node.json in gz+b64", len(cc.WriteFiles))
+		return nil, fmt.Errorf("the user data writes %d files, want /etc/tent/node.json in gz+b64", len(cc.WriteFiles))
 	}
 	zipped, err := base64.StdEncoding.DecodeString(cc.WriteFiles[0].Content)
 	if err != nil {
-		t.Fatalf("the payload is not base64: %v", err)
+		return nil, fmt.Errorf("the payload is not base64: %w", err)
 	}
 	zr, err := gzip.NewReader(bytes.NewReader(zipped))
 	if err != nil {
-		t.Fatalf("the payload is not gzip: %v", err)
+		return nil, fmt.Errorf("the payload is not gzip: %w", err)
 	}
 	node, err := io.ReadAll(zr)
 	if err != nil {
-		t.Fatalf("read the payload: %v", err)
+		return nil, fmt.Errorf("read the payload: %w", err)
 	}
-	return node
+	return node, nil
 }
 
 // newNode returns the new node called name of the group of the specs in docs, with the test CA's certificate for its
@@ -1323,37 +1335,52 @@ func TestNodeBuilderCacheKeepsVersionsApart(t *testing.T) {
 	}
 }
 
+// TestNodeBuilderBootstrapExpect checks bootstrap_expect in 10-node.hcl: the number of servers of the specs, except on
+// a server of a cluster of one that has a seed, which joins the server that exists and gets none. The spec hash of the
+// group is the same with and without the seed.
 func TestNodeBuilderBootstrapExpect(t *testing.T) {
+	serversDocs := []string{nodeClusterYAML, nodeServersYAML, nodeWorkersYAML}
+	combinedDocs := []string{nodeClusterYAML, nodeCombinedYAML}
 	for _, tc := range []struct {
 		name  string
 		group string
 		docs  []string
-		want  int
+		size  int
+		seed  []netip.Addr
+		want  string // the bootstrap_expect line, "" for none
 	}{
-		{"servers", "servers", []string{nodeClusterYAML, nodeServersYAML, nodeWorkersYAML}, 3},
-		{"a combined group of one", "dev", []string{nodeClusterYAML, nodeCombinedYAML}, 1},
+		{"three servers with no seed", "servers", serversDocs, 3, nil, "bootstrap_expect = 3"},
+		{"three servers with a seed", "servers", serversDocs, 3, seeds(1), "bootstrap_expect = 3"},
+		{"five servers with no seed", "servers", serversDocs, 5, nil, "bootstrap_expect = 5"},
+		{"five servers with a seed", "servers", serversDocs, 5, seeds(2), "bootstrap_expect = 5"},
+		{"one server with no seed", "servers", serversDocs, 1, nil, "bootstrap_expect = 1"},
+		{"one server with a seed", "servers", serversDocs, 1, seeds(1), ""},
+		{"a combined group of one with no seed", "dev", combinedDocs, 1, nil, "bootstrap_expect = 1"},
+		{"a combined group of one with a seed", "dev", combinedDocs, 1, seeds(1), ""},
+		{"a combined group of three with a seed", "dev", combinedDocs, 3, seeds(2), "bootstrap_expect = 3"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := testBuilderInput(t, assetstest.New(), onArch("amd64", "servers", "workers", "dev"), tc.docs...)
-			if tc.want == 1 {
-				in.Specs.NodeGroups[0].Spec.Size = 1
-			}
+			in.Specs.NodeGroups[0].Spec.Size = tc.size
 			b, err := newNodeBuilder(t.Context(), in, assetCache{})
 			if err != nil {
 				t.Fatalf("newNodeBuilder: %v", err)
 			}
-			ca := testCA(t)
-			cert, err := ca.IssueNode(in.Specs.NodeGroups[0].Spec.Role, "eu", testNow)
+			cert, err := testCA(t).IssueNode(b.role(tc.group), "eu", testNow)
 			if err != nil {
 				t.Fatalf("IssueNode: %v", err)
 			}
-			nc, err := b.node(tc.group, "prod-"+tc.group+"-0", "ams", cert, seeds(1), nil)
+			nc, err := b.node(tc.group, "prod-"+tc.group+"-0", "ams", cert, tc.seed, nil)
 			if err != nil {
 				t.Fatalf("node: %v", err)
 			}
-			want := fmt.Sprintf("bootstrap_expect = %d", tc.want)
-			if got := string(fileAt(t, nc.Files, "/etc/nomad.d/10-node.hcl").Content); !strings.Contains(got, want) {
-				t.Errorf("10-node.hcl = %q, want it to hold %q", got, want)
+			got := string(fileAt(t, nc.Files, "/etc/nomad.d/10-node.hcl").Content)
+			if has := strings.Contains(got, "bootstrap_expect"); has != (tc.want != "") ||
+				!strings.Contains(got, tc.want) {
+				t.Errorf("10-node.hcl = %q, want bootstrap_expect %q", got, tc.want)
+			}
+			if hash := nodeconfig.SpecHash(nc); hash != b.specHash(tc.group) {
+				t.Errorf("the spec hash of the node is %s, want that of the group, %s", hash, b.specHash(tc.group))
 			}
 		})
 	}

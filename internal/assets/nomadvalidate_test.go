@@ -32,8 +32,8 @@ const nodeconfigGoldens = "../nodeconfig/testdata"
 const maxNomadZip = 128 << 20
 
 // TestNomadConfigValidateOnline runs nomad config validate, of the oldest Nomad the stable channel allows and of the
-// one it recommends, on each role's agent configuration as the goldens of internal/nodeconfig hold it, and on one with
-// a key Nomad does not know.
+// one it recommends, on each role's agent configuration as the goldens of internal/nodeconfig hold it, on the joining
+// form of a server and a combined node, and on one with a key Nomad does not know.
 func TestNomadConfigValidateOnline(t *testing.T) {
 	if os.Getenv("TENT_TEST_ONLINE") != "1" {
 		t.Skip("downloads Nomad from releases.hashicorp.com; set TENT_TEST_ONLINE=1 to run it")
@@ -55,15 +55,24 @@ func TestNomadConfigValidateOnline(t *testing.T) {
 			nomad := downloadNomad(ctx, t, version)
 			for _, role := range v1alpha1.Roles() {
 				t.Run(string(role), func(t *testing.T) {
-					out, err := nomadValidate(ctx, nomad, nomadAgentDir(t, files[role]))
-					if err != nil {
-						t.Fatalf("nomad config validate: %v\n%s", err, out)
+					forms := []bool{false}
+					if hasJoiningForm(files[role]) {
+						forms = append(forms, true)
 					}
-					t.Logf("nomad config validate:\n%s", out)
+					for _, joining := range forms {
+						t.Run(fmt.Sprintf("joining=%t", joining), func(t *testing.T) {
+							dir := nomadAgentDir(t, nomadAgentForm(files[role], joining))
+							out, err := nomadValidate(ctx, nomad, dir)
+							if err != nil {
+								t.Fatalf("nomad config validate: %v\n%s", err, out)
+							}
+							t.Logf("nomad config validate:\n%s", out)
+						})
+					}
 				})
 			}
 			t.Run("unknown key", func(t *testing.T) {
-				dir := nomadAgentDir(t, files[v1alpha1.RoleServer])
+				dir := nomadAgentDir(t, nomadAgentForm(files[v1alpha1.RoleServer], false))
 				writeTestFile(t, filepath.Join(dir, "50-unknown.hcl"), "tent_unknown_key = true\n")
 				out, err := nomadValidate(ctx, nomad, dir)
 				if ee, ok := errors.AsType[*exec.ExitError](err); !ok || ee.ExitCode() < 1 {
@@ -113,8 +122,78 @@ func TestNomadAgentFiles(t *testing.T) {
 	}
 
 	t.Run("the goldens of nodeconfig", func(t *testing.T) {
-		nomadAgentGoldens(t) // every golden has a place
+		goldens := nomadAgentGoldens(t) // every golden has a place
+		for _, role := range v1alpha1.Roles() {
+			if got := hasJoiningForm(goldens[role]); got != role.RunsServer() {
+				t.Errorf("the %s role has a joining form = %t, want %t", role, got, role.RunsServer())
+			}
+		}
 	})
+}
+
+// TestNomadAgentForm checks that the joining form takes 10-node.joining.hcl in place of 10-node.hcl and keeps the other
+// files, and that the other form leaves the joining file out.
+func TestNomadAgentForm(t *testing.T) {
+	files := map[string]string{
+		"00-tent.hcl":             "d/server_00-tent.hcl.golden",
+		"10-node.hcl":             "d/server_10-node.hcl.golden",
+		"10-node.joining.hcl":     "d/server_10-node.joining.hcl.golden",
+		"99-user-client.hcl":      "d/client_99.golden",
+		"11-instance.joining.hcl": "d/other.golden",
+	}
+	if !hasJoiningForm(files) || hasJoiningForm(map[string]string{"10-node.hcl": "d/g"}) {
+		t.Error("hasJoiningForm does not tell a role with a joining form from one without")
+	}
+	wantBootstrap := map[string]string{
+		"00-tent.hcl":        "d/server_00-tent.hcl.golden",
+		"10-node.hcl":        "d/server_10-node.hcl.golden",
+		"99-user-client.hcl": "d/client_99.golden",
+	}
+	if diff := cmp.Diff(wantBootstrap, nomadAgentForm(files, false)); diff != "" {
+		t.Errorf("nomadAgentForm(files, false) (-want +got):\n%s", diff)
+	}
+	wantJoining := map[string]string{
+		"00-tent.hcl":        "d/server_00-tent.hcl.golden",
+		"10-node.hcl":        "d/server_10-node.joining.hcl.golden",
+		"11-instance.hcl":    "d/other.golden",
+		"99-user-client.hcl": "d/client_99.golden",
+	}
+	if diff := cmp.Diff(wantJoining, nomadAgentForm(files, true)); diff != "" {
+		t.Errorf("nomadAgentForm(files, true) (-want +got):\n%s", diff)
+	}
+}
+
+// joiningInfix in the name of a file marks its joining form: the content of a server or combined node that joins
+// servers that exist. 10-node.joining.hcl takes the place of 10-node.hcl in that form.
+const joiningInfix = ".joining"
+
+// hasJoiningForm reports whether files, the golden of each file name, hold a joining form.
+func hasJoiningForm(files map[string]string) bool {
+	for name := range files {
+		if strings.Contains(name, joiningInfix) {
+			return true
+		}
+	}
+	return false
+}
+
+// nomadAgentForm returns the files of one form of a role's agent configuration. The joining form is the files without
+// the infix, each replaced by its file with the infix where there is one; the other form leaves the latter out.
+func nomadAgentForm(files map[string]string, joining bool) map[string]string {
+	form := make(map[string]string, len(files))
+	for name, golden := range files {
+		if !strings.Contains(name, joiningInfix) {
+			form[name] = golden
+		}
+	}
+	if joining {
+		for name, golden := range files {
+			if strings.Contains(name, joiningInfix) {
+				form[strings.Replace(name, joiningInfix, "", 1)] = golden
+			}
+		}
+	}
+	return form
 }
 
 // nomadAgentGoldens returns each role's agent configuration from the goldens of internal/nodeconfig, as

@@ -24,9 +24,10 @@ func perNodeFile(path string, content []byte) File {
 }
 
 // RenderNode returns 10-node.hcl, the settings of one node: its name, its datacenter and, on server and combined
-// nodes, the number of servers that bootstrap the cluster. Clients ignore bootstrapExpect. The name must be a host
-// name, the datacenter an HCL1 string without "*", the role server, client or combined, and bootstrapExpect at least
-// 1 on a server. The error is the first problem in the order of the arguments.
+// nodes, the number of servers that bootstrap the cluster. Clients ignore bootstrapExpect. A bootstrapExpect of 0 on a
+// server gives no server block: the node joins servers that exist and never starts a cluster of its own. The name
+// must be a host name, the datacenter an HCL1 string without "*", the role server, client or combined, and
+// bootstrapExpect at least 0 on a server. The error is the first problem in the order of the arguments.
 func RenderNode(name, datacenter string, role v1alpha1.Role, bootstrapExpect int) (File, error) {
 	content, err := renderNode(name, datacenter, role, bootstrapExpect)
 	if err != nil {
@@ -53,10 +54,12 @@ func renderNode(name, datacenter string, role v1alpha1.Role, bootstrapExpect int
 	}
 	content := header + "name       = " + n + "\ndatacenter = " + dc + "\n"
 	if role.RunsServer() {
-		if bootstrapExpect < 1 {
-			return nil, fmt.Errorf("bootstrap_expect %d is less than 1", bootstrapExpect)
+		if bootstrapExpect < 0 {
+			return nil, fmt.Errorf("bootstrap_expect %d is less than 0", bootstrapExpect)
 		}
-		content += fmt.Sprintf("\nserver {\n  bootstrap_expect = %d\n}\n", bootstrapExpect)
+		if bootstrapExpect > 0 {
+			content += fmt.Sprintf("\nserver {\n  bootstrap_expect = %d\n}\n", bootstrapExpect)
+		}
 	}
 	return []byte(content), nil
 }
