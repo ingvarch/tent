@@ -381,15 +381,16 @@ func TestResumeFromEveryState(t *testing.T) {
 const maxIdleTicks = 12
 
 // idleResumeProblem finishes a new run from the world before each decision of the full run, after the world sat idle
-// for the given number of ticks, and returns the first difference in how the run ends: the last line or the world.
-// The steps in between may differ, since a pause lets waits end and servers fail. "" means that every run ended as the
-// full run did.
+// for the given number of ticks, and returns the first difference in how the run ends: the last line or the world,
+// each a tick after its end, when a force-leave of a live member has shown. The steps in between may differ, since a
+// pause lets waits end and servers fail. "" means that every run ended as the full run did.
 func idleResumeProblem(sc scenario, idle int) (string, error) {
 	full := sc.build()
 	res, err := full.run(sc.mode, rollout.Next, true)
 	if err != nil {
 		return "", fmt.Errorf("full run: %w", err)
 	}
+	full.tick()
 	wantWorld, wantEnd := full.clientShape(), res.lines[len(res.lines)-1]
 	for i, snap := range res.snapshots {
 		w := snap.world.clone()
@@ -404,6 +405,7 @@ func idleResumeProblem(sc scenario, idle int) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("run resumed at decision %d after %d idle ticks: %w", i, idle, err)
 		}
+		w.tick() // a force-leave of a live member shows a tick later
 		if end := rest.lines[len(rest.lines)-1]; end != wantEnd {
 			return fmt.Sprintf("run resumed at decision %d after %d idle ticks ends with %q, want %q", i, idle, end,
 				wantEnd), nil

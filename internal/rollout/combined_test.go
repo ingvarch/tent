@@ -133,7 +133,7 @@ func TestCombinedLinesBToDTakeTheVictimThroughItsDrain(t *testing.T) {
 	})
 }
 
-func TestCombinedDrainStartedVictimIsNotCheckedAtRestOrForTheWindowAgain(t *testing.T) {
+func TestCombinedDrainWaitsForTheWindowOnlyBeforeTheServerGoes(t *testing.T) {
 	since := func(t *testing.T, s *rollout.State, i int, ago time.Duration) {
 		t.Helper()
 		serverNode(t, s, i).StableSince = s.Now.Add(-ago)
@@ -146,10 +146,10 @@ func TestCombinedDrainStartedVictimIsNotCheckedAtRestOrForTheWindowAgain(t *test
 			nodeNamed(t, s, serverName(1)).Eligible = false
 			since(t, s, 3, 0)
 		}, serverOutcome{Action: rollout.Drain, Machine: serverName(1), Node: nodeIDOf(1), Deadline: time.Hour}},
-		{"a drained victim does not wait for the window", func(t *testing.T, s *rollout.State) {
+		{"a drained victim waits for the window before its server goes", func(t *testing.T, s *rollout.State) {
 			serverDrained(t, s, 1)
 			since(t, s, 3, 0)
-		}, serverOutcome{Action: rollout.Stop, Machine: serverName(1)}},
+		}, serverOutcome{Action: rollout.WaitStable, Machine: serverName(1), Until: epoch.Add(70 * time.Second)}},
 		{"a drain that has begun is not checked at rest again", func(t *testing.T, s *rollout.State) {
 			nodeNamed(t, s, serverName(1)).Eligible = false
 			s.Nomad.Healthy = false
@@ -266,6 +266,15 @@ func TestCombinedLeaderIsDrainedBeforeItsLeadershipMoves(t *testing.T) {
 		return serverOutcome{Action: action, Machine: serverName(0), Node: nodeIDOf(0)}
 	}
 	transfer := serverOutcome{Action: rollout.TransferLeadership, Machine: serverName(0), Server: "r-2"}
+	// afterMove is the state right after the move: node 1 leads and every server is stable since now.
+	afterMove := func(t *testing.T, s *rollout.State) {
+		serverDrained(t, s, 0)
+		serverNode(t, s, 0).Leader = false
+		serverNode(t, s, 1).Leader = true
+		for i := range s.Nomad.Servers {
+			s.Nomad.Servers[i].StableSince = s.Now
+		}
+	}
 	runServerCases(t, combinedLeaderRoll, []serverCase{
 		{"it is marked first", func(*testing.T, *rollout.State) {}, step(rollout.MarkIneligible)},
 		{"then drained", func(t *testing.T, s *rollout.State) { node(t, s).Eligible = false }, serverOutcome{
@@ -285,13 +294,12 @@ func TestCombinedLeaderIsDrainedBeforeItsLeadershipMoves(t *testing.T) {
 			n := node(t, s)
 			n.Eligible, n.Status = false, "down"
 		}, transfer},
-		{"after the move the machine is stopped, with no second window", func(t *testing.T, s *rollout.State) {
-			serverDrained(t, s, 0)
-			serverNode(t, s, 0).Leader = false
-			serverNode(t, s, 1).Leader = true
-			for i := range s.Nomad.Servers {
-				s.Nomad.Servers[i].StableSince = s.Now
-			}
+		{"after the move the window over the other voters starts again", func(t *testing.T, s *rollout.State) {
+			afterMove(t, s)
+		}, serverOutcome{Action: rollout.WaitStable, Machine: serverName(0), Until: epoch.Add(70 * time.Second)}},
+		{"70 seconds after the move the machine is stopped", func(t *testing.T, s *rollout.State) {
+			afterMove(t, s)
+			s.Now = epoch.Add(70 * time.Second)
 		}, serverOutcome{Action: rollout.Stop, Machine: serverName(0)}},
 	})
 }
@@ -466,26 +474,26 @@ func TestCombinedGroupRollsLikeAServerGroup(t *testing.T) {
 		dropNode(&s, serverName(2))
 		checkRefused(t, s, "node group servers: it has 2 of its 3 nodes; run tent update cluster first")
 	})
-	t.Run("a group of one node cannot roll", func(t *testing.T) {
+	t.Run("a group of one node creates its second node without a failure tolerance", func(t *testing.T) {
 		s := combinedState(1)
 		s.Machines[0].SpecHash = oldHash
 		s.Nomad.FailureTolerance = 0
-		checkRefused(t, s, "node group servers: a group of one server cannot roll: its failure tolerance is 0")
+		checkOutcome(t, nextRoll(t, s), outcome{Action: rollout.Create, Group: "servers", Machine: serverName(1),
+			Zone: "ams"})
 	})
-	t.Run("a drained victim is refused when two voters would be left", func(t *testing.T) {
+	removePeer := serverOutcome{Action: rollout.RemovePeer, Machine: serverName(1), Server: "r-2"}
+	t.Run("a drained victim beside one voter has its peer removed while it runs", func(t *testing.T) {
 		s := combinedState(1)
 		addCombinedNode(&s, 1, oldHash)
 		serverDrained(t, &s, 1)
-		checkRefused(t, s, "node group servers: removing prod-servers-1 would leave one voter of two: tent does not "+
-			"take a group from two voters to one yet")
+		checkServerStep(t, nextRoll(t, s), removePeer)
 	})
-	t.Run("with two voters the failure tolerance is 0, and the refusal says why it is two", func(t *testing.T) {
+	t.Run("with two voters the failure tolerance is 0, which does not stop the removal", func(t *testing.T) {
 		s := combinedState(1)
 		addCombinedNode(&s, 1, oldHash)
 		serverDrained(t, &s, 1)
 		s.Nomad.FailureTolerance = 0
-		checkRefused(t, s, "node group servers: removing prod-servers-1 would leave one voter of two: tent does not "+
-			"take a group from two voters to one yet")
+		checkServerStep(t, nextRoll(t, s), removePeer)
 	})
 }
 

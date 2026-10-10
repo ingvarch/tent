@@ -17,6 +17,11 @@ const (
 // stableMargin is added to the refresh interval to make the stability window.
 const stableMargin = 10 * time.Second
 
+// minOtherVoters is how many servers besides the victim's must vote for its machine to stop while its server is in the
+// Raft configuration: Nomad's leader adds a removed server again, autopilot may promote it after its machine has
+// stopped, and the voters that run must still be a quorum then.
+const minOtherVoters = 2
+
 // serverGroup is a server or combined group with its machines and their servers, members and nodes at one moment.
 type serverGroup struct {
 	groupView
@@ -69,7 +74,8 @@ func nextServer(s State, mode Mode, g Group) (Step, bool, error) {
 
 // started reports whether the removal of the machine has begun: it has joined, and it is stopped, or its server is
 // gone or no longer votes, or, in a combined group, its node is ineligible or draining. A running machine without a
-// private address counts as not started, so the checks at rest refuse it.
+// private address counts as not started, so the checks at rest refuse it. So does a running server whose peer was
+// removed, once Nomad's leader has added it again and it votes: its removal starts again with the checks at rest.
 func (sg *serverGroup) started(m Machine) bool {
 	if !m.Joined {
 		return false
@@ -148,12 +154,20 @@ func (sg *serverGroup) removal(v Machine) (Step, error) {
 	return step, nil
 }
 
-// removeServer returns the step that removes the victim's server and machine. A victim that leads hands the
-// leadership over, and with two voters the removal is refused. Otherwise the order is: stop the server, wait until
-// autopilot no longer counts it a healthy voter, remove its peer, force its member out of the gossip pool, wait until
-// the rest is healthy with the servers that are left voting, delete the machine. A running voter whose removal has
-// started (a combined node that was drained: the drain may last long, and a run may resume days later) is checked
-// again first, since a server may have failed meanwhile and the stop or the new leader would then cost the quorum.
+// removeServer returns the step that removes the victim's server and machine. The order for a victim that runs:
+//
+//   - a victim that leads hands the leadership over;
+//   - a victim that votes waits until the other voters have been stable for the stability window;
+//   - with fewer than two other voters its peer is removed from the Raft configuration while it runs, so that no
+//     server that stops can be counted a voter again; with two or more it is stopped first;
+//   - the machine is stopped.
+//
+// Then, for a machine that is stopped: wait until autopilot no longer counts the server a healthy voter, remove its
+// peer, force its member out of the gossip pool, wait until the rest is healthy with the servers that are left voting,
+// delete the machine. A stopped voter beside fewer than two other voters is refused: the servers have no quorum. A
+// running voter whose removal has started (a combined node that was drained: the drain may last long, and a run may
+// resume days later) is checked again first, since a server may have failed meanwhile and the stop or the new leader
+// would then cost the quorum.
 func (sg *serverGroup) removeServer(v Machine) (Step, error) {
 	srv, hasServer := sg.servers[v.ID] // the zero Server when there is none: it neither leads nor votes
 	mem := sg.members[v.ID]            // the zero Member when there is none: neither alive nor failed
@@ -163,6 +177,11 @@ func (sg *serverGroup) removeServer(v Machine) (Step, error) {
 			return Step{}, err
 		}
 	}
+	otherVoters := sg.voters
+	if srv.Voter {
+		otherVoters--
+	}
+	wait, waiting := sg.waitStable(v)
 	switch {
 	case v.Ready && srv.Leader:
 		target, ok := sg.successor(v)
@@ -174,11 +193,16 @@ func (sg *serverGroup) removeServer(v Machine) (Step, error) {
 			return Step{}, refuse("node group %s: %s leads, and no %s can take the leadership", sg.g.Name, v.Name, who)
 		}
 		step.Action, step.Server = TransferLeadership, target
-	case v.Ready && srv.Voter && sg.voters == 2:
-		return Step{}, refuse("node group %s: removing %s would leave one voter of two: tent does not take a group "+
-			"from two voters to one yet", sg.g.Name, v.Name)
+	case v.Ready && srv.Voter && waiting:
+		return wait, nil
+	case v.Ready && hasServer && otherVoters < minOtherVoters:
+		step.Action, step.Server = RemovePeer, srv
 	case v.Ready:
 		step.Action = Stop
+	case srv.Voter && otherVoters < minOtherVoters:
+		return Step{}, refuse("node group %s: node %s is stopped and its server votes beside one other voter, so the "+
+			"servers have no quorum; start its instance again (ID %s), which tent has not deleted, and run the command "+
+			"again", sg.g.Name, v.Name, v.ID)
 	case srv.Voter && srv.Healthy:
 		step.Action = WaitServerDown
 	case hasServer:
@@ -234,8 +258,8 @@ func (sg *serverGroup) checkAtRest() error {
 
 // checkServing refuses unless autopilot reports every server healthy, every machine of the group runs and votes and
 // the cluster can lose a voter, which a server needs before it stops or hands over its leadership. The nodes of a
-// combined group are not looked at: the victim's has been drained. With two voters the failure tolerance is 0, and the
-// removal is refused on its own.
+// combined group are not looked at: the victim's has been drained. With two voters the failure tolerance is 0, and
+// none is asked for: the victim's peer is removed while it runs.
 func (sg *serverGroup) checkServing() error {
 	if err := sg.checkHealthy(); err != nil {
 		return err
@@ -364,10 +388,11 @@ func (sg *serverGroup) create() (Step, bool, error) {
 }
 
 // requireTolerance refuses a cluster that can lose no voter, since a new server is added only to a cluster that
-// survives it. A group of one server always has a tolerance of 0.
+// survives it. A group of one server passes: its one voter never has a failure tolerance, and the new server joins
+// before the old one goes.
 func (sg *serverGroup) requireTolerance() error {
-	if sg.g.Size == 1 && sg.s.Nomad.FailureTolerance < 1 {
-		return refuse("node group %s: a group of one server cannot roll: its failure tolerance is 0", sg.g.Name)
+	if sg.g.Size == 1 {
+		return nil
 	}
 	return sg.requireToleranceFor("adds a server only to")
 }

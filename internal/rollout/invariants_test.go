@@ -129,6 +129,22 @@ func TestRunBreaksOnInvariants(t *testing.T) {
 				return []rollout.Step{create, wait, wait, w.serverStep(rollout.RemovePeer, "prod-servers-1")}
 			},
 			"a server joined the Raft configuration 0s ago, less than the refresh interval of 1m0s"},
+		{"a voter is stopped in the tick of a transfer of the leadership", func() *world { return serverWorld(3) },
+			func(w *world) []rollout.Step {
+				return []rollout.Step{
+					w.serverStep(rollout.TransferLeadership, "prod-servers-1"), w.serverStep(rollout.Stop, "prod-servers-0"),
+				}
+			},
+			"its server votes and the leadership moved 0s ago, less than the refresh interval of 1m0s"},
+		{"the peer of a running voter is removed in the tick of a transfer of the leadership",
+			func() *world { return serverWorld(3) },
+			func(w *world) []rollout.Step {
+				return []rollout.Step{
+					w.serverStep(rollout.TransferLeadership, "prod-servers-1"),
+					w.serverStep(rollout.RemovePeer, "prod-servers-0"),
+				}
+			},
+			"its server votes and the leadership moved 0s ago, less than the refresh interval of 1m0s"},
 		{"a machine is deleted while its server is in the Raft configuration", func() *world { return serverWorld(3) },
 			func(w *world) []rollout.Step { return []rollout.Step{w.serverStep(rollout.Delete, "prod-servers-1")} },
 			"its server is still in the Raft configuration"},
@@ -197,6 +213,40 @@ func TestRunBreaksOnInvariants(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTheWindowAfterATransferIsForVotersWhoseServerGoes(t *testing.T) {
+	transfer := func(w *world) rollout.Step { return w.serverStep(rollout.TransferLeadership, "prod-servers-1") }
+	t.Run("the start of the world is no transfer", func(t *testing.T) {
+		w := serverWorld(3)
+		w.mustApply(t, w.serverStep(rollout.Stop, "prod-servers-2"))
+	})
+	t.Run("a transfer to the leader is no transfer", func(t *testing.T) {
+		w := serverWorld(3)
+		w.mustApply(t, w.serverStep(rollout.TransferLeadership, "prod-servers-0"))
+		w.mustApply(t, w.serverStep(rollout.Stop, "prod-servers-2"))
+	})
+	t.Run("a nonvoter is stopped within the window", func(t *testing.T) {
+		w := serverWorld(4)
+		w.servers[3].voter = false
+		w.mustApply(t, transfer(w))
+		w.mustApply(t, w.serverStep(rollout.Stop, "prod-servers-3"))
+	})
+	t.Run("a voter is stopped once the window is over", func(t *testing.T) {
+		w := serverWorld(3)
+		w.mustApply(t, transfer(w))
+		w.ticks(int(refreshInterval / tickLength))
+		w.mustApply(t, w.serverStep(rollout.Stop, "prod-servers-0"))
+	})
+	t.Run("a voter is not stopped a tick before the window is over", func(t *testing.T) {
+		w := serverWorld(3)
+		w.mustApply(t, transfer(w))
+		w.ticks(int(refreshInterval/tickLength) - 1)
+		var v *violation
+		if err := w.apply(w.serverStep(rollout.Stop, "prod-servers-0")); !errors.As(err, &v) {
+			t.Errorf("stop = %v, want a violation", err)
+		}
+	})
 }
 
 func TestRunBreaksOnShrinkInvariants(t *testing.T) {

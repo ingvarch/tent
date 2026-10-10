@@ -10,4 +10,8 @@ wait until autopilot no longer counts prod-servers-2 as a healthy voter
 remove prod-servers-2 from the Raft configuration
 force prod-servers-2.global out of the gossip pool
 delete node prod-servers-2 (ID m-3)
-refused: node group servers: removing prod-servers-1 would leave one voter of two: tent does not take a group from two voters to one yet
+remove prod-servers-1 from the Raft configuration
+stop node prod-servers-1 (ID m-2)
+force prod-servers-1.global out of the gossip pool
+delete node prod-servers-1 (ID m-2)
+done

@@ -445,6 +445,7 @@ func TestSimRemovalAfterAReconcileWaitsForTheNextOne(t *testing.T) {
 
 func TestSimTransferStartsTheSixTicksOfTheReconcileAgain(t *testing.T) {
 	w := serverWorld(3)
+	w.servers[1].voter = false // the window after a transfer is for voters
 	w.ticks(3)
 	w.mustApply(t, w.serverStep(rollout.TransferLeadership, "prod-servers-2"))
 	w.mustApply(t, w.serverStep(rollout.RemovePeer, "prod-servers-1"))

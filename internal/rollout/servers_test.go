@@ -481,11 +481,6 @@ func TestServerRuleS5NeedsAFailureToleranceOfOne(t *testing.T) {
 			s.Nomad.FailureTolerance = 0
 		}, "node group servers: the servers can lose no voter (failure tolerance 0); tent adds a server only to a " +
 			"cluster that can lose one"},
-		{"a group of one server", func(_ *testing.T, s *rollout.State) {
-			*s = serversState(1)
-			s.Machines[0].SpecHash = oldHash
-			s.Nomad.FailureTolerance = 0
-		}, "node group servers: a group of one server cannot roll: its failure tolerance is 0"},
 		{"the other checks come first", func(_ *testing.T, s *rollout.State) {
 			s.Nomad.FailureTolerance = 0
 			s.Nomad.Healthy = false
@@ -630,28 +625,137 @@ func TestServerLineETransfersTheLeadership(t *testing.T) {
 	})
 }
 
-func TestServerLineFRefusesTwoVotersToOne(t *testing.T) {
-	// A group of one server with a second one: both vote, and the second is outdated.
-	two := func() rollout.State {
+func TestServerGroupOfOneNeedsNoFailureToleranceToCreate(t *testing.T) {
+	one := func() rollout.State {
 		s := serversState(1)
-		addServerNode(&s, 1, oldHash)
+		s.Machines[0].SpecHash = oldHash
+		s.Nomad.FailureTolerance = 0
 		return s
 	}
-	runRefusalCases(t, two, []refusalCase{
-		{"the victim runs and votes", func(*testing.T, *rollout.State) {},
-			"node group servers: removing prod-servers-1 would leave one voter of two: tent does not take a group " +
-				"from two voters to one yet"},
+	t.Run("the new server is created", func(t *testing.T) {
+		step := nextRoll(t, one())
+		if step.Action != rollout.Create || step.Machine.Name != serverName(1) {
+			t.Errorf("step = %q, want the creation of %s", step, serverName(1))
+		}
 	})
-	runServerCases(t, two, []serverCase{
+	runRefusalCases(t, one, []refusalCase{
+		{"the checks at rest stay", func(_ *testing.T, s *rollout.State) { s.Nomad.Healthy = false },
+			"node group servers: autopilot reports the servers unhealthy" + unhealthyAdvice},
+		{"the server must vote", func(t *testing.T, s *rollout.State) { serverNode(t, s, 0).Voter = false },
+			"node group servers: node prod-servers-0 is not a voting server" + restAdvice},
+	})
+}
+
+// twoVoters is a group of one server with a second one: both vote, the first leads and is up to date, and the second
+// is outdated and the victim. Both have been stable for an hour.
+func twoVoters() rollout.State {
+	s := serversState(1)
+	addServerNode(&s, 1, oldHash)
+	return s
+}
+
+func TestServerLineE1WaitsForTheWindowWhateverTheNumberOfVoters(t *testing.T) {
+	window := 70 * time.Second
+	fresh := func(t *testing.T, s *rollout.State) { serverNode(t, s, 0).StableSince = s.Now }
+	t.Run("two voters", func(t *testing.T) {
+		runServerCases(t, twoVoters, []serverCase{
+			{"the window is not over", fresh,
+				serverOutcome{Action: rollout.WaitStable, Machine: serverName(1), Until: epoch.Add(window)}},
+			{"the window is over", func(t *testing.T, s *rollout.State) {
+				serverNode(t, s, 0).StableSince = s.Now.Add(-window)
+			}, serverOutcome{Action: rollout.RemovePeer, Machine: serverName(1), Server: "r-2"}},
+		})
+	})
+	t.Run("a drained combined victim", func(t *testing.T) {
+		combinedTwo := func() rollout.State {
+			s := combinedState(1)
+			addCombinedNode(&s, 1, oldHash)
+			serverDrained(t, &s, 1)
+			return s
+		}
+		runServerCases(t, combinedTwo, []serverCase{
+			{"beside one other voter, the window is not over", fresh,
+				serverOutcome{Action: rollout.WaitStable, Machine: serverName(1), Until: epoch.Add(window)}},
+			{"beside one other voter, the window is over", func(t *testing.T, s *rollout.State) {
+				serverNode(t, s, 0).StableSince = s.Now.Add(-window)
+			}, serverOutcome{Action: rollout.RemovePeer, Machine: serverName(1), Server: "r-2"}},
+		})
+		runServerCases(t, combinedMidRoll, []serverCase{
+			{"beside two or more other voters, the window is not over", func(t *testing.T, s *rollout.State) {
+				serverDrained(t, s, 1)
+				serverNode(t, s, 3).StableSince = s.Now
+			}, serverOutcome{Action: rollout.WaitStable, Machine: serverName(1), Until: epoch.Add(window)}},
+			{"beside two or more other voters, the window is over", func(t *testing.T, s *rollout.State) {
+				serverDrained(t, s, 1)
+			}, serverOutcome{Action: rollout.Stop, Machine: serverName(1)}},
+		})
+	})
+	t.Run("the window counts the other voters only", func(t *testing.T) {
+		s := twoVoters()
+		s.Groups[0].Role = v1alpha1.RoleCombined
+		s.Groups[0].DrainTimeout = time.Hour
+		makeCombined(&s, 0)
+		makeCombined(&s, 1)
+		serverDrained(t, &s, 1)
+		serverNode(t, &s, 1).StableSince = s.Now
+		checkServerStep(t, nextRoll(t, s), serverOutcome{Action: rollout.RemovePeer, Machine: serverName(1),
+			Server: "r-2"})
+	})
+	t.Run("checkServing comes before the window", func(t *testing.T) {
+		s := combinedMidRoll()
+		serverDrained(t, &s, 1)
+		serverNode(t, &s, 3).StableSince = s.Now
+		s.Nomad.Healthy = false
+		serverNode(t, &s, 2).Healthy = false
+		checkRefused(t, s, "node group servers: autopilot reports the servers unhealthy (prod-servers-2)"+unhealthyAdvice)
+	})
+	t.Run("a nonvoter is not waited for", func(t *testing.T) {
+		s := twoVoters()
+		serverNode(t, &s, 0).StableSince = s.Now
+		serverNode(t, &s, 1).Voter = false
+		checkServerStep(t, nextRoll(t, s), serverOutcome{Action: rollout.RemovePeer, Machine: serverName(1),
+			Server: "r-2"})
+	})
+	t.Run("a drained nonvoter beside two or more other voters is stopped within the window", func(t *testing.T) {
+		s := combinedMidRoll()
+		serverDrained(t, &s, 1)
+		serverNode(t, &s, 1).Voter = false
+		serverNode(t, &s, 3).StableSince = s.Now
+		checkServerStep(t, nextRoll(t, s), serverOutcome{Action: rollout.Stop, Machine: serverName(1)})
+	})
+	t.Run("a drained combined victim of a shrink waits too", func(t *testing.T) {
+		s := combinedState(3)
+		s.Groups[0].Size = 2
+		serverDrained(t, &s, 2)
+		serverNode(t, &s, 0).StableSince = s.Now
+		checkServerStep(t, nextIn(t, rollout.Shrink, s), serverOutcome{Action: rollout.WaitStable,
+			Machine: serverName(2), Until: epoch.Add(window)})
+	})
+}
+
+func TestServerLineFRemovesThePeerOfARunningServerBesideFewerThanTwoOtherVoters(t *testing.T) {
+	remove := serverOutcome{Action: rollout.RemovePeer, Machine: serverName(1), Server: "r-2"}
+	stop := serverOutcome{Action: rollout.Stop, Machine: serverName(1)}
+	runServerCases(t, twoVoters, []serverCase{
+		{"the victim votes", func(*testing.T, *rollout.State) {}, remove},
 		{"the victim leads: the transfer comes first", func(t *testing.T, s *rollout.State) {
 			machineOf(t, s, serverName(0)).SpecHash = oldHash
 			machineOf(t, s, serverName(1)).SpecHash = newHash
 		}, serverOutcome{Action: rollout.TransferLeadership, Machine: serverName(0), Server: "r-2"}},
+		{"the leader added it again as a nonvoter", func(t *testing.T, s *rollout.State) {
+			serverNode(t, s, 1).Voter = false
+		}, remove},
+		{"it has no server", func(t *testing.T, s *rollout.State) { dropServerPeer(t, s, 1) }, stop},
 	})
-	t.Run("a victim that does not vote is stopped", func(t *testing.T) {
+	t.Run("a nonvoter beside two voters is stopped", func(t *testing.T) {
 		s := serversState(2)
 		addServerNode(&s, 2, oldHash)
 		serverNode(t, &s, 2).Voter = false
+		checkServerStep(t, nextRoll(t, s), serverOutcome{Action: rollout.Stop, Machine: serverName(2)})
+	})
+	t.Run("a voter beside two other voters is stopped", func(t *testing.T) {
+		s := serversState(2)
+		addServerNode(&s, 2, oldHash)
 		checkServerStep(t, nextRoll(t, s), serverOutcome{Action: rollout.Stop, Machine: serverName(2)})
 	})
 }
@@ -791,18 +895,115 @@ func TestServerLineEIsNotForAStoppedLeader(t *testing.T) {
 	checkServerStep(t, nextRoll(t, s), serverOutcome{Action: rollout.WaitServerDown, Machine: serverName(0)})
 }
 
-func TestServerLineFIsNotForAStoppedServer(t *testing.T) {
-	two := func() rollout.State {
-		s := serversState(1)
-		addServerNode(&s, 1, oldHash)
+const noQuorumAdvice = "so the servers have no quorum; start its instance again (ID m-2), which tent has not " +
+	"deleted, and run the command again"
+
+func TestServerLineH0RefusesAStoppedVoterBesideOneOtherVoter(t *testing.T) {
+	refusal := "node group servers: node prod-servers-1 is stopped and its server votes beside one other voter, " +
+		noQuorumAdvice
+	stopped := func() rollout.State {
+		s := twoVoters()
 		stopServer(t, &s, 1)
 		return s
 	}
-	runServerCases(t, two, []serverCase{
-		{"autopilot counts it healthy", func(*testing.T, *rollout.State) {},
-			serverOutcome{Action: rollout.WaitServerDown, Machine: serverName(1)}},
-		{"autopilot counts it unhealthy", func(t *testing.T, s *rollout.State) {
-			serverNode(t, s, 1).Healthy = false
+	runRefusalCases(t, stopped, []refusalCase{
+		{"autopilot counts it healthy", func(*testing.T, *rollout.State) {}, refusal},
+		{"autopilot counts it unhealthy", func(t *testing.T, s *rollout.State) { serverNode(t, s, 1).Healthy = false },
+			refusal},
+		{"the cluster is unhealthy", func(_ *testing.T, s *rollout.State) { s.Nomad.Healthy = false }, refusal},
+	})
+	t.Run("in a shrink", func(t *testing.T) {
+		s := shrinkServersState(2, 1)
+		stopServer(t, &s, 1)
+		checkRefusedIn(t, rollout.Shrink, s, refusal)
+	})
+	runServerCases(t, twoVoters, []serverCase{
+		{"a stopped nonvoter is removed, not refused", func(t *testing.T, s *rollout.State) {
+			stopServer(t, s, 1)
+			serverNode(t, s, 1).Voter = false
 		}, serverOutcome{Action: rollout.RemovePeer, Machine: serverName(1), Server: "r-2"}},
+	})
+	// A group of two servers with a third one, which is outdated and the victim: it votes beside two other voters.
+	three := func() rollout.State {
+		s := serversState(2)
+		addServerNode(&s, 2, oldHash)
+		stopServer(t, &s, 2)
+		return s
+	}
+	runServerCases(t, three, []serverCase{
+		{"beside two other voters autopilot's count is waited for", func(*testing.T, *rollout.State) {},
+			serverOutcome{Action: rollout.WaitServerDown, Machine: serverName(2)}},
+		{"beside two other voters the peer of an unhealthy server is removed", func(t *testing.T, s *rollout.State) {
+			serverNode(t, s, 2).Healthy = false
+		}, serverOutcome{Action: rollout.RemovePeer, Machine: serverName(2), Server: "r-3"}},
+	})
+}
+
+func TestServerVictimAtEveryLaterObservationOfAGroupOfOne(t *testing.T) {
+	forceLeave := serverOutcome{Action: rollout.ForceLeave, Machine: serverName(1), Member: serverName(1) + ".global"}
+	remove := serverOutcome{Action: rollout.RemovePeer, Machine: serverName(1), Server: "r-2"}
+	modes := []struct {
+		name   string
+		mode   rollout.Mode
+		base   func() rollout.State
+		advice string
+	}{
+		{"roll", rollout.Roll, twoVoters, unhealthyAdvice},
+		{"shrink", rollout.Shrink, func() rollout.State { return shrinkServersState(2, 1) }, shrinkUnhealthyAdvice},
+	}
+	for _, m := range modes {
+		mode, base := m.mode, m.base
+		t.Run(m.name, func(t *testing.T) {
+			runServerCasesIn(t, mode, base, []serverCase{
+				{"it runs and has no server: stop within the window", func(t *testing.T, s *rollout.State) {
+					dropServerPeer(t, s, 1)
+					serverNode(t, s, 0).StableSince = s.Now
+				}, serverOutcome{Action: rollout.Stop, Machine: serverName(1)}},
+				{"it runs and is a nonvoter again: remove the peer within the window", func(t *testing.T,
+					s *rollout.State) {
+					serverNode(t, s, 1).Voter = false
+					serverNode(t, s, 0).StableSince = s.Now
+				}, remove},
+				{"it runs and was promoted: the window comes first", func(t *testing.T, s *rollout.State) {
+					serverNode(t, s, 0).StableSince = s.Now
+				}, serverOutcome{Action: rollout.WaitStable, Machine: serverName(1), Until: epoch.Add(70 * time.Second)}},
+				{"it runs and was promoted, the window is over: remove the peer", func(*testing.T, *rollout.State) {},
+					remove},
+				{"it is stopped, has no server and its member is alive", func(t *testing.T, s *rollout.State) {
+					stopServer(t, s, 1)
+					dropServerPeer(t, s, 1)
+				}, forceLeave},
+				{"it is stopped, has no server and its member failed", func(t *testing.T, s *rollout.State) {
+					stopServer(t, s, 1)
+					dropServerPeer(t, s, 1)
+					serverMember(t, s, 1).Status = "failed"
+				}, forceLeave},
+				{"it is stopped and a nonvoter again: remove the peer", func(t *testing.T, s *rollout.State) {
+					stopServer(t, s, 1)
+					serverNode(t, s, 1).Voter = false
+				}, remove},
+			})
+			t.Run("it runs and was promoted: the checks at rest come first", func(t *testing.T) {
+				s := base()
+				s.Nomad.Healthy = false
+				checkRefusedIn(t, mode, s, "node group servers: autopilot reports the servers unhealthy"+m.advice)
+			})
+		})
+	}
+	t.Run("a combined victim that was promoted: checkServing, the window, then the peer", func(t *testing.T) {
+		combined := func() rollout.State {
+			s := combinedState(1)
+			addCombinedNode(&s, 1, oldHash)
+			serverDrained(t, &s, 1)
+			return s
+		}
+		runServerCases(t, combined, []serverCase{
+			{"the window is not over", func(t *testing.T, s *rollout.State) { serverNode(t, s, 0).StableSince = s.Now },
+				serverOutcome{Action: rollout.WaitStable, Machine: serverName(1), Until: epoch.Add(70 * time.Second)}},
+			{"the window is over", func(*testing.T, *rollout.State) {}, remove},
+		})
+		s := combined()
+		s.Nomad.Healthy = false
+		checkRefused(t, s, "node group servers: autopilot reports the servers unhealthy"+unhealthyAdvice)
 	})
 }

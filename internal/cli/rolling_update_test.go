@@ -580,7 +580,10 @@ func TestRollingUpdateClusterHelp(t *testing.T) {
 		"A server group rolls one node at a time: tent creates a new server, waits until it votes and every node has " +
 			"had time to learn of it, moves the leadership away from the old server when it leads, stops it, removes " +
 			"it from the Raft configuration and the gossip pool, waits until the servers that stay are healthy, and " +
-			"deletes it.",
+			"deletes it. A group of one server rolls through two servers: tent removes the old server from the Raft " +
+			"configuration while it still runs, waits until Nomad's leader has added it again, removes it once more, " +
+			"stops it right then and forces it out of the gossip pool; that takes about a minute more, and it needs " +
+			"--allow-single-server.",
 		"The servers roll before the clients.",
 		"tent cannot roll combined groups yet: select the client groups with --nodegroups.",
 	} {

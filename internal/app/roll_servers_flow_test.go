@@ -396,9 +396,17 @@ func idsOf(machines []serverMachine) []string {
 // exactly them as voters and as alive members, and no peer or member of an old machine.
 func wantServersRolled(t *testing.T, svc *app.Service, f *vultrfake.Fake, old []serverMachine, hashChanged bool) {
 	t.Helper()
+	wantServersRolledOf(t, svc, f, serverGroupSize, old, hashChanged)
+}
+
+// wantServersRolledOf is wantServersRolled for a group of the given size.
+func wantServersRolledOf(
+	t *testing.T, svc *app.Service, f *vultrfake.Fake, size int, old []serverMachine, hashChanged bool,
+) {
+	t.Helper()
 	now := serverMachines(f)
-	if len(now) != serverGroupSize {
-		t.Errorf("the server group has %d machines, want %d", len(now), serverGroupSize)
+	if len(now) != size {
+		t.Errorf("the server group has %d machines, want %d", len(now), size)
 	}
 	var wantPeers, wantMembers []string
 	for _, m := range now {
@@ -845,41 +853,97 @@ func TestRollServersFlowForceReplacesEveryServerAndWorkerOnce(t *testing.T) {
 	})
 }
 
-// TestRollServersFlowRefusesAGroupOfOneServerAndRollsTheWorkers refuses the default selection of a cluster of one
-// server whose servers and workers are outdated, with only reads, and rolls the workers when they are selected.
-func TestRollServersFlowRefusesAGroupOfOneServerAndRollsTheWorkers(t *testing.T) {
+// singleServerSteps are the progress lines of the roll of a group of one server: the new server's create, vote,
+// scrub and window, the move of the leadership and its window, the removal of the old server's peer while it runs,
+// the wait for the leader's reconcile, the removal of the peer that the leader added again, the stop, the forced
+// leave and the delete. The wait for the servers to be healthy is left out: it comes only while autopilot reads
+// unhealthy.
+func singleServerSteps(created, victim string) []string {
+	return []string{
+		"node started create " + created, "node done create " + created,
+		"nomad started vote " + created, "nomad done vote " + created,
+		"node started scrub " + created, "node done scrub " + created,
+		"nomad started stable", "nomad done stable",
+		"nomad started transfer " + victim, "nomad done transfer " + victim,
+		"nomad started stable", "nomad done stable",
+		"nomad started remove-peer " + victim, "nomad done remove-peer " + victim,
+		"nomad started reconcile " + victim, "nomad done reconcile " + victim,
+		"nomad started remove-peer " + victim, "nomad done remove-peer " + victim,
+		"node started stop " + victim, "node done stop " + victim,
+		"nomad started force-leave " + victim + ".global", "nomad done force-leave " + victim + ".global",
+		"node started delete " + victim, "node done delete " + victim,
+	}
+}
+
+// TestRollServersFlowRollsAGroupOfOneServerAndTheWorkers rolls a cluster of one server and two workers, all outdated,
+// where Nomad's leader adds a removed server again every minute and a halted machine runs for 9 s more as far as Nomad
+// goes. The server rolls through two voters: the leadership moves, the old server's peer is removed while it runs,
+// and its machine is halted within 10 s after the reconcile at which the leader added it again and the roll removed
+// it once more, so that the next reconcile is far off. The workers follow. The invariants watch, and the voters that
+// run are a quorum for two reconciles and a promotion after the last write.
+func TestRollServersFlowRollsAGroupOfOneServerAndTheWorkers(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := newRelease(t, keyedClusterYAML, edit(t, serversYAML, "size: 3", "size: 1"), workersYAML)
+		w.ServersOverTime()
+		w.SetReconcile(time.Minute, 10*time.Second)
+		w.SetHaltLag(9 * time.Second)
 		mustUpdate(t, svc)
 		mustReplace(t, svc, keyedClusterYAML+serversExtraYAML, workersMetaYAML)
 		mustUpdate(t, svc)
-		server := instanceNamed(t, f, "prod-servers-0")
-		cloudCalls, nomadCalls := len(f.Calls()), len(w.Log())
+		inv := watchServers(t, f, w, 1)
+		var halted time.Time
+		inv.watch(func(ctx context.Context, c vultrfake.Call, next func(context.Context) error) error {
+			if c.Name == "HaltInstance" {
+				halted = time.Now()
+			}
+			return next(ctx)
+		}, nil)
+		oldServers, oldWorkers := serverMachines(f), workerIDs(f)
+		lines := recordProgress(svc)
 
 		plan, err := applyRoll(svc, app.RollOptions{})
 
-		wantError(t, err, "node group servers: a group of one server cannot roll: its failure tolerance is 0")
-		wantNoWrites(t, f.Calls()[cloudCalls:])
-		if got := nomadWrites(w, nomadCalls); len(got) > 0 {
-			t.Errorf("the roll wrote to Nomad: %q", got)
-		}
-		wantLockFree(t, svc.Store)
-		if len(plan.Groups) != 2 || plan.Next != nil || plan.Applied {
-			t.Errorf("plan = %+v, want the two groups, no next step and not applied", plan)
-		}
-
-		plan, err = applyRoll(svc, app.RollOptions{NodeGroups: []string{"workers"}})
-
 		if err != nil {
-			t.Fatalf("RollingUpdate of the workers: %v", err)
+			t.Fatalf("RollingUpdate: %v", err)
 		}
-		if want := (app.RollCounts{Created: 2, Drained: 2, Deleted: 2, Purged: 2}); plan.Rolled != want {
+		if want := (app.RollCounts{Created: 3, Drained: 2, Stopped: 1, Deleted: 3, Purged: 2}); plan.Rolled != want {
 			t.Errorf("the roll did %+v, want %+v", plan.Rolled, want)
 		}
-		if !hasInstance(f, server) {
-			t.Errorf("the machine %s of the one server is gone", server)
+		server := slices.DeleteFunc(slices.Clone(*lines), func(l string) bool {
+			return strings.HasSuffix(l, " healthy") || strings.Contains(l, "workers")
+		})
+		server = server[:slices.Index(server, "node done delete prod-servers-0")+1]
+		if diff := cmp.Diff(singleServerSteps("prod-servers-1", "prod-servers-0"), server); diff != "" {
+			t.Errorf("the progress of the server's roll (-want +got):\n%s", diff)
 		}
+		if got := count(*lines, "nomad started server-down prod-servers-0"); got != 0 {
+			t.Errorf("the roll waited for autopilot to drop the server %d times, want 0", got)
+		}
+		inv.mu.Lock()
+		moved := inv.transferred
+		inv.mu.Unlock()
+		if since := halted.Sub(moved); since < 2*time.Minute || since >= 2*time.Minute+10*time.Second {
+			t.Errorf("the roll halted the old server %v after the transfer, want it in the 10 s after the reconcile at 2m0s",
+				since)
+		}
+		oldRaft := raftIDOf(oldServers[0].id)
+		if diff := cmp.Diff([]string{oldRaft, oldRaft}, nomadArgs(w, "RemovePeer")); diff != "" {
+			t.Errorf("the peers that the roll removed (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff([]string{oldServers[0].name + ".global"}, nomadArgs(w, "ForceLeave")); diff != "" {
+			t.Errorf("the members that the roll forced out (-want +got):\n%s", diff)
+		}
+		if got := w.RemovedCalls(); len(got) > 0 {
+			t.Errorf("the roll called a removed server that runs: %v", got)
+		}
+		wantRollEnded(t, svc, f, append(idsOf(oldServers), oldWorkers...))
+		wantServersRolledOf(t, svc, f, 1, oldServers, true)
+		if got := len(workerIDs(f)); got != workerCount {
+			t.Errorf("the workers have %d machines, want %d", got, workerCount)
+		}
+		inv.wantKept()
+		inv.wantQuorumFor(2*time.Minute + 15*time.Second)
 	})
 }
 

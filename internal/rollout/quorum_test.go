@@ -19,8 +19,9 @@ func (w *world) downVoters() []string {
 	return names
 }
 
-// A step that stops a server or hands its leadership over never comes while another voter is down, whichever
-// voter failed at whichever point of a roll, and whether or not autopilot has noticed it yet.
+// A step that stops a server, hands its leadership over or removes the peer of a running voter never comes while
+// another voter is down, whichever voter failed at whichever point of a roll, and whether or not autopilot has noticed
+// it yet. The stop of a machine that has no server in the Raft configuration is no such step.
 func TestNoStopOrTransferWhileAnotherVoterIsDown(t *testing.T) {
 	failures := []struct {
 		name string
@@ -50,7 +51,13 @@ func TestNoStopOrTransferWhileAnotherVoterIsDown(t *testing.T) {
 					if err != nil {
 						continue
 					}
-					if step.Action != rollout.Stop && step.Action != rollout.TransferLeadership {
+					server := w.serverIndexByMachine(step.Machine.ID)
+					switch {
+					case step.Action == rollout.TransferLeadership:
+					// A machine with no server in the Raft configuration is stopped beside whatever voters there are.
+					case step.Action == rollout.Stop && server >= 0:
+					case step.Action == rollout.RemovePeer && server >= 0 && w.servers[server].voter && w.up(step.Machine.ID):
+					default:
 						continue
 					}
 					if down := w.downVoters(); len(down) > 0 && !slices.Equal(down, []string{step.Machine.Name}) {

@@ -3,4 +3,13 @@
 # group servers: server, size 1, zones ams and fra
 # machine prod-servers-0 (m-1) in ams runs Nomad 2.0.6, outdated
 # leader prod-servers-0
-refused: node group servers: a group of one server cannot roll: its failure tolerance is 0
+create node prod-servers-1 (server of servers, ams)
+wait until node prod-servers-1 joins
+wait until 12:01:30 for the servers to be stable
+move the leadership from prod-servers-0 to prod-servers-1
+wait until 12:02:40 for the servers to be stable
+remove prod-servers-0 from the Raft configuration
+stop node prod-servers-0 (ID m-1)
+force prod-servers-0.global out of the gossip pool
+delete node prod-servers-0 (ID m-1)
+done

@@ -38,6 +38,7 @@ mark node prod-control-0 ineligible
 drain node prod-control-0 within 1h0m0s
 wait until node prod-control-0 is drained
 move the leadership from prod-control-0 to prod-control-3
+wait until 12:08:40 for the servers to be stable
 stop node prod-control-0 (ID m-1)
 wait until autopilot no longer counts prod-control-0 as a healthy voter
 remove prod-control-0 from the Raft configuration
