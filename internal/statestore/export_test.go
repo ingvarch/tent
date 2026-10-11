@@ -3,6 +3,7 @@ package statestore
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,4 +78,37 @@ func PurgeS3(ctx context.Context, s Store) error {
 func SetS3HTTPClient(s Store, c s3.HTTPClient) {
 	b := s.(checkedStore).backend.(*s3Store)
 	b.client = s3.New(b.client.Options(), func(o *s3.Options) { o.HTTPClient = c })
+}
+
+// SyncLog records the syncs of a file store: "file" for a synced file and "dir" for a synced directory, in order.
+type SyncLog struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (l *SyncLog) add(event string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.events = append(l.events, event)
+}
+
+// Take returns the syncs recorded since the last call and forgets them.
+func (l *SyncLog) Take() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	events := l.events
+	l.events = nil
+	return events
+}
+
+// RecordSyncs makes a file store that Open or OpenWith returned record each sync, which still runs.
+func RecordSyncs(t *testing.T, s Store) *SyncLog {
+	t.Helper()
+	f, ok := fileStoreOf(s)
+	if !ok {
+		t.Fatalf("%T is not a file store that Open or OpenWith returned", s)
+	}
+	log := &SyncLog{}
+	f.onSync = log.add
+	return log
 }
