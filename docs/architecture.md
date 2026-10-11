@@ -1783,6 +1783,11 @@ See [ADR-0010](adr/0010-state-store-and-locking.md).
 `statestore.Open(ctx, url)` opens a store. It wraps every backend in a check that rejects invalid paths before the
 backend sees them, and it names the operation and the path in every error.
 
+`statestore.OpenWith(ctx, url, opts...)` is `Open` with options. The one option, `WithoutSync()`, is for tests: a file
+store then skips the sync of each written file and of its directory, and a bucket ignores it. tent never passes it:
+no URL, flag, environment variable or config key reaches it, and `TestOnlyTestsUseWithoutSync` fails when a Go file
+that is not a test names it.
+
 - **`file:///abs/path`** (`file:///C:/state` on Windows): local development and single-runner CI jobs (E2E uses it).
   - Local disks only. Network file systems such as NFS emulate file locks per process, so two goroutines of one
     process would not exclude each other and conditional puts would not be atomic.
@@ -4268,9 +4273,11 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
        A failed read of the release files gives the warning once and an update that goes on, and an interrupted read is
        an interruption. `TestUpdateReadsNomadsReleaseFilesOncePerRun` checks that a run reads Nomad's release files
        once.
-     - **Parallel tests.** Every top-level test of the roll's test files calls `t.Parallel()` first, and
-       `TestRollTestsRunInParallel` fails for one that does not. `go test -race ./internal/app/` took 177 s on the
-       maintainer's machine on 2026-10-08, 146 s on main before M3.3, and 236 s before the tests ran in parallel.
+     - **Parallel tests without syncs.** Every top-level test of `internal/app` calls `t.Parallel()` first, and
+       `TestEveryTestRunsInParallel` fails for one that does not. The tests open their file store with
+       `statestore.OpenWith` and `WithoutSync()` ([10.1](#101-backends)): the syncs of the store's writes took most of
+       the package's time. `go test -race ./internal/app/` took 36 s on the maintainer's machine on 2026-10-11; it
+       took 232 s before every test ran in parallel, and 182 s before the stores stopped syncing.
    - **Built in M3.4** ([ADR-0038](adr/0038-rolling-update-of-server-groups.md)): tests of the server roll, on the same
      fakes.
      - **The world follows servers over time** (`roll_servers_world_*_test.go`; every delay is 0 by default, so the
