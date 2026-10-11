@@ -141,8 +141,9 @@ This ADR records maintainer decisions 39 to 42 as built in M3.3. Decisions 37 an
     what the first one leaves. Cutting at every call made the package take 285 s with `-race` on the maintainer's
     machine, which at the ratio of CI's Windows runner on main (361 s there) would be about 680 s, over the 10 minutes
     that `go test` gives a package. A test fails when a write of a roll is missing
-    from the list of writes, so M3.4's Raft calls cannot go uncut. The roll's tests run in parallel, and
-    `TestRollTestsRunInParallel` fails for a top-level test that does not call `t.Parallel()`.
+    from the list of writes, so M3.4's Raft calls cannot go uncut. The roll's tests run in parallel, and a guard test
+    fails for a top-level test that does not call `t.Parallel()` (since 2026-10-11 `TestEveryTestRunsInParallel`,
+    which checks every test of the package).
 
 ## Consequences
 

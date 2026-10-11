@@ -211,6 +211,9 @@ packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries that
 - **Tests.**
   - Unit tests sit next to the code, with golden files under `testdata/`.
   - Every engine task needs an "apply → re-plan → no-op" test.
+  - Every top-level test of `internal/app` calls `t.Parallel()` first (`TestEveryTestRunsInParallel` checks it), and
+    its tests open a file store with `statestore.OpenWith(..., statestore.WithoutSync())`. Production code calls
+    `statestore.Open`.
   - E2E tests use the `e2e` build tag and never run by default. `make e2e` runs them from the maintainer's machine
     and needs `VULTR_API_KEY`, the R2 keys and `TENT_DEV_S3_URL` (`test/e2e/README.md`).
 - **Checks.** `make check` runs fmt, lint, licenses, test and build; `make fmt` and `make lint` need golangci-lint at
