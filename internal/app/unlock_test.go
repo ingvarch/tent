@@ -34,6 +34,7 @@ func wantUnlocked(t *testing.T, got *statestore.Lease, err error, want *statesto
 }
 
 func TestUnlockNotLocked(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		wrap func(statestore.Store) statestore.Store
@@ -57,6 +58,7 @@ func TestUnlockNotLocked(t *testing.T) {
 
 // TestUnlockMissingCluster reports a cluster with no state and no lock as missing, rather than as not locked.
 func TestUnlockMissingCluster(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		wrap func(statestore.Store) statestore.Store
@@ -86,6 +88,7 @@ const stopHolder = "; that tent is still running and holds a file lock that only
 	"stop that process first"
 
 func TestUnlockRunningFlockHolder(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	held := holdLock(t, svc.Store)
 	for _, force := range []bool{false, true} {
@@ -100,6 +103,7 @@ func TestUnlockRunningFlockHolder(t *testing.T) {
 
 // TestUnlockDeadFlockHolder removes the lease that a tent left when it died holding the flock, which the OS released.
 func TestUnlockDeadFlockHolder(t *testing.T) {
+	t.Parallel()
 	svc, root := newService(t)
 	dead := leaveFlockLease(t, root)
 	removed, err := svc.Unlock(t.Context(), "prod", false)
@@ -119,6 +123,7 @@ func leaseService(t *testing.T, lease statestore.Lease) *app.Service {
 }
 
 func TestUnlockLiveLease(t *testing.T) {
+	t.Parallel()
 	live := otherLease(time.Now().Add(time.Hour).UTC())
 	svc := leaseService(t, live)
 	removed, err := svc.Unlock(t.Context(), "prod", false)
@@ -134,6 +139,7 @@ func TestUnlockLiveLease(t *testing.T) {
 }
 
 func TestUnlockExpiredLease(t *testing.T) {
+	t.Parallel()
 	expired := otherLease(time.Now().Add(-time.Minute).UTC())
 	svc := leaseService(t, expired)
 	removed, err := svc.Unlock(t.Context(), "prod", false)
@@ -161,6 +167,7 @@ func (s *swapping) Get(ctx context.Context, p string) ([]byte, statestore.Versio
 }
 
 func TestUnlockExpiredLeaseTakenMeanwhile(t *testing.T) {
+	t.Parallel()
 	expired := otherLease(time.Now().Add(-time.Minute).UTC())
 	live := otherLease(time.Now().Add(time.Hour).UTC())
 	live.ID, live.Host = "taker", "laptop"
@@ -175,6 +182,7 @@ func TestUnlockExpiredLeaseTakenMeanwhile(t *testing.T) {
 }
 
 func TestUnlockChecksTheTentVersion(t *testing.T) {
+	t.Parallel()
 	expired := otherLease(time.Now().Add(-time.Minute).UTC())
 	svc := leaseService(t, expired)
 	put(t, svc.Store, versionPath, []byte("v0.9.0\n"))
@@ -197,6 +205,7 @@ func (failingPuts) Put(_ context.Context, p string, _ []byte, _ statestore.PutOp
 }
 
 func TestUnlockUnreadableLease(t *testing.T) {
+	t.Parallel()
 	const hint = "; run it again with --force if that tent is gone"
 	svc, _ := newService(t)
 	svc.Store = unwrapped{svc.Store}

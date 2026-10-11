@@ -97,6 +97,7 @@ func (w *putLog) Put(ctx context.Context, p string, data []byte, opts statestore
 // TestUpdateWritesTheSecrets writes the CA's key and bundle, the gossip key and the ACL bootstrap secret, each only
 // when it does not exist yet, after it raises the tent version and before it changes the infrastructure.
 func TestUpdateWritesTheSecrets(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newUpdate(t)
 		now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
@@ -147,6 +148,7 @@ func TestUpdateWritesTheSecrets(t *testing.T) {
 
 // TestUpdateSignsTheCANow makes the CA valid from five minutes before the update when Now is not set.
 func TestUpdateSignsTheCANow(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newUpdate(t)
 		start := time.Now()
@@ -162,6 +164,7 @@ func TestUpdateSignsTheCANow(t *testing.T) {
 // TestUpdateKeepsTheSecrets plans no secrets once they are stored, and an update that changes the cluster leaves them
 // byte for byte.
 func TestUpdateKeepsTheSecrets(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newUpdate(t)
 		mustUpdate(t, svc)
@@ -182,6 +185,7 @@ func TestUpdateKeepsTheSecrets(t *testing.T) {
 // TestUpdateCompletesTheCA signs a CA bundle for a stored CA key whose bundle was never written, and leaves the key
 // and the other secrets as they are.
 func TestUpdateCompletesTheCA(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newUpdate(t)
 		mustUpdate(t, svc)
@@ -217,6 +221,7 @@ func TestUpdateCompletesTheCA(t *testing.T) {
 // TestUpdateRefusesBrokenSecrets fails the plan, with and without apply, when a stored secret cannot be used: tent
 // never replaces a cluster's secrets. It writes nothing and changes nothing in the cloud.
 func TestUpdateRefusesBrokenSecrets(t *testing.T) {
+	t.Parallel()
 	otherCA, err := pki.NewCA("prod", time.Now())
 	if err != nil {
 		t.Fatal(err)
@@ -321,6 +326,7 @@ func (s *racingStore) Put(ctx context.Context, p string, data []byte, opts state
 // TestUpdateKeepsASecretWrittenMeanwhile stops when a secret appears between the plan and its write, with an error
 // that shows no secret, and keeps the secret that the other writer wrote. The next update keeps it too.
 func TestUpdateKeepsASecretWrittenMeanwhile(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newUpdate(t)
 		other := pki.NewGossipKey().Bytes()
@@ -357,6 +363,7 @@ func TestUpdateKeepsASecretWrittenMeanwhile(t *testing.T) {
 // TestUpdateWritesTheSecretsWithoutConditionalPuts writes the secrets with plain puts to a store that cannot create
 // only, under its best-effort lock.
 func TestUpdateWritesTheSecretsWithoutConditionalPuts(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newUpdate(t)
 		rec := &putLog{Store: noConditions{svc.Store}}
@@ -424,6 +431,7 @@ func (s *sent) received(t *testing.T, path string) map[string][]byte {
 // TestUpdateShowsNoSecrets writes the secrets and shows them in neither the plan, as text and as JSON, nor the
 // progress, nor the provider's log.
 func TestUpdateShowsNoSecrets(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newService(t)
 		mustCreate(t, svc, keyedClusterYAML, serversYAML, workersYAML)

@@ -20,6 +20,7 @@ const (
 // TestRefuseJoinedDeletes fails a plan that deletes a machine with the joined label, for every reason a delete has,
 // and names each such machine in one error. It accepts a plan whose deletes have never joined.
 func TestRefuseJoinedDeletes(t *testing.T) {
+	t.Parallel()
 	joined := func(id, name string) cloud.Instance { return cloud.Instance{ID: id, Name: name, Joined: true} }
 	idle := func(id, name string) cloud.Instance { return cloud.Instance{ID: id, Name: name} }
 	old, w1, w2, twin := joined("instance-7", "prod-old-0"), joined("instance-5", "prod-workers-1"),
@@ -146,6 +147,7 @@ func TestRefuseJoinedDeletes(t *testing.T) {
 
 // TestRefuseJoinedDeletesIgnoresAMachineThatTheCloudDoesNotList accepts a delete whose ID no listed machine has.
 func TestRefuseJoinedDeletesIgnoresAMachineThatTheCloudDoesNotList(t *testing.T) {
+	t.Parallel()
 	changes := []NodeChange{{Action: NodeDelete, Name: "prod-workers-1", ID: "instance-5", Reason: reasonSurplus}}
 	listed := []cloud.Instance{{ID: "instance-6", Name: "prod-workers-1", Joined: true}}
 
@@ -157,6 +159,7 @@ func TestRefuseJoinedDeletesIgnoresAMachineThatTheCloudDoesNotList(t *testing.T)
 // TestRefuseJoinedDeletesNamesTheStayerOfTheSameCluster names the machine of the duplicate's own cluster as the one
 // that stays, also when a machine of another cluster with the name is listed first.
 func TestRefuseJoinedDeletesNamesTheStayerOfTheSameCluster(t *testing.T) {
+	t.Parallel()
 	other := cloud.Instance{ID: "instance-1", Cluster: "other", Name: "prod-workers-0", Joined: true}
 	keeper := cloud.Instance{ID: "instance-3", Cluster: "prod", Name: "prod-workers-0", Joined: true}
 	twin := cloud.Instance{ID: "instance-8", Cluster: "prod", Name: "prod-workers-0", Joined: true}
@@ -190,6 +193,7 @@ func (s *nomadStub) Peers(context.Context) ([]nomadops.Peer, error) {
 // TestHasJoined tells a machine that joined Nomad from one that did not, by the node's name and address and by the
 // peer's address, and passes on the error of either call.
 func TestHasJoined(t *testing.T) {
+	t.Parallel()
 	addr := netip.MustParseAddr("10.64.0.9")
 	machine := cloud.Instance{ID: "instance-9", Name: "prod-workers-1", PrivateIP: addr}
 	as := func(role v1alpha1.Role) cloud.Instance {

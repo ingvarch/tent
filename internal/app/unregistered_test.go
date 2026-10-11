@@ -100,6 +100,7 @@ func writesOf(f *vultrfake.Fake, n int, nm map[string]string) []string {
 // delete and the create, and the apply checks the delete, deletes the machine, makes a token and a machine under a
 // new operation id, waits for its registration and scrubs it.
 func TestUpdateReplacesAClientThatNeverRegistered(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := neverRegistered(t)
 		oldOp := opOf(f.Instances()[4].Tags)
@@ -175,6 +176,7 @@ func TestUpdateReplacesAClientThatNeverRegistered(t *testing.T) {
 // account that is at its instance limit: Vultr refuses the first create after the delete, and the run still ends with
 // the new machine, in one run.
 func TestUpdateReplacesAClientWhenTheLimitStillCountsItsDeletedMachine(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := neverRegistered(t)
 		sleepUntilAge(t, f, "instance-5", oldClient)
@@ -210,6 +212,7 @@ func instanceIDs(f *vultrfake.Fake) []string {
 // without the label: the plan asks Nomad, finds the node, and keeps the wait, so the run labels the machine and
 // deletes nothing.
 func TestUpdateWaitsForAClientThatRegisteredLate(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := neverRegistered(t)
 		sleepUntilAge(t, f, "instance-5", oldClient)
@@ -242,6 +245,7 @@ func TestUpdateWaitsForAClientThatRegisteredLate(t *testing.T) {
 // TestUpdateAsksWhichNodeRegistered finds a client that never registered although Nomad lists a node of its name: the
 // node is down, or it advertises another address. The plan replaces the machine.
 func TestUpdateAsksWhichNodeRegistered(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		node func(machine netip.Addr) nomadops.Node
@@ -275,6 +279,7 @@ func TestUpdateAsksWhichNodeRegistered(t *testing.T) {
 // TestUpdateReplacesAClientThatIsNotReady replaces a machine that the cloud still reports not ready 31 minutes after
 // its creation: the plan holds its delete, not the repeat of its create.
 func TestUpdateReplacesAClientThatIsNotReady(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newUpdate(t)
 		pendingWorker(t, svc, f) // instance-6 replaces instance-5 and is not ready
@@ -298,6 +303,7 @@ func TestUpdateReplacesAClientThatIsNotReady(t *testing.T) {
 // TestUpdateAsksNothingWithoutAJoinedServer waits for an old client when no server that stays carries the joined
 // label, since the plan has no server to ask: the plan makes no Nomad call.
 func TestUpdateAsksNothingWithoutAJoinedServer(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := neverRegistered(t)
 		for _, id := range serverIDs {
@@ -328,6 +334,7 @@ func TestUpdateAsksNothingWithoutAJoinedServer(t *testing.T) {
 // TestUpdateAsksOnlyTheJoinedServers asks Nomad about an old client through the servers that carry the joined label
 // alone: with one of three joined, the plan makes one Nomad client, at the public address of that server.
 func TestUpdateAsksOnlyTheJoinedServers(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := neverRegistered(t)
 		unmark(t, f, "instance-2")
@@ -361,6 +368,7 @@ func TestUpdateAsksOnlyTheJoinedServers(t *testing.T) {
 // TestUpdateMeasuresTheAgeByTheServiceClock decides that a client is old by the clock of the service, not by the
 // clock of the process: a service clock an hour ahead of the cloud's makes the machine old at once.
 func TestUpdateMeasuresTheAgeByTheServiceClock(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w := neverRegistered(t)
 		svc.Now = func() time.Time { return time.Now().Add(time.Hour) }
@@ -381,6 +389,7 @@ func TestUpdateMeasuresTheAgeByTheServiceClock(t *testing.T) {
 // TestUpdateFailsWhenItCannotAskNomadAboutAClient fails the plan of an old client before any write when Nomad cannot be
 // asked, with and without apply, and when the service has no way to reach Nomad.
 func TestUpdateFailsWhenItCannotAskNomadAboutAClient(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		setup func(*testing.T, *app.Service, *nomadWorld)
@@ -428,6 +437,7 @@ func TestUpdateFailsWhenItCannotAskNomadAboutAClient(t *testing.T) {
 // TestUpdateStopsWhenTheClientRegisteredMeanwhile does not delete a client that registered after the plan asked: the
 // check of the delete finds its node, labels the machine, and fails the run.
 func TestUpdateStopsWhenTheClientRegisteredMeanwhile(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := neverRegistered(t)
 		sleepUntilAge(t, f, "instance-5", oldClient)
@@ -459,6 +469,7 @@ func TestUpdateStopsWhenTheClientRegisteredMeanwhile(t *testing.T) {
 // TestUpdateResumesTheReplacementOfAClient cuts the replacement at the delete of the machine: before it, the next plan
 // holds both changes; after it, the create alone. The next run ends with one machine per node and no change.
 func TestUpdateResumesTheReplacementOfAClient(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		after bool
@@ -498,6 +509,7 @@ func TestUpdateResumesTheReplacementOfAClient(t *testing.T) {
 // of its name that registered without the label, both older than 31 minutes. The twin stays and the other machine
 // goes as a duplicate: no third machine is made, and the guard does not meet a joined twin.
 func TestUpdateKeepsTheTwinThatRegisteredOfAClientThatNeverRegistered(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := neverRegistered(t)
 		twin := twinOf(t, f, "instance-5")
@@ -534,6 +546,7 @@ func nameOf(f *vultrfake.Fake, id string) string { return names(f)[id] }
 // registered down to one. Both are old and Nomad lists both as down: the plan deletes both as not registered and makes
 // one, which registers and is scrubbed.
 func TestUpdateReplacesTwoClientsThatNeverRegisteredWhenTheirGroupShrinks(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := newRelease(t)
 		mustUpdate(t, svc)

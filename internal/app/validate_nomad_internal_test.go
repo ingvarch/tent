@@ -84,6 +84,7 @@ func dropReport(h nomadops.Health, in cloud.Instance) nomadops.Health {
 }
 
 func TestServerFailures(t *testing.T) {
+	t.Parallel()
 	servers := serversOf()
 	noVote := func(p []nomadops.Peer, i int) []nomadops.Peer {
 		p[i].Voter = false
@@ -218,6 +219,7 @@ func TestServerFailures(t *testing.T) {
 }
 
 func TestClientFailures(t *testing.T) {
+	t.Parallel()
 	clients := workersOf()
 	node := func(in cloud.Instance, status string, eligible bool) nomadops.Node {
 		return nomadops.Node{Name: in.Name, Status: status, Eligible: eligible, Address: in.PrivateIP, Version: "2.0.7"}
@@ -303,6 +305,7 @@ func TestClientFailures(t *testing.T) {
 }
 
 func TestVersionFailures(t *testing.T) {
+	t.Parallel()
 	servers, clients := serversOf(), workersOf()
 	node := func(in cloud.Instance, status, v string) nomadops.Node {
 		return nomadops.Node{Name: in.Name, Status: status, Eligible: true, Address: in.PrivateIP, Version: v}
@@ -363,6 +366,7 @@ func TestVersionFailures(t *testing.T) {
 }
 
 func TestCertificateFindings(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 	const day = 24 * time.Hour
 	// created returns the creation time of a machine whose node certificate ends d after now.
@@ -451,6 +455,7 @@ func TestCertificateFindings(t *testing.T) {
 
 // TestCertificateFindingsOrderTheWarningsByNode tells the warnings of the nodes by name, then the CA's.
 func TestCertificateFindingsOrderTheWarningsByNode(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 	soon := now.Add(48*time.Hour).AddDate(-1, 0, 0)
 	machines := fullCluster()
@@ -472,6 +477,7 @@ func TestCertificateFindingsOrderTheWarningsByNode(t *testing.T) {
 
 // TestFindingsAreOfTheRoles checks that a machine of a client group is no expected server.
 func TestFindingsAreOfTheRoles(t *testing.T) {
+	t.Parallel()
 	m := validateModel()
 	m.Groups = append(m.Groups,
 		model.NodeGroup{Name: "mixed", Role: v1alpha1.RoleCombined, Zones: []string{"ams"}, Size: 1})

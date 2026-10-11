@@ -33,6 +33,7 @@ func seedServer(t *testing.T, f *vultrfake.Fake, name, public string) {
 // the end of the run's context. The error of the run names the call and keeps the cause; the progress of a failed step
 // shows the cause alone.
 func TestUpdateNamesAFailedNomadCall(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ call, prefix string }{
 		{"Bootstrap", "bootstrap the ACL system: "},
 		{"IntroToken", "intro token for node prod-workers-0: "},
@@ -83,6 +84,7 @@ func TestUpdateNamesAFailedNomadCall(t *testing.T) {
 // TestUpdateNeedsServerAddresses fails the changes that need an address of a server that it does not have, and names
 // the servers, with the text that tells to run the command again.
 func TestUpdateNeedsServerAddresses(t *testing.T) {
+	t.Parallel()
 	oneServer := edit(t, serversYAML, "size: 3", "size: 1")
 	t.Run("a server joins servers that have no private address", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
@@ -125,6 +127,7 @@ func TestUpdateNeedsServerAddresses(t *testing.T) {
 // TestUpdateHintsOnlyAtTheDeadline adds the hint about the access setting to the wait for a leader that ran out of
 // time, and to no other failure.
 func TestUpdateHintsOnlyAtTheDeadline(t *testing.T) {
+	t.Parallel()
 	t.Run("a permanent error", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			svc, _, w := newRelease(t)
@@ -160,6 +163,7 @@ func TestUpdateHintsOnlyAtTheDeadline(t *testing.T) {
 
 // TestUpdateAsksForTheNodePoolOfTheGroup asks for the intro token of a client in the node pool of its group.
 func TestUpdateAsksForTheNodePoolOfTheGroup(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		batch := workersYAML + "  nomad:\n    nodePool: batch\n"
 		svc, _, w := newRelease(t, keyedClusterYAML, serversYAML, batch)

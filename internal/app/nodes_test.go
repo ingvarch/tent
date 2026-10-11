@@ -135,6 +135,7 @@ func wantDelete(in cloud.Instance, reason string) NodeChange {
 }
 
 func TestPlanNodes(t *testing.T) {
+	t.Parallel()
 	apps := nodeGroup("apps", v1alpha1.RoleClient, 2) // a client group whose name sorts before servers
 	nodes, node1 := nodeGroup("nodes", v1alpha1.RoleCombined, 3), nodeGroup("nodes", v1alpha1.RoleCombined, 1)
 	app1 := nodeGroup("apps", v1alpha1.RoleClient, 1)
@@ -586,6 +587,7 @@ func TestPlanNodes(t *testing.T) {
 // TestPlanNodesUnregistered plans the delete of the machines that never registered, with the reason not registered,
 // between the waits for clients and their creates: such a machine neither counts toward its group nor holds its name.
 func TestPlanNodesUnregistered(t *testing.T) {
+	t.Parallel()
 	s2, w3 := servers(2), workers(3)
 	fra := workers(2, "ams", "fra")
 	w0, w1, w2 := unjoined(member(w3, 0, "i-4", minutes(4))), unjoined(member(w3, 1, "i-5", minutes(5))),
@@ -691,6 +693,7 @@ func TestPlanNodesUnregistered(t *testing.T) {
 // TestPlanNodesServers returns the machines of the server and combined groups that stay, by name, and leaves out the
 // duplicates, the surplus, the machines of client groups and those of another cluster.
 func TestPlanNodesServers(t *testing.T) {
+	t.Parallel()
 	combined := nodeGroup("all", v1alpha1.RoleCombined, 1)
 	s3 := servers(3)
 	s0, s1, s2 := member(s3, 0, "i-1", minutes(1)), member(s3, 1, "i-2", minutes(2)), member(s3, 2, "i-3", minutes(3))
@@ -730,6 +733,7 @@ func TestPlanNodesServers(t *testing.T) {
 }
 
 func TestNodeActionString(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		action NodeAction
 		want   string

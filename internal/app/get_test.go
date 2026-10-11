@@ -12,6 +12,7 @@ import (
 )
 
 func TestGet(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	got, err := svc.Get(t.Context(), "prod", false)
@@ -26,6 +27,7 @@ func TestGet(t *testing.T) {
 // TestGetSortsNodeGroups stores groups whose paths sort in another order than their names: web-2.yaml before
 // web.yaml.
 func TestGetSortsNodeGroups(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	web := edit(t, workersYAML, "name: workers", "name: web")
 	web2 := edit(t, workersYAML, "name: workers", "name: web-2")
@@ -44,6 +46,7 @@ func TestGetSortsNodeGroups(t *testing.T) {
 }
 
 func TestGetFull(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	got, err := svc.Get(t.Context(), "prod", true)
@@ -58,6 +61,7 @@ func TestGetFull(t *testing.T) {
 }
 
 func TestGetMissing(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML)
 	_, err := svc.Get(t.Context(), "dev", false)
@@ -65,6 +69,7 @@ func TestGetMissing(t *testing.T) {
 }
 
 func TestClusters(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	rename := func(doc string) string { return edit(t, doc, "prod", "dev") }
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
@@ -93,6 +98,7 @@ func TestClusters(t *testing.T) {
 }
 
 func TestClustersOfEmptyStore(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	got, err := svc.Clusters(t.Context(), false)
 	if err != nil || len(got) != 0 {
@@ -110,6 +116,7 @@ func full(t *testing.T, docs ...string) spec.Objects {
 
 // TestReadsCheckTheTentVersion reads a cluster that a newer tent wrote in a format this one cannot decode.
 func TestReadsCheckTheTentVersion(t *testing.T) {
+	t.Parallel()
 	const want = "cluster prod needs tent v0.9.0 or newer; this is v0.4.0"
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML)
@@ -128,6 +135,7 @@ func TestReadsCheckTheTentVersion(t *testing.T) {
 }
 
 func TestNodeGroups(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	for _, tc := range []struct {

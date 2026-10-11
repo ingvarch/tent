@@ -10,6 +10,7 @@ import (
 )
 
 func TestCreateCluster(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	objs := decode(t, workersYAML, clusterYAML, serversYAML)
 	changes, err := svc.Create(t.Context(), objs, true)
@@ -28,6 +29,7 @@ func TestCreateCluster(t *testing.T) {
 }
 
 func TestCreateNodeGroups(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML)
 	changes, err := svc.Create(t.Context(), decode(t, workersYAML), true)
@@ -40,6 +42,7 @@ func TestCreateNodeGroups(t *testing.T) {
 }
 
 func TestCreateAgain(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	changes, err := svc.Create(t.Context(), decode(t, clusterYAML, serversYAML, workersYAML), true)
@@ -51,6 +54,7 @@ func TestCreateAgain(t *testing.T) {
 }
 
 func TestCreateExisting(t *testing.T) {
+	t.Parallel()
 	const hint = " already exists; change it with edit or replace -f"
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
@@ -76,6 +80,7 @@ func TestCreateExisting(t *testing.T) {
 
 // TestCreateInterrupted re-runs a create that stopped after writing the node groups: cluster.yaml comes last.
 func TestCreateInterrupted(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	put(t, svc.Store, serversPath, encode(t, serversYAML))
 	put(t, svc.Store, workersPath, encode(t, workersYAML))
@@ -88,6 +93,7 @@ func TestCreateInterrupted(t *testing.T) {
 }
 
 func TestCreateInvalid(t *testing.T) {
+	t.Parallel()
 	svc, root := newService(t)
 	_, err := svc.Create(t.Context(), decode(t, clusterYAML, edit(t, serversYAML, "size: 3", "size: 2")), true)
 	wantFieldErrors(t, err, v1alpha1.FieldError{
@@ -99,6 +105,7 @@ func TestCreateInvalid(t *testing.T) {
 // TestCreateChecksTheWholeCluster adds a second server group to a cluster: the groups are valid alone, the cluster
 // is not.
 func TestCreateChecksTheWholeCluster(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML)
 	_, err := svc.Create(t.Context(), decode(t, edit(t, serversYAML, "name: servers", "name: more")), true)
@@ -110,6 +117,7 @@ func TestCreateChecksTheWholeCluster(t *testing.T) {
 }
 
 func TestCreateSingleServer(t *testing.T) {
+	t.Parallel()
 	single := edit(t, serversYAML, "size: 3", "size: 1")
 	svc, _ := newService(t)
 	_, err := svc.Create(t.Context(), decode(t, clusterYAML, single), true)
@@ -124,6 +132,7 @@ func TestCreateSingleServer(t *testing.T) {
 }
 
 func TestCreateNodeGroupsOfMissingCluster(t *testing.T) {
+	t.Parallel()
 	svc, root := newService(t)
 	_, err := svc.Create(t.Context(), decode(t, workersYAML), true)
 	wantError(t, err, notFound(svc, "cluster prod"))
@@ -131,6 +140,7 @@ func TestCreateNodeGroupsOfMissingCluster(t *testing.T) {
 }
 
 func TestCreateBadInput(t *testing.T) {
+	t.Parallel()
 	svc, root := newService(t)
 	for _, tc := range []struct {
 		name string
@@ -157,6 +167,7 @@ func TestCreateBadInput(t *testing.T) {
 // TestCreateReplacesLeftovers runs a create again whose first run stopped after writing the node groups, with one
 // group changed since: without cluster.yaml, the groups are leftovers of that run.
 func TestCreateReplacesLeftovers(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	put(t, svc.Store, serversPath, encode(t, serversYAML))
 	put(t, svc.Store, workersPath, encode(t, edit(t, workersYAML, "size: 2", "size: 4")))
@@ -170,6 +181,7 @@ func TestCreateReplacesLeftovers(t *testing.T) {
 }
 
 func TestCreateNodeGroupWithoutCluster(t *testing.T) {
+	t.Parallel()
 	svc, root := newService(t)
 	_, err := svc.Create(t.Context(), decode(t, edit(t, workersYAML, "  cluster: prod\n", "")), true)
 	wantFieldErrors(t, err, v1alpha1.FieldError{
@@ -181,6 +193,7 @@ func TestCreateNodeGroupWithoutCluster(t *testing.T) {
 // TestCreateRefusesLeftoversMissingFromTheSpec runs a create again whose first run stopped after writing the node
 // groups, from a spec that no longer has some of them.
 func TestCreateRefusesLeftoversMissingFromTheSpec(t *testing.T) {
+	t.Parallel()
 	const left = " is left from an interrupted create; add it to the spec or run delete cluster first"
 	svc, _ := newService(t)
 	put(t, svc.Store, serversPath, encode(t, serversYAML))

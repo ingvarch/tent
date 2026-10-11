@@ -118,6 +118,7 @@ func (r *recorder) record(ctx context.Context, p string) {
 // TestChangesHoldTheLock checks that every write of a change happens under the cluster's lock, whose lease names the
 // operation, and that the lease is gone afterwards.
 func TestChangesHoldTheLock(t *testing.T) {
+	t.Parallel()
 	for _, tc := range changes {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, _ := newService(t)
@@ -143,6 +144,7 @@ func TestChangesHoldTheLock(t *testing.T) {
 }
 
 func TestChangesWaitForTheLock(t *testing.T) {
+	t.Parallel()
 	for _, tc := range changes {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -185,6 +187,7 @@ func lockedBy(holder statestore.Lease) string {
 }
 
 func TestChangesDoNotWaitWithoutTimeout(t *testing.T) {
+	t.Parallel()
 	for _, tc := range changes {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, _ := newService(t)
@@ -203,6 +206,7 @@ func TestChangesDoNotWaitWithoutTimeout(t *testing.T) {
 }
 
 func TestChangesStopWaitingAfterTimeout(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newService(t)
 		mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
@@ -223,6 +227,7 @@ func TestChangesStopWaitingAfterTimeout(t *testing.T) {
 }
 
 func TestChangesCheckTheTentVersion(t *testing.T) {
+	t.Parallel()
 	for _, tc := range changes {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, _ := newService(t)
@@ -241,6 +246,7 @@ func TestChangesCheckTheTentVersion(t *testing.T) {
 }
 
 func TestChangesRaiseTheTentVersion(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	svc.Version = "v0.4.0"
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
@@ -279,6 +285,7 @@ func (b blocking) Put(
 }
 
 func TestChangesStopWhenTheLockIsLost(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newService(t)
 		svc.Store = blocking{unwrapped{svc.Store}}
@@ -295,6 +302,7 @@ func TestChangesStopWhenTheLockIsLost(t *testing.T) {
 }
 
 func TestWeakLock(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newService(t)
 		svc.Store = noConditions{svc.Store}
@@ -314,6 +322,7 @@ func TestWeakLock(t *testing.T) {
 // TestChangesCheckTheTentVersionAfterWaiting has a newer tent raise the tent version while it holds the lock that a
 // change waits for.
 func TestChangesCheckTheTentVersionAfterWaiting(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newService(t)
 		mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
@@ -360,6 +369,7 @@ func (p *puts) Put(
 // the version read under the lock. The tent version comes first, and the Cluster last, so an interrupted create
 // leaves no cluster.yaml.
 func TestWrites(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	rec := &puts{Store: svc.Store}
 	svc.Store, svc.Version = rec, "v0.4.0"
@@ -401,6 +411,7 @@ func (f *failing) Put(
 // TestCreateAgainAfterTheVersionFailed runs a create again whose write of the tent version failed: the version is
 // recorded in the end, although the specs are unchanged.
 func TestCreateAgainAfterTheVersionFailed(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	svc.Store, svc.Version = &failing{Store: svc.Store, path: versionPath}, "v0.4.0"
 	objs := decode(t, clusterYAML, serversYAML, workersYAML)
@@ -422,6 +433,7 @@ func replaceWorkers(t *testing.T, svc *app.Service) error {
 }
 
 func TestOnTakeover(t *testing.T) {
+	t.Parallel()
 	t.Run("dead flock holder", func(t *testing.T) {
 		svc, root := newService(t)
 		mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
@@ -460,6 +472,7 @@ func TestOnTakeover(t *testing.T) {
 // TestChangesPlanAgainUnderTheLock changes the store while a change waits for the lock: the change decides on what
 // it finds once it holds the lock.
 func TestChangesPlanAgainUnderTheLock(t *testing.T) {
+	t.Parallel()
 	bigger := edit(t, workersYAML, "size: 2", "size: 4")
 	for _, tc := range []struct {
 		name string
@@ -510,6 +523,7 @@ func TestChangesPlanAgainUnderTheLock(t *testing.T) {
 }
 
 func TestChangesStopWaitingWhenInterrupted(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newService(t)
 		mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
@@ -530,6 +544,7 @@ func TestChangesStopWaitingWhenInterrupted(t *testing.T) {
 // TestChangesReleaseTheLockWhenInterrupted interrupts a change that holds the lock: the change releases the lock and
 // says that it was interrupted.
 func TestChangesReleaseTheLockWhenInterrupted(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		leave func(t *testing.T, svc *app.Service, root string) // the lease of a holder that is gone
@@ -570,6 +585,7 @@ func TestChangesReleaseTheLockWhenInterrupted(t *testing.T) {
 
 // TestUseCasesSayInterrupted runs every use case with a context that has ended, as after Ctrl-C.
 func TestUseCasesSayInterrupted(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	stored := snapshot(t, svc.Store)
@@ -606,6 +622,7 @@ func TestUseCasesSayInterrupted(t *testing.T) {
 // TestChangesThatNeedNoLock runs changes that fail or change nothing while another tent holds the lock: they
 // neither wait nor fail for the lock.
 func TestChangesThatNeedNoLock(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	held := holdLock(t, svc.Store)
@@ -631,6 +648,7 @@ func TestChangesThatNeedNoLock(t *testing.T) {
 
 // TestWaitForUnnamedHolder waits for a flock whose holder has written no lease.
 func TestWaitForUnnamedHolder(t *testing.T) {
+	t.Parallel()
 	const unnamed = "cluster prod is locked, but its holder has written no lease"
 	synctest.Test(t, func(t *testing.T) {
 		svc, root := newService(t)
@@ -694,6 +712,7 @@ func (f forceUnlocked) Delete(ctx context.Context, p string) error {
 
 // TestLockLostAfterTheChange loses the lock after the last write: the change comes back with the error.
 func TestLockLostAfterTheChange(t *testing.T) {
+	t.Parallel()
 	const want = "the change is saved, but the lock of cluster prod was lost before tent released it"
 	wantSaved := func(t *testing.T, err error) {
 		t.Helper()
@@ -727,6 +746,7 @@ func TestLockLostAfterTheChange(t *testing.T) {
 
 // TestSavedOnlyForALockLostAfterTheChange: no other error, and no error at all, says that a change was saved with it.
 func TestSavedOnlyForALockLostAfterTheChange(t *testing.T) {
+	t.Parallel()
 	for _, err := range []error{nil, errors.New("broken"), statestore.ErrLockLost} {
 		if app.Saved(err) {
 			t.Errorf("Saved(%v) = true, want false", err)
@@ -753,6 +773,7 @@ func (r racing) Put(
 }
 
 func TestConditionFailed(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		path string

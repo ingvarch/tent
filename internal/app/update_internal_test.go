@@ -9,6 +9,7 @@ import (
 // TestApplyNodeRefusesACreateAndAWait fails a create and a wait, for which applyNode has no user data: it reports the
 // change as started and as failed, returns the error, and asks the cloud for no machine.
 func TestApplyNodeRefusesACreateAndAWait(t *testing.T) {
+	t.Parallel()
 	const cause = "node prod-servers-0: no user data"
 	for _, tc := range []struct {
 		action NodeAction

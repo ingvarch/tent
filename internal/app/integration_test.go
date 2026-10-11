@@ -352,6 +352,7 @@ func callsText(lines []string) string {
 // replaces a worker that never registered, and deletes the built cluster. The plans of the three updates and the calls
 // that each of the four runs makes to Vultr and Nomad match golden files.
 func TestFlowGoldens(t *testing.T) {
+	t.Parallel()
 	plan, calls, _ := buildExample(t)
 	checkGolden(t, "flow_build.plan.golden", planText(t, plan))
 	checkGolden(t, "flow_build.calls.golden", callsText(calls))

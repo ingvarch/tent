@@ -732,6 +732,7 @@ func (w *nomadWorld) shapeHealth(h nomadops.Health) nomadops.Health {
 // RemovePeer of a client of the world go through the world's hook with the Call that the Nomad fake logs, reach the
 // fake when the hook calls next, and return the hook's error, without reaching the fake, when it does not.
 func TestWorldClientPassesTheWritesThroughItsHook(t *testing.T) {
+	t.Parallel()
 	svc, _, w := newRelease(t)
 	errStopped := errors.New("the hook stopped the call")
 	var hooked []nomadfake.Call

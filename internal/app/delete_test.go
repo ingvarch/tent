@@ -166,6 +166,7 @@ func wantNoWrites(t *testing.T, calls []vultrfake.Call) {
 }
 
 func TestDeleteClusterStatePlan(t *testing.T) {
+	t.Parallel()
 	svc, f := newCluster(t)
 	put(t, svc.Store, lockPath, []byte("{}")) // the lock's lease goes when the lock is released
 	plan, err := svc.DeleteCluster(t.Context(), "prod", false, false)
@@ -175,6 +176,7 @@ func TestDeleteClusterStatePlan(t *testing.T) {
 }
 
 func TestDeleteClusterState(t *testing.T) {
+	t.Parallel()
 	svc, _ := newCluster(t)
 	plan, err := svc.DeleteCluster(t.Context(), "prod", true, false)
 	wantDeletePlan(t, plan, err, nil, nil, allState)
@@ -183,6 +185,7 @@ func TestDeleteClusterState(t *testing.T) {
 
 // TestDeleteClusterAgain runs a delete again that stopped before the Cluster's spec and the tent version.
 func TestDeleteClusterAgain(t *testing.T) {
+	t.Parallel()
 	svc, _ := newCluster(t)
 	for _, p := range []string{completedPath, serversPath, workersPath} {
 		if err := svc.Store.Delete(t.Context(), p); err != nil {
@@ -197,6 +200,7 @@ func TestDeleteClusterAgain(t *testing.T) {
 // TestDeleteClusterUnknownState refuses objects in the state that tent does not know before it calls the cloud, and
 // with force deletes them with the rest of the state.
 func TestDeleteClusterUnknownState(t *testing.T) {
+	t.Parallel()
 	unknown := []string{"prod/nodegroups/old/x.yaml", "prod/notes.txt", "prod/pki/ca.pem"}
 	svc, f := newCluster(t)
 	for _, p := range unknown {
@@ -240,6 +244,7 @@ var secretDeletes = []string{aclPath, gossipPath, caBundlePath, caKeyPath}
 // TestDeleteClusterSecrets deletes the cluster's CA, gossip key and ACL bootstrap secret without force, after the
 // node groups and the completed spec and before cluster.yaml and the tent version.
 func TestDeleteClusterSecrets(t *testing.T) {
+	t.Parallel()
 	svc, _ := newCluster(t)
 	for _, p := range secretPaths {
 		put(t, svc.Store, p, []byte("?"))
@@ -256,6 +261,7 @@ func TestDeleteClusterSecrets(t *testing.T) {
 // TestDeleteClusterNameIndexes deletes the objects that hold the highest index of the names of a group without force,
 // with the objects that the store lists first, also for a group that the specs no longer have.
 func TestDeleteClusterNameIndexes(t *testing.T) {
+	t.Parallel()
 	svc, _ := newCluster(t)
 	put(t, svc.Store, namesPath, []byte("4\n"))
 	put(t, svc.Store, "prod/names/old", []byte("2\n"))
@@ -270,6 +276,7 @@ func TestDeleteClusterNameIndexes(t *testing.T) {
 // TestDeleteClusterUnknownNameObjects refuses the object names and an object that is deeper than a node group's
 // under names/.
 func TestDeleteClusterUnknownNameObjects(t *testing.T) {
+	t.Parallel()
 	for _, unknown := range []string{"prod/names", "prod/names/servers/x"} {
 		svc, _ := newCluster(t)
 		put(t, svc.Store, unknown, []byte("?"))
@@ -284,6 +291,7 @@ const nomadMarkPath = "prod/nomad/bootstrapped"
 // TestDeleteClusterNomadMark deletes the bootstrap mark without force, after the node groups and before the
 // secrets, and still refuses an unknown object beside it.
 func TestDeleteClusterNomadMark(t *testing.T) {
+	t.Parallel()
 	svc, _ := newCluster(t)
 	put(t, svc.Store, nomadMarkPath, []byte("?"))
 	for _, p := range secretPaths {
@@ -306,6 +314,7 @@ func TestDeleteClusterNomadMark(t *testing.T) {
 
 // TestDeleteClusterUnknownObjectNextToTheSecrets refuses an object under pki/ that is not one of the secrets.
 func TestDeleteClusterUnknownObjectNextToTheSecrets(t *testing.T) {
+	t.Parallel()
 	const unknown = "prod/pki/private/old.key"
 	svc, _ := newCluster(t)
 	for _, p := range append(slices.Clone(secretPaths), unknown) {
@@ -320,6 +329,7 @@ func TestDeleteClusterUnknownObjectNextToTheSecrets(t *testing.T) {
 }
 
 func TestDeleteClusterMissing(t *testing.T) {
+	t.Parallel()
 	svc, f := newCluster(t)
 	for _, apply := range []bool{false, true} {
 		_, err := svc.DeleteCluster(t.Context(), "dev", apply, false)
@@ -334,6 +344,7 @@ func TestDeleteClusterMissing(t *testing.T) {
 // TestDeleteClusterWithoutClusterSpec deletes the state of a cluster without cluster.yaml, such as one left from an
 // interrupted create: tent cannot tell its cloud, so it deletes the state alone.
 func TestDeleteClusterWithoutClusterSpec(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	put(t, svc.Store, serversPath, encode(t, serversYAML))
 	put(t, svc.Store, workersPath, encode(t, workersYAML))
@@ -362,6 +373,7 @@ func TestDeleteClusterWithoutClusterSpec(t *testing.T) {
 // TestDeleteClusterOnAnUnsupportedProvider deletes the state alone of a cluster on a provider that tent cannot manage
 // yet: tent made no cloud objects there.
 func TestDeleteClusterOnAnUnsupportedProvider(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	hetzner := edit(t, edit(t, clusterYAML, "provider: vultr", "provider: hetzner"), "region: ams",
 		"region: eu-central\n    zones: [fsn1, nbg1, hel1]")
@@ -398,6 +410,7 @@ func TestDeleteClusterOnAnUnsupportedProvider(t *testing.T) {
 }
 
 func TestDeleteClusterFailsBeforeTheCloud(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name      string
 		providers func(v1alpha1.Provider) (cloud.Provider, error)
@@ -428,6 +441,7 @@ func TestDeleteClusterFailsBeforeTheCloud(t *testing.T) {
 // TestDeleteClusterPlan plans the delete of a built cluster: every node, every infrastructure object and the state,
 // with only reads.
 func TestDeleteClusterPlan(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newBuilt(t)
 		before := len(f.Calls())
@@ -454,6 +468,7 @@ func TestDeleteClusterPlan(t *testing.T) {
 // TestDeleteCluster deletes a built cluster next to another one: the nodes, then the firewall groups, the VPC and
 // the SSH keys, then the state. The other cluster keeps everything.
 func TestDeleteCluster(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newBuilt(t)
 		devSpecs := make([]string, 0, 3)
@@ -555,6 +570,7 @@ func TestDeleteCluster(t *testing.T) {
 
 // TestDeleteClusterTellsThePlan tells OnDeletePlan the plan made under the lock, once, before the first change.
 func TestDeleteClusterTellsThePlan(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newBuilt(t)
 		var events []string
@@ -589,6 +605,7 @@ func TestDeleteClusterTellsThePlan(t *testing.T) {
 
 // TestDeleteClusterStopsWhenThePlanCannotBeTold deletes nothing when OnDeletePlan fails, and returns its error.
 func TestDeleteClusterStopsWhenThePlanCannotBeTold(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newBuilt(t)
 		errClosed := errors.New("stdout is closed")
@@ -613,6 +630,7 @@ func TestDeleteClusterStopsWhenThePlanCannotBeTold(t *testing.T) {
 
 // TestDeleteClusterRetriesTheVPC deletes a VPC that Vultr still counts attached to the deleted nodes at first.
 func TestDeleteClusterRetriesTheVPC(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newBuilt(t)
 		vpc := f.VPCs()[0].ID
@@ -651,6 +669,7 @@ func (u undeletable) DeleteInstance(ctx context.Context, id string) error {
 // TestDeleteClusterWaitsForTheNodes lists the nodes every 5 seconds until none is left, for up to 5 minutes, before
 // it deletes the infrastructure.
 func TestDeleteClusterWaitsForTheNodes(t *testing.T) {
+	t.Parallel()
 	t.Run("a node that goes after 12 seconds", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			svc, f := newBuilt(t)
@@ -720,6 +739,7 @@ func TestDeleteClusterWaitsForTheNodes(t *testing.T) {
 // TestDeleteClusterDoesNotWaitForNodesThatAreGone tells nothing of a wait when the cloud lists no node after the
 // deletes.
 func TestDeleteClusterDoesNotWaitForNodesThatAreGone(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newBuilt(t)
 		progress := recordProgress(svc)
@@ -734,6 +754,7 @@ func TestDeleteClusterDoesNotWaitForNodesThatAreGone(t *testing.T) {
 // TestDeleteClusterStopsAtAFailedNodeDelete keeps the rest of the cluster and its state, and the next delete
 // finishes the job.
 func TestDeleteClusterStopsAtAFailedNodeDelete(t *testing.T) {
+	t.Parallel()
 	const wantErr = "delete node prod-servers-0 (instance-1): vultr: DELETE /v2/instances/instance-1: " +
 		"500 Internal Server Error: Internal error."
 	synctest.Test(t, func(t *testing.T) {
@@ -777,6 +798,7 @@ func TestDeleteClusterStopsAtAFailedNodeDelete(t *testing.T) {
 // TestDeleteClusterWithInvalidSpecs deletes a cluster whose specs are invalid and whose machine type is not
 // available: the delete checks neither.
 func TestDeleteClusterWithInvalidSpecs(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newBuilt(t)
 		put(t, svc.Store, serversPath, encode(t, edit(t, serversYAML, "size: 3", "size: 2")))
@@ -793,6 +815,7 @@ func TestDeleteClusterWithInvalidSpecs(t *testing.T) {
 
 // TestDeleteClusterInterrupted interrupts the delete as it starts the first node's, as Ctrl-C would.
 func TestDeleteClusterInterrupted(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newBuilt(t)
 		stored := snapshot(t, svc.Store)

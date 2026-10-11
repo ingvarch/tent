@@ -194,6 +194,7 @@ func onlyNomadAndNodes(lines []string) []string {
 // boots with the NodeConfig of its group, the servers with the seed of the servers that exist, the clients with an
 // intro token; Nomad is bootstrapped with the stored secret once the servers run, and the clients are made after.
 func TestUpdateBuildsANomadCluster(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := newRelease(t)
 		now := time.Now()
@@ -484,6 +485,7 @@ func countOf(calls []vultrfake.Call, name string) int {
 // TestUpdateBuildsACombinedCluster builds a cluster of three combined nodes: they join like servers, take no intro
 // token, and each registers after the servers are healthy. A cluster of one combined node bootstraps with one server.
 func TestUpdateBuildsACombinedCluster(t *testing.T) {
+	t.Parallel()
 	t.Run("three nodes", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			svc, f, w := newRelease(t, keyedClusterYAML, combinedYAML)
@@ -568,6 +570,7 @@ var errNotReady = fmt.Errorf("test: %w", nomadops.ErrNotReady)
 // TestUpdateMovesToTheNextServer fails the first call to the first server with a not-ready error: the call goes to
 // the second server, and the later calls start there.
 func TestUpdateMovesToTheNextServer(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w := newRelease(t)
 		w.Fail(t, "Leader", errNotReady)
@@ -590,6 +593,7 @@ func TestUpdateMovesToTheNextServer(t *testing.T) {
 // TestUpdateResumesAfter cuts the build of the example cluster at a point of its flow. The next run plans what is left
 // and finishes: one instance per node, the mark stored, a plan without changes.
 func TestUpdateResumesAfter(t *testing.T) {
+	t.Parallel()
 	_, _, want := buildExample(t)
 	_, template := exampleStore(t)
 	const leader = "nomad Leader (prod-servers-0)"
@@ -711,6 +715,7 @@ func TestUpdateResumesAfter(t *testing.T) {
 // TestUpdateStoresNoMarkBeforeTheServersAreHealthy fails the health wait of the build. The run creates no client and
 // stores no mark, so the next run repeats the leader wait, the bootstrap and the health wait before the clients.
 func TestUpdateStoresNoMarkBeforeTheServersAreHealthy(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := newRelease(t)
 		w.Fail(t, "Health", errBoom)
@@ -757,6 +762,7 @@ func TestUpdateStoresNoMarkBeforeTheServersAreHealthy(t *testing.T) {
 // the bootstrap. The run reads it until it is ready, once more than it was held back, and only then scrubs the servers
 // and asks for an intro token, which fails while the keyring is not ready.
 func TestUpdateWaitsForTheKeyringBeforeTheScrubAndTheFirstIntroToken(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := newRelease(t)
 		w.SetKeyringDelay(2)
@@ -795,6 +801,7 @@ var serverIDs = []string{"instance-1", "instance-2", "instance-3"}
 // that makes it again. The next plan waits for the new server, which is ready and has not joined, and the run after it
 // waits for health, scrubs that server alone and reads no release file. The wait itself shows no node step.
 func TestUpdateRepeatsAHealthWaitThatStopped(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := newRelease(t)
 		mustUpdate(t, svc)
@@ -862,6 +869,7 @@ func TestUpdateRepeatsAHealthWaitThatStopped(t *testing.T) {
 // first user data again. The plan waits for the three, with the Nomad step and no bootstrap; the run creates nothing,
 // bootstraps nothing and labels the three.
 func TestUpdateLabelsServersThatLostTheLabel(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := newRelease(t)
 		mustUpdate(t, svc)
@@ -921,6 +929,7 @@ func relabelRole(t *testing.T, f *vultrfake.Fake, name string, role v1alpha1.Rol
 // labelled client is waited for as a client, whatever its group: no Nomad step of its own. A machine labelled server in
 // a group of clients is waited for as a server, scrubbed by its ID, and the run never panics.
 func TestUpdateDecidesByTheMachinesRoleLabel(t *testing.T) {
+	t.Parallel()
 	t.Run("labelled client in a group of servers", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			svc, f, _ := newRelease(t)
@@ -963,6 +972,7 @@ func TestUpdateDecidesByTheMachinesRoleLabel(t *testing.T) {
 // TestUpdateScrubsAgainWithoutTheLabel finds a server that holds the stub and lacks the label: the plan waits for it,
 // and the run sets the label, as a scrub that lost its answer needs.
 func TestUpdateScrubsAgainWithoutTheLabel(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := newRelease(t)
 		mustUpdate(t, svc)
@@ -990,6 +1000,7 @@ func TestUpdateScrubsAgainWithoutTheLabel(t *testing.T) {
 // TestUpdateStopsAtAFailedScrub fails the scrub of the first server. The run stops with the provider's error and a
 // failed step, frees the lock, makes no client and stores no mark; the next run finishes.
 func TestUpdateStopsAtAFailedScrub(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := newRelease(t)
 		progress := recordProgress(svc)
@@ -1024,6 +1035,7 @@ func TestUpdateStopsAtAFailedScrub(t *testing.T) {
 // minutes with the provider's scrub error, which matches context.DeadlineExceeded, with a failed step, no mark and a
 // free lock; the next run finishes.
 func TestUpdateGivesAScrubFiveMinutes(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := newRelease(t)
 		progress := recordProgress(svc)
@@ -1064,6 +1076,7 @@ func TestUpdateGivesAScrubFiveMinutes(t *testing.T) {
 // TestUpdateScrubsOnlyAServerThatVotes changes the Raft configuration that the run reads, so that a server does not
 // vote at its address. The run stops with an error before it scrubs that server, after those that vote.
 func TestUpdateScrubsOnlyAServerThatVotes(t *testing.T) {
+	t.Parallel()
 	voting := func(voters ...bool) []nomadops.Peer {
 		var peers []nomadops.Peer
 		for i, voter := range voters {
@@ -1117,6 +1130,7 @@ func TestUpdateScrubsOnlyAServerThatVotes(t *testing.T) {
 // TestUpdateLosesTheBootstrapAnswer loses the answer of the Bootstrap call. With three servers the next server finds
 // the bootstrap done. With one server the run fails, no mark is stored, and the next run finishes.
 func TestUpdateLosesTheBootstrapAnswer(t *testing.T) {
+	t.Parallel()
 	t.Run("three servers", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			svc, _, w := newRelease(t)
@@ -1164,6 +1178,7 @@ func TestUpdateLosesTheBootstrapAnswer(t *testing.T) {
 // TestUpdateLosesAnIntroTokenAnswer loses the answer of an IntroToken call: the call goes to the next server, and the
 // node boots with a token for its own name.
 func TestUpdateLosesAnIntroTokenAnswer(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := newRelease(t)
 		w.LoseResponse(t, "IntroToken")
@@ -1185,6 +1200,7 @@ func TestUpdateLosesAnIntroTokenAnswer(t *testing.T) {
 
 // TestUpdateWaitsTenMinutes ends the waits of the Nomad step at 10 minutes.
 func TestUpdateWaitsTenMinutes(t *testing.T) {
+	t.Parallel()
 	t.Run("no leader", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			svc, f, w := newRelease(t)
@@ -1325,6 +1341,7 @@ func TestUpdateWaitsTenMinutes(t *testing.T) {
 // TestUpdateLabelsNoClientThatIsNotEligible registers a client that is not eligible: the wait ends after 10 minutes
 // with that state, the client stays without the label, and the next plan and the next run wait for it again.
 func TestUpdateLabelsNoClientThatIsNotEligible(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := newRelease(t)
 		w.Withhold("prod-workers-1")
@@ -1364,6 +1381,7 @@ func TestUpdateLabelsNoClientThatIsNotEligible(t *testing.T) {
 // earlier tent built has it. The plan is five waits without operation ids and the Nomad step without the bootstrap.
 // The run creates nothing, asks for no intro token, bootstraps nothing, reads no release file and leaves five labels.
 func TestUpdateLabelsABuiltCluster(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := newRelease(t)
 		mustUpdate(t, svc)
@@ -1415,6 +1433,7 @@ func TestUpdateLabelsABuiltCluster(t *testing.T) {
 // TestUpdateWaitsForTheMachinesOwnNode checks that the registration wait ignores a ready node of the same name at
 // another address, such as the node of an earlier machine, and fails naming the address of the machine's own node.
 func TestUpdateWaitsForTheMachinesOwnNode(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := newRelease(t)
 		w.Withhold("prod-workers-1")
@@ -1445,6 +1464,7 @@ func TestUpdateWaitsForTheMachinesOwnNode(t *testing.T) {
 // TestUpdateNeedsANomadClient fails an update that needs Nomad when the service has none, before it changes anything:
 // the first build, and a built cluster that gets only a client, which needs the intro token.
 func TestUpdateNeedsANomadClient(t *testing.T) {
+	t.Parallel()
 	t.Run("a first build", func(t *testing.T) {
 		svc, f, _ := newRelease(t)
 		svc.Nomad = nil
@@ -1485,6 +1505,7 @@ func TestUpdateNeedsANomadClient(t *testing.T) {
 // TestUpdateNeedsANomadClientForAWait fails an update whose only node change is the wait for a client that has not
 // joined, before it changes anything.
 func TestUpdateNeedsANomadClientForAWait(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := newRelease(t)
 		mustUpdate(t, svc)
@@ -1511,6 +1532,7 @@ func TestUpdateNeedsANomadClientForAWait(t *testing.T) {
 // TestUpdateGivesTheAssetsItsClock verifies the signature of Nomad's release files at the service's time when the
 // assets have no clock of their own.
 func TestUpdateGivesTheAssetsItsClock(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := newRelease(t)
 		svc.Assets.Now = nil
@@ -1536,6 +1558,7 @@ func nomadSumsRead(sites *assetstest.Sites) int {
 // TestUpdateReadsNomadsReleaseFilesOncePerRun reads Nomad's release files once for an update that creates nodes, and
 // once for each later run, which creates none and reports the outdated nodes: not again for its second plan.
 func TestUpdateReadsNomadsReleaseFilesOncePerRun(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := newRelease(t)
 		sites := withAssets(svc)
@@ -1565,6 +1588,7 @@ func TestUpdateReadsNomadsReleaseFilesOncePerRun(t *testing.T) {
 
 // TestUpdatePlansTheNomadStep plans the Nomad step of a built cluster in the cases that give it one.
 func TestUpdatePlansTheNomadStep(t *testing.T) {
+	t.Parallel()
 	t.Run("ready servers and no mark", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			svc, _, w := newRelease(t)
@@ -1747,6 +1771,7 @@ func withExtraConfig(t *testing.T, role string, n int, seed byte) string {
 // TestUpdatePlanFailsForTooMuchUserData fails the plan of an update whose nodes would boot with more user data than a
 // provider takes, before it writes anything, with or without apply.
 func TestUpdatePlanFailsForTooMuchUserData(t *testing.T) {
+	t.Parallel()
 	svc, f, _ := newRelease(t, withExtraConfig(t, "server", 30<<10, 0), serversYAML, workersYAML)
 	rec := &writeLog{Store: svc.Store}
 	svc.Store = rec
@@ -1770,6 +1795,7 @@ func TestUpdatePlanFailsForTooMuchUserData(t *testing.T) {
 // TestUpdatePlanCountsTheIntroToken fails the plan for a client whose user data fits until the intro token is added:
 // the client config is about 1 KiB under the limit without the token, and the token adds about 2 KiB.
 func TestUpdatePlanCountsTheIntroToken(t *testing.T) {
+	t.Parallel()
 	svc, f, _ := newRelease(t, withExtraConfig(t, "client", 18000, 1), serversYAML, workersYAML)
 	rec := &writeLog{Store: svc.Store}
 	svc.Store = rec
@@ -1790,6 +1816,7 @@ func TestUpdatePlanCountsTheIntroToken(t *testing.T) {
 // TestUpdateFindsTentNodeOnlyForNodes fails a plan that creates nodes with a development build that has no tent-node,
 // and passes a plan that creates none.
 func TestUpdateFindsTentNodeOnlyForNodes(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newService(t)
 		mustCreate(t, svc, keyedClusterYAML, serversYAML, workersYAML)
@@ -1813,6 +1840,7 @@ func TestUpdateFindsTentNodeOnlyForNodes(t *testing.T) {
 // TestUpdateWarnsOfDevelopmentVariables warns once, before the first change, that a release build ignores TENT_NODE_URL
 // and TENT_NODE_SHA256.
 func TestUpdateWarnsOfDevelopmentVariables(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _ := newRelease(t)
 		var events []string

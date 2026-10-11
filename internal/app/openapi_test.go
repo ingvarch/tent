@@ -14,6 +14,7 @@ const openAPIWarning = "spec.access.api lets the whole internet reach the Nomad 
 
 // TestOpenAPI tells OnWarning when a change leaves a cluster whose Nomad API the whole internet may reach.
 func TestOpenAPI(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	calls := 0
 	svc.OnWarning = func(w string) {
@@ -65,6 +66,7 @@ func mustReplace(t *testing.T, svc *app.Service, docs ...string) {
 // TestUpdateWarnsWhenTheAPIIsOpen tells OnWarning once, before the first change, when an update applies changes to a
 // cluster whose Nomad API the whole internet may reach.
 func TestUpdateWarnsWhenTheAPIIsOpen(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newUpdate(t) // access.api left out is 0.0.0.0/0
 		var events []string
@@ -112,6 +114,7 @@ const combinedWarning = "node group all is combined: its nodes run the Nomad ser
 // TestCombinedWarning tells OnWarning when a change leaves a cluster with a combined group, and only after it
 // applies the change.
 func TestCombinedWarning(t *testing.T) {
+	t.Parallel()
 	narrow := edit(t, clusterYAML, "region: ams", "region: ams\n  access:\n    api: [203.0.113.0/24]")
 	var got []string
 	newCombined := func(t *testing.T) *app.Service {
@@ -173,6 +176,7 @@ func TestCombinedWarning(t *testing.T) {
 // TestUpdateWarnsOfACombinedGroup tells OnWarning once, before the first change, when an update applies changes to a
 // cluster with a combined group, and never for a plan.
 func TestUpdateWarnsOfACombinedGroup(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _ := newRelease(t, edit(t, keyedClusterYAML, "region: ams", "region: ams\n  access:\n"+
 			"    api: [203.0.113.0/24]"), combinedYAML)

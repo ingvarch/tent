@@ -34,6 +34,7 @@ func secretsTestService(t *testing.T) (*Service, statestore.Layout) {
 
 // TestPlanSecretsReturnsNewSecrets holds all four secrets of a new cluster, with a write for each.
 func TestPlanSecretsReturnsNewSecrets(t *testing.T) {
+	t.Parallel()
 	s, l := secretsTestService(t)
 	got, err := s.planSecrets(t.Context(), l)
 	if err != nil {
@@ -58,6 +59,7 @@ func TestPlanSecretsReturnsNewSecrets(t *testing.T) {
 
 // TestPlanSecretsReturnsStoredSecrets holds the stored CA, gossip key and bootstrap secret, with nothing to write.
 func TestPlanSecretsReturnsStoredSecrets(t *testing.T) {
+	t.Parallel()
 	s, l := secretsTestService(t)
 	first, err := s.planSecrets(t.Context(), l)
 	if err != nil {
@@ -84,6 +86,7 @@ func TestPlanSecretsReturnsStoredSecrets(t *testing.T) {
 
 // TestPlanSecretsCompletesCAFromStoredKey signs a bundle with the stored key when only the key is there.
 func TestPlanSecretsCompletesCAFromStoredKey(t *testing.T) {
+	t.Parallel()
 	s, l := secretsTestService(t)
 	first, err := s.planSecrets(t.Context(), l)
 	if err != nil {
@@ -123,6 +126,7 @@ func storedTestSecrets(t *testing.T, s *Service, l statestore.Layout) clusterSec
 
 // TestStoredSecretsReturnsTheStoredSecrets holds the stored secrets and writes nothing.
 func TestStoredSecretsReturnsTheStoredSecrets(t *testing.T) {
+	t.Parallel()
 	s, l := secretsTestService(t)
 	want := storedTestSecrets(t, s, l)
 	before := len(list(t, s.Store, ""))
@@ -143,6 +147,7 @@ func TestStoredSecretsReturnsTheStoredSecrets(t *testing.T) {
 
 // TestStoredSecretsNamesTheMissingPaths fails with the paths of the secrets that the store lacks, and writes nothing.
 func TestStoredSecretsNamesTheMissingPaths(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		deleted func(statestore.Layout) []string
@@ -183,6 +188,7 @@ func TestStoredSecretsNamesTheMissingPaths(t *testing.T) {
 // TestStoredSecretsFailsForABrokenSecret returns the error of a stored secret that does not load, which is no missing
 // secret, and shows no secret.
 func TestStoredSecretsFailsForABrokenSecret(t *testing.T) {
+	t.Parallel()
 	s, l := secretsTestService(t)
 	storedTestSecrets(t, s, l)
 	broken := []byte("hunter2-not-a-key")

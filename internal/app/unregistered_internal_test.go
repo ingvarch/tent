@@ -16,6 +16,7 @@ import (
 
 // TestIntroLifetime is the intro token's TTL and the minute that a server still accepts it after its expiry.
 func TestIntroLifetime(t *testing.T) {
+	t.Parallel()
 	if introLifetime != 31*time.Minute {
 		t.Errorf("introLifetime = %s, want 31m0s", introLifetime)
 	}
@@ -24,6 +25,7 @@ func TestIntroLifetime(t *testing.T) {
 // TestStaleClients picks the listed machines of the cluster that have not joined and are older than the lifetime of
 // an intro token, by the machine's role label and its creation time, whatever the plan does with them.
 func TestStaleClients(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 	client := func(id string, age time.Duration) cloud.Instance {
 		return cloud.Instance{
@@ -103,6 +105,7 @@ func TestStaleClients(t *testing.T) {
 
 // TestRegistered answers whether Nomad lists a client of the machine's name at its private address that is not down.
 func TestRegistered(t *testing.T) {
+	t.Parallel()
 	addr := netip.MustParseAddr("10.64.0.9")
 	machine := cloud.Instance{ID: "instance-5", Name: "prod-workers-1", PrivateIP: addr}
 	node := func(change func(*nomadops.Node)) nomadops.Node {
@@ -173,6 +176,7 @@ func TestRegistered(t *testing.T) {
 
 // TestAskNomadError names the machines that the plan could not ask Nomad about, in the singular and the plural.
 func TestAskNomadError(t *testing.T) {
+	t.Parallel()
 	cause := errors.New("boom")
 	one := cloud.Instance{ID: "instance-5", Name: "prod-workers-1"}
 	two := cloud.Instance{ID: "instance-4", Name: "prod-workers-0"}

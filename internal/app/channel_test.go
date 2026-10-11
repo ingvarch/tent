@@ -84,6 +84,7 @@ var specChecks = []specCheck{
 // TestSpecChecksTheChannel refuses a Cluster whose channel tent does not know or whose Nomad version the channel does
 // not allow, with a field error, before it writes anything or reaches the cloud.
 func TestSpecChecksTheChannel(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		doc  string
@@ -120,6 +121,7 @@ func TestSpecChecksTheChannel(t *testing.T) {
 // TestChannelProblemsWithOthers reports the channel's problems first, with the other problems of the spec, and a
 // field that has a problem already only once.
 func TestChannelProblemsWithOthers(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		docs []string
@@ -161,6 +163,7 @@ const narrowClusterYAML = clusterYAML + "  access:\n    api: [203.0.113.0/24]\n"
 // TestWarnsOfAnUntestedNomad tells OnWarning when a change leaves a cluster whose spec sets a Nomad version that the
 // channel allows but has not tested.
 func TestWarnsOfAnUntestedNomad(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.6", "2.0.7")
 	var warnings []string
@@ -195,6 +198,7 @@ func TestWarnsOfAnUntestedNomad(t *testing.T) {
 // TestUpdateWarnsOfAnUntestedNomad tells OnWarning once, before the first change, when an update applies changes to a
 // cluster whose Nomad version, set in its spec or pinned, the channel allows but has not tested.
 func TestUpdateWarnsOfAnUntestedNomad(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newService(t)
 		mustCreate(t, svc, narrowClusterYAML, serversYAML, workersYAML)
@@ -249,6 +253,7 @@ const completedOnly = "State: cluster.completed.yaml will be written.\n"
 // TestUpdatePinsTheNomadVersion records the channel's recommended Nomad version in the completed spec on the first
 // update of a cluster whose spec leaves it out, and keeps it when the channel recommends another one later.
 func TestUpdatePinsTheNomadVersion(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newUpdate(t)
 		svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.7")
@@ -266,6 +271,7 @@ func TestUpdatePinsTheNomadVersion(t *testing.T) {
 // TestUpdateTakesTheUsersVersion records the Nomad version that the spec sets, and keeps it once the spec leaves it out
 // again.
 func TestUpdateTakesTheUsersVersion(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newUpdate(t)
 		svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.7")
@@ -287,6 +293,7 @@ func TestUpdateTakesTheUsersVersion(t *testing.T) {
 // TestUpdatePinsAnOlderCompletedSpec updates a cluster whose completed spec a tent without channels wrote, without a
 // Nomad version: the plan writes the completed spec alone, with the channel's recommended version.
 func TestUpdatePinsAnOlderCompletedSpec(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newUpdate(t)
 		mustUpdate(t, svc)
@@ -309,6 +316,7 @@ func TestUpdatePinsAnOlderCompletedSpec(t *testing.T) {
 // TestUpdateRefusesAPinOutsideTheChannel fails the plan of a cluster pinned to a Nomad version that its channel no
 // longer allows, before it writes anything or reaches the cloud.
 func TestUpdateRefusesAPinOutsideTheChannel(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newUpdate(t)
 		svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.7")
@@ -337,6 +345,7 @@ func TestUpdateRefusesAPinOutsideTheChannel(t *testing.T) {
 // TestUpdateNeedsACompletedSpecThatDecodes fails the plan when the pinned Nomad version is needed and the stored
 // completed spec, which holds it, does not decode or holds no Cluster, and says how to go on. Nothing is written.
 func TestUpdateNeedsACompletedSpecThatDecodes(t *testing.T) {
+	t.Parallel()
 	const hint = "; set spec.nomad.version to the Nomad version the cluster was built with, or fix " + completedPath +
 		" in the state store by hand"
 	for _, tc := range []struct {
@@ -363,6 +372,7 @@ func TestUpdateNeedsACompletedSpecThatDecodes(t *testing.T) {
 // no Cluster, when the spec sets the Nomad version: the pin is not needed, and the plan writes the completed spec
 // alone.
 func TestUpdateRewritesABrokenCompletedSpec(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ name, data string }{
 		{"broken", "kind: Cluster\n"},
 		{"node groups only", string(encode(t, serversYAML))},
