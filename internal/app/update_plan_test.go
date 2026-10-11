@@ -179,6 +179,7 @@ func someOutdated() []app.OutdatedNode {
 }
 
 func TestUpdatePlanWriteTextGolden(t *testing.T) {
+	t.Parallel()
 	got := planText(t, exampleUpdate(t))
 	checkGolden(t, "update_plan.golden", got)
 	if strings.Contains(got, waitOp) {
@@ -187,16 +188,19 @@ func TestUpdatePlanWriteTextGolden(t *testing.T) {
 }
 
 func TestUpdatePlanJSONGolden(t *testing.T) {
+	t.Parallel()
 	checkGolden(t, "update_plan.json.golden", encodeJSON(t, exampleUpdate(t), "  "))
 }
 
 func TestUpdatePlanWithoutChanges(t *testing.T) {
+	t.Parallel()
 	p := app.UpdatePlan{Infra: infraPlan(t, nil)}
 	checkGolden(t, "update_plan_empty.golden", planText(t, p))
 	checkGolden(t, "update_plan_empty.json.golden", encodeJSON(t, p, "  "))
 }
 
 func TestUpdatePlanWriteText(t *testing.T) {
+	t.Parallel()
 	const (
 		nodesOnly = `+ node prod-workers-1 (client, vc2-4c-8gb, ams)
 - node prod-workers-3 (ID instance-8, surplus)
@@ -317,6 +321,7 @@ Nodes: 1 to create, 0 to wait for, 1 to delete.
 }
 
 func TestUpdatePlanHasChanges(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		plan app.UpdatePlan
@@ -342,6 +347,7 @@ func TestUpdatePlanHasChanges(t *testing.T) {
 }
 
 func TestUpdatePlanJSONWithoutInfrastructure(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		plan app.UpdatePlan
 		want string
@@ -378,6 +384,7 @@ func TestUpdatePlanJSONWithoutInfrastructure(t *testing.T) {
 // TestUpdatePlanJSONLeavesEscapingToTheCaller checks that the plan's JSON escapes HTML characters such as < and &
 // only when the caller's encoder does, in both parts.
 func TestUpdatePlanJSONLeavesEscapingToTheCaller(t *testing.T) {
+	t.Parallel()
 	p := app.UpdatePlan{
 		Infra: infraPlan(t, nil, stubTask{key: engine.Key{Kind: kindVPC, Name: "prod"}, change: engine.Change{
 			Action: engine.Create, Reason: "<new> & more",
@@ -413,6 +420,7 @@ func (w *failWriter) Write([]byte) (int, error) {
 }
 
 func TestUpdatePlanWriteTextWriteError(t *testing.T) {
+	t.Parallel()
 	errBroken := errors.New("broken pipe")
 	for _, tc := range []struct {
 		name string
@@ -448,6 +456,7 @@ func appliedText(t *testing.T, p interface{ WriteApplied(io.Writer) error }) str
 }
 
 func TestUpdatePlanWriteApplied(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		plan app.UpdatePlan
@@ -502,6 +511,7 @@ func TestUpdatePlanWriteApplied(t *testing.T) {
 }
 
 func TestNomadActionString(t *testing.T) {
+	t.Parallel()
 	for a, want := range map[app.NomadAction]string{
 		app.NomadLeader: "leader", app.NomadBootstrap: "bootstrap", app.NomadHealthy: "healthy",
 		app.NomadRegister: "register", app.NomadKeyring: "keyring", app.NomadIneligible: "ineligible",

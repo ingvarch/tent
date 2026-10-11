@@ -65,6 +65,7 @@ func with(change func(cloud.Instance) (cloud.Instance, bool), extra ...cloud.Ins
 }
 
 func TestMachineFailures(t *testing.T) {
+	t.Parallel()
 	unchanged := func(in cloud.Instance) (cloud.Instance, bool) { return in, true }
 	noGroup := machine(8, "prod-stray-0", "", v1alpha1.RoleClient)
 	stoppedSurplus := machine(6, "prod-workers-2", "workers", v1alpha1.RoleClient)
@@ -280,6 +281,7 @@ func TestMachineFailures(t *testing.T) {
 }
 
 func TestMachineCountsFollowTheNodeGroup(t *testing.T) {
+	t.Parallel()
 	m := validateModel()
 	stray := machine(4, "prod-workers-0", "workers", v1alpha1.RoleCombined) // the label is not the group's role
 	noLabel := machine(1, "prod-servers-0", "servers", "")
@@ -297,6 +299,7 @@ func TestMachineCountsFollowTheNodeGroup(t *testing.T) {
 }
 
 func TestMachineCountsLeaveOutTheMachinesThatAnUpdateDeletes(t *testing.T) {
+	t.Parallel()
 	m := validateModel()
 	instances := append(fullCluster(),
 		machine(6, "prod-workers-2", "workers", v1alpha1.RoleClient), // one more than the group's size

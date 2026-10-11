@@ -488,6 +488,7 @@ var allCreates = []app.NodeChange{
 }
 
 func TestUpdatePlan(t *testing.T) {
+	t.Parallel()
 	svc, f := newUpdate(t)
 	sites := withAssets(svc)
 	rec := &writeLog{Store: svc.Store}
@@ -520,6 +521,7 @@ func TestUpdatePlan(t *testing.T) {
 }
 
 func TestUpdate(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newService(t)
 		svc.Version = "v0.4.0"
@@ -609,6 +611,7 @@ func TestUpdate(t *testing.T) {
 // TestUpdateWritesTheCompletedSpec runs an update whose only change is the completed spec: it takes the lock, raises
 // the tent version and writes the spec, and only reads the cloud.
 func TestUpdateWritesTheCompletedSpec(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		change func(t *testing.T, svc *app.Service)
@@ -659,6 +662,7 @@ func TestUpdateWritesTheCompletedSpec(t *testing.T) {
 // TestUpdateRepairsANode recreates a node that was deleted by hand. The specs are as last applied, so the completed
 // spec is not written again.
 func TestUpdateRepairsANode(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newUpdate(t)
 		mustUpdate(t, svc)
@@ -723,6 +727,7 @@ func wantRefused(t *testing.T, svc *app.Service, f *vultrfake.Fake, want string)
 }
 
 func TestUpdateScales(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newUpdate(t)
 		mustUpdate(t, svc)
@@ -746,6 +751,7 @@ func TestUpdateScales(t *testing.T) {
 // then the clients' firewall group, which Vultr's guard keeps while nodes use it. When the workers joined, the plan
 // refuses.
 func TestUpdateRemovesTheLastClientGroup(t *testing.T) {
+	t.Parallel()
 	t.Run("a worker that never joined", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			svc, f, w := newRelease(t)
@@ -809,6 +815,7 @@ func TestUpdateRemovesTheLastClientGroup(t *testing.T) {
 // TestUpdateStopsAtAFailedCreate fails a node's create while the plan also deletes an SSH key: the update stops, and
 // the next one finishes the job.
 func TestUpdateStopsAtAFailedCreate(t *testing.T) {
+	t.Parallel()
 	const wantErr = "create node prod-workers-2 of cluster prod: vultr: POST /v2/instances: 400 Bad Request: " +
 		"Invalid plan."
 	synctest.Test(t, func(t *testing.T) {
@@ -857,6 +864,7 @@ func TestUpdateStopsAtAFailedCreate(t *testing.T) {
 // TestUpdateReportsTheMachines reports the machine of each node it created: its ID and its private address. A scrub
 // step names no machine but the node's.
 func TestUpdateReportsTheMachines(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newUpdate(t)
 		var steps []app.Progress
@@ -914,6 +922,7 @@ func instanceLost(id string) error {
 // TestUpdateReportsTheMachineItWaitedFor reports the machine of a node that it waited for, which has the address that
 // the deleted worker left free.
 func TestUpdateReportsTheMachineItWaitedFor(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newUpdate(t)
 		pendingWorker(t, svc, f)
@@ -937,6 +946,7 @@ func TestUpdateReportsTheMachineItWaitedFor(t *testing.T) {
 // TestUpdateReportsTheProvidersErrorOfAFailedWait reports the provider's own error for a failed wait, and returns it
 // with the node that the update waited for.
 func TestUpdateReportsTheProvidersErrorOfAFailedWait(t *testing.T) {
+	t.Parallel()
 	const cause = "create node prod-workers-1 of cluster prod: wait for instance instance-6: vultr: GET " +
 		"/v2/instances/instance-6: 400 Bad Request: Invalid instance."
 	synctest.Test(t, func(t *testing.T) {
@@ -958,6 +968,7 @@ func TestUpdateReportsTheProvidersErrorOfAFailedWait(t *testing.T) {
 // TestUpdateLostCreateAnswer loses the answer to a node's create: the provider finds the node by its operation id,
 // and no node is created twice.
 func TestUpdateLostCreateAnswer(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newUpdate(t)
 		f.LoseResponse(t, "CreateInstance", 1)
@@ -973,6 +984,7 @@ func TestUpdateLostCreateAnswer(t *testing.T) {
 // TestUpdateWaitsForNodes runs an update after one that stopped while its nodes booted: it waits for them, and creates
 // none again.
 func TestUpdateWaitsForNodes(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newUpdate(t)
 		f.SetBootReads(t, 100, 100)
@@ -1003,6 +1015,7 @@ func TestUpdateWaitsForNodes(t *testing.T) {
 
 // TestUpdateGivesEachNodeTenMinutes has the provider read a new node every 5 seconds until it is ready.
 func TestUpdateGivesEachNodeTenMinutes(t *testing.T) {
+	t.Parallel()
 	t.Run("nodes that take 8 minutes each", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			svc, f := newUpdate(t)
@@ -1037,6 +1050,7 @@ func TestUpdateGivesEachNodeTenMinutes(t *testing.T) {
 }
 
 func TestUpdateFailsBeforeTheCloud(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		prepare func(t *testing.T, svc *app.Service, f *vultrfake.Fake)
@@ -1097,6 +1111,7 @@ func TestUpdateFailsBeforeTheCloud(t *testing.T) {
 }
 
 func TestUpdateMissingCluster(t *testing.T) {
+	t.Parallel()
 	svc, f := newUpdate(t)
 	_, err := svc.Update(t.Context(), "dev", true)
 	wantError(t, err, notFound(svc, "cluster dev"))
@@ -1107,6 +1122,7 @@ func TestUpdateMissingCluster(t *testing.T) {
 
 // TestUpdateHoldsTheLock runs another change while the update creates a node: it finds the cluster locked for update.
 func TestUpdateHoldsTheLock(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newUpdate(t)
 		other := &app.Service{Store: svc.Store, Version: "dev"}
@@ -1133,6 +1149,7 @@ func TestUpdateHoldsTheLock(t *testing.T) {
 // TestUpdateInterrupted interrupts the update as it starts the first node, as Ctrl-C would. The completed spec is
 // stored by then, and no node exists.
 func TestUpdateInterrupted(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newUpdate(t)
 		ctx, interrupt := context.WithCancel(t.Context())
@@ -1155,6 +1172,7 @@ func TestUpdateInterrupted(t *testing.T) {
 // TestUpdateTellsThePlan tells OnUpdatePlan the plan made under the lock, once, before the first change, and returns
 // that plan applied.
 func TestUpdateTellsThePlan(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newUpdate(t)
 		var events []string
@@ -1196,6 +1214,7 @@ func TestUpdateTellsThePlan(t *testing.T) {
 
 // TestUpdateStopsWhenThePlanCannotBeTold changes nothing when OnUpdatePlan fails, and returns its error.
 func TestUpdateStopsWhenThePlanCannotBeTold(t *testing.T) {
+	t.Parallel()
 	svc, f := newUpdate(t)
 	errClosed := errors.New("stdout is closed")
 	svc.OnUpdatePlan = func(app.UpdatePlan) error { return errClosed }
@@ -1219,6 +1238,7 @@ func TestUpdateStopsWhenThePlanCannotBeTold(t *testing.T) {
 }
 
 func TestNodeStepString(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		step app.NodeStep
 		want string
@@ -1283,6 +1303,7 @@ func joinedFixture(t *testing.T) *vultrfake.Fake {
 }
 
 func TestJoinedMismatches(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		f := joinedFixture(t)
 		for _, tc := range []struct {
@@ -1311,6 +1332,7 @@ func TestJoinedMismatches(t *testing.T) {
 }
 
 func TestJoinedTagStaysOutOfTheNodeView(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		f := markedBuild(t)
 		wantNodes(t, f, allNodes...)
@@ -1322,6 +1344,7 @@ func TestJoinedTagStaysOutOfTheNodeView(t *testing.T) {
 }
 
 func TestUnscrubbedJoined(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		if diff := cmp.Diff([]string{"no-stub"}, unscrubbedJoined(joinedFixture(t))); diff != "" {
 			t.Errorf("the joined instances without the stub (-want +got):\n%s", diff)
@@ -1330,6 +1353,7 @@ func TestUnscrubbedJoined(t *testing.T) {
 }
 
 func TestCloudViewShowsTheUserData(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) { testCloudViewShowsTheUserData(t, joinedFixture(t)) })
 }
 

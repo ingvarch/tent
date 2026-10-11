@@ -104,6 +104,7 @@ func privateOf(t *testing.T, f *vultrfake.Fake, id string) netip.Addr {
 // TestUpdateDeletesASurplusNodeThatNeverJoined deletes a machine that no node of Nomad stands for, after it asked
 // Nomad for the clients and for the Raft configuration.
 func TestUpdateDeletesASurplusNodeThatNeverJoined(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := unjoinedWorker(t)
 		before := len(w.Log())
@@ -123,6 +124,7 @@ func TestUpdateDeletesASurplusNodeThatNeverJoined(t *testing.T) {
 // TestUpdateKeepsADuplicateThatRegistered finds a twin that registered without the label: it is not deleted, it gets
 // the label and the stub, and from then on the plan refuses to delete it.
 func TestUpdateKeepsADuplicateThatRegistered(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newUpdate(t)
 		mustUpdate(t, svc)
@@ -151,6 +153,7 @@ func TestUpdateKeepsADuplicateThatRegistered(t *testing.T) {
 // TestUpdateFailedScrubStillKeepsTheJoinedNode fails the scrub of a twin that registered: the twin is not deleted
 // and stays without the label, and the next update, which can scrub it, labels it and refuses its delete.
 func TestUpdateFailedScrubStillKeepsTheJoinedNode(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newUpdate(t)
 		mustUpdate(t, svc)
@@ -189,6 +192,7 @@ func TestUpdateFailedScrubStillKeepsTheJoinedNode(t *testing.T) {
 // TestUpdateKeepsAServerOfTheRaftConfiguration finds that the Raft configuration lists a twin server that has no
 // label: it is not deleted, it gets the label and the stub, and the plan refuses to delete it from then on.
 func TestUpdateKeepsAServerOfTheRaftConfiguration(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newUpdate(t)
 		mustUpdate(t, svc)
@@ -210,6 +214,7 @@ func TestUpdateKeepsAServerOfTheRaftConfiguration(t *testing.T) {
 // TestUpdateDeletesNothingWhenNomadCannotBeAsked stops the delete of a machine that never joined when either call
 // that tells whether it joined fails, and shows the delete as started and failed. The next update deletes it.
 func TestUpdateDeletesNothingWhenNomadCannotBeAsked(t *testing.T) {
+	t.Parallel()
 	boom := errors.New("boom")
 	for _, call := range []string{"Nodes", "Peers"} {
 		t.Run(call, func(t *testing.T) {
@@ -246,6 +251,7 @@ func TestUpdateDeletesNothingWhenNomadCannotBeAsked(t *testing.T) {
 // TestUpdateDeleteNeedsNomad fails an update whose only change is a delete before it calls the cloud when the
 // service has no way to reach Nomad.
 func TestUpdateDeleteNeedsNomad(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := unjoinedWorker(t)
 		svc.Nomad = nil
@@ -264,6 +270,7 @@ func TestUpdateDeleteNeedsNomad(t *testing.T) {
 // when the new node has joined and the group is one machine above its size, and updates: the plan refuses to delete
 // the new node as surplus, with and without apply, and its advice names tent rolling-update cluster.
 func TestUpdateAfterACutRollNamesRollingUpdate(t *testing.T) {
+	t.Parallel()
 	calls := uninterruptedRoll(t)
 	del := slices.IndexFunc(calls, func(call string) bool { return strings.HasPrefix(callKey(call), "DeleteInstance ") })
 	if del < 0 {

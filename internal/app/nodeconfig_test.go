@@ -273,6 +273,7 @@ var bridgeSysctls = map[string]string{
 // TestGroupTemplates checks the template of each role: the Nomad agent that the specs describe, the CA bundle, the
 // assets, the join strategy, the system and the host firewall, with the spec hash of it all.
 func TestGroupTemplates(t *testing.T) {
+	t.Parallel()
 	gossip, ca := pki.NewGossipKey(), testCA(t)
 	caFile := nodeconfig.File{Path: "/etc/nomad.d/tls/ca.pem", Mode: 0o644, Owner: "root:root", Content: ca.Bundle()}
 	agent := nodeconfig.Agent{
@@ -374,6 +375,7 @@ func TestGroupTemplates(t *testing.T) {
 // groups of one cluster differ, and that spec.access leaves every hash as it is: the cloud firewall filters the
 // sources.
 func TestGroupTemplatesSpecHash(t *testing.T) {
+	t.Parallel()
 	gossip, bundle := pki.NewGossipKey(), testCA(t).Bundle()
 	tmpls := templates(t, gossip, bundle, nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
 	for name, tmpl := range tmpls {
@@ -420,6 +422,7 @@ func TestGroupTemplatesSpecHash(t *testing.T) {
 // TestRollingUpdateLeavesTheSpecHash checks that the rollingUpdate settings of a group change no template's hash:
 // they say how nodes are replaced, and a node's configuration does not hold them.
 func TestRollingUpdateLeavesTheSpecHash(t *testing.T) {
+	t.Parallel()
 	gossip, bundle := pki.NewGossipKey(), testCA(t).Bundle()
 	want := templates(t, gossip, bundle, nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
 	rolling := nodeWorkersYAML + "  rollingUpdate:\n    maxSurge: 3\n    maxUnavailable: 1\n    drainTimeout: 5m\n"
@@ -437,6 +440,7 @@ func TestRollingUpdateLeavesTheSpecHash(t *testing.T) {
 // TestGroupTemplatesProvider checks that every template names the model's provider, which tells tent-node whose
 // metadata service to read.
 func TestGroupTemplatesProvider(t *testing.T) {
+	t.Parallel()
 	m, c, groups := nodeSpecs(t, nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
 	m.Provider = v1alpha1.ProviderHetzner
 	tmpls, err := groupTemplates(m, c, groups, forGroups(m, testAssets()), pki.NewGossipKey(), testCA(t).Bundle())
@@ -453,6 +457,7 @@ func TestGroupTemplatesProvider(t *testing.T) {
 // TestHostFirewall checks the host firewall of each role in a cluster whose private network is 10.10.0.0/16: the
 // rules that the templates of the test cluster carry, and the metadata service blocked.
 func TestHostFirewall(t *testing.T) {
+	t.Parallel()
 	intra := model.IntraRules(netip.MustParsePrefix("10.10.0.0/16"))
 	for _, tc := range []struct {
 		role  v1alpha1.Role
@@ -474,6 +479,7 @@ func TestHostFirewall(t *testing.T) {
 // TestNodeSystem checks the system settings of each role: bridge networking on a node that runs a client, and Docker
 // with its storage module unless the drivers leave the docker driver out.
 func TestNodeSystem(t *testing.T) {
+	t.Parallel()
 	withDocker := nodeconfig.System{
 		Sysctls: bridgeSysctls, KernelModules: []string{"br_netfilter", "overlay"}, Docker: true,
 	}
@@ -502,6 +508,7 @@ func TestNodeSystem(t *testing.T) {
 }
 
 func TestGroupTemplatesErrors(t *testing.T) {
+	t.Parallel()
 	gossip, bundle := pki.NewGossipKey(), testCA(t).Bundle()
 	for _, tc := range []struct {
 		name   string
@@ -606,6 +613,7 @@ func seeds(n int) []netip.Addr {
 // TestNodeConfig checks the config of one node of each role: its template with its name, its 10-node.hcl, its
 // certificate and key, an intro token when it runs a client and has one, and the seed.
 func TestNodeConfig(t *testing.T) {
+	t.Parallel()
 	ca := testCA(t)
 	tmpls := templates(t, pki.NewGossipKey(), ca.Bundle(), nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
 	combined := templates(t, pki.NewGossipKey(), ca.Bundle(), nodeClusterYAML, nodeCombinedYAML)["dev"]
@@ -671,6 +679,7 @@ func TestNodeConfig(t *testing.T) {
 // TestNodeConfigsShareNothing checks that the configs of two nodes of one group share none of their own parts, with
 // each other or with the caller, even when the template's files have room to grow.
 func TestNodeConfigsShareNothing(t *testing.T) {
+	t.Parallel()
 	ca := testCA(t)
 	tmpl := templates(t, pki.NewGossipKey(), ca.Bundle(), nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)["workers"]
 	tmpl.Files = append(make([]nodeconfig.File, 0, len(tmpl.Files)+8), tmpl.Files...)
@@ -698,6 +707,7 @@ func TestNodeConfigsShareNothing(t *testing.T) {
 }
 
 func TestNodeConfigErrors(t *testing.T) {
+	t.Parallel()
 	ca := testCA(t)
 	tmpls := templates(t, pki.NewGossipKey(), ca.Bundle(), nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
 	cert, err := ca.IssueNode(v1alpha1.RoleServer, "eu", testNow)
@@ -742,6 +752,7 @@ func TestNodeConfigErrors(t *testing.T) {
 // TestNodeConfigHidesSecrets checks that printing a node's config shows none of its secrets: the gossip key, the
 // node's key and intro token, and the signature of a development build's tent-node URL.
 func TestNodeConfigHidesSecrets(t *testing.T) {
+	t.Parallel()
 	ca, gossip, intro := testCA(t), pki.NewGossipKey(), introToken(512)
 	m, c, groups := nodeSpecs(t, nodeClusterYAML, nodeCombinedYAML)
 	const signature = "9f2c6e1ab47d03e58c1f6a2b7d4e90c3a5f81b6d2e7c409a3f5b8d1e6c2a7f40"
@@ -767,6 +778,7 @@ func TestNodeConfigHidesSecrets(t *testing.T) {
 }
 
 func TestResolveAssets(t *testing.T) {
+	t.Parallel()
 	const (
 		release = "https://github.com/ingvarch/tent/releases/download/v0.3.0/"
 		nodeSum = assetstest.TentNodeSHA256
@@ -825,6 +837,7 @@ func TestResolveAssets(t *testing.T) {
 }
 
 func TestResolveAssetsErrors(t *testing.T) {
+	t.Parallel()
 	stable, err := channels.Load("stable")
 	if err != nil {
 		t.Fatal(err)
@@ -886,6 +899,7 @@ func TestResolveAssetsErrors(t *testing.T) {
 }
 
 func TestDevVariablesWarning(t *testing.T) {
+	t.Parallel()
 	const signature = "9f2c6e1ab47d03e58c1f6a2b7d4e90c3a5f81b6d2e7c409a3f5b8d1e6c2a7f40"
 	url := "https://tent-dev.s3.example.com/tent-node?X-Amz-Signature=" + signature
 	sum := strings.Repeat("a", 64)
@@ -971,6 +985,7 @@ plugin "docker" {
 // embedded stable channel, a Nomad release URL, a development build's presigned tent-node URL of 1.5 KiB, an intro
 // token of 2 KiB, 5 seeds, 8 meta keys and the extraConfig above.
 func TestNodeConfigUserDataFits(t *testing.T) {
+	t.Parallel()
 	ca := testCA(t)
 	cert, err := ca.IssueNode(v1alpha1.RoleCombined, "eu", testNow)
 	if err != nil {
@@ -1127,6 +1142,7 @@ func newNode(t *testing.T, l *assetstest.Sites, ca *pki.CA, gossip pki.Secret, g
 // TestNodeConfigOf checks the config of a new node of each role: what tent's own steps make of the node's specs,
 // secrets and parts, with the assets that the channel and the signed release files give.
 func TestNodeConfigOf(t *testing.T) {
+	t.Parallel()
 	ca, gossip, intro := testCA(t), pki.NewGossipKey(), introToken(512)
 	all := []string{nodeClusterYAML, nodeServersYAML, nodeWorkersYAML}
 	for _, tc := range []struct {
@@ -1181,6 +1197,7 @@ func TestNodeConfigOf(t *testing.T) {
 }
 
 func TestNodeConfigOfErrors(t *testing.T) {
+	t.Parallel()
 	ca, gossip := testCA(t), pki.NewGossipKey()
 	const sums = "https://releases.hashicorp.com/nomad/2.0.6/nomad_2.0.6_SHA256SUMS"
 	for _, tc := range []struct {
@@ -1246,6 +1263,7 @@ func onArch(arch string, groups ...string) map[string]string {
 }
 
 func TestNodeBuilderReadsEachArchitectureOnce(t *testing.T) {
+	t.Parallel()
 	l := assetstest.New()
 	in := testBuilderInput(t, l, onArch("amd64", "servers", "workers"), nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
 	if _, err := newNodeBuilder(t.Context(), in, assetCache{}); err != nil {
@@ -1258,6 +1276,7 @@ func TestNodeBuilderReadsEachArchitectureOnce(t *testing.T) {
 }
 
 func TestNodeBuilderAssetsNameTheirArchitecture(t *testing.T) {
+	t.Parallel()
 	l := assetstest.New()
 	archs := map[string]string{"servers": "amd64", "workers": "arm64"}
 	in := testBuilderInput(t, l, archs, nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
@@ -1285,6 +1304,7 @@ func TestNodeBuilderAssetsNameTheirArchitecture(t *testing.T) {
 }
 
 func TestNodeBuilderCacheSavesRequests(t *testing.T) {
+	t.Parallel()
 	l := assetstest.New()
 	in := testBuilderInput(t, l, onArch("amd64", "servers", "workers"), nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
 	cache := assetCache{}
@@ -1301,6 +1321,7 @@ func TestNodeBuilderCacheSavesRequests(t *testing.T) {
 // TestNodeBuilderCacheKeepsVersionsApart checks that a cache filled for one tent and one Nomad gives a builder of
 // another tent that tent's tent-node, and that a builder of another Nomad asks for that Nomad's release files.
 func TestNodeBuilderCacheKeepsVersionsApart(t *testing.T) {
+	t.Parallel()
 	in := testBuilderInput(t, assetstest.New(), onArch("amd64", "servers", "workers"), nodeClusterYAML,
 		nodeServersYAML, nodeWorkersYAML)
 	cache := assetCache{}
@@ -1339,6 +1360,7 @@ func TestNodeBuilderCacheKeepsVersionsApart(t *testing.T) {
 // a server of a cluster of one that has a seed, which joins the server that exists and gets none. The spec hash of the
 // group is the same with and without the seed.
 func TestNodeBuilderBootstrapExpect(t *testing.T) {
+	t.Parallel()
 	serversDocs := []string{nodeClusterYAML, nodeServersYAML, nodeWorkersYAML}
 	combinedDocs := []string{nodeClusterYAML, nodeCombinedYAML}
 	for _, tc := range []struct {
@@ -1387,6 +1409,7 @@ func TestNodeBuilderBootstrapExpect(t *testing.T) {
 }
 
 func TestNodeBuilderReadsGroups(t *testing.T) {
+	t.Parallel()
 	in := testBuilderInput(t, assetstest.New(), onArch("amd64", "servers", "workers"), nodeClusterYAML, nodeServersYAML,
 		nodeWorkersYAML)
 	b, err := newNodeBuilder(t.Context(), in, assetCache{})
@@ -1402,6 +1425,7 @@ func TestNodeBuilderReadsGroups(t *testing.T) {
 }
 
 func TestNodeBuilderNoArchitecture(t *testing.T) {
+	t.Parallel()
 	l := assetstest.New()
 	in := testBuilderInput(t, l, onArch("amd64", "servers"), nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
 	b, err := newNodeBuilder(t.Context(), in, assetCache{})
@@ -1417,6 +1441,7 @@ func TestNodeBuilderNoArchitecture(t *testing.T) {
 }
 
 func TestNodeBuilderNoNomadVersion(t *testing.T) {
+	t.Parallel()
 	l := assetstest.New()
 	in := testBuilderInput(t, l, onArch("amd64", "servers", "workers"), nodeClusterYAML, nodeServersYAML, nodeWorkersYAML)
 	in.Specs.Cluster.Spec.Nomad.Version = ""
@@ -1433,6 +1458,7 @@ func TestNodeBuilderNoNomadVersion(t *testing.T) {
 }
 
 func TestNodeBuilderSkipsNilGroups(t *testing.T) {
+	t.Parallel()
 	in := testBuilderInput(t, assetstest.New(), onArch("amd64", "servers", "workers"), nodeClusterYAML, nodeServersYAML,
 		nodeWorkersYAML)
 	in.Specs.NodeGroups = append(in.Specs.NodeGroups, nil)
@@ -1446,6 +1472,7 @@ func TestNodeBuilderSkipsNilGroups(t *testing.T) {
 }
 
 func TestNodeConfigOfSkipsNilGroups(t *testing.T) {
+	t.Parallel()
 	ca, gossip := testCA(t), pki.NewGossipKey()
 	build := func(withNil bool) *nodeconfig.NodeConfig {
 		n := newNode(t, assetstest.New(), ca, gossip, "servers", "prod-servers-0", nil, nodeClusterYAML,
@@ -1465,6 +1492,7 @@ func TestNodeConfigOfSkipsNilGroups(t *testing.T) {
 }
 
 func TestNodeBuilderUnknownGroup(t *testing.T) {
+	t.Parallel()
 	in := testBuilderInput(t, assetstest.New(), onArch("amd64", "servers", "workers"), nodeClusterYAML, nodeServersYAML,
 		nodeWorkersYAML)
 	b, err := newNodeBuilder(t.Context(), in, assetCache{})

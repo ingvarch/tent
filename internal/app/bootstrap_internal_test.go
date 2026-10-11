@@ -27,6 +27,7 @@ func texts(addrs []netip.Addr) []string {
 // TestLastAddresses gives the addresses of an IPv4 prefix from its last one down, and the prefix's address, repeated,
 // for a prefix that has no more room and for IPv6.
 func TestLastAddresses(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		prefix string
 		n      int
@@ -54,6 +55,7 @@ func TestLastAddresses(t *testing.T) {
 // cluster's prefix gives no address, so a node built with a seed fails the check, as an address that is not one is
 // an error of the NodeConfig.
 func TestPrepareNodesChecksWithTheLongestSeed(t *testing.T) {
+	t.Parallel()
 	for _, size := range []int{1, 3} {
 		t.Run(fmt.Sprintf("a group of %d", size), func(t *testing.T) {
 			in := testBuilderInput(t, assetstest.New(), onArch("amd64", "dev"), nodeClusterYAML, nodeCombinedYAML)
@@ -84,6 +86,7 @@ func TestPrepareNodesChecksWithTheLongestSeed(t *testing.T) {
 
 // TestStandInIntroToken makes a token of 2048 bytes in three dot-separated parts, the same every time.
 func TestStandInIntroToken(t *testing.T) {
+	t.Parallel()
 	got := standInIntroToken()
 	if len(got) != standInIntroTokenSize || standInIntroTokenSize != 2048 {
 		t.Errorf("the stand-in token has %d bytes, want 2048", len(got))
@@ -99,6 +102,7 @@ func TestStandInIntroToken(t *testing.T) {
 // TestSeed gives the private addresses of the known servers other than the node, by name, and fails when servers are
 // known and none has an address, or when a client has no server to join.
 func TestSeed(t *testing.T) {
+	t.Parallel()
 	in := func(name, private string) cloud.Instance {
 		c := cloud.Instance{Name: name}
 		if private != "" {
@@ -156,6 +160,7 @@ func TestSeed(t *testing.T) {
 
 // TestClusterServers counts the machines of the server and combined groups, and ignores clients and a negative size.
 func TestClusterServers(t *testing.T) {
+	t.Parallel()
 	m := &model.Cluster{Groups: []model.NodeGroup{
 		{Name: "servers", Role: v1alpha1.RoleServer, Size: 3},
 		{Name: "both", Role: v1alpha1.RoleCombined, Size: 2},
@@ -171,6 +176,7 @@ func TestClusterServers(t *testing.T) {
 // call: a node cannot be told from its twin without it. The service has no Nomad client, so a Nomad call would fail
 // with another error.
 func TestRegisterNeedsAPrivateAddress(t *testing.T) {
+	t.Parallel()
 	err := (&applier{s: &Service{}}).register(t.Context(), cloud.Instance{Name: "prod-workers-1"})
 
 	const want = "node prod-workers-1: the cloud reports no private address for it yet; run the command again"
@@ -182,6 +188,7 @@ func TestRegisterNeedsAPrivateAddress(t *testing.T) {
 // TestCheckVote accepts a machine whose address a voter holds in the Raft configuration, and fails a machine without a
 // private address, one that no peer holds and one whose peer does not vote, naming the voters of the cluster.
 func TestCheckVote(t *testing.T) {
+	t.Parallel()
 	peer := func(a string, voter bool) nomadops.Peer {
 		return nomadops.Peer{Address: netip.MustParseAddrPort(a + ":4647"), Voter: voter}
 	}

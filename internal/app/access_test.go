@@ -102,6 +102,7 @@ func wantAccessError(t *testing.T, err error, want string, secrets map[string][]
 // the token. The answering server comes first among the servers' addresses, and the store, the lock and the
 // cloud's objects stay as they were.
 func TestOperatorAccessMakesATokenAndACertificate(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w, _ := builtWorld(t)
 		rec := &writeLog{Store: svc.Store}
@@ -195,6 +196,7 @@ func wantOperatorCertificate(t *testing.T, acc app.Access, from, end time.Time) 
 // TestOperatorAccessMovesToTheNextServer loses the answer of the first server: the second makes a token, which the
 // access holds, and its address comes first, the others after it by name. Nomad keeps the lost token.
 func TestOperatorAccessMovesToTheNextServer(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w, _ := builtWorld(t)
 		w.LoseResponse(t, "CreateToken")
@@ -223,6 +225,7 @@ func TestOperatorAccessMovesToTheNextServer(t *testing.T) {
 // TestOperatorAccessListsTheServersThatHaveAPublicAddress leaves a server without a public address out of the
 // addresses, and a client out of them too.
 func TestOperatorAccessListsTheServersThatHaveAPublicAddress(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _, _ := builtWorld(t)
 		if err := f.DeleteInstance(t.Context(), "instance-3"); err != nil {
@@ -253,6 +256,7 @@ func (n reversedNodes) List(ctx context.Context, cluster string) ([]cloud.Instan
 
 // TestOperatorAccessOrdersTheServersByName lists the servers by name, whatever the order in which the cloud lists them.
 func TestOperatorAccessOrdersTheServersByName(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _, _ := builtWorld(t)
 		providers := svc.Providers
@@ -272,6 +276,7 @@ func TestOperatorAccessOrdersTheServersByName(t *testing.T) {
 
 // TestOperatorAccessReachesCombinedServers lists the machines of a combined group as the servers.
 func TestOperatorAccessReachesCombinedServers(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := newRelease(t, clusterYAML, combinedYAML)
 		mustUpdate(t, svc)
@@ -286,6 +291,7 @@ func TestOperatorAccessReachesCombinedServers(t *testing.T) {
 
 // TestOperatorAccessDoesNotValidateTheSpecs gives the access of a cluster whose specs an update would refuse now.
 func TestOperatorAccessDoesNotValidateTheSpecs(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _ := newRelease(t, keyedClusterYAML, edit(t, serversYAML, "size: 3", "size: 1"), workersYAML)
 		mustUpdate(t, svc)
@@ -300,6 +306,7 @@ func TestOperatorAccessDoesNotValidateTheSpecs(t *testing.T) {
 // TestOperatorAccessTakesNoLock gives the access while another tent holds the cluster's lock, and leaves its lease as
 // it was.
 func TestOperatorAccessTakesNoLock(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _, _ := builtWorld(t)
 		held := holdLock(t, svc.Store)
@@ -316,6 +323,7 @@ func TestOperatorAccessTakesNoLock(t *testing.T) {
 // TestOperatorAccessEndsWithTheEarlierEnd takes the time from the service's clock: the certificate starts and ends by
 // it, and the access ends with the earlier of the certificate and the token, whose end Nomad's clock sets.
 func TestOperatorAccessEndsWithTheEarlierEnd(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		offset time.Duration // of the service's clock from Nomad's
@@ -349,6 +357,7 @@ func TestOperatorAccessEndsWithTheEarlierEnd(t *testing.T) {
 // TestOperatorAccessEndsWithTheCA ends the access with the CA when the CA ends before the TTL: the certificate never
 // outlives its CA.
 func TestOperatorAccessEndsWithTheCA(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _, _ := builtWorld(t)
 		caEnd := storedCA(t, svc.Store).Certificate().NotAfter
@@ -367,6 +376,7 @@ func TestOperatorAccessEndsWithTheCA(t *testing.T) {
 
 // TestOperatorAccessNamesWhatIsMissing fails with what the store lacks, before any call of the cloud or Nomad.
 func TestOperatorAccessNamesWhatIsMissing(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		remove []string
@@ -413,6 +423,7 @@ func TestOperatorAccessNamesWhatIsMissing(t *testing.T) {
 // TestOperatorAccessFailsForAStoredSecretThatDoesNotLoad fails as an update does, names the path and shows nothing of
 // the secret.
 func TestOperatorAccessFailsForAStoredSecretThatDoesNotLoad(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _, _ := builtWorld(t)
 		secrets := storedSecretBytes(t, svc)
@@ -434,6 +445,7 @@ func TestOperatorAccessFailsForAStoredSecretThatDoesNotLoad(t *testing.T) {
 // TestOperatorAccessNeedsServerMachines fails for a cluster whose servers are gone, and for one whose servers have
 // no public address, before any call of Nomad.
 func TestOperatorAccessNeedsServerMachines(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		public string // the public address of the servers that replace the deleted ones; "" for none, "-" for no server
@@ -469,6 +481,7 @@ func TestOperatorAccessNeedsServerMachines(t *testing.T) {
 
 // TestOperatorAccessRefusesATTLThatIsNotAboveZero fails before any call of the cloud or Nomad.
 func TestOperatorAccessRefusesATTLThatIsNotAboveZero(t *testing.T) {
+	t.Parallel()
 	for _, ttl := range []time.Duration{0, -time.Minute} {
 		t.Run(ttl.String(), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -488,6 +501,7 @@ func TestOperatorAccessRefusesATTLThatIsNotAboveZero(t *testing.T) {
 
 // TestOperatorAccessSaysNomadsWordsForATTLOutOfItsLimits fails with Nomad's own text, after one call.
 func TestOperatorAccessSaysNomadsWordsForATTLOutOfItsLimits(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w, _ := builtWorld(t)
 		nomadBefore := len(w.Log())
@@ -509,6 +523,7 @@ func TestOperatorAccessSaysNomadsWordsForATTLOutOfItsLimits(t *testing.T) {
 // TestOperatorAccessNamesAFailedCall fails with the cause of a call that no other server answers differently, after
 // one call and with no hint about the API's access.
 func TestOperatorAccessNamesAFailedCall(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w, _ := builtWorld(t)
 		secrets := storedSecretBytes(t, svc)
@@ -529,6 +544,7 @@ func TestOperatorAccessNamesAFailedCall(t *testing.T) {
 
 // TestOperatorAccessHintsAtTheAPIAccess tells the operator where to look when no server answers.
 func TestOperatorAccessHintsAtTheAPIAccess(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w, _ := builtWorld(t)
 		secrets := storedSecretBytes(t, svc)
@@ -549,6 +565,7 @@ func TestOperatorAccessHintsAtTheAPIAccess(t *testing.T) {
 
 // TestOperatorAccessNeedsTheCluster fails for a cluster that the store does not hold, and writes nothing.
 func TestOperatorAccessNeedsTheCluster(t *testing.T) {
+	t.Parallel()
 	svc, root := newService(t)
 	withCloud(svc)
 
@@ -560,6 +577,7 @@ func TestOperatorAccessNeedsTheCluster(t *testing.T) {
 
 // TestOperatorAccessChecksTheTentVersion fails for a cluster that a newer tent wrote.
 func TestOperatorAccessChecksTheTentVersion(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	withCloud(svc)
@@ -573,6 +591,7 @@ func TestOperatorAccessChecksTheTentVersion(t *testing.T) {
 
 // TestOperatorAccessIsInterrupted says "interrupted" when the context ends during the call of Nomad.
 func TestOperatorAccessIsInterrupted(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w, _ := builtWorld(t)
 		ctx, cancel := context.WithCancel(t.Context())
@@ -593,6 +612,7 @@ func TestOperatorAccessIsInterrupted(t *testing.T) {
 // TestAccessPrintsNoSecret prints an access in every way and finds neither the token, the key nor any other secret of
 // the cluster, and the JSON of an access holds the sizes of its two secrets.
 func TestAccessPrintsNoSecret(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _, _ := builtWorld(t)
 		acc := mustAccess(t, svc)
@@ -612,6 +632,7 @@ func TestAccessPrintsNoSecret(t *testing.T) {
 // TestOperatorAccessFailsWhenTheCloudDoesNotAnswer returns the error of a list that fails, before any call of Nomad: a
 // cluster whose machines cannot be listed is not a cluster without servers.
 func TestOperatorAccessFailsWhenTheCloudDoesNotAnswer(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w, _ := builtWorld(t)
 		errDown := errors.New("the cloud is down")
@@ -634,6 +655,7 @@ func TestOperatorAccessFailsWhenTheCloudDoesNotAnswer(t *testing.T) {
 
 // TestOperatorAccessNamesTheTokenAfterThePurpose puts the purpose that the caller gives into the token's name.
 func TestOperatorAccessNamesTheTokenAfterThePurpose(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w, _ := builtWorld(t)
 
@@ -649,6 +671,7 @@ func TestOperatorAccessNamesTheTokenAfterThePurpose(t *testing.T) {
 
 // TestOperatorAccessUsesTheNomadRegionOfTheSpecs names the certificate and the access after the cluster's Nomad region.
 func TestOperatorAccessUsesTheNomadRegionOfTheSpecs(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _ := newRelease(t, edit(t, keyedClusterYAML, "region: ams", "region: ams\n  nomad:\n    region: eu"),
 			serversYAML, workersYAML)

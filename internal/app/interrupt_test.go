@@ -277,6 +277,7 @@ func countNomad(w *nomadWorld, name string) int {
 // run, with a fresh context, leaves the cloud as the uninterrupted build does, without a second copy of any object,
 // keeps the secrets that the cut run wrote, and a run after it has nothing to change.
 func TestUpdateCutAtEveryCall(t *testing.T) {
+	t.Parallel()
 	for _, ex := range exampleClusters {
 		t.Run(ex.name, func(t *testing.T) {
 			_, calls, want := buildExample(t, ex.docs...)
@@ -312,6 +313,7 @@ func builtTemplate(t *testing.T, docs ...string) string {
 // uninterrupted rebuild, just before it and just after it. After the next run the cloud is as the uninterrupted
 // rebuild leaves it, the new Nomad is bootstrapped and the mark is stored again.
 func TestUpdateCutAtEveryCallOfARebuild(t *testing.T) {
+	t.Parallel()
 	for _, ex := range exampleClusters {
 		t.Run(ex.name, func(t *testing.T) {
 			template := builtTemplate(t, ex.docs...)
@@ -391,6 +393,7 @@ func cutError(op, p string) error { return fmt.Errorf("%s %q: %w", op, p, errCut
 // uninterrupted build does, with one CA, one gossip key and one ACL bootstrap secret, and keeps each secret that the
 // cut run wrote byte for byte.
 func TestUpdateCutAtEveryStateWrite(t *testing.T) {
+	t.Parallel()
 	for _, ex := range exampleClusters {
 		_, _, want := buildExample(t, ex.docs...)
 		_, template := exampleStore(t, ex.docs...)
@@ -463,6 +466,7 @@ func TestUpdateCutAtEveryStateWrite(t *testing.T) {
 // index of the write before it when the cut came first and the index of the write when it came after. The next run
 // leaves the cloud as an uninterrupted build does.
 func TestUpdateCutAtEveryWriteOfTheNames(t *testing.T) {
+	t.Parallel()
 	groups := map[string]string{"servers and workers": "servers", "combined": "all"}
 	for _, ex := range exampleClusters {
 		_, _, want := buildExample(t, ex.docs...)
@@ -519,6 +523,7 @@ func TestUpdateCutAtEveryWriteOfTheNames(t *testing.T) {
 // delete, just before it and just after it. The next run, with a fresh context, deletes what is left of the cluster
 // and its state, and then the cluster is not found.
 func TestDeleteCutAtEveryCall(t *testing.T) {
+	t.Parallel()
 	calls := deleteExample(t)
 	_, template := exampleStore(t)
 	eachCut(t, calls, func(t *testing.T, c cutCase) {
@@ -545,6 +550,7 @@ func TestDeleteCutAtEveryCall(t *testing.T) {
 // without its bundle, an update, once the node groups are back, signs a new bundle for the stored key and keeps the
 // key. The next delete deletes the rest.
 func TestDeleteCutAtEveryStateDelete(t *testing.T) {
+	t.Parallel()
 	for _, after := range []bool{false, true} {
 		when := "before"
 		if after {
@@ -613,6 +619,7 @@ var errLost = errors.New("the test lost the answer")
 // lists the rules again, and finishes in the same run with one copy of every object and one instance per node. A
 // subtest's name gives the call's place in the build and its method.
 func TestUpdateLosesTheAnswerOfEveryCreate(t *testing.T) {
+	t.Parallel()
 	_, calls, want := buildExample(t)
 	_, template := exampleStore(t)
 	for i, call := range calls {

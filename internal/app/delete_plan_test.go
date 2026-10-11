@@ -49,14 +49,17 @@ func exampleDelete(t *testing.T) app.DeletePlan {
 }
 
 func TestDeletePlanWriteTextGolden(t *testing.T) {
+	t.Parallel()
 	checkGolden(t, "delete_plan.golden", deletePlanText(t, exampleDelete(t)))
 }
 
 func TestDeletePlanJSONGolden(t *testing.T) {
+	t.Parallel()
 	checkGolden(t, "delete_plan.json.golden", encodeJSON(t, exampleDelete(t), "  "))
 }
 
 func TestDeletePlanWriteText(t *testing.T) {
+	t.Parallel()
 	const (
 		nodesOnly = "- node prod-servers-0 (ID instance-1)\n\nNodes: 1 to delete.\n"
 		stateOnly = "- state prod/cluster.yaml\n\nState: 1 object to delete.\n"
@@ -97,6 +100,7 @@ func TestDeletePlanWriteText(t *testing.T) {
 }
 
 func TestDeletePlanHasChanges(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		plan app.DeletePlan
@@ -118,6 +122,7 @@ func TestDeletePlanHasChanges(t *testing.T) {
 }
 
 func TestDeletePlanJSON(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		plan app.DeletePlan
@@ -151,6 +156,7 @@ func TestDeletePlanJSON(t *testing.T) {
 // TestDeletePlanJSONLeavesEscapingToTheCaller checks that the plan's JSON escapes HTML characters such as < and &
 // only when the caller's encoder does.
 func TestDeletePlanJSONLeavesEscapingToTheCaller(t *testing.T) {
+	t.Parallel()
 	p := app.DeletePlan{State: []string{"prod/<notes>&more"}}
 	want := `{"nodes":[],"infrastructure":null,"state":["prod/<notes>&more"]}` + "\n"
 	if got := encodeJSON(t, p, ""); got != want {
@@ -166,6 +172,7 @@ func TestDeletePlanJSONLeavesEscapingToTheCaller(t *testing.T) {
 }
 
 func TestDeletePlanWriteTextWriteError(t *testing.T) {
+	t.Parallel()
 	errBroken := errors.New("broken pipe")
 	for _, tc := range []struct {
 		name string
@@ -191,6 +198,7 @@ func TestDeletePlanWriteTextWriteError(t *testing.T) {
 }
 
 func TestDeletePlanWriteApplied(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		plan app.DeletePlan

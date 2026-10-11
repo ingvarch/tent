@@ -10,6 +10,7 @@ import (
 )
 
 func TestReplace(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	bigger := edit(t, workersYAML, "size: 2", "size: 4")
@@ -31,6 +32,7 @@ func TestReplace(t *testing.T) {
 }
 
 func TestReplaceCluster(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	pinned := edit(t, clusterYAML, "region: ams", "region: ams\n  nomad:\n    version: 2.0.7")
@@ -43,6 +45,7 @@ func TestReplaceCluster(t *testing.T) {
 }
 
 func TestReplaceMissing(t *testing.T) {
+	t.Parallel()
 	const hint = "; create it with create -f"
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML)
@@ -65,6 +68,7 @@ func TestReplaceMissing(t *testing.T) {
 }
 
 func TestReplaceInvalid(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	_, err := svc.Replace(t.Context(), decode(t, edit(t, serversYAML, "role: server", "role: client")), true)
@@ -82,6 +86,7 @@ func moved(was, now string) string {
 // TestReplaceKeepsTheCloud refuses a Cluster on another provider or in another region: the cloud objects of the
 // cluster would stay behind where tent made them. The other fields still change.
 func TestReplaceKeepsTheCloud(t *testing.T) {
+	t.Parallel()
 	hetzner := edit(t, edit(t, clusterYAML, "provider: vultr", "provider: hetzner"), "region: ams",
 		"region: eu-central\n    zones: [fsn1, nbg1, hel1]")
 	for _, tc := range []struct {
@@ -153,6 +158,7 @@ func wantBroken(t *testing.T, err error) {
 // TestReplaceKeepsTheCloudOfABrokenStore refuses to replace a stored cluster.yaml that does not decode: its cloud is
 // unknown, so the change could move the cluster. The error says how to repair the file.
 func TestReplaceKeepsTheCloudOfABrokenStore(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	breakCluster(t, svc)
@@ -164,6 +170,7 @@ func TestReplaceKeepsTheCloudOfABrokenStore(t *testing.T) {
 // TestBrokenClusterSaysHowToRepairIt says how to repair a stored cluster.yaml that does not decode, whichever use case
 // reads it, and changes nothing.
 func TestBrokenClusterSaysHowToRepairIt(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	breakCluster(t, svc)

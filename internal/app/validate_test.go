@@ -73,6 +73,7 @@ func wantFailures(t *testing.T, v app.Validation, want ...app.Failure) {
 // TestValidateClusterPassesTheChecks validates the cluster that an update built: it is valid, and tells the counts,
 // the pinned Nomad version and the warnings about the specs and the zone.
 func TestValidateClusterPassesTheChecks(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _ := builtCluster(t)
 		var told []string
@@ -105,6 +106,7 @@ func TestValidateClusterPassesTheChecks(t *testing.T) {
 // TestValidateClusterTellsThePinnedNomadVersion tells the Nomad version of the completed spec when the channel
 // recommends a newer one.
 func TestValidateClusterTellsThePinnedNomadVersion(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newUpdate(t)
 		withNomad(svc, f).SetVersion("2.0.7")
@@ -121,6 +123,7 @@ func TestValidateClusterTellsThePinnedNomadVersion(t *testing.T) {
 // TestValidateClusterWarnsAboutACombinedGroup tells the warning about a combined group after the one about the
 // open API, and counts a combined node as a server and as a client.
 func TestValidateClusterWarnsAboutACombinedGroup(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newService(t)
 		svc.Validate = v1alpha1.ValidateOptions{AllowSingleServer: true}
@@ -144,6 +147,7 @@ func TestValidateClusterWarnsAboutACombinedGroup(t *testing.T) {
 // TestValidateClusterFindsMachinesThatChanged fails the checks of the machines that a halt and a delete leave. The
 // halted machine's node still reads ready in Nomad, as it does until Nomad notices.
 func TestValidateClusterFindsMachinesThatChanged(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := builtCluster(t)
 
@@ -173,6 +177,7 @@ func TestValidateClusterFindsMachinesThatChanged(t *testing.T) {
 
 // TestValidateClusterShowsTheLock tells who holds the cluster's lock, and reports no failure for it.
 func TestValidateClusterShowsTheLock(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _ := builtCluster(t)
 		held := holdLock(t, svc.Store)
@@ -192,6 +197,7 @@ func TestValidateClusterShowsTheLock(t *testing.T) {
 
 // TestValidateClusterNamesNoHolder shows a lock whose holder wrote no lease as one of an unknown holder.
 func TestValidateClusterNamesNoHolder(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, root := builtCluster(t)
 		held := holdLock(t, svc.Store)
@@ -211,6 +217,7 @@ func TestValidateClusterNamesNoHolder(t *testing.T) {
 
 // TestValidateClusterReportsALeaseItCannotRead warns about a lock whose lease cannot be read, and fails nothing.
 func TestValidateClusterReportsALeaseItCannotRead(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _ := builtCluster(t)
 		svc.Store = unwrapped{svc.Store}
@@ -236,6 +243,7 @@ func TestValidateClusterReportsALeaseItCannotRead(t *testing.T) {
 
 // TestValidateClusterOnlyReads leaves the store as it was, takes no lock and calls the cloud only to read.
 func TestValidateClusterOnlyReads(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w, _ := builtWorld(t)
 		before, calls := snapshot(t, svc.Store), len(f.Calls())
@@ -291,6 +299,7 @@ func (s readOnlyProbe) Delete(_ context.Context, p string) error {
 // TestValidateClusterReadsTheLockWithoutProbingTheStore validates over a store that is no file store without a
 // Capabilities call or a write, and still shows the lease that a holder wrote.
 func TestValidateClusterReadsTheLockWithoutProbingTheStore(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _ := builtCluster(t)
 		inner := svc.Store
@@ -323,6 +332,7 @@ func nomadCallNames(w *nomadWorld, n int) []string {
 
 // TestValidateClusterWithoutTheCluster fails for a cluster that the store does not hold, and writes nothing.
 func TestValidateClusterWithoutTheCluster(t *testing.T) {
+	t.Parallel()
 	svc, root := newService(t)
 	withCloud(svc)
 
@@ -334,6 +344,7 @@ func TestValidateClusterWithoutTheCluster(t *testing.T) {
 
 // TestValidateClusterChecksTheTentVersion fails for a cluster that a newer tent wrote.
 func TestValidateClusterChecksTheTentVersion(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	withCloud(svc)
@@ -347,6 +358,7 @@ func TestValidateClusterChecksTheTentVersion(t *testing.T) {
 
 // TestValidateClusterChecksTheSpecs fails for a single server without AllowSingleServer, as an update does.
 func TestValidateClusterChecksTheSpecs(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	svc.Validate = v1alpha1.ValidateOptions{AllowSingleServer: true}
 	mustCreate(t, svc, clusterYAML, edit(t, serversYAML, "size: 3", "size: 1"), workersYAML)
@@ -367,6 +379,7 @@ func TestValidateClusterChecksTheSpecs(t *testing.T) {
 
 // TestValidateClusterNeedsProviders fails when the service has no cloud providers.
 func TestValidateClusterNeedsProviders(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 
@@ -466,14 +479,17 @@ func validText(t *testing.T, v app.Validation) string {
 }
 
 func TestValidationTextGolden(t *testing.T) {
+	t.Parallel()
 	checkGolden(t, "validate.golden", validText(t, exampleValidation()))
 }
 
 func TestValidationJSONGolden(t *testing.T) {
+	t.Parallel()
 	checkGolden(t, "validate.json.golden", encodeJSON(t, exampleValidation(), "  "))
 }
 
 func TestValidationWriteText(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		v    app.Validation
@@ -510,6 +526,7 @@ func TestValidationWriteText(t *testing.T) {
 }
 
 func TestValidationJSONListsAreNeverNull(t *testing.T) {
+	t.Parallel()
 	got := encodeJSON(t, app.Validation{Cluster: "prod", Servers: 3, Clients: 2, NomadVersion: "2.0.7"}, "")
 	want := `{"cluster":"prod","valid":true,"servers":3,"clients":2,"nomadVersion":"2.0.7",` +
 		`"failures":[],"warnings":[]}` + "\n"
@@ -519,6 +536,7 @@ func TestValidationJSONListsAreNeverNull(t *testing.T) {
 }
 
 func TestValidationWriteTextWriteError(t *testing.T) {
+	t.Parallel()
 	errBroken := errors.New("broken pipe")
 	for name, v := range map[string]app.Validation{
 		"valid":     {Cluster: "prod", Servers: 3, Clients: 2, NomadVersion: "2.0.7"},
@@ -537,6 +555,7 @@ func TestValidationWriteTextWriteError(t *testing.T) {
 // TestValidateClusterFailsWhenTheCloudDoesNotAnswer returns the error of a list that fails: a machine that cannot be
 // listed is not a missing machine.
 func TestValidateClusterFailsWhenTheCloudDoesNotAnswer(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := builtCluster(t)
 		var told []string
@@ -577,6 +596,7 @@ func (s cancelOnGet) Get(ctx context.Context, p string) ([]byte, statestore.Vers
 // TestValidateClusterIsInterruptedWhileReadingTheLock says "interrupted" when the context ends during the read of the
 // lock, and does not turn the end into a warning.
 func TestValidateClusterIsInterruptedWhileReadingTheLock(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _ := builtCluster(t)
 		ctx, cancel := context.WithCancel(t.Context())
@@ -620,6 +640,7 @@ const noLeaderSuffix = "; tent reaches the servers on port 4646: check spec.acce
 // TestValidateClusterFindsWhatDiffersInNomad changes what the Nomad of the built cluster answers, one thing at a time,
 // and fails the check for it.
 func TestValidateClusterFindsWhatDiffersInNomad(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		change func(*nomadWorld)
@@ -772,6 +793,7 @@ func TestValidateClusterFindsWhatDiffersInNomad(t *testing.T) {
 // TestValidateClusterNeedsNomadThatAnswers fails with one failure of the cluster when Nomad has no leader, or fails a
 // call after it had one, and asks nothing more.
 func TestValidateClusterNeedsNomadThatAnswers(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w, _ := builtWorld(t)
 		w.NoLeader()
@@ -795,6 +817,7 @@ func TestValidateClusterNeedsNomadThatAnswers(t *testing.T) {
 // TestValidateClusterFailsWhenAnotherNomadCallFails fails the check of Nomad with the call's error when the leader
 // answered but a later call fails, and asks no further.
 func TestValidateClusterFailsWhenAnotherNomadCallFails(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ call, what string }{
 		{"Peers", "read the Raft configuration"},
 		{"Health", "read autopilot's health"},
@@ -817,6 +840,7 @@ func TestValidateClusterFailsWhenAnotherNomadCallFails(t *testing.T) {
 // TestValidateClusterNeedsTheStoreToSetUpNomad fails with one failure of the cluster, and asks Nomad nothing, when
 // the store lacks a secret or the mark of the bootstrap, or no server has a public address.
 func TestValidateClusterNeedsTheStoreToSetUpNomad(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		change func(*testing.T, *app.Service)
@@ -883,6 +907,7 @@ func (n noPublicNodes) List(ctx context.Context, cluster string) ([]cloud.Instan
 // tent could not check, which is no failure of the cluster as a missing secret is. It asks Nomad nothing, and the
 // error does not show the stored bytes.
 func TestValidateClusterFailsForASecretThatDoesNotLoad(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w, _ := builtWorld(t)
 		stored := []byte("hunter2-is-no-gossip-key")
@@ -909,6 +934,7 @@ func TestValidateClusterFailsForASecretThatDoesNotLoad(t *testing.T) {
 
 // TestValidateClusterNeedsANomadClient fails with an error, not a failure, when the service has no way to reach Nomad.
 func TestValidateClusterNeedsANomadClient(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _ := builtCluster(t)
 		svc.Nomad = nil
@@ -925,6 +951,7 @@ func TestValidateClusterNeedsANomadClient(t *testing.T) {
 // TestValidateClusterNeedsANomadClientBeforeTheSecrets fails with the error even for a cluster that was never
 // updated, whose store holds no secrets and no mark: it is no failure of Nomad.
 func TestValidateClusterNeedsANomadClientBeforeTheSecrets(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newService(t)
 		mustCreate(t, svc, keyedClusterYAML, serversYAML, workersYAML)
@@ -942,6 +969,7 @@ func TestValidateClusterNeedsANomadClientBeforeTheSecrets(t *testing.T) {
 
 // TestValidateClusterPassesAClusterOfOneNode counts a single combined node as a server and as a client.
 func TestValidateClusterPassesAClusterOfOneNode(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newService(t)
 		svc.Validate = v1alpha1.ValidateOptions{AllowSingleServer: true}
@@ -977,6 +1005,7 @@ func expiredCertificates() []app.Failure {
 // TestValidateClusterWarnsAboutCertificatesThatEndSoon tells, as warnings, which node certificates end within 30 days.
 // A node certificate ends a year after its machine was made.
 func TestValidateClusterWarnsAboutCertificatesThatEndSoon(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _ := builtCluster(t)
 		time.Sleep(339*24*time.Hour + 12*time.Hour) // the bubble's clock starts at 2000-01-01, a leap year
@@ -1003,6 +1032,7 @@ func TestValidateClusterWarnsAboutCertificatesThatEndSoon(t *testing.T) {
 // TestValidateClusterFailsForCertificatesThatEnded fails the checks of the certificates of the nodes and of the CA
 // once they have ended.
 func TestValidateClusterFailsForCertificatesThatEnded(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, _ := builtCluster(t)
 		time.Sleep(11 * 366 * 24 * time.Hour)
@@ -1019,6 +1049,7 @@ func TestValidateClusterFailsForCertificatesThatEnded(t *testing.T) {
 // TestValidateClusterFailsForCertificatesBesideNomadThatCannotBeAsked shows the failures of the certificates beside
 // the failure of a Nomad that tent cannot ask: an expired CA may be why tent cannot reach Nomad.
 func TestValidateClusterFailsForCertificatesBesideNomadThatCannotBeAsked(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		change func(*testing.T, *app.Service, *nomadWorld)
@@ -1058,6 +1089,7 @@ func TestValidateClusterFailsForCertificatesBesideNomadThatCannotBeAsked(t *test
 // one list, in the order of the checks, then by node. The server that left is an older machine than the one without a
 // vote, so its failures are found first and come after.
 func TestValidateClusterOrdersFailuresOfAllSources(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w, _ := builtWorld(t)
 		time.Sleep(11 * 366 * 24 * time.Hour)
@@ -1096,6 +1128,7 @@ func TestValidateClusterOrdersFailuresOfAllSources(t *testing.T) {
 // TestValidateClusterShowsNoSecrets keeps every secret of the cluster out of the text, the JSON, the warnings and the
 // errors of a valid cluster, of a cluster that fails checks of Nomad and of one whose Nomad call fails.
 func TestValidateClusterShowsNoSecrets(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w, _ := builtWorld(t)
 		secrets := secretsOf(t, svc.Store)
@@ -1128,6 +1161,7 @@ func TestValidateClusterShowsNoSecrets(t *testing.T) {
 // TestValidateClusterIsInterruptedWhileAskingNomad says "interrupted" when the context ends during a Nomad call, and
 // does not turn the end into a failure.
 func TestValidateClusterIsInterruptedWhileAskingNomad(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _, w, _ := builtWorld(t)
 		ctx, cancel := context.WithCancel(t.Context())

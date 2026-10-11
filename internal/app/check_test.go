@@ -10,6 +10,7 @@ import (
 )
 
 func TestCheck(t *testing.T) {
+	t.Parallel()
 	objs := decode(t, clusterYAML, serversYAML, workersYAML)
 	if err := app.Check(objs, v1alpha1.ValidateOptions{}); err != nil {
 		t.Fatalf("Check: %v", err)
@@ -29,6 +30,7 @@ func TestCheck(t *testing.T) {
 
 // TestCheckChecksTheChannel checks the channel and the Nomad version against the channels embedded in tent.
 func TestCheckChecksTheChannel(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, doc string
 		want      v1alpha1.FieldError

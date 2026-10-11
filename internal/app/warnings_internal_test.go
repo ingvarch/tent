@@ -12,6 +12,7 @@ import (
 // TestWarnings returns the warnings about a cluster in a fixed order: the open API, the combined group, the Nomad
 // version that the channel has not tested.
 func TestWarnings(t *testing.T) {
+	t.Parallel()
 	ch := &channels.Channel{Name: "stable", Nomad: channels.Nomad{Tested: []string{"2.0.7"}}}
 	cluster := func(api, version string) *v1alpha1.Cluster {
 		c := &v1alpha1.Cluster{}

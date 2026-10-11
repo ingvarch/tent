@@ -33,6 +33,7 @@ func (r *reads) List(ctx context.Context, prefix string) ([]string, error) {
 // TestNamesAreChecked refuses names outside the name rule before it reads the store under them. On a disk that
 // ignores case, PROD would name prod's state.
 func TestNamesAreChecked(t *testing.T) {
+	t.Parallel()
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	store := svc.Store
