@@ -813,9 +813,9 @@ func mustPutS3(t *testing.T, s statestore.Store, p, data string) statestore.Vers
 	return v
 }
 
-func openS3(t *testing.T, rawURL string) statestore.Store {
+func openS3(t *testing.T, rawURL string, opts ...statestore.Option) statestore.Store {
 	t.Helper()
-	s, err := statestore.Open(t.Context(), rawURL)
+	s, err := statestore.OpenWith(t.Context(), rawURL, opts...)
 	if err != nil {
 		t.Fatalf("Open(%q): %v", rawURL, err)
 	}

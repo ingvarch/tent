@@ -25,7 +25,8 @@ func secretsTestService(t *testing.T) (*Service, statestore.Layout) {
 	if !strings.HasPrefix(dir, "/") {
 		dir = "/" + dir
 	}
-	s, err := statestore.Open(t.Context(), (&url.URL{Scheme: "file", Path: dir}).String())
+	s, err := statestore.OpenWith(t.Context(), (&url.URL{Scheme: "file", Path: dir}).String(),
+		statestore.WithoutSync())
 	if err != nil {
 		t.Fatalf("open the store: %v", err)
 	}

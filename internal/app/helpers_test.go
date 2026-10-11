@@ -107,7 +107,7 @@ func fileURL(dir string) string {
 func newService(t *testing.T) (*app.Service, string) {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "state")
-	s, err := statestore.Open(t.Context(), fileURL(root))
+	s, err := statestore.OpenWith(t.Context(), fileURL(root), statestore.WithoutSync())
 	if err != nil {
 		t.Fatalf("open the store: %v", err)
 	}

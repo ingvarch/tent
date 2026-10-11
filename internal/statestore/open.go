@@ -11,6 +11,18 @@ import (
 // schemes says which stores Open takes.
 const schemes = "use file:///abs/path for a local directory or s3://bucket[/prefix] for a bucket"
 
+// Option changes how OpenWith opens a store.
+type Option func(*options)
+
+type options struct {
+	noSync bool
+}
+
+// WithoutSync makes a file store skip the syncs that make a write survive a power loss: of the file and of its
+// directory. Everything else stays: the atomic rename, the modes, the lock and the errors. A bucket ignores it. It is
+// for tests, whose stores need not survive a power loss; tent itself never passes it.
+func WithoutSync() Option { return func(o *options) { o.noSync = true } }
+
 // Open opens the store at a URL. Credentials never go in the URL.
 //
 //   - file:///abs/path is a local directory (file:///C:/state on Windows).
@@ -19,6 +31,11 @@ const schemes = "use file:///abs/path for a local directory or s3://bucket[/pref
 //     pathStyle=true only for servers without bucket host names. Credentials come from the standard AWS chain: the
 //     environment, the shared files, or the role of the machine.
 func Open(ctx context.Context, rawURL string) (Store, error) {
+	return OpenWith(ctx, rawURL)
+}
+
+// OpenWith is Open with options. The options are for tests; production code calls Open.
+func OpenWith(ctx context.Context, rawURL string, opts ...Option) (Store, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("open state store: %w", err)
 	}
@@ -36,10 +53,14 @@ func Open(ctx context.Context, rawURL string) (Store, error) {
 		}
 		return nil, fmt.Errorf("state store URL: %w", err)
 	}
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
 	var backend Store
 	switch u.Scheme {
 	case "file":
-		backend, err = newFileStore(u)
+		backend, err = newFileStore(u, o)
 	case "s3":
 		backend, err = newS3Store(ctx, rawURL)
 	case "":

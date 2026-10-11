@@ -132,15 +132,15 @@ func newExample(t *testing.T, docs ...string) (*app.Service, *vultrfake.Fake, *n
 	return svc, f, withNomad(svc, f)
 }
 
-// newExampleFrom is newExample over a copy of the store at the root template, from exampleStore. The store syncs each
-// write to disk, which makes writing the specs anew take most of a short test's time; the copy does not sync.
+// newExampleFrom is newExample over a copy of the store at the root template, from exampleStore. The copy saves
+// writing the specs anew in every short test.
 func newExampleFrom(t *testing.T, template string) (*app.Service, *vultrfake.Fake, *nomadWorld) {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "state")
 	if err := os.CopyFS(root, os.DirFS(template)); err != nil {
 		t.Fatalf("copy the store: %v", err)
 	}
-	s, err := statestore.Open(t.Context(), fileURL(root))
+	s, err := statestore.OpenWith(t.Context(), fileURL(root), statestore.WithoutSync())
 	if err != nil {
 		t.Fatalf("open the store: %v", err)
 	}

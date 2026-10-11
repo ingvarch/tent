@@ -53,7 +53,7 @@ func (k *flockLocker) TryLock(ctx context.Context, l Lease) (Lease, *Lease, erro
 	if l.ID == "" {
 		return Lease{}, nil, k.fail("lock", errNoID)
 	}
-	if err := mkdirAll(filepath.Dir(k.lockFile)); err != nil {
+	if err := k.store.mkdirAll(filepath.Dir(k.lockFile)); err != nil {
 		return Lease{}, nil, k.fail("lock", err)
 	}
 	var previous *Lease

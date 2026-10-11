@@ -30,9 +30,9 @@ func fileURL(dir string) string {
 	return (&url.URL{Scheme: "file", Path: p}).String()
 }
 
-func openFile(t *testing.T, root string) statestore.Store {
+func openFile(t *testing.T, root string, opts ...statestore.Option) statestore.Store {
 	t.Helper()
-	s, err := statestore.Open(t.Context(), fileURL(root))
+	s, err := statestore.OpenWith(t.Context(), fileURL(root), opts...)
 	if err != nil {
 		t.Fatalf("Open(%q): %v", fileURL(root), err)
 	}

@@ -33,11 +33,13 @@ const (
 // <root>/.tent-store.lock: shared to read, exclusive to write or delete. It makes conditional puts atomic between
 // processes and keeps readers' open files away from renames, which Windows refuses over an open file.
 type fileStore struct {
-	root string // absolute and clean
-	url  string
+	root   string // absolute and clean
+	url    string
+	noSync bool         // skip the syncs of a write; see WithoutSync
+	onSync func(string) // told "file" or "dir" before each sync; only tests that count syncs set it
 }
 
-func newFileStore(u *url.URL) (*fileStore, error) {
+func newFileStore(u *url.URL, o options) (*fileStore, error) {
 	switch {
 	case u.Host != "":
 		return nil, errors.New("state store URL: a file URL has no host: use file:///abs/path (three slashes)")
@@ -58,7 +60,7 @@ func newFileStore(u *url.URL) (*fileStore, error) {
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p // a Windows drive path
 	}
-	return &fileStore{root: root, url: (&url.URL{Scheme: "file", Path: p}).String()}, nil
+	return &fileStore{root: root, url: (&url.URL{Scheme: "file", Path: p}).String(), noSync: o.noSync}, nil
 }
 
 // localPath returns the OS path of a file URL: /C:/state is C:\state on Windows.
@@ -89,7 +91,7 @@ func (s *fileStore) Get(ctx context.Context, p string) ([]byte, Version, error) 
 }
 
 func (s *fileStore) Put(ctx context.Context, p string, data []byte, opts PutOptions) (Version, error) {
-	if err := mkdirAll(s.root); err != nil {
+	if err := s.mkdirAll(s.root); err != nil {
 		return "", err
 	}
 	err := s.withLock(ctx, true, func() error {
@@ -200,19 +202,19 @@ func (s *fileStore) check(p string, opts PutOptions) error {
 	return nil
 }
 
-// write replaces an object atomically and durably: through a synced temp file in the same directory, renamed over
-// the object, then the directory synced.
+// write replaces an object atomically and, unless the store skips syncs, durably: through a synced temp file in the
+// same directory, renamed over the object, then the directory synced.
 func (s *fileStore) write(p string, data []byte) error {
 	full := s.file(p)
 	dir := filepath.Dir(full)
-	if err := mkdirAll(dir); err != nil {
+	if err := s.mkdirAll(dir); err != nil {
 		return s.explain(p, err)
 	}
 	tmp, err := os.CreateTemp(dir, tmpPattern) // mode 0600
 	if err != nil {
 		return s.explain(p, err)
 	}
-	err = writeAndClose(tmp, data)
+	err = s.writeAndClose(tmp, data)
 	if err == nil {
 		err = os.Rename(tmp.Name(), full)
 	}
@@ -220,7 +222,7 @@ func (s *fileStore) write(p string, data []byte) error {
 		_ = os.Remove(tmp.Name()) // the write error matters more; List skips a leftover temp file
 		return s.explain(p, err)
 	}
-	return syncDir(dir)
+	return s.flushDir(dir)
 }
 
 // explain replaces the OS error of a failed write when the path clashes with another object: a file system cannot
@@ -240,21 +242,21 @@ func (s *fileStore) explain(p string, err error) error {
 	return err
 }
 
-// mkdirAll creates dir and its missing parents, and syncs the parent of each new directory.
-func mkdirAll(dir string) error {
+// mkdirAll creates dir and its missing parents, and syncs (see flushDir) the parent of each new directory.
+func (s *fileStore) mkdirAll(dir string) error {
 	if _, err := os.Stat(dir); err == nil {
 		return nil
 	}
 	parent := filepath.Dir(dir)
 	if parent != dir {
-		if err := mkdirAll(parent); err != nil {
+		if err := s.mkdirAll(parent); err != nil {
 			return err
 		}
 	}
 	if err := os.Mkdir(dir, dirPerm); err != nil && !errors.Is(err, fs.ErrExist) {
 		return err
 	}
-	return syncDir(parent)
+	return s.flushDir(parent)
 }
 
 // syncDir writes a directory's entries to disk, so a rename or a new entry in it survives a power loss. Windows
@@ -270,11 +272,33 @@ func syncDir(dir string) error {
 	return errors.Join(f.Sync(), f.Close())
 }
 
-// writeAndClose writes data to f, syncs it to disk and closes it.
-func writeAndClose(f *os.File, data []byte) error {
+// flushDir syncs a directory unless the store skips syncs.
+func (s *fileStore) flushDir(dir string) error {
+	if s.noSync {
+		return nil
+	}
+	if s.onSync != nil {
+		s.onSync("dir")
+	}
+	return syncDir(dir)
+}
+
+// flushFile syncs a file unless the store skips syncs.
+func (s *fileStore) flushFile(f *os.File) error {
+	if s.noSync {
+		return nil
+	}
+	if s.onSync != nil {
+		s.onSync("file")
+	}
+	return f.Sync()
+}
+
+// writeAndClose writes data to f, syncs it (see flushFile) and closes it.
+func (s *fileStore) writeAndClose(f *os.File, data []byte) error {
 	_, err := f.Write(data)
 	if err == nil {
-		err = f.Sync()
+		err = s.flushFile(f)
 	}
 	return errors.Join(err, f.Close())
 }
