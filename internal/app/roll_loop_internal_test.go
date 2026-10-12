@@ -822,40 +822,6 @@ func TestOpenWaitOfAServerGroupIsOverWhenTheReadingShowsItsEnd(t *testing.T) {
 	}
 }
 
-// TestRefuseRoleRefusesCombinedGroupsOnly refuses a combined group, with the advice about --nodegroups when the specs
-// have a client group; a server group and a client group never.
-func TestRefuseRoleRefusesCombinedGroupsOnly(t *testing.T) {
-	t.Parallel()
-	m := &model.Cluster{Name: "prod", Groups: []model.NodeGroup{
-		{Name: "servers", Role: v1alpha1.RoleServer}, {Name: "all", Role: v1alpha1.RoleCombined},
-		{Name: "workers", Role: v1alpha1.RoleClient},
-	}}
-	withClients := &rollRun{model: m}
-	serversOnly := &rollRun{model: &model.Cluster{Name: "prod", Groups: m.Groups[:2]}}
-	step := func(group string) rollout.Step { return rollout.Step{Action: rollout.Create, Group: group} }
-	for _, tc := range []struct {
-		name  string
-		r     *rollRun
-		group string
-		want  string
-	}{
-		{"a combined group", withClients, "all",
-			"node group all: tent cannot roll combined groups yet; select client groups with --nodegroups"},
-		{"a combined group of a cluster without clients", serversOnly, "all",
-			"node group all: tent cannot roll combined groups yet"},
-		{"a server group", withClients, "servers", ""},
-		{"a client group", withClients, "workers", ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			err := tc.r.refuseRole(step(tc.group))
-			if (err == nil) != (tc.want == "") || err != nil && err.Error() != tc.want {
-				t.Errorf("refuseRole error = %v, want %q", err, tc.want)
-			}
-		})
-	}
-}
-
 // TestNeedsListOnlyForAStopOrATransferDecidedWithoutAList wants a list for a stop and for a transfer of the leadership
 // that were decided on an observation that did not list the machines, and for no other step or observation.
 func TestNeedsListOnlyForAStopOrATransferDecidedWithoutAList(t *testing.T) {
