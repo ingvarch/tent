@@ -305,7 +305,7 @@ func (r *rollRun) plan(ctx context.Context) (RollPlan, error) {
 	plan := RollPlan{Groups: groups}
 	step, err := rollout.Next(r.state(reading), rollout.Roll)
 	if err == nil && step.Action != rollout.Done {
-		err = r.refuse(step, reading.nodes)
+		err = r.refuse(step, reading)
 	}
 	if err != nil {
 		plan.refused = true
@@ -336,13 +336,13 @@ func (r *rollRun) state(reading nomadReading) rollout.State {
 }
 
 // refuse returns why the run cannot carry out the step, or nil: see refuseRole. A wait for a machine to join is refused
-// as its first poll would refuse it, given the nodes that Nomad lists.
-func (r *rollRun) refuse(step rollout.Step, nodes []nomadops.Node) error {
+// as its first poll would refuse it, given what Nomad reports.
+func (r *rollRun) refuse(step rollout.Step, reading nomadReading) error {
 	if err := r.refuseRole(step); err != nil || step.Action != rollout.WaitJoined {
 		return err
 	}
 	in, _ := instanceByID(r.listed, step.Machine.ID)
-	_, err := joinCheck(in, nodes, r.s.now())
+	_, err := joinCheck(in, reading, r.s.now())
 	return err
 }
 
@@ -367,22 +367,39 @@ type joinStep int
 const (
 	joinWait   joinStep = iota // the node has not joined: poll again
 	joinCreate                 // the cloud reports the machine not ready: repeat its create with its operation id
-	joinScrub                  // the node is ready and eligible: replace the machine's user data with the stub
+	joinScrub                  // the machine has joined: replace its user data with the stub
 )
 
-// joinCheck says what a poll of the wait for the machine in to join does, at now, given the nodes that Nomad lists. In
-// this order: a machine that the cloud reports not ready, with a valid operation id, has its create repeated; a
-// machine without a private address fails the wait; a machine for which Nomad lists a ready and eligible node of its
-// name and private address is scrubbed; a client created more than introLifetime ago is refused, as its intro token has
-// run out; otherwise the wait goes on.
-func joinCheck(in cloud.Instance, nodes []nomadops.Node, now time.Time) (joinStep, error) {
+// joined reports whether Nomad shows that the machine in has joined, by its role: a client's node is ready and eligible
+// at its name and private address; a server votes at its private address and autopilot counts it healthy; a combined
+// node has done both.
+func joined(in cloud.Instance, reading nomadReading) bool {
+	registered := func() bool {
+		return slices.ContainsFunc(reading.nodes, func(n nomadops.Node) bool {
+			return n.Is(in.Name, in.PrivateIP) && n.Ready()
+		})
+	}
+	switch in.Role {
+	case v1alpha1.RoleServer:
+		return reading.votesAt(in.PrivateIP)
+	case v1alpha1.RoleCombined:
+		return reading.votesAt(in.PrivateIP) && registered()
+	}
+	return registered()
+}
+
+// joinCheck says what a poll of the wait for the machine in to join does, at now, given what Nomad reports. In this
+// order: a machine that the cloud reports not ready, with a valid operation id, has its create repeated; a machine
+// without a private address fails the wait; a machine that has joined is scrubbed; a client created more than
+// introLifetime ago is refused, as its intro token has run out; otherwise the wait goes on.
+func joinCheck(in cloud.Instance, reading nomadReading, now time.Time) (joinStep, error) {
 	if !in.Ready && cloud.ValidOpID(in.Op) {
 		return joinCreate, nil
 	}
 	if err := privateAddress(in); err != nil {
 		return joinWait, err
 	}
-	if slices.ContainsFunc(nodes, func(n nomadops.Node) bool { return n.Is(in.Name, in.PrivateIP) && n.Ready() }) {
+	if joined(in, reading) {
 		return joinScrub, nil
 	}
 	if in.Role == v1alpha1.RoleClient && !in.Created.IsZero() && now.Sub(in.Created) > introLifetime {

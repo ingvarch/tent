@@ -116,8 +116,9 @@ func TestOutdatedMachines(t *testing.T) {
 }
 
 // TestJoinCheck gives what each rule of the wait for a new node says, in the order of the rules: repeat the create of
-// a machine that is not ready, fail without a private address, scrub a machine whose node is ready and eligible,
-// refuse a client that is older than its intro token's life, and else wait.
+// a machine that is not ready, fail without a private address, scrub a machine that has joined as its role means
+// (a client's node is ready and eligible, a server votes and is healthy, a combined node does both), refuse a client
+// that is older than its intro token's life, and else wait.
 func TestJoinCheck(t *testing.T) {
 	t.Parallel()
 	now := minutes(59)
@@ -130,12 +131,25 @@ func TestJoinCheck(t *testing.T) {
 		}
 		return in
 	}
-	node := func(change func(*nomadops.Node)) []nomadops.Node {
+	node := func(change func(*nomadops.Node)) nomadReading {
 		n := nomadops.Node{ID: "n-6", Name: "prod-workers-2", Address: addr, Status: "ready", Eligible: true}
 		if change != nil {
 			change(&n)
 		}
-		return []nomadops.Node{n}
+		return nomadReading{nodes: []nomadops.Node{n}}
+	}
+	both := func(voter, healthy bool, change func(*nomadops.Node)) nomadReading {
+		r := serversReading(healthy, serverEntry{"s-6", "10.64.0.6", voter, healthy})
+		r.nodes = node(change).nodes
+		return r
+	}
+	role := func(role v1alpha1.Role, change func(*cloud.Instance)) cloud.Instance {
+		return machine(func(in *cloud.Instance) {
+			in.Role = role
+			if change != nil {
+				change(in)
+			}
+		})
 	}
 	old := func(in *cloud.Instance) { in.Created = now.Add(-introLifetime - time.Nanosecond) }
 	const noAddress = "node prod-workers-2: the cloud reports no private address for it yet; run the command again"
@@ -144,19 +158,19 @@ func TestJoinCheck(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		in      cloud.Instance
-		nodes   []nomadops.Node
+		reading nomadReading
 		want    joinStep
 		wantErr string
 	}{
 		{"a machine that is not ready is created again with its operation id", machine(func(in *cloud.Instance) {
 			in.Ready, in.PrivateIP = false, netip.Addr{}
 			old(in)
-		}), nil, joinCreate, ""},
+		}), nomadReading{}, joinCreate, ""},
 		{"a machine that is not ready and has no valid operation id has no address", machine(func(in *cloud.Instance) {
 			in.Ready, in.Op, in.PrivateIP = false, "", netip.Addr{}
-		}), nil, 0, noAddress},
+		}), nomadReading{}, 0, noAddress},
 		{"a ready machine without an address", machine(func(in *cloud.Instance) { in.PrivateIP = netip.Addr{} }),
-			nil, 0, noAddress},
+			nomadReading{}, 0, noAddress},
 		{"a node that is ready and eligible is scrubbed", machine(nil), node(nil), joinScrub, ""},
 		{"a node that is not eligible is waited for", machine(nil), node(func(n *nomadops.Node) { n.Eligible = false }),
 			joinWait, ""},
@@ -168,25 +182,49 @@ func TestJoinCheck(t *testing.T) {
 			node(func(n *nomadops.Node) { n.Name = "prod-workers-3" }), joinWait, ""},
 		{"a client within the life of its intro token is waited for", machine(func(in *cloud.Instance) {
 			in.Created = now.Add(-introLifetime)
-		}), nil, joinWait, ""},
-		{"a client past the life of its intro token is refused", machine(old), nil, 0, tooOld},
+		}), nomadReading{}, joinWait, ""},
+		{"a client past the life of its intro token is refused", machine(old), nomadReading{}, 0, tooOld},
 		{"an old client whose node is ready is scrubbed", machine(old), node(nil), joinScrub, ""},
+		{"a client whose address holds a healthy voter and no node is waited for", machine(nil),
+			serversReading(true, serverEntry{"s-6", "10.64.0.6", true, true}), joinWait, ""},
 		{"a machine with no creation time is never old", machine(func(in *cloud.Instance) {
 			in.Created = time.Time{}
-		}), nil, joinWait, ""},
-		{"a server without an address fails the wait", machine(func(in *cloud.Instance) {
-			in.Role, in.PrivateIP = v1alpha1.RoleServer, netip.Addr{}
-		}), nil, 0, noAddress},
-		{"a server that is not ready is created again with its operation id", machine(func(in *cloud.Instance) {
-			in.Role, in.Ready, in.PrivateIP = v1alpha1.RoleServer, false, netip.Addr{}
-		}), nil, joinCreate, ""},
-		{"an old server is waited for", machine(func(in *cloud.Instance) {
-			in.Role = v1alpha1.RoleServer
-			old(in)
-		}), nil, joinWait, ""},
+		}), nomadReading{}, joinWait, ""},
+		{"a server without an address fails the wait", role(v1alpha1.RoleServer, func(in *cloud.Instance) {
+			in.PrivateIP = netip.Addr{}
+		}), nomadReading{}, 0, noAddress},
+		{"a server that is not ready is created again with its operation id",
+			role(v1alpha1.RoleServer, func(in *cloud.Instance) { in.Ready, in.PrivateIP = false, netip.Addr{} }),
+			nomadReading{}, joinCreate, ""},
+		{"an old server is waited for", role(v1alpha1.RoleServer, old), nomadReading{}, joinWait, ""},
+		{"a server that votes and is healthy is scrubbed", role(v1alpha1.RoleServer, nil),
+			both(true, true, nil), joinScrub, ""},
+		{"a server that votes and is not healthy is waited for", role(v1alpha1.RoleServer, nil),
+			both(true, false, nil), joinWait, ""},
+		{"a server that does not vote is waited for", role(v1alpha1.RoleServer, nil),
+			both(false, true, nil), joinWait, ""},
+		{"a server whose node is ready and that has no peer is waited for", role(v1alpha1.RoleServer, nil),
+			node(nil), joinWait, ""},
+		{"a combined node whose server votes and whose node is ready is scrubbed", role(v1alpha1.RoleCombined, nil),
+			both(true, true, nil), joinScrub, ""},
+		{"a combined node whose node is ready and whose server does not vote is waited for",
+			role(v1alpha1.RoleCombined, nil), both(false, true, nil), joinWait, ""},
+		{"a combined node whose node is ready and whose server is not healthy is waited for",
+			role(v1alpha1.RoleCombined, nil), both(true, false, nil), joinWait, ""},
+		{"a combined node whose server votes and that has no node is waited for", role(v1alpha1.RoleCombined, nil),
+			serversReading(true, serverEntry{"s-6", "10.64.0.6", true, true}), joinWait, ""},
+		{"a combined node whose server votes and whose node is not eligible is waited for",
+			role(v1alpha1.RoleCombined, nil), both(true, true, func(n *nomadops.Node) { n.Eligible = false }),
+			joinWait, ""},
+		{"a combined node is never refused for its age", role(v1alpha1.RoleCombined, old), nomadReading{},
+			joinWait, ""},
+		{"a combined node without an address fails the wait", role(v1alpha1.RoleCombined, func(in *cloud.Instance) {
+			in.PrivateIP = netip.Addr{}
+		}), nomadReading{}, 0, noAddress},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := joinCheck(tc.in, tc.nodes, now)
+			t.Parallel()
+			got, err := joinCheck(tc.in, tc.reading, now)
 			if (err == nil) != (tc.wantErr == "") || err != nil && err.Error() != tc.wantErr {
 				t.Fatalf("joinCheck error = %v, want %q", err, tc.wantErr)
 			}

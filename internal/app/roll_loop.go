@@ -427,8 +427,11 @@ func (r *rollRun) waitOf(step rollout.Step) (rollWait, error) {
 	m, n := step.Machine, step.Node
 	switch step.Action {
 	case rollout.WaitJoined:
-		if joinsByVote(m.Role) {
+		switch m.Role {
+		case v1alpha1.RoleServer:
 			return rollWait{NomadEvent{Action: NomadVote, Node: m.Name}, nodeTimeout, "node " + m.Name, "vote"}, nil
+		case v1alpha1.RoleCombined:
+			return rollWait{NomadEvent{Action: NomadJoin, Node: m.Name}, nodeTimeout, "node " + m.Name, "join"}, nil
 		}
 		return rollWait{NomadEvent{Action: NomadRegister, Node: m.Name}, nodeTimeout, "node " + m.Name, "join"}, nil
 	case rollout.WaitDrained:
@@ -469,7 +472,8 @@ func showing(step rollout.Step, reading nomadReading) string {
 		return fmt.Sprintf("autopilot reports %d voters and the servers %s", reading.health.Voters, state)
 	case step.Action == rollout.WaitStable:
 		return "the window ends at " + step.Until.UTC().Format(time.TimeOnly) + " UTC"
-	case step.Action == rollout.WaitServerDown || step.Action == rollout.WaitJoined && joinsByVote(step.Machine.Role):
+	case step.Action == rollout.WaitServerDown,
+		step.Action == rollout.WaitJoined && waitsOnServer(step.Machine, reading):
 		return showingServer(step, reading)
 	}
 	i := slices.IndexFunc(reading.nodes, func(n nomadops.Node) bool {
@@ -481,6 +485,8 @@ func showing(step rollout.Step, reading nomadReading) string {
 	switch {
 	case i >= 0 && reading.nodes[i].Draining:
 		return "Nomad lists it draining"
+	case i >= 0 && step.Action == rollout.WaitJoined && !reading.nodes[i].Eligible:
+		return "Nomad lists it " + reading.nodes[i].Status + " but not eligible"
 	case i >= 0:
 		return "Nomad lists it " + reading.nodes[i].Status
 	case step.Action == rollout.WaitJoined:
@@ -520,15 +526,12 @@ func (r *rollRun) poll(ctx context.Context, step rollout.Step, reading nomadRead
 }
 
 // joinPoll does what joinCheck says to the machine of the wait for a node to join: it repeats the machine's create,
-// scrubs it, or does nothing. A server is also scrubbed once its server votes and autopilot counts it healthy.
+// scrubs it, or does nothing.
 func (r *rollRun) joinPoll(ctx context.Context, step rollout.Step, reading nomadReading) error {
 	in, _ := instanceByID(r.machines(), step.Machine.ID)
-	what, err := joinCheck(in, reading.nodes, r.s.now())
+	what, err := joinCheck(in, reading, r.s.now())
 	if err != nil {
 		return err
-	}
-	if what == joinWait && joinsByVote(in.Role) && healthyVoterAt(reading.state().Servers, in.PrivateIP) {
-		what = joinScrub
 	}
 	switch what {
 	case joinCreate:

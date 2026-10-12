@@ -17,9 +17,17 @@ import (
 // as stopped 4 to 19 s after the call.
 const stopTimeout = 2 * time.Minute
 
-// joinsByVote reports whether a machine of the role has joined once its server votes and autopilot counts it healthy.
-// A server's does; the node of a combined machine must register too.
-func joinsByVote(role v1alpha1.Role) bool { return role == v1alpha1.RoleServer }
+// waitsOnServer reports whether the wait of the machine m to join waits on its server: a server's always, and a
+// combined node's while its server is no healthy voter, since showing names the server's half first.
+func waitsOnServer(m rollout.Machine, reading nomadReading) bool {
+	switch m.Role {
+	case v1alpha1.RoleServer:
+		return true
+	case v1alpha1.RoleCombined:
+		return !reading.votesAt(m.PrivateIP)
+	}
+	return false
+}
 
 // serverAt returns the server of servers that runs at the private address addr, and whether there is one.
 func serverAt(servers []rollout.Server, addr netip.Addr) (rollout.Server, bool) {
@@ -47,8 +55,11 @@ func healthyVoterAt(servers []rollout.Server, addr netip.Addr) bool {
 	return ok && srv.Voter && srv.Healthy
 }
 
-// showingServer says what the reading shows of the server that a wait for a vote or for a stopped server to go down
-// waits on.
+// votesAt reports whether the reading shows a voter at the private address addr that autopilot counts healthy.
+func (r nomadReading) votesAt(addr netip.Addr) bool { return healthyVoterAt(r.state().Servers, addr) }
+
+// showingServer says what the reading shows of the server that a wait for a vote, for a combined node to join or for a
+// stopped server to go down waits on.
 func showingServer(step rollout.Step, reading nomadReading) string {
 	servers := reading.state().Servers
 	if step.Action == rollout.WaitServerDown {

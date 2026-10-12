@@ -108,7 +108,8 @@ func TestWaitOfGivesEachWaitItsLimitAndItsEvent(t *testing.T) {
 		step rollout.Step
 		want rollWait
 	}{
-		{"join", rollout.Step{Action: rollout.WaitJoined, Group: "workers", Machine: rollout.Machine{Name: "prod-workers-2"}},
+		{"a client registering", rollout.Step{Action: rollout.WaitJoined, Group: "workers",
+			Machine: rollout.Machine{Name: "prod-workers-2", Role: v1alpha1.RoleClient}},
 			rollWait{NomadEvent{Action: NomadRegister, Node: "prod-workers-2"}, 10 * time.Minute, "node prod-workers-2",
 				"join"}},
 		{"drained", rollout.Step{Action: rollout.WaitDrained, Group: "workers", Node: node},
@@ -122,6 +123,9 @@ func TestWaitOfGivesEachWaitItsLimitAndItsEvent(t *testing.T) {
 		{"a server voting", rollout.Step{Action: rollout.WaitJoined, Group: "servers", Machine: rollout.Machine{
 			Name: "prod-servers-3", Role: v1alpha1.RoleServer}},
 			rollWait{NomadEvent{Action: NomadVote, Node: "prod-servers-3"}, 10 * time.Minute, "node prod-servers-3", "vote"}},
+		{"a combined node joining", rollout.Step{Action: rollout.WaitJoined, Group: "all", Machine: rollout.Machine{
+			Name: "prod-all-3", Role: v1alpha1.RoleCombined}},
+			rollWait{NomadEvent{Action: NomadJoin, Node: "prod-all-3"}, 10 * time.Minute, "node prod-all-3", "join"}},
 		{"the window", rollout.Step{Action: rollout.WaitStable, Group: "servers", Until: stableUntil,
 			Machine: rollout.Machine{Name: "prod-servers-0"}},
 			rollWait{NomadEvent{Action: NomadStable, Until: stableUntil}, 5 * time.Minute, "the servers", "become stable"}},
@@ -204,10 +208,11 @@ func TestShowingSaysWhatNomadListsOfTheWait(t *testing.T) {
 	t.Parallel()
 	addr := netip.MustParseAddr("10.64.0.6")
 	nodes := []nomadops.Node{
-		{ID: "n-1", Name: "prod-workers-0", Address: addr, Status: "ready"},
+		{ID: "n-1", Name: "prod-workers-0", Address: addr, Status: "ready", Eligible: true},
 		{ID: "n-2", Name: "prod-workers-1", Address: netip.MustParseAddr("10.64.0.7"), Status: "ready", Draining: true},
 	}
 	reading := nomadReading{nodes: nodes, health: nomadops.Health{Healthy: true, Voters: 3}}
+	ineligible := nomadReading{nodes: []nomadops.Node{{ID: "n-1", Name: "prod-workers-0", Address: addr, Status: "ready"}}}
 	join := rollout.Step{Action: rollout.WaitJoined, Machine: rollout.Machine{Name: "prod-workers-0", PrivateIP: addr}}
 	for _, tc := range []struct {
 		name    string
@@ -216,6 +221,7 @@ func TestShowingSaysWhatNomadListsOfTheWait(t *testing.T) {
 		want    string
 	}{
 		{"a node that joined", join, reading, "Nomad lists it ready"},
+		{"a node that is ready and not eligible", join, ineligible, "Nomad lists it ready but not eligible"},
 		{"a node at another address", rollout.Step{Action: rollout.WaitJoined, Machine: rollout.Machine{
 			Name: "prod-workers-0", PrivateIP: netip.MustParseAddr("10.64.0.9")}}, reading,
 			"Nomad lists no node of that name at its address"},
@@ -695,7 +701,8 @@ type serverEntry struct {
 }
 
 // TestShowingSaysWhatNomadListsOfAServerWait says what the Raft configuration and autopilot show of the server that a
-// wait for a vote, for a stopped server and for the window waits on.
+// wait for a vote, for a stopped server and for the window waits on, and what Nomad shows of a combined node that
+// waits for both halves: its server first, then its node.
 func TestShowingSaysWhatNomadListsOfAServerWait(t *testing.T) {
 	t.Parallel()
 	machine := rollout.Machine{
@@ -703,6 +710,22 @@ func TestShowingSaysWhatNomadListsOfAServerWait(t *testing.T) {
 	}
 	join := rollout.Step{Action: rollout.WaitJoined, Machine: machine}
 	down := rollout.Step{Action: rollout.WaitServerDown, Machine: machine}
+	combinedMachine := machine
+	combinedMachine.Name, combinedMachine.Role = "prod-all-3", v1alpha1.RoleCombined
+	combined := rollout.Step{Action: rollout.WaitJoined, Machine: combinedMachine}
+	withNodes := func(r nomadReading, change ...func(*nomadops.Node)) nomadReading {
+		n := nomadops.Node{
+			ID: "n-3", Name: "prod-all-3", Address: netip.MustParseAddr("10.64.0.6"), Status: "ready", Eligible: true,
+		}
+		for _, c := range change {
+			c(&n)
+		}
+		r.nodes = []nomadops.Node{n}
+		return r
+	}
+	nodeReading := func() nomadReading {
+		return withNodes(serversReading(true, serverEntry{"s-0", "10.64.0.3", true, true}))
+	}
 	stable := rollout.Step{Action: rollout.WaitStable, Machine: machine, Until: stableUntil}
 	at := func(voter, healthy bool) nomadReading {
 		return serversReading(healthy, serverEntry{"s-3", "10.64.0.6", voter, healthy},
@@ -729,6 +752,21 @@ func TestShowingSaysWhatNomadListsOfAServerWait(t *testing.T) {
 		{"a vote of a machine without an address", rollout.Step{Action: rollout.WaitJoined, Machine: rollout.Machine{
 			Name: "prod-servers-3", Role: v1alpha1.RoleServer}}, nomadReading{peers: []nomadops.Peer{{ID: "s-9"}}},
 			"the Raft configuration lists no server at its address"},
+		{"a combined node with no server at its address", combined, nodeReading(),
+			"the Raft configuration lists no server at its address"},
+		{"a combined node whose server does not vote yet", combined, withNodes(at(false, true)),
+			"its server does not vote yet"},
+		{"a combined node whose server is not healthy", combined, withNodes(at(true, false)),
+			"autopilot does not count its server healthy"},
+		{"a combined node whose server votes and that has no node", combined, at(true, true),
+			"Nomad lists no node of that name at its address"},
+		{"a combined node whose server votes and whose node is ready", combined, withNodes(at(true, true)),
+			"Nomad lists it ready"},
+		{"a combined node whose server votes and whose node is not eligible", combined,
+			withNodes(at(true, true), func(n *nomadops.Node) { n.Eligible = false }),
+			"Nomad lists it ready but not eligible"},
+		{"a combined node whose server votes and whose node drains", combined,
+			withNodes(at(true, true), func(n *nomadops.Node) { n.Draining = true }), "Nomad lists it draining"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -915,24 +953,44 @@ func TestCreateAndRepeatCreateBootAServerWithoutAnIntroTokenAndAClientWithOne(t 
 	}
 }
 
-// TestJoinPollScrubsAServerThatVotesAndNotACombinedMachine scrubs a server once a healthy voter runs at its address,
-// and a combined machine not before its node has registered.
-func TestJoinPollScrubsAServerThatVotesAndNotACombinedMachine(t *testing.T) {
+// TestJoinPollScrubsAMachineThatHasJoinedAsItsRoleMeans scrubs a machine once Nomad shows what its role needs: a client
+// its ready node, a server its healthy voter, a combined node both. The machine is labelled once, and not before.
+func TestJoinPollScrubsAMachineThatHasJoinedAsItsRoleMeans(t *testing.T) {
 	t.Parallel()
+	vote := serverEntry{"s-3", "10.64.0.6", true, true}
+	registered := []nomadops.Node{{ID: "n-3", Name: "prod-x-3", Address: netip.MustParseAddr("10.64.0.6"),
+		Status: "ready", Eligible: true}}
 	for _, tc := range []struct {
+		name      string
 		role      v1alpha1.Role
+		voter     bool
+		node      bool
 		wantScrub int
-	}{{v1alpha1.RoleServer, 1}, {v1alpha1.RoleCombined, 0}} {
-		t.Run(string(tc.role), func(t *testing.T) {
+	}{
+		{"a client with a node", v1alpha1.RoleClient, false, true, 1},
+		{"a client with a voter only", v1alpha1.RoleClient, true, false, 0},
+		{"a server with a voter", v1alpha1.RoleServer, true, false, 1},
+		{"a server with a node only", v1alpha1.RoleServer, false, true, 0},
+		{"a combined node with a voter only", v1alpha1.RoleCombined, true, false, 0},
+		{"a combined node with a node only", v1alpha1.RoleCombined, false, true, 0},
+		{"a combined node with both", v1alpha1.RoleCombined, true, true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var steps []string
 			nodes := &recordingNodes{}
 			in := cloud.Instance{
-				ID: "i-3", Name: "prod-servers-3", Role: tc.role, Ready: true, PrivateIP: netip.MustParseAddr("10.64.0.6"),
+				ID: "i-3", Name: "prod-x-3", Role: tc.role, Ready: true, PrivateIP: netip.MustParseAddr("10.64.0.6"),
 			}
 			r := &rollRun{s: testService(&steps), kit: testKit(t, nodes), rollLoop: newRollLoop(), listed: []cloud.Instance{in}}
 			step := rollout.Step{Action: rollout.WaitJoined, Machine: rollout.Machine{ID: in.ID, Name: in.Name, Role: tc.role}}
-			reading := serversReading(true, serverEntry{"s-3", "10.64.0.6", true, true})
+			reading := serversReading(true)
+			if tc.voter {
+				reading = serversReading(true, vote)
+			}
+			if tc.node {
+				reading.nodes = registered
+			}
 
 			if err := r.joinPoll(t.Context(), step, reading); err != nil {
 				t.Fatalf("joinPoll: %v", err)
@@ -940,6 +998,42 @@ func TestJoinPollScrubsAServerThatVotesAndNotACombinedMachine(t *testing.T) {
 
 			if len(nodes.joined) != tc.wantScrub {
 				t.Errorf("the cloud was asked to label %d machines, want %d", len(nodes.joined), tc.wantScrub)
+			}
+		})
+	}
+}
+
+// TestPollEndsTheWaitOfACombinedNodeNamingTheHalfThatIsMissing fails the wait for a combined node at its limit and
+// names the half that is missing, the server's first.
+func TestPollEndsTheWaitOfACombinedNodeNamingTheHalfThatIsMissing(t *testing.T) {
+	t.Parallel()
+	addr := netip.MustParseAddr("10.64.0.6")
+	node := nomadops.Node{ID: "n-3", Name: "prod-all-3", Address: addr, Status: "ready", Eligible: true}
+	votes := serversReading(true, serverEntry{"s-3", "10.64.0.6", true, true})
+	waits := serversReading(true, serverEntry{"s-3", "10.64.0.6", false, true})
+	withNode := func(r nomadReading) nomadReading { r.nodes = []nomadops.Node{node}; return r }
+	for _, tc := range []struct {
+		name    string
+		reading nomadReading
+		missing string
+	}{
+		{"the server and the node", nomadReading{}, "the Raft configuration lists no server at its address"},
+		{"the server", withNode(waits), "its server does not vote yet"},
+		{"the node", votes, "Nomad lists no node of that name at its address"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var steps []string
+			r := &rollRun{s: testService(&steps), rollLoop: newRollLoop()}
+			step := rollout.Step{Action: rollout.WaitJoined, Group: "all", Machine: rollout.Machine{
+				ID: "i-3", Name: "prod-all-3", Role: v1alpha1.RoleCombined, PrivateIP: addr}}
+			r.seen[keyOf(step)] = seenWait{step: step, since: time.Now().Add(-nodeTimeout)}
+
+			err := r.poll(t.Context(), step, tc.reading)
+
+			want := "node prod-all-3 did not join within 10m0s (" + tc.missing + "); " + rollAgain
+			if err == nil || err.Error() != want {
+				t.Errorf("poll error = %v, want %q", err, want)
 			}
 		})
 	}
