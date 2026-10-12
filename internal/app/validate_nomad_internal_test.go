@@ -481,7 +481,7 @@ func TestFindingsAreOfTheRoles(t *testing.T) {
 	m := validateModel()
 	m.Groups = append(m.Groups,
 		model.NodeGroup{Name: "mixed", Role: v1alpha1.RoleCombined, Zones: []string{"ams"}, Size: 1})
-	set := planMachines(m, append(fullCluster(), machine(6, "prod-mixed-0", "mixed", v1alpha1.RoleCombined)))
+	set := planMachines(m, append(fullCluster(), machine(6, "prod-mixed-0", "mixed", v1alpha1.RoleCombined)), nil)
 
 	servers, clients := names(set.servers(m)), names(set.clients(m))
 

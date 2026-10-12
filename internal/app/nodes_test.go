@@ -462,7 +462,7 @@ func TestPlanNodes(t *testing.T) {
 			want: []NodeChange{
 				wantWait(s3, notReady(member(s3, 0, "i-2", minutes(2)))),
 				wantWait(s3, notReady(member(s3, 2, "i-1", minutes(1)))),
-				wantCreate(s3, 1, "ams"),
+				wantCreate(s3, 3, "ams"),
 			},
 		},
 		{
@@ -568,7 +568,7 @@ func TestPlanNodes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &model.Cluster{Name: "prod", Groups: tc.groups}
 			instances := slices.Clone(tc.instances)
-			got, _ := planNodes(m, instances, nil)
+			got, _ := planNodes(m, instances, nil, nil)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("planNodes (-want +got):\n%s", diff)
 			}
@@ -576,9 +576,93 @@ func TestPlanNodes(t *testing.T) {
 				t.Errorf("planNodes changed the instances (-before +after):\n%s", diff)
 			}
 			slices.Reverse(instances)
-			reversed, _ := planNodes(m, instances, nil)
+			reversed, _ := planNodes(m, instances, nil, nil)
 			if diff := cmp.Diff(got, reversed); diff != "" {
 				t.Errorf("planNodes of the instances in reverse order (-in order +reversed):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestPlanNodesServerNames names a new machine of a server or combined group above every name that the group has
+// had: above the listed machines and above the index that tent remembers, one higher for each further create. A client
+// group still takes the lowest free name.
+func TestPlanNodesServerNames(t *testing.T) {
+	t.Parallel()
+	s3, s5 := servers(3), servers(5)
+	nodes := nodeGroup("nodes", v1alpha1.RoleCombined, 2)
+	w3 := workers(3)
+	for _, tc := range []struct {
+		name      string
+		groups    []model.NodeGroup
+		instances []cloud.Instance
+		next      map[string]int
+		want      []NodeChange
+	}{
+		{
+			name:      "a gap in the names is not filled",
+			groups:    []model.NodeGroup{s3},
+			instances: []cloud.Instance{member(s3, 0, "i-1", minutes(1)), member(s3, 2, "i-2", minutes(2))},
+			want:      []NodeChange{wantCreate(s3, 3, "ams")},
+		},
+		{
+			name:      "the remembered index holds the names of servers that are gone",
+			groups:    []model.NodeGroup{s3},
+			instances: []cloud.Instance{member(s3, 0, "i-1", minutes(1))},
+			next:      map[string]int{"servers": 7},
+			want:      []NodeChange{wantCreate(s3, 7, "ams"), wantCreate(s3, 8, "ams")},
+		},
+		{
+			name:      "a listed machine above the remembered index wins",
+			groups:    []model.NodeGroup{s3},
+			instances: []cloud.Instance{member(s3, 5, "i-1", minutes(1)), member(s3, 0, "i-2", minutes(2))},
+			next:      map[string]int{"servers": 2},
+			want:      []NodeChange{wantCreate(s3, 6, "ams")},
+		},
+		{
+			name:   "the index of another group does not count",
+			groups: []model.NodeGroup{s3, nodes},
+			next:   map[string]int{"nodes": 4},
+			want: []NodeChange{
+				wantCreate(nodes, 4, "ams"), wantCreate(nodes, 5, "ams"),
+				wantCreate(s3, 0, "ams"), wantCreate(s3, 1, "ams"), wantCreate(s3, 2, "ams"),
+			},
+		},
+		{
+			name:   "a machine that is not to stay still holds its index",
+			groups: []model.NodeGroup{servers(2)},
+			instances: []cloud.Instance{
+				member(s3, 0, "i-1", minutes(1)),
+				changed(member(s3, 3, "i-2", minutes(2)), func(in *cloud.Instance) { in.Group = "gone" }),
+			},
+			want: []NodeChange{
+				wantCreate(servers(2), 4, "ams"),
+				wantDelete(changed(member(s3, 3, "i-2", minutes(2)), func(in *cloud.Instance) { in.Group = "gone" }),
+					reasonNotInSpec),
+			},
+		},
+		{
+			name:      "a growth from one server to five",
+			groups:    []model.NodeGroup{s5},
+			instances: []cloud.Instance{member(s5, 0, "i-1", minutes(1))},
+			next:      map[string]int{"servers": 4},
+			want: []NodeChange{
+				wantCreate(s5, 4, "ams"), wantCreate(s5, 5, "ams"), wantCreate(s5, 6, "ams"), wantCreate(s5, 7, "ams"),
+			},
+		},
+		{
+			name:      "a client group takes the lowest free name whatever the map says",
+			groups:    []model.NodeGroup{w3},
+			instances: []cloud.Instance{member(w3, 1, "i-1", minutes(1))},
+			next:      map[string]int{"workers": 9},
+			want:      []NodeChange{wantCreate(w3, 0, "ams"), wantCreate(w3, 2, "ams")},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &model.Cluster{Name: "prod", Groups: tc.groups}
+			got, _ := planNodes(m, slices.Clone(tc.instances), nil, tc.next)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("planNodes (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -677,12 +761,12 @@ func TestPlanNodesUnregistered(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &model.Cluster{Name: "prod", Groups: tc.groups}
 			instances := slices.Clone(tc.instances)
-			got, _ := planNodes(m, instances, tc.unregistered)
+			got, _ := planNodes(m, instances, tc.unregistered, nil)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("planNodes (-want +got):\n%s", diff)
 			}
 			slices.Reverse(instances)
-			reversed, _ := planNodes(m, instances, tc.unregistered)
+			reversed, _ := planNodes(m, instances, tc.unregistered, nil)
 			if diff := cmp.Diff(got, reversed); diff != "" {
 				t.Errorf("planNodes of the instances in reverse order (-in order +reversed):\n%s", diff)
 			}
@@ -724,7 +808,7 @@ func TestPlanNodesServers(t *testing.T) {
 			[]cloud.Instance{s0, changed(s1, func(in *cloud.Instance) { in.Cluster = "dev" })}, []cloud.Instance{s0}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, got := planNodes(&model.Cluster{Name: "prod", Groups: tc.groups}, slices.Clone(tc.instances), nil)
+			_, got := planNodes(&model.Cluster{Name: "prod", Groups: tc.groups}, slices.Clone(tc.instances), nil, nil)
 			if diff := cmp.Diff(tc.want, got, cmpopts.EquateComparable(netip.Addr{})); diff != "" {
 				t.Errorf("the servers (-want +got):\n%s", diff)
 			}

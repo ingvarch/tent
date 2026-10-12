@@ -175,6 +175,49 @@ func TestValidateClusterFindsMachinesThatChanged(t *testing.T) {
 	})
 }
 
+// TestValidateClusterNamesAMissingServerAsUpdateDoes names the machine that a deleted server leaves missing by the
+// name that update gives its new server: above every name that the group has had.
+func TestValidateClusterNamesAMissingServerAsUpdateDoes(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, _ := builtCluster(t)
+		if err := f.DeleteInstance(t.Context(), "instance-3"); err != nil {
+			t.Fatal(err)
+		}
+
+		v := mustValidate(t, svc)
+
+		var missing []string
+		for _, fail := range v.Failures {
+			if fail.Check == "machine-missing" {
+				missing = append(missing, fail.Node)
+			}
+		}
+		if diff := cmp.Diff([]string{"prod-servers-3"}, missing); diff != "" {
+			t.Errorf("the missing machines (-want +got):\n%s", diff)
+		}
+		plan, err := svc.Update(t.Context(), "prod", false)
+		if err != nil {
+			t.Fatalf("Update without apply: %v", err)
+		}
+		wantNodeChanges(t, plan, createOf("servers", v1alpha1.RoleServer, 3))
+	})
+}
+
+// TestValidateClusterFailsForAnObjectOfNamesThatIsNoIndex fails when the object of the server names holds no index.
+func TestValidateClusterFailsForAnObjectOfNamesThatIsNoIndex(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, _, _ := builtCluster(t)
+		put(t, svc.Store, namesPath, []byte("x\n"))
+
+		_, err := svc.ValidateCluster(t.Context(), "prod")
+
+		wantError(t, err, `prod/names/servers holds "x", which is no index of a node name; it must hold the highest `+
+			"index that a machine name of node group servers has had")
+	})
+}
+
 // TestValidateClusterShowsTheLock tells who holds the cluster's lock, and reports no failure for it.
 func TestValidateClusterShowsTheLock(t *testing.T) {
 	t.Parallel()

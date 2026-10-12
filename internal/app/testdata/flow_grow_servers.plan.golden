@@ -1,0 +1,6 @@
++ node prod-servers-1 (server, vc2-2c-4gb, ams)
++ node prod-servers-2 (server, vc2-2c-4gb, ams)
+
+Nodes: 2 to create, 0 to wait for, 0 to delete.
+Nomad: wait for 3 healthy servers.
+State: cluster.completed.yaml will be written.

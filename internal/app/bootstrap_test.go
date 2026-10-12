@@ -611,7 +611,7 @@ func TestUpdateResumesAfter(t *testing.T) {
 		progress []string
 	}{
 		{name: "the first server", cut: "CreateInstance prod-servers-1", plan: []string{
-			"wait prod-servers-0", "create prod-servers-1", "create prod-servers-2", "create prod-workers-0",
+			"wait prod-servers-0", "create prod-servers-2", "create prod-servers-3", "create prod-workers-0",
 			"create prod-workers-1",
 		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 1, nodes: 2},
 		{name: "every server, before the leader", cut: leader, plan: []string{
@@ -818,7 +818,7 @@ func TestUpdateRepeatsAHealthWaitThatStopped(t *testing.T) {
 			t.Fatalf("Update without apply: %v", err)
 		}
 		wait := app.NodeChange{
-			Action: app.NodeWait, Name: "prod-servers-2", Group: "servers", Role: v1alpha1.RoleServer, Zone: "ams",
+			Action: app.NodeWait, Name: "prod-servers-3", Group: "servers", Role: v1alpha1.RoleServer, Zone: "ams",
 			MachineType: "vc2-2c-4gb", Image: v1alpha1.DefaultImage, ID: "instance-6",
 		}
 		wantNodeChanges(t, plan, wait)
@@ -843,7 +843,7 @@ func TestUpdateRepeatsAHealthWaitThatStopped(t *testing.T) {
 				"nomad started leader", "nomad done leader", "nomad started healthy", "nomad done healthy",
 				"nomad started keyring", "nomad done keyring",
 			},
-			nodeSteps("scrub", "prod-servers-2"),
+			nodeSteps("scrub", "prod-servers-3"),
 		)
 		if diff := cmp.Diff(wantProgress, onlyNomadAndNodes(*progress)); diff != "" {
 			t.Errorf("the progress of the run (-want +got):\n%s", diff)
@@ -857,10 +857,10 @@ func TestUpdateRepeatsAHealthWaitThatStopped(t *testing.T) {
 				writes = append(writes, line(c, names(f)))
 			}
 		}
-		if diff := cmp.Diff([]string{"UpdateInstance <prod-servers-2>"}, writes); diff != "" {
+		if diff := cmp.Diff([]string{"UpdateInstance <prod-servers-3>"}, writes); diff != "" {
 			t.Errorf("the cloud calls that change something (-want +got):\n%s", diff)
 		}
-		wantJoined(t, f, allNames...)
+		wantJoined(t, f, "prod-servers-0", "prod-servers-1", "prod-servers-3", "prod-workers-0", "prod-workers-1")
 		wantConverged(t, svc)
 	})
 }
@@ -1632,12 +1632,12 @@ func TestUpdatePlansTheNomadStep(t *testing.T) {
 				t.Fatalf("Update without apply: %v", err)
 			}
 
-			wantNodeChanges(t, plan, createOf("servers", v1alpha1.RoleServer, 2))
+			wantNodeChanges(t, plan, createOf("servers", v1alpha1.RoleServer, 3))
 			if want := (&app.NomadStep{Servers: 3}); !cmp.Equal(plan.Nomad, want) {
 				t.Errorf("the plan's Nomad step is %+v, want %+v", plan.Nomad, want)
 			}
 			mustUpdate(t, svc)
-			nc := configOf(t, f, "prod-servers-2")
+			nc := configOf(t, f, "prod-servers-3")
 			if diff := cmp.Diff([]string{"10.64.0.3", "10.64.0.4"}, seedOf(nc)); diff != "" {
 				t.Errorf("the seed of the new server (-want +got):\n%s", diff)
 			}
@@ -1688,7 +1688,7 @@ func TestUpdatePlansTheNomadStep(t *testing.T) {
 				t.Errorf("writes to the store %v, want the delete of the stale mark and then the write of a new one",
 					rec.writes)
 			}
-			wantNodes(t, f, allNodes...)
+			wantNodes(t, f, nodesAfterRebuild...)
 			if n := countNomad(w, "Bootstrap"); n != 2 {
 				t.Errorf("%d Bootstrap calls reached Nomad, want one for each cluster", n)
 			}
@@ -1713,7 +1713,7 @@ func TestUpdatePlansTheNomadStep(t *testing.T) {
 			wantNodes(t, f)
 			svc.Store = store
 			mustUpdate(t, svc)
-			wantNodes(t, f, allNodes...)
+			wantNodes(t, f, nodesAfterRebuild...)
 			wantConverged(t, svc)
 		})
 	})
@@ -1724,7 +1724,7 @@ func TestUpdatePlansTheNomadStep(t *testing.T) {
 			if err := f.DeleteInstance(t.Context(), "instance-3"); err != nil {
 				t.Fatal(err)
 			}
-			cut := cutCase{key: "CreateInstance prod-servers-2", n: 1, after: true}
+			cut := cutCase{key: "CreateInstance prod-servers-3", n: 1, after: true}
 			runCut(t, f, w, svc.Store, cut, func(ctx context.Context) error {
 				_, err := svc.Update(ctx, "prod", true)
 				return err
@@ -1736,8 +1736,8 @@ func TestUpdatePlansTheNomadStep(t *testing.T) {
 				t.Fatalf("Update without apply: %v", err)
 			}
 
-			if got := plan.Nodes; len(got) != 1 || got[0].Action != app.NodeWait || got[0].Name != "prod-servers-2" {
-				t.Errorf("the node changes are %+v, want the wait for prod-servers-2", got)
+			if got := plan.Nodes; len(got) != 1 || got[0].Action != app.NodeWait || got[0].Name != "prod-servers-3" {
+				t.Errorf("the node changes are %+v, want the wait for prod-servers-3", got)
 			}
 			if want := (&app.NomadStep{Servers: 3}); !cmp.Equal(plan.Nomad, want) {
 				t.Errorf("the plan's Nomad step is %+v, want %+v", plan.Nomad, want)
@@ -1750,7 +1750,7 @@ func TestUpdatePlansTheNomadStep(t *testing.T) {
 			if diff := cmp.Diff(want, nomadLines(w)[before:]); diff != "" {
 				t.Errorf("the Nomad calls of the update (-want +got):\n%s", diff)
 			}
-			wantJoined(t, f, allNames...)
+			wantJoined(t, f, "prod-servers-0", "prod-servers-1", "prod-servers-3", "prod-workers-0", "prod-workers-1")
 			wantConverged(t, svc)
 		})
 	})

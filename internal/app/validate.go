@@ -136,10 +136,11 @@ func (v Validation) MarshalJSON() ([]byte, error) {
 // ValidateCluster checks a cluster against its specs, in one round. It loads the specs from the store as an update does
 // and fails for the same reasons: the specs must be valid, and the channel must allow the Nomad version that the
 // cluster is pinned to. It lists the cluster's machines in the cloud, and counts as a failure each change that an
-// update would make to the nodes, and each machine that stays and that the cloud does not report as running. Then it
-// checks Nomad and the certificates: see checkNomad. It reads the store, the cloud and Nomad and writes nothing, takes
-// no lock and reads who holds it: Lock is that holder. A lock whose lease cannot be read is a warning, not a failure. A
-// service without a Nomad client fails with an error.
+// update would make to the nodes, and each machine that stays and that the cloud does not report as running. It names
+// a missing server or combined machine as an update would, from the highest name index of its group in the store, and
+// fails with an error when that object holds no index. Then it checks Nomad and the certificates: see checkNomad. It
+// reads the store, the cloud and Nomad and writes nothing, takes no lock and reads who holds it: Lock is that holder.
+// A lock whose lease cannot be read is a warning, not a failure. A service without a Nomad client fails with an error.
 //
 // The warnings are those that every change of the cluster gives, the one about a cluster that runs in a single failure
 // domain, those about certificates that end within 30 days, the one that names the machines that stay and that a
@@ -172,7 +173,11 @@ func (s *Service) ValidateCluster(ctx context.Context, cluster string) (_ Valida
 	if err != nil {
 		return Validation{}, err
 	}
-	set := planMachines(c.m, instances)
+	names, err := s.readNames(ctx, l, serverGroups(c.m, nil))
+	if err != nil {
+		return Validation{}, err
+	}
+	set := planMachines(c.m, instances, names.nexts())
 	found, err := s.checkNomad(ctx, l, c, set, s.now())
 	if err != nil {
 		return Validation{}, err
@@ -248,9 +253,9 @@ type machineSet struct {
 }
 
 // planMachines plans the node changes for the machines instances of the cluster m, as an update does without any
-// machine that never registered.
-func planMachines(m *model.Cluster, instances []cloud.Instance) machineSet {
-	changes, _ := planNodes(m, instances, nil)
+// machine that never registered, with the indexes next that tent remembers for the names of new servers.
+func planMachines(m *model.Cluster, instances []cloud.Instance, next map[string]int) machineSet {
+	changes, _ := planNodes(m, instances, nil, next)
 	set := machineSet{changes: changes}
 	set.owned = slices.DeleteFunc(slices.Clone(instances), func(in cloud.Instance) bool { return in.Cluster != m.Name })
 	slices.SortStableFunc(set.owned, compareAge)

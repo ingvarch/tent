@@ -266,13 +266,13 @@ func TestMachineFailures(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := planMachines(validateModel(), tc.instances).failures(validateModel())
+			got := planMachines(validateModel(), tc.instances, nil).failures(validateModel())
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("the failures (-want +got):\n%s", diff)
 			}
 			reversed := slices.Clone(tc.instances)
 			slices.Reverse(reversed)
-			again := planMachines(validateModel(), reversed).failures(validateModel())
+			again := planMachines(validateModel(), reversed, nil).failures(validateModel())
 			if diff := cmp.Diff(tc.want, again); diff != "" {
 				t.Errorf("the failures of the reversed list (-want +got):\n%s", diff)
 			}
@@ -291,7 +291,7 @@ func TestMachineCountsFollowTheNodeGroup(t *testing.T) {
 		[]cloud.Instance{machine(5, "prod-workers-1", "workers", v1alpha1.RoleClient), foreign()},
 	)
 
-	servers, clients := planMachines(m, instances).counts(m)
+	servers, clients := planMachines(m, instances, nil).counts(m)
 
 	if servers != 3 || clients != 2 {
 		t.Errorf("%d servers and %d clients, want 3 and 2", servers, clients)
@@ -305,7 +305,7 @@ func TestMachineCountsLeaveOutTheMachinesThatAnUpdateDeletes(t *testing.T) {
 		machine(6, "prod-workers-2", "workers", v1alpha1.RoleClient), // one more than the group's size
 		machine(9, "prod-servers-0", "servers", v1alpha1.RoleServer)) // a twin of instance-1
 
-	servers, clients := planMachines(m, instances).counts(m)
+	servers, clients := planMachines(m, instances, nil).counts(m)
 
 	if servers != 3 || clients != 2 {
 		t.Errorf("%d servers and %d clients, want 3 and 2", servers, clients)

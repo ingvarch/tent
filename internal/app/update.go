@@ -323,7 +323,7 @@ func (s *Service) planUpdate(ctx context.Context, l statestore.Layout, cache ass
 		return updateRun{}, err
 	}
 	access := nomadAccess{cluster: m.Name, region: objs.Cluster.Spec.Nomad.Region, secrets: secrets}
-	plan, found, err := s.planChanges(ctx, p, m, access)
+	plan, found, err := s.planChanges(ctx, p, m, access, names.nexts())
 	if err != nil {
 		return updateRun{}, err
 	}
@@ -453,6 +453,7 @@ type machines struct {
 // inventory, and those of the nodes, from a fresh list of the machines, which it asks Nomad about when a client may
 // never have registered. It also returns the machines it planned over.
 func (s *Service) planChanges(ctx context.Context, p cloud.Provider, m *model.Cluster, access nomadAccess,
+	next map[string]int,
 ) (UpdatePlan, machines, error) {
 	snap, err := p.Inventory(ctx, m.Name)
 	if err != nil {
@@ -470,14 +471,14 @@ func (s *Service) planChanges(ctx context.Context, p cloud.Provider, m *model.Cl
 	if err != nil {
 		return UpdatePlan{}, machines{}, err
 	}
-	changes, servers := planNodes(m, instances, nil)
+	changes, servers := planNodes(m, instances, nil, next)
 	stale := staleClients(m.Name, instances, s.now())
 	gone, err := s.unregistered(ctx, access, stale, servers)
 	if err != nil {
 		return UpdatePlan{}, machines{}, err
 	}
 	if len(gone) > 0 {
-		changes, servers = planNodes(m, instances, gone)
+		changes, servers = planNodes(m, instances, gone, next)
 	}
 	return UpdatePlan{Infra: infra, Nodes: changes}, machines{servers: servers, listed: instances}, nil
 }
