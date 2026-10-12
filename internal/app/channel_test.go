@@ -275,19 +275,20 @@ func TestUpdateTakesTheUsersVersion(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newUpdate(t)
-		svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.7")
+		svc.Channels = stableChannel("2.0.0", "2.0.6", "2.0.6")
 		mustUpdate(t, svc)
 
-		mustReplace(t, svc, withVersion(t, keyedClusterYAML, "2.0.8"))
-		if got := planText(t, mustUpdate(t, svc)); got != completedOnly {
-			t.Errorf("the plan is\n%s\nwant the completed spec alone", got)
+		mustReplace(t, svc, withVersion(t, keyedClusterYAML, "2.0.7"))
+		if got, want := planText(t, mustUpdate(t, svc)), completedOnly+allOutdatedLine; got != want {
+			t.Errorf("the plan is\n%s\nwant the completed spec and the outdated nodes:\n%s", got, want)
 		}
-		wantPinned(t, svc, "2.0.8")
+		wantPinned(t, svc, "2.0.7")
 
 		svc.Channels = stableChannel("2.0.0", "2.0.9", "2.0.9")
 		mustReplace(t, svc, keyedClusterYAML)
+		wantPinned(t, svc, "2.0.7")
 		wantConverged(t, svc)
-		wantPinned(t, svc, "2.0.8")
+		wantPinned(t, svc, "2.0.7")
 	})
 }
 
@@ -297,19 +298,20 @@ func TestUpdatePinsAnOlderCompletedSpec(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, _ := newUpdate(t)
+		svc.Channels = stableChannel("2.0.0", "2.0.6", "2.0.6")
 		mustUpdate(t, svc)
 		put(t, svc.Store, completedPath, completedSpec(t, svc, ""))
-		svc.Channels = stableChannel("2.0.0", "2.0.8", "2.0.8")
+		svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.7")
 
 		plan, err := svc.Update(t.Context(), "prod", false)
 		if err != nil {
 			t.Fatalf("Update without apply: %v", err)
 		}
-		if got := planText(t, plan); got != completedOnly {
-			t.Errorf("the plan is\n%s\nwant the completed spec alone", got)
+		if got, want := planText(t, plan), completedOnly+allOutdatedLine; got != want {
+			t.Errorf("the plan is\n%s\nwant the completed spec and the outdated nodes:\n%s", got, want)
 		}
 		mustUpdate(t, svc)
-		wantPinned(t, svc, "2.0.8")
+		wantPinned(t, svc, "2.0.7")
 		wantConverged(t, svc)
 	})
 }
@@ -320,15 +322,15 @@ func TestUpdateRefusesAPinOutsideTheChannel(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newUpdate(t)
-		svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.7")
+		svc.Channels = stableChannel("2.0.0", "2.0.6", "2.0.6")
 		mustUpdate(t, svc)
-		svc.Channels = stableChannel("2.1.0", "2.1.0", "2.1.0")
+		svc.Channels = stableChannel("2.0.7", "2.0.7", "2.0.7")
 		stored, calls := snapshot(t, svc.Store), len(f.Calls())
 
 		for _, apply := range []bool{false, true} {
 			_, err := svc.Update(t.Context(), "prod", apply)
-			wantError(t, err, "cluster prod is pinned to Nomad 2.0.7 ("+completedPath+"), which is older than "+
-				"2.1.0, the oldest Nomad that channel stable allows; run tent upgrade cluster, or set "+
+			wantError(t, err, "cluster prod is pinned to Nomad 2.0.6 ("+completedPath+"), which is older than "+
+				"2.0.7, the oldest Nomad that channel stable allows; run tent upgrade cluster, or set "+
 				"spec.nomad.version to a version that the channel allows")
 		}
 		wantSnapshot(t, svc.Store, stored)
@@ -337,10 +339,82 @@ func TestUpdateRefusesAPinOutsideTheChannel(t *testing.T) {
 		}
 
 		// A version in the spec wins over the pin.
-		mustReplace(t, svc, withVersion(t, keyedClusterYAML, "2.1.0"))
+		mustReplace(t, svc, withVersion(t, keyedClusterYAML, "2.0.7"))
 		mustUpdate(t, svc)
-		wantPinned(t, svc, "2.1.0")
+		wantPinned(t, svc, "2.0.7")
 	})
+}
+
+// TestUpdateRefusesToPinAVersionWhoseReleaseFilesCannotBeRead fails the plan of a cluster whose spec sets a Nomad
+// version other than the pin when the release files of that version cannot be read, newer or older, with and without
+// apply, before it writes to the store or the cloud.
+func TestUpdateRefusesToPinAVersionWhoseReleaseFilesCannotBeRead(t *testing.T) {
+	t.Parallel()
+	for _, version := range []string{"2.0.99", "2.0.5"} {
+		t.Run(version, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				svc, f := newUpdate(t)
+				svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.7")
+				mustUpdate(t, svc)
+				mustReplace(t, svc, withVersion(t, keyedClusterYAML, version))
+				stored, calls := snapshot(t, svc.Store), len(f.Calls())
+
+				for _, apply := range []bool{false, true} {
+					plan, err := svc.Update(t.Context(), "prod", apply)
+					wantError(t, err, "cluster prod: tent pins Nomad "+version+" only after it has read the release "+
+						"files that the nodes download: find Nomad "+version+": get https://releases.hashicorp.com/nomad/"+
+						version+"/nomad_"+version+"_SHA256SUMS: 404 Not Found")
+					if plan.Applied {
+						t.Errorf("Update(apply %t) applied a plan", apply)
+					}
+				}
+				wantSnapshot(t, svc.Store, stored)
+				wantNoWrites(t, f.Calls()[calls:])
+				wantPinned(t, svc, "2.0.7")
+			})
+		})
+	}
+}
+
+// TestUpdateRefusesAFirstPinWhoseReleaseFilesCannotBeRead fails the plan of a built cluster whose store holds no pin,
+// a completed spec without a Nomad version or one that does not decode, when the release files of the version that
+// the plan would pin cannot be read, with and without apply, before it writes to the store or the cloud.
+func TestUpdateRefusesAFirstPinWhoseReleaseFilesCannotBeRead(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		prepare func(t *testing.T, svc *app.Service)
+	}{
+		{"a completed spec without a version", func(t *testing.T, svc *app.Service) {
+			put(t, svc.Store, completedPath, completedSpec(t, svc, ""))
+			svc.Channels = stableChannel("2.0.0", "2.0.99", "2.0.99")
+		}},
+		{"a completed spec that does not decode", func(t *testing.T, svc *app.Service) {
+			put(t, svc.Store, completedPath, []byte("kind: Cluster\n"))
+			mustReplace(t, svc, withVersion(t, keyedClusterYAML, "2.0.99"))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				svc, f := newUpdate(t)
+				svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.7")
+				mustUpdate(t, svc)
+				tc.prepare(t, svc)
+				stored, calls := snapshot(t, svc.Store), len(f.Calls())
+
+				for _, apply := range []bool{false, true} {
+					_, err := svc.Update(t.Context(), "prod", apply)
+					wantError(t, err, "cluster prod: tent pins Nomad 2.0.99 only after it has read the release files "+
+						"that the nodes download: find Nomad 2.0.99: get "+
+						"https://releases.hashicorp.com/nomad/2.0.99/nomad_2.0.99_SHA256SUMS: 404 Not Found")
+				}
+				wantSnapshot(t, svc.Store, stored)
+				wantNoWrites(t, f.Calls()[calls:])
+			})
+		})
+	}
 }
 
 // TestUpdateNeedsACompletedSpecThatDecodes fails the plan when the pinned Nomad version is needed and the stored

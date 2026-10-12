@@ -159,17 +159,19 @@ func (s NodeStep) String() string {
 // takes. Every plan reads them, to name the machines that stay and whose spec hash is not their group's, or is missing,
 // in Outdated: they are no change, and an update replaces none of them. A plan that creates no node, may remove no
 // node that joined and cannot read the release files has no Outdated and no purge and goes on, and Update tells
-// OnWarning once that it could not tell which nodes are outdated. A machine of any role without the joined label counts
-// as not joined, and is waited for until its node joins and its user data is scrubbed; the wait repeats the create
-// only for a machine that the cloud reports not ready. A client that has not joined and is older than the lifetime of
-// its intro token, 31 minutes, may never have registered: when a server that stays has joined, the plan asks Nomad
-// once, through those servers, about every such client of the cluster, whatever the plan does with it. A machine for
-// which Nomad lists no node of its name and private address that is not down never registered. When its group is in the
-// specs, a machine of its name whose group is in the specs too stays before it if that machine has joined, is not among
-// those that never registered, or is older, and it then goes as a duplicate; otherwise it is deleted as not registered,
-// does not count toward its group and frees its name for a create. A plan that cannot ask fails, with and without
-// apply, before it changes anything; without a joined server it does not ask, and such a client that stays is waited
-// for.
+// OnWarning once that it could not tell which nodes are outdated, unless the plan would write a Nomad version that the
+// stored completed spec does not hold: then it fails, because tent pins a version only after it has read the release
+// files of that version. A completed spec that is missing or does not decode holds none. A machine of any role without
+// the joined label counts as not joined, and is waited for until its node joins and its user data is scrubbed; the wait
+// repeats the create only for a machine that the cloud reports not ready. A client that has not joined and is older
+// than the lifetime of its intro token, 31 minutes, may never have registered: when a server that stays has joined, the
+// plan asks Nomad once, through those servers, about every such client of the cluster, whatever the plan does with it.
+// A machine for which Nomad lists no node of its name and private address that is not down never registered. When its
+// group is in the specs, a machine of its name whose group is in the specs too stays before it if that machine has
+// joined, is not among those that never registered, or is older, and it then goes as a duplicate; otherwise it is
+// deleted as not registered, does not count toward its group and frees its name for a create. A plan that cannot ask
+// fails, with and without apply, before it changes anything; without a joined server it does not ask, and such a client
+// that stays is waited for.
 //
 // A group with more machines than its size loses the machines that rollout.Surplus names. A machine that never joined
 // is deleted. A machine that joined is removed: its node, if it runs a client, is marked ineligible and drained within
@@ -385,6 +387,9 @@ func (s *Service) planUpdate(ctx context.Context, l statestore.Layout, cache ass
 	switch {
 	case err != nil && (changes || ctx.Err() != nil):
 		return updateRun{}, err
+	case err != nil && objs.Cluster.Spec.Nomad.Version != c.pinned:
+		return updateRun{}, fmt.Errorf("%s: tent pins Nomad %s only after it has read the release files that the nodes "+
+			"download: %w", clusterLabel(m.Name), objs.Cluster.Spec.Nomad.Version, err)
 	case err != nil:
 		u.readWarnings = append(u.readWarnings, couldNotTellOutdated+err.Error())
 		return u, nil
