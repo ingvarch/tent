@@ -66,7 +66,14 @@ func watchShrink(tb testing.TB, f *vultrfake.Fake, w *nomadWorld, group string, 
 		tb.Fatalf("the specs have no client group %q", group)
 	}
 	inv.most = len(inv.machineIDs())
-	f.SetHook(func(ctx context.Context, c vultrfake.Call, next func(context.Context) error) error {
+	inv.watch(nil, nil)
+	return inv
+}
+
+// watch makes every call to the Vultr fake and to Nomad check the invariants before it runs and then go through the
+// hook for it, which a nil hook leaves out. It takes the hooks of both fakes.
+func (inv *shrinkInvariants) watch(onVultr vultrfake.Hook, onNomad nomadHook) {
+	inv.f.SetHook(func(ctx context.Context, c vultrfake.Call, next func(context.Context) error) error {
 		inv.check("Vultr " + c.Name + " " + c.Arg)
 		switch c.Name {
 		case "CreateInstance":
@@ -74,16 +81,21 @@ func watchShrink(tb testing.TB, f *vultrfake.Fake, w *nomadWorld, group string, 
 		case "DeleteInstance":
 			inv.checkDrained(c.Arg)
 		}
-		return next(ctx)
+		if onVultr == nil {
+			return next(ctx)
+		}
+		return onVultr(ctx, c, next)
 	})
-	w.SetHook(func(ctx context.Context, c nomadfake.Call, next func(context.Context) error) error {
+	inv.w.SetHook(func(ctx context.Context, c nomadfake.Call, next func(context.Context) error) error {
 		inv.check("Nomad " + c.Name + " " + c.Arg)
 		if c.Name == "Purge" {
 			inv.purges.checkPurge(c.Arg)
 		}
-		return next(ctx)
+		if onNomad == nil {
+			return next(ctx)
+		}
+		return onNomad(ctx, c, next)
 	})
-	return inv
 }
 
 // machineIDs returns the instance IDs of the machines of the group that the cloud lists.

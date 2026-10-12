@@ -37,14 +37,7 @@ func resizeServers(t *testing.T, svc *app.Service, size int) {
 }
 
 // listedServers returns the names of the machines of the server group that f lists, sorted.
-func listedServers(f *vultrfake.Fake) []string {
-	var names []string
-	for _, m := range serverMachines(f, serversGroup) {
-		names = append(names, m.name)
-	}
-	slices.Sort(names)
-	return names
-}
+func listedServers(f *vultrfake.Fake) []string { return machinesOf(f, serversGroup) }
 
 // raftAddresses returns the address of each server in the Raft configuration, by its machine's name, and fails the
 // test for a server that does not vote.
