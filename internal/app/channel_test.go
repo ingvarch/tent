@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -327,8 +328,8 @@ func TestUpdateRefusesAPinOutsideTheChannel(t *testing.T) {
 		for _, apply := range []bool{false, true} {
 			_, err := svc.Update(t.Context(), "prod", apply)
 			wantError(t, err, "cluster prod is pinned to Nomad 2.0.7 ("+completedPath+"), which is older than "+
-				"2.1.0, the oldest Nomad that channel stable allows; set spec.nomad.version to a version that the "+
-				"channel allows")
+				"2.1.0, the oldest Nomad that channel stable allows; run tent upgrade cluster, or set "+
+				"spec.nomad.version to a version that the channel allows")
 		}
 		wantSnapshot(t, svc.Store, stored)
 		if n := len(f.Calls()); n != calls {
@@ -393,4 +394,203 @@ func TestUpdateRewritesABrokenCompletedSpec(t *testing.T) {
 			})
 		})
 	}
+}
+
+// moveDetail is the problem of a Nomad version to that is more than one minor version above the pin from, as the spec
+// writers report it.
+func moveDetail(to, from, advice string) string {
+	return to + " is more than one minor version above " + from + ", the Nomad version that the cluster is pinned to" +
+		advice
+}
+
+// moveChecks are the use cases that write a Cluster over a stored one: replace and edit.
+var moveChecks = specChecks[1:3]
+
+// pinnedService returns a service whose store holds the test cluster and a completed spec that pins Nomad 2.0.7, in
+// a channel that allows 2.x from 2.0.0.
+func pinnedService(t *testing.T) *app.Service {
+	t.Helper()
+	svc, _ := newService(t)
+	svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.7")
+	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
+	put(t, svc.Store, completedPath, completedSpec(t, svc, "2.0.7"))
+	return svc
+}
+
+// TestSpecWritersHoldTheVersionToThePin refuses a Cluster whose Nomad version is more than one minor version above
+// the pin of the stored completed spec, with or without apply and without a write, and accepts an older version, the
+// pin and a version at most one minor version above it.
+func TestSpecWritersHoldTheVersionToThePin(t *testing.T) {
+	t.Parallel()
+	for _, uc := range moveChecks {
+		t.Run(uc.name, func(t *testing.T) {
+			t.Parallel()
+			svc := pinnedService(t)
+			stored := snapshot(t, svc.Store)
+			for _, apply := range []bool{false, true} {
+				wantFieldErrors(t, uc.run(t, svc, withVersion(t, clusterYAML, "2.2.0"), apply),
+					problem("spec.nomad.version", moveDetail("2.2.0", "2.0.7", "; move to 2.1 first")))
+			}
+			wantSnapshot(t, svc.Store, stored)
+			for _, v := range []string{"2.0.6", "2.0.7", "2.0.9", "2.1.5"} {
+				if err := uc.run(t, svc, withVersion(t, clusterYAML, v), true); err != nil {
+					t.Errorf("version %s over the pin 2.0.7: %v", v, err)
+				}
+			}
+		})
+	}
+}
+
+// TestSpecWritersAdviseOnlyTheSameMajor names no version to move to first when the version is of another major
+// version than the pin, which only a pin that the channel no longer allows shows.
+func TestSpecWritersAdviseOnlyTheSameMajor(t *testing.T) {
+	t.Parallel()
+	svc := pinnedService(t)
+	put(t, svc.Store, completedPath, completedSpec(t, svc, "1.11.0"))
+	_, err := svc.Replace(t.Context(), decode(t, withVersion(t, clusterYAML, "2.0.7")), true)
+	wantFieldErrors(t, err, problem("spec.nomad.version",
+		"2.0.7 is of another major version than 1.11.0, the Nomad version that the cluster is pinned to"))
+}
+
+// TestSpecWritersReportAVersionThatTheChannelRefusesOnce gives the channel's problem alone for a version that the
+// channel refuses, though it is also more than one minor version above the pin.
+func TestSpecWritersReportAVersionThatTheChannelRefusesOnce(t *testing.T) {
+	t.Parallel()
+	svc := pinnedService(t)
+	_, err := svc.Replace(t.Context(), decode(t, withVersion(t, clusterYAML, "3.0.0")), true)
+	wantFieldErrors(t, err, problem("spec.nomad.version",
+		"3.0.0 is newer than this tent knows; channel stable allows 2.x from 2.0.0"))
+}
+
+// TestSpecWritersCheckNoMoveWithoutAUsablePin accepts a version far above a pin that is not there: the store has no
+// completed spec, or the stored one does not decode or holds no Cluster.
+func TestSpecWritersCheckNoMoveWithoutAUsablePin(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		data []byte // the completed spec; nil for none
+	}{
+		{"no completed spec", nil},
+		{"broken", []byte("kind: Cluster\n")},
+		{"node groups only", encode(t, serversYAML)},
+	} {
+		for _, uc := range moveChecks {
+			t.Run(tc.name+"/"+uc.name, func(t *testing.T) {
+				t.Parallel()
+				svc := pinnedService(t)
+				if tc.data == nil {
+					if err := svc.Store.Delete(t.Context(), completedPath); err != nil {
+						t.Fatalf("delete the completed spec: %v", err)
+					}
+				} else {
+					put(t, svc.Store, completedPath, tc.data)
+				}
+				if err := uc.run(t, svc, withVersion(t, clusterYAML, "2.2.0"), true); err != nil {
+					t.Errorf("version 2.2.0 without a pin: %v", err)
+				}
+			})
+		}
+	}
+}
+
+// TestCreateHoldsTheVersionToALeftoverPin refuses a create whose Nomad version is more than one minor version above
+// the pin of a completed spec that the store still holds without its cluster.yaml.
+func TestCreateHoldsTheVersionToALeftoverPin(t *testing.T) {
+	t.Parallel()
+	svc := pinnedService(t)
+	if err := svc.Store.Delete(t.Context(), clusterPath); err != nil {
+		t.Fatalf("delete cluster.yaml: %v", err)
+	}
+	stored := snapshot(t, svc.Store)
+	for _, apply := range []bool{false, true} {
+		_, err := svc.Create(t.Context(), decode(t, withVersion(t, clusterYAML, "2.2.0"), serversYAML, workersYAML), apply)
+		wantFieldErrors(t, err, problem("spec.nomad.version", moveDetail("2.2.0", "2.0.7", "; move to 2.1 first")))
+	}
+	wantSnapshot(t, svc.Store, stored)
+}
+
+// TestSpecWritersReadTheCompletedSpecOnlyForACluster reads the completed spec when the objects hold a Cluster, and
+// not when they hold node groups alone.
+func TestSpecWritersReadTheCompletedSpecOnlyForACluster(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		docs []string
+		want bool
+	}{
+		{"node groups", []string{edit(t, workersYAML, "size: 2", "size: 4")}, false},
+		{"a Cluster", []string{clusterYAML}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			svc := pinnedService(t)
+			log := &reads{Store: svc.Store}
+			svc.Store = log
+			if _, err := svc.Replace(t.Context(), decode(t, tc.docs...), false); err != nil {
+				t.Fatalf("Replace: %v", err)
+			}
+			if got := slices.Contains(log.paths, completedPath); got != tc.want {
+				t.Errorf("the completed spec was read: %t, want %t; reads: %v", got, tc.want, log.paths)
+			}
+		})
+	}
+}
+
+// TestCommandsThatLoadTheSpecsRefuseAVersionTooFarAboveThePin fails update, rolling-update and validate with the
+// load's text when the stored Cluster, put past the writers, sets a version more than one minor version above the
+// pin, before they reach a provider or write anything.
+func TestCommandsThatLoadTheSpecsRefuseAVersionTooFarAboveThePin(t *testing.T) {
+	t.Parallel()
+	const want = "cluster prod: spec.nomad.version: 2.2.0 is more than one minor version above 2.0.7, the Nomad " +
+		"version that the cluster is pinned to (" + completedPath + "); move to 2.1 first"
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T, svc *app.Service) error
+	}{
+		{"update", func(t *testing.T, svc *app.Service) error {
+			_, err := svc.Update(t.Context(), "prod", true)
+			return err
+		}},
+		{"rolling-update", func(t *testing.T, svc *app.Service) error {
+			_, err := svc.RollingUpdate(t.Context(), "prod", app.RollOptions{Apply: true})
+			return err
+		}},
+		{"validate", func(t *testing.T, svc *app.Service) error {
+			_, err := svc.ValidateCluster(t.Context(), "prod")
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			svc := pinnedService(t)
+			svc.Providers = func(v1alpha1.Provider) (cloud.Provider, error) {
+				t.Error("the command looked up a provider")
+				return nil, errors.New("no provider")
+			}
+			put(t, svc.Store, clusterPath, encode(t, withVersion(t, clusterYAML, "2.2.0")))
+			stored := snapshot(t, svc.Store)
+			wantError(t, tc.run(t, svc), want)
+			wantSnapshot(t, svc.Store, stored)
+		})
+	}
+}
+
+// TestCommandsThatLoadTheSpecsLoadAVersionOlderThanThePin loads the specs for update, validate and rolling-update when
+// the spec sets an older Nomad version than the pin: a version in the spec wins over the pin.
+func TestCommandsThatLoadTheSpecsLoadAVersionOlderThanThePin(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, _ := newUpdate(t)
+		svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.6", "2.0.7")
+		mustUpdate(t, svc)
+		mustReplace(t, svc, withVersion(t, keyedClusterYAML, "2.0.6"))
+		if _, err := svc.Update(t.Context(), "prod", false); err != nil {
+			t.Errorf("Update over a pin of 2.0.7 with 2.0.6 in the spec: %v", err)
+		}
+		if _, err := svc.ValidateCluster(t.Context(), "prod"); err != nil {
+			t.Errorf("ValidateCluster over a pin of 2.0.7 with 2.0.6 in the spec: %v", err)
+		}
+		_, err := svc.RollingUpdate(t.Context(), "prod", app.RollOptions{})
+		wantError(t, err, "the specs of cluster prod changed since the last tent update cluster; run it first")
+	})
 }

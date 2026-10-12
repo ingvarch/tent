@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -147,7 +148,8 @@ func (s NodeStep) String() string {
 // specs with every default as last applied, counts as a change when the stored one is missing or differs. Its Nomad
 // version is the one that the spec sets, else the one of the stored completed spec, else the one that the channel
 // recommends; a stored one that the channel does not allow, or a stored completed spec that does not decode when its
-// version is needed, fails the plan. Each of the cluster's secrets that the store lacks counts as a change too: the
+// version is needed, fails the plan; so does a version in the spec that is more than one minor version above the one of
+// the stored completed spec. Each of the cluster's secrets that the store lacks counts as a change too: the
 // CA's key and bundle, the gossip key and the ACL bootstrap secret. A stored CA key without its bundle gets a bundle
 // signed with it; a bundle without its key, or a stored secret that does not load, fails the plan, since tent never
 // replaces a cluster's secrets.
@@ -289,6 +291,8 @@ type loadedCluster struct {
 	objs   spec.Objects
 	ch     *channels.Channel
 	stored []byte // the stored completed spec; nil when the store has none
+	// pinned is the Nomad version of the stored completed spec; "" when the store has none or it does not decode.
+	pinned string
 	m      *model.Cluster
 }
 
@@ -307,14 +311,15 @@ func (s *Service) loadCluster(ctx context.Context, l statestore.Layout) (loadedC
 	if err != nil {
 		return loadedCluster{}, err
 	}
-	if err := pinVersion(objs.Cluster, ch, l, stored); err != nil {
+	pinned, err := pinVersion(objs.Cluster, ch, l, stored)
+	if err != nil {
 		return loadedCluster{}, err
 	}
 	m, err := model.New(objs.Cluster, objs.NodeGroups)
 	if err != nil {
 		return loadedCluster{}, err
 	}
-	return loadedCluster{objs: objs, ch: ch, stored: stored, m: m}, nil
+	return loadedCluster{objs: objs, ch: ch, stored: stored, pinned: pinned, m: m}, nil
 }
 
 // planUpdate loads and checks a cluster's specs, as Update says, and plans the changes that bring the cloud to them and
@@ -428,43 +433,72 @@ func (s *Service) readCompleted(ctx context.Context, l statestore.Layout) ([]byt
 // pinVersion sets the Nomad version of the cluster c, which has its defaults and the channel ch, when its spec leaves
 // it out: to the one pinned in stored, the cluster's stored completed spec, or else to the one that ch recommends. A
 // pinned version that ch does not allow is an error, and so is a stored completed spec that does not decode or holds
-// no Cluster: tent does not move a cluster to another Nomad version by itself.
-func pinVersion(c *v1alpha1.Cluster, ch *channels.Channel, l statestore.Layout, stored []byte) error {
+// no Cluster: tent does not move a cluster to another Nomad version by itself. A version that the spec sets must not
+// be more than one minor version above the pinned one. pinVersion returns the pinned version, "" when there is none;
+// a version that the spec sets is checked against it only when the completed spec decodes.
+func pinVersion(c *v1alpha1.Cluster, ch *channels.Channel, l statestore.Layout, stored []byte) (string, error) {
 	n := &c.Spec.Nomad
+	pinned, err := storedPin(l, stored)
 	if n.Version != "" {
-		return nil
-	}
-	var pinned string
-	if stored != nil {
-		var err error
-		if pinned, err = pinnedVersion(stored); err != nil {
-			return fmt.Errorf("%s: %w; set spec.nomad.version to the Nomad version the cluster was built with, or fix "+
-				"%s in the state store by hand", l.Completed(), err, l.Completed())
+		if why, advice := moveProblem(pinned, n.Version); why != "" {
+			why += " (" + l.Completed() + ")"
+			if advice != "" {
+				why += "; " + advice
+			}
+			return "", fmt.Errorf("%s: spec.nomad.version: %s", clusterLabel(c.Metadata.Name), why)
 		}
+		return pinned, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("%w; set spec.nomad.version to the Nomad version the cluster was built with, or fix "+
+			"%s in the state store by hand", err, l.Completed())
 	}
 	if pinned == "" {
 		n.Version = ch.Nomad.Recommended
-		return nil
+		return "", nil
 	}
 	// Allows returns nil or a *VersionError.
 	if v, ok := errors.AsType[*channels.VersionError](ch.Allows(pinned)); ok {
-		return fmt.Errorf("%s is pinned to Nomad %s (%s), which %s; set spec.nomad.version to a version that the "+
-			"channel allows", clusterLabel(c.Metadata.Name), pinned, l.Completed(), v.Problem)
+		advice := "set spec.nomad.version to a version that the channel allows"
+		if ch.OlderThanMinimum(pinned) {
+			advice = "run tent upgrade cluster, or " + advice
+		}
+		return "", fmt.Errorf("%s is pinned to Nomad %s (%s), which %s; %s", clusterLabel(c.Metadata.Name), pinned,
+			l.Completed(), v.Problem, advice)
 	}
 	n.Version = pinned
-	return nil
+	return pinned, nil
 }
 
-// pinnedVersion returns the Nomad version that a stored completed spec holds.
-func pinnedVersion(completed []byte) (string, error) {
-	objs, err := spec.Decode(completed)
+// storedPin returns the Nomad version that the cluster's stored completed spec holds, "" when stored is nil. A
+// completed spec that does not decode, or holds no Cluster, is an error that names its path.
+func storedPin(l statestore.Layout, stored []byte) (string, error) {
+	if stored == nil {
+		return "", nil
+	}
+	objs, err := spec.Decode(stored)
 	switch {
 	case err != nil:
-		return "", err
+		return "", fmt.Errorf("%s: %w", l.Completed(), err)
 	case objs.Cluster == nil:
-		return "", errors.New("holds no " + v1alpha1.KindCluster)
+		return "", fmt.Errorf("%s: holds no %s", l.Completed(), v1alpha1.KindCluster)
 	}
 	return objs.Cluster.Spec.Nomad.Version, nil
+}
+
+// moveProblem says why a cluster pinned to the Nomad version pinned may not take the version to: it is more than one
+// minor version above, or of another major version. It also says what to do, unless the version is of another major
+// version. Both are empty when the move is allowed, and when pinned is empty.
+func moveProblem(pinned, to string) (why, advice string) {
+	v, ok := errors.AsType[*channels.VersionError](channels.CheckMove(pinned, to))
+	if !ok {
+		return "", ""
+	}
+	why = v.Error() + ", the Nomad version that the cluster is pinned to"
+	if major, _, _ := strings.Cut(pinned, "."); strings.HasPrefix(to, major+".") {
+		advice = "move to " + strings.TrimSuffix(channels.NextMinor(pinned), ".0") + " first"
+	}
+	return why, advice
 }
 
 // provider returns the cloud provider called name.
