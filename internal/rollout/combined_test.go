@@ -236,6 +236,80 @@ func TestCombinedDrainedVictimIsCheckedAgainBeforeItsServerLeavesTheQuorum(t *te
 	})
 }
 
+func TestCombinedMarkAndDrainNeedTheOtherNodes(t *testing.T) {
+	// Node 1 is the victim of combinedMidRoll. Node 3 is up to date, so no rule picks it as a victim.
+	victims := []struct {
+		name  string
+		build func(t *testing.T, s *rollout.State)
+	}{
+		{"before a drain", func(t *testing.T, s *rollout.State) { nodeNamed(t, s, serverName(1)).Eligible = false }},
+		{"before a mark", func(t *testing.T, s *rollout.State) { stopServer(t, s, 1) }},
+	}
+	others := []refusalCase{
+		{"another node is down", func(t *testing.T, s *rollout.State) {
+			nodeNamed(t, s, serverName(3)).Status = "down"
+		}, "node group servers: node prod-servers-3 is down in Nomad" + restAdvice},
+		{"another node is not eligible", func(t *testing.T, s *rollout.State) {
+			nodeNamed(t, s, serverName(3)).Eligible = false
+		}, "node group servers: node prod-servers-3 is not eligible" + restAdvice},
+		{"another node is draining", func(t *testing.T, s *rollout.State) {
+			nodeNamed(t, s, serverName(3)).Draining = true
+		}, "node group servers: node prod-servers-3 is draining" + restAdvice},
+		{"another machine has no node", func(_ *testing.T, s *rollout.State) {
+			dropNode(s, serverName(3))
+		}, "node group servers: node prod-servers-3 has no node in Nomad" + restAdvice},
+		{"another machine does not run", func(t *testing.T, s *rollout.State) {
+			stopServer(t, s, 3)
+		}, "node group servers: node prod-servers-3 is not running" + restAdvice},
+		{"the first of two nodes that cannot take work is named", func(t *testing.T, s *rollout.State) {
+			nodeNamed(t, s, serverName(0)).Status = "down"
+			nodeNamed(t, s, serverName(3)).Draining = true
+		}, "node group servers: node prod-servers-0 is down in Nomad" + restAdvice},
+	}
+	for _, victim := range victims {
+		t.Run(victim.name, func(t *testing.T) {
+			var cases []refusalCase
+			for _, other := range others {
+				cases = append(cases, refusalCase{other.name, func(t *testing.T, s *rollout.State) {
+					victim.build(t, s)
+					other.build(t, s)
+				}, other.want})
+			}
+			runRefusalCases(t, combinedMidRoll, cases)
+		})
+	}
+	t.Run("a node that drains is waited for whatever the others read", func(t *testing.T) {
+		s := combinedMidRoll()
+		n := nodeNamed(t, &s, serverName(1))
+		n.Eligible, n.Draining = false, true
+		nodeNamed(t, &s, serverName(3)).Status = "down"
+		checkServerStep(t, nextRoll(t, s), serverOutcome{Action: rollout.WaitDrained, Machine: serverName(1),
+			Node: nodeIDOf(1)})
+	})
+	t.Run("a drained victim is stopped whatever the other nodes read", func(t *testing.T) {
+		s := combinedMidRoll()
+		serverDrained(t, &s, 1)
+		nodeNamed(t, &s, serverName(3)).Status = "down"
+		checkServerStep(t, nextRoll(t, s), serverOutcome{Action: rollout.Stop, Machine: serverName(1)})
+	})
+	t.Run("a shrink takes the same care", func(t *testing.T) {
+		build := func(victimStopped bool) rollout.State {
+			s := combinedState(3)
+			s.Groups[0].Size = 2
+			if victimStopped {
+				stopServer(t, &s, 2)
+			} else {
+				nodeNamed(t, &s, serverName(2)).Eligible = false
+			}
+			nodeNamed(t, &s, serverName(1)).Status = "down"
+			return s
+		}
+		want := "node group servers: node prod-servers-1 is down in Nomad" + restAdvice
+		checkRefusedIn(t, rollout.Shrink, build(false), want)
+		checkRefusedIn(t, rollout.Shrink, build(true), want)
+	})
+}
+
 func TestCombinedEligibleNodeWithItsDrainMetaHasNotStarted(t *testing.T) {
 	// An operator made the node eligible after its drain, so its removal starts again from the beginning.
 	meta := func(t *testing.T, s *rollout.State, i int) {
