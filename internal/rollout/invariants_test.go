@@ -386,3 +386,36 @@ func TestShrinkLeavesNoDrainedNodeBehind(t *testing.T) {
 		}
 	}
 }
+
+func TestRollOfACombinedNodeAloneIsRefusedWhenTheNewNodeGoesDownAfterTheMark(t *testing.T) {
+	w := outdatedCombined(1).arm()
+	marked := false
+	decide := func(s rollout.State, mode rollout.Mode) (rollout.Step, error) {
+		if marked {
+			for i := range w.nodes {
+				if m := w.machineIndex(w.nodes[i].owner); m >= 0 && w.machines[m].SpecHash == newHash {
+					w.nodes[i].Status = "down"
+				}
+			}
+			s = w.observe()
+		}
+		step, err := rollout.Next(s, mode)
+		marked = marked || step.Action == rollout.MarkIneligible
+		return step, err
+	}
+	res, err := w.run(rollout.Roll, decide, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.unplaced != 0 {
+		t.Errorf("%d allocations are unplaced, want 0", w.unplaced)
+	}
+	if !marked || !res.refused {
+		t.Fatalf("marked = %t, refused = %t, want both: %q", marked, res.refused, res.lines)
+	}
+	last := len(res.lines) - 1
+	want := "refused: node group control: node prod-control-1 is down in Nomad" + restAdvice
+	if res.lines[last] != want || !strings.HasPrefix(res.lines[last-1], "mark node prod-control-0 ") {
+		t.Errorf("the run ends with %q, want the mark and then %q", res.lines[last-1:], want)
+	}
+}

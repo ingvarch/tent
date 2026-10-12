@@ -130,8 +130,9 @@ func (sg *serverGroup) removeVictim() (Step, bool, error) {
 }
 
 // removal returns the step that follows in the removal of the victim. A combined victim whose node is up is marked
-// ineligible and drained first; then removeServer takes over. Each step is chosen from what is left to do, so a step
-// that something else has done already is skipped.
+// ineligible and drained first, and only while the group's other nodes can take its work; then removeServer takes
+// over. Each step is chosen from what is left to do, so a step that something else has done already is skipped. A
+// drain that has begun is waited for whatever the other nodes read: Nomad runs it already.
 func (sg *serverGroup) removal(v Machine) (Step, error) {
 	n, hasNode := sg.nodes[v.ID] // the zero Node when there is none
 	nodeUp := hasNode && n.Status != nodeDown
@@ -151,7 +152,25 @@ func (sg *serverGroup) removal(v Machine) (Step, error) {
 	default:
 		return sg.removeServer(v)
 	}
+	if step.Action != WaitDrained {
+		if err := sg.checkOtherNodes(v); err != nil {
+			return Step{}, err
+		}
+	}
 	return step, nil
+}
+
+// checkOtherNodes refuses unless every machine of the group but the victim has a node that can take work: ready,
+// eligible and not draining. The victim's allocations move to those nodes. The servers are not looked at. Only a
+// combined group has nodes, so only its removal comes here.
+func (sg *serverGroup) checkOtherNodes(v Machine) error {
+	return sg.checkMachines(func(m Machine) string {
+		if m.ID == v.ID {
+			return ""
+		}
+		n, hasNode := sg.nodes[m.ID]
+		return nodeWhy(m, n, hasNode)
+	})
 }
 
 // removeServer returns the step that removes the victim's server and machine. The order for a victim that runs:
