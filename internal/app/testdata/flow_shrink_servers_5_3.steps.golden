@@ -1,0 +1,26 @@
+nomad started stable
+nomad done stable
+node started stop prod-servers-4
+node done stop prod-servers-4
+nomad started server-down prod-servers-4
+nomad done server-down prod-servers-4
+nomad started remove-peer prod-servers-4
+nomad done remove-peer prod-servers-4
+nomad started force-leave prod-servers-4.global
+nomad done force-leave prod-servers-4.global
+nomad started healthy
+nomad done healthy
+node started delete prod-servers-4
+node done delete prod-servers-4
+node started stop prod-servers-3
+node done stop prod-servers-3
+nomad started server-down prod-servers-3
+nomad done server-down prod-servers-3
+nomad started remove-peer prod-servers-3
+nomad done remove-peer prod-servers-3
+nomad started force-leave prod-servers-3.global
+nomad done force-leave prod-servers-3.global
+nomad started healthy
+nomad done healthy
+node started delete prod-servers-3
+node done delete prod-servers-3

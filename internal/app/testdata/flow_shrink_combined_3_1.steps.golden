@@ -1,0 +1,46 @@
+nomad started stable
+nomad done stable
+nomad started ineligible prod-all-2
+nomad done ineligible prod-all-2
+nomad started drain prod-all-2
+nomad done drain prod-all-2
+nomad started drained prod-all-2
+nomad done drained prod-all-2
+node started stop prod-all-2
+node done stop prod-all-2
+nomad started server-down prod-all-2
+nomad done server-down prod-all-2
+nomad started remove-peer prod-all-2
+nomad done remove-peer prod-all-2
+nomad started force-leave prod-all-2.global
+nomad done force-leave prod-all-2.global
+nomad started healthy
+nomad done healthy
+node started delete prod-all-2
+node done delete prod-all-2
+nomad started ineligible prod-all-1
+nomad done ineligible prod-all-1
+nomad started drain prod-all-1
+nomad done drain prod-all-1
+nomad started drained prod-all-1
+nomad done drained prod-all-1
+nomad started remove-peer prod-all-1
+nomad done remove-peer prod-all-1
+nomad started reconcile prod-all-1
+nomad done reconcile prod-all-1
+nomad started remove-peer prod-all-1
+nomad done remove-peer prod-all-1
+node started stop prod-all-1
+node done stop prod-all-1
+nomad started force-leave prod-all-1.global
+nomad done force-leave prod-all-1.global
+nomad started healthy
+nomad done healthy
+node started delete prod-all-1
+node done delete prod-all-1
+nomad started purge prod-all-2
+nomad done purge prod-all-2
+nomad started down prod-all-1
+nomad done down prod-all-1
+nomad started purge prod-all-1
+nomad done purge prod-all-1
