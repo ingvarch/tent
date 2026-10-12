@@ -3,6 +3,7 @@ package app
 import (
 	"cmp"
 	"fmt"
+	"net/netip"
 	"slices"
 	"strings"
 
@@ -73,6 +74,66 @@ const (
 	reasonNotRegistered = "not registered"
 )
 
+// shrinkView is what the node planner knows when it chooses the machines that a group loses: a reading of Nomad, if
+// read is set, the spec hash of each node group and the IDs of the machines to replace whatever their hash. The zero
+// view has none of them: the planner then takes the joined label at its word, and no machine is outdated.
+type shrinkView struct {
+	read   bool
+	nomad  rollout.Nomad
+	hash   func(group string) string
+	forced map[string]bool
+}
+
+// surplus returns the IDs of the machines that group g loses, as rollout.Surplus chooses them.
+func (v shrinkView) surplus(cluster string, g model.NodeGroup, members []cloud.Instance) map[string]bool {
+	machines := rolloutMachines(members)
+	group := rollout.Group{Name: g.Name, Role: g.Role, Size: g.Size}
+	if v.hash != nil {
+		group.SpecHash = v.hash(g.Name)
+	} else {
+		for i := range machines {
+			machines[i].SpecHash = ""
+		}
+	}
+	s := rollout.State{Cluster: cluster, Machines: machines, Nomad: v.nomad, Forced: v.forced}
+	if !v.read {
+		s.Nomad = nomadAsLabelled(machines)
+	}
+	lost := rollout.Surplus(s, group)
+	ids := make(map[string]bool, len(lost))
+	for _, m := range lost {
+		ids[m.ID] = true
+	}
+	return ids
+}
+
+// raftPort is the port of a server's Raft address.
+const raftPort = 4647
+
+// nomadAsLabelled returns what Nomad would report if every machine were what its labels say: a healthy voter at the
+// address of a joined machine that runs a server, and a ready, eligible node for a joined machine that runs a
+// client; a machine that has not joined gets neither. They are matched to machines by private address, so a machine
+// without one finds none.
+func nomadAsLabelled(machines []rollout.Machine) rollout.Nomad {
+	var n rollout.Nomad
+	for _, m := range machines {
+		if !m.Joined {
+			continue
+		}
+		if m.Role.RunsServer() {
+			n.Servers = append(n.Servers, rollout.Server{
+				ID: m.ID, Name: m.Name, Address: netip.AddrPortFrom(m.PrivateIP, raftPort), Voter: true, Healthy: true,
+			})
+		}
+		if m.Role.RunsClient() {
+			n.Nodes = append(n.Nodes, rollout.Node{
+				ID: m.ID, Name: m.Name, Address: m.PrivateIP, Status: "ready", Eligible: true,
+			})
+		}
+	}
+	return n
+}
+
 // planNodes returns the changes that bring the cluster's machines, as the cloud lists them, to the node groups of m.
 // Only the machines with the cluster's label count; the others are left alone.
 //
@@ -80,14 +141,16 @@ const (
 //   - Of machines with one name, one that has joined stays before one that has not, then one that is not among the
 //     unregistered machines before one that is, and among equals the oldest stays; the others are deleted as
 //     duplicates.
-//   - A group with more machines than its size loses the newest ones.
+//   - A group with more machines than its size loses the machines that rollout.Surplus names for it, in its order: a
+//     joined server or combined machine that does not run, then those that have not joined, and so on, with the
+//     newest last. view says what Surplus reads of Nomad.
 //   - A group with fewer gets new machines named <cluster>-<group>-<index>, each in the group's zone with the fewest
 //     machines, the zone listed first on a tie. A client group takes the lowest indexes whose names no listed machine
 //     has. A server or combined group takes the indexes from the one above the highest index among the listed
 //     machines whose names have the group's pattern, whatever the plan does with them, and not below its entry in
 //     next, the lowest index that tent has not used for the group; without an entry that is 0.
 //   - A machine in a zone that its group no longer lists counts toward the group's size and stays, unless it is among
-//     the newest of a group that is too big. New machines go only into the listed zones.
+//     the machines that a group that is too big loses. New machines go only into the listed zones.
 //   - A machine that stays and has not joined, of any role, is waited for, until its node joins and its user data is
 //     scrubbed. When the cloud reports it not ready and its operation id is valid, the wait repeats the create call
 //     that made it, with its id; otherwise the wait has no operation id and calls no cloud. A machine that joined is
@@ -106,6 +169,7 @@ const (
 //
 // It also returns the machines of the server and combined groups that stay, by name: the servers the cluster has.
 func planNodes(m *model.Cluster, instances []cloud.Instance, unregistered map[string]bool, next map[string]int,
+	view shrinkView,
 ) (changes []NodeChange, servers []cloud.Instance) {
 	owned := slices.DeleteFunc(slices.Clone(instances), func(in cloud.Instance) bool { return in.Cluster != m.Name })
 	slices.SortStableFunc(owned, compareAge)
@@ -132,11 +196,16 @@ func planNodes(m *model.Cluster, instances []cloud.Instance, unregistered map[st
 	}
 	for _, g := range m.Groups {
 		nodes := members[g.Name] // oldest first
-		if size := max(g.Size, 0); len(nodes) > size {
-			for _, in := range nodes[size:] {
-				deletes = append(deletes, deleteNode(in, reasonSurplus))
+		if lost := view.surplus(m.Name, g, nodes); len(lost) > 0 {
+			var stay []cloud.Instance
+			for _, in := range nodes {
+				if lost[in.ID] {
+					deletes = append(deletes, deleteNode(in, reasonSurplus))
+				} else {
+					stay = append(stay, in)
+				}
 			}
-			nodes = nodes[:size]
+			nodes = stay
 		}
 		for _, in := range nodes {
 			if w, ok := waitFor(g, in); ok {

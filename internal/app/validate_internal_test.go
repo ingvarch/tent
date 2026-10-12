@@ -247,8 +247,8 @@ func TestMachineFailures(t *testing.T) {
 					Detail: "the cloud reports its machine (ID instance-4) as not running",
 				},
 				{
-					Check: "machine-surplus", Node: "prod-servers-3", ID: "instance-6",
-					Detail: "machine ID instance-6 is one more than the size of node group servers, 3",
+					Check: "machine-surplus", Node: "prod-servers-2", ID: "instance-3",
+					Detail: "machine ID instance-3 is one more than the size of node group servers, 3",
 				},
 				{
 					Check: "machine-duplicate", Node: "prod-servers-0", ID: "instance-9",
@@ -257,10 +257,6 @@ func TestMachineFailures(t *testing.T) {
 				{
 					Check: "machine-unknown", Node: "prod-old-0", ID: "instance-7",
 					Detail: "machine ID instance-7 is of node group old, which the specs do not have",
-				},
-				{
-					Check: "not-joined", Node: "prod-servers-2", ID: "instance-3",
-					Detail: "machine ID instance-3 has not joined Nomad: it carries no tent/joined label",
 				},
 			},
 		},

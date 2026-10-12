@@ -255,7 +255,7 @@ type machineSet struct {
 // planMachines plans the node changes for the machines instances of the cluster m, as an update does without any
 // machine that never registered, with the indexes next that tent remembers for the names of new servers.
 func planMachines(m *model.Cluster, instances []cloud.Instance, next map[string]int) machineSet {
-	changes, _ := planNodes(m, instances, nil, next)
+	changes, _ := planNodes(m, instances, nil, next, shrinkView{})
 	set := machineSet{changes: changes}
 	set.owned = slices.DeleteFunc(slices.Clone(instances), func(in cloud.Instance) bool { return in.Cluster != m.Name })
 	slices.SortStableFunc(set.owned, compareAge)

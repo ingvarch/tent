@@ -471,14 +471,14 @@ func (s *Service) planChanges(ctx context.Context, p cloud.Provider, m *model.Cl
 	if err != nil {
 		return UpdatePlan{}, machines{}, err
 	}
-	changes, servers := planNodes(m, instances, nil, next)
+	changes, servers := planNodes(m, instances, nil, next, shrinkView{})
 	stale := staleClients(m.Name, instances, s.now())
 	gone, err := s.unregistered(ctx, access, stale, servers)
 	if err != nil {
 		return UpdatePlan{}, machines{}, err
 	}
 	if len(gone) > 0 {
-		changes, servers = planNodes(m, instances, gone, next)
+		changes, servers = planNodes(m, instances, gone, next, shrinkView{})
 	}
 	return UpdatePlan{Infra: infra, Nodes: changes}, machines{servers: servers, listed: instances}, nil
 }
