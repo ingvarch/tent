@@ -26,7 +26,7 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0002](0002-direct-cloud-apis-and-own-engine.md) | Call cloud APIs directly and reconcile with an in-house engine | Accepted |
 | [0003](0003-cloud-is-source-of-truth.md) | The cloud is the source of truth: ownership labels and deterministic names | Accepted; extended by 0015 |
 | [0004](0004-layered-architecture.md) | Layered architecture: a cloud-agnostic core and providers that translate intents | Accepted; provider order changed by 0014; narrowed by 0021; amended by 0035 |
-| [0005](0005-immutable-nodes-and-nomad-aware-rollouts.md) | Immutable nodes and Nomad-aware rolling updates | Accepted; amended by 0017, 0030, 0031, 0032, 0035, 0037, 0038 and 0039 |
+| [0005](0005-immutable-nodes-and-nomad-aware-rollouts.md) | Immutable nodes and Nomad-aware rolling updates | Accepted; amended by 0017, 0030, 0031, 0032, 0035, 0037, 0038, 0039 and 0040 |
 | [0006](0006-two-binaries-and-nodeconfig.md) | Two binaries and a versioned NodeConfig contract | Accepted; extended by 0026; amended by 0027 and 0028 |
 | [0007](0007-security-baseline.md) | Security baseline: PKI, mTLS, ACL, client introduction | Accepted; see 0019; amended by 0024, 0029 and 0033 |
 | [0008](0008-node-credential-delivery.md) | Node credential delivery: user data in v1, bootstrap controller as the target | Accepted; exception in 0019; amended by 0029 and 0032 |
@@ -36,9 +36,9 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0012](0012-testing-strategy.md) | Testing strategy: fakes, golden integration tests, E2E on Hetzner | Accepted; E2E platform amended by 0014; E2E running and marking amended by 0034 |
 | [0013](0013-technology-stack.md) | Technology stack and release engineering | Accepted; govultr added by 0018; extended by 0020; JSON Schema generator and spec decoding libraries added by 0022 |
 | [0014](0014-vultr-first-provider-and-e2e.md) | Implement Vultr first and run the E2E suite on Vultr | Accepted; E2E rules amended by 0034 |
-| [0015](0015-idempotency-without-unique-names.md) | Idempotent creation on clouds without unique names | Accepted; amended by 0023 and 0032 |
+| [0015](0015-idempotency-without-unique-names.md) | Idempotent creation on clouds without unique names | Accepted; amended by 0023, 0032 and 0040 |
 | [0016](0016-server-discovery-seed-and-refresh.md) | Nomad server discovery with a seed list and tent-node refresh | Accepted; amended by 0027, 0030, 0031, 0035 and 0038 |
-| [0017](0017-api-driven-server-removal.md) | Remove Nomad servers through the Nomad API; ACPI shutdown is an optimization | Accepted; amended by 0030, 0031, 0035, 0036, 0038 and 0039 |
+| [0017](0017-api-driven-server-removal.md) | Remove Nomad servers through the Nomad API; ACPI shutdown is an optimization | Accepted; amended by 0030, 0031, 0035, 0036, 0038, 0039 and 0040 |
 | [0018](0018-vultr-provider-design.md) | Vultr provider design | Accepted (item 11 still provisional); amended by 0023, 0027, 0032, 0033 and 0034 |
 | [0019](0019-combined-server-client-role.md) | A combined server+client role for dev and small clusters | Accepted; amended by 0031, 0032, 0033 and 0039 |
 | [0020](0020-release-channels-and-ci-conventions.md) | Release channels and CI conventions | Accepted; amended by 0028 |
@@ -52,12 +52,13 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0028](0028-tent-node-agent-units-and-delivery.md) | tent-node agent, units and delivery | Accepted; amended by 0029 and 0030 |
 | [0029](0029-host-firewall-runtime-and-cni-on-nodes.md) | Host firewall, container runtime and CNI plugins on nodes | Accepted; amended by 0030 and 0032 |
 | [0030](0030-nomad-on-nodes.md) | Nomad on nodes | Accepted; amended by 0031, 0032, 0033 and 0038 |
-| [0031](0031-bootstrap-in-update.md) | Bootstrap in `update` | Accepted; amended by 0032, 0033, 0034, 0036, 0038 and 0039 |
-| [0032](0032-joined-label-scrub-and-delete-guard.md) | The joined label, the scrub and the delete guard | Accepted; amended by 0033, 0037 and 0039 |
-| [0033](0033-operator-commands.md) | Operator commands: validate, export nomad and ui | Accepted |
+| [0031](0031-bootstrap-in-update.md) | Bootstrap in `update` | Accepted; amended by 0032, 0033, 0034, 0036, 0038, 0039 and 0040 |
+| [0032](0032-joined-label-scrub-and-delete-guard.md) | The joined label, the scrub and the delete guard | Accepted; amended by 0033, 0037, 0039 and 0040 |
+| [0033](0033-operator-commands.md) | Operator commands: validate, export nomad and ui | Accepted; amended by 0040 |
 | [0034](0034-e2e-suite-on-vultr.md) | The E2E suite on Vultr | Accepted |
-| [0035](0035-rollout-decisions.md) | Rollout decisions | Accepted; the refusal of two voters and single servers is gone (built in M3.4); amended by 0036, 0037, 0038 and 0039 |
+| [0035](0035-rollout-decisions.md) | Rollout decisions | Accepted; the refusal of two voters and single servers is gone (built in M3.4); amended by 0036, 0037, 0038, 0039 and 0040 |
 | [0036](0036-nomad-calls-of-a-roll.md) | The Nomad calls of a roll | Accepted; amended by 0038 |
-| [0037](0037-rolling-update-of-client-groups.md) | Rolling update of client groups | Accepted; amended by 0038 and 0039 |
-| [0038](0038-rolling-update-of-server-groups.md) | Rolling update of server groups | Accepted; amended by 0039 |
-| [0039](0039-rolling-update-of-combined-groups.md) | Rolling update of combined groups | Accepted |
+| [0037](0037-rolling-update-of-client-groups.md) | Rolling update of client groups | Accepted; amended by 0038, 0039 and 0040 |
+| [0038](0038-rolling-update-of-server-groups.md) | Rolling update of server groups | Accepted; amended by 0039 and 0040 |
+| [0039](0039-rolling-update-of-combined-groups.md) | Rolling update of combined groups | Accepted; amended by 0040 |
+| [0040](0040-scale-down-through-the-rollout.md) | Scale down through the rollout | Accepted |

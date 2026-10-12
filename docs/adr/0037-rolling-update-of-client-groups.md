@@ -8,6 +8,10 @@
   and by [ADR-0039](0039-rolling-update-of-combined-groups.md) (item 11 and the follow-ups: combined groups roll; the
   loop carries out their steps, and a combined node has joined when its server votes and its node is ready and
   eligible)
+  and by
+  [ADR-0040](0040-scale-down-through-the-rollout.md) (the loop serves the removals of `update`; items 12, 14 and 15
+  changed: `update` names a new server or combined machine above the remembered index, a plan that may remove a node
+  that joined fails when the release files cannot be read, and the guard's text no longer names `rolling-update`)
 - **Date:** 2026-10-08
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),

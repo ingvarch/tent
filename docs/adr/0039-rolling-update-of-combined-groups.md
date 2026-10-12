@@ -1,6 +1,8 @@
 # ADR-0039: Rolling update of combined groups
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by
+  [ADR-0040](0040-scale-down-through-the-rollout.md) (a combined group shrinks in `update` with
+  `Shrink`; follow-up built)
 - **Date:** 2026-10-12
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),

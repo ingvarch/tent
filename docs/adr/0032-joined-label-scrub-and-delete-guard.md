@@ -6,6 +6,10 @@
   tent drains or removes a node safely, decision 34)
   and by [ADR-0039](0039-rolling-update-of-combined-groups.md) (the roll labels a combined node joined after both
   halves, as `update` does: its server votes and its node is ready and eligible)
+  and by
+  [ADR-0040](0040-scale-down-through-the-rollout.md) (decision 34 is built: the plan's refusal stays for two cases,
+  ADR-0040 item 13; a machine that the apply's guard finds joined is removed by the next run or refused by those
+  cases; a surplus machine is chosen by `rollout.Surplus`, one that has not joined first, where item 14 says by age)
 - **Date:** 2026-10-06
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),

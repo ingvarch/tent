@@ -410,6 +410,68 @@ The roll of combined groups rests on them ([ADR-0039](adr/0039-rolling-update-of
   the two transfers of the first runs; M3.4 saw 8 in 52 with servers); Linux with Docker. Vultr is in
   [3.16](#316-spike-runs).
 
+**Servers and drains in a scale-down** (lab of 2026-10-10, 03:23 to 03:40 UTC, local Nomad v2.0.7, darwin/arm64,
+`nomad` revision `9dcbdc5e`). Servers `s1` to `s7` ran on 127.0.0.1 with `leave_on_terminate = false`, `autopilot {
+cleanup_dead_servers = true }`, gossip encryption, ACL on and bootstrapped, mTLS on HTTP and RPC with
+`verify_server_hostname` and `verify_https_client`, `client_introduction { enforcement = "strict" }` and a
+`server_join { retry_join }` to the servers that existed. Clients `c1` (node class `a`) and `c2` (class `b`) ran
+`raw_exec` only, each with an intro token of TTL 30 minutes in `<data_dir>/client/intro_token.jwt` and the RPC address
+of `s1` alone in its configuration. Every request used the management token and an operator certificate, reads came
+every 0.5 s, and a stop is a SIGKILL of the agent. The scale-down of `update` and the growth of a server group rest on
+them ([ADR-0040](adr/0040-scale-down-through-the-rollout.md)).
+- **Growth from 1 to 3 and from 3 to 5.** `s1` ran alone with `bootstrap_expect = 1`; `s2` and `s3` (`bootstrap_expect =
+  3`, empty data directories) were started one after the other, then `s4` and `s5` (`bootstrap_expect = 5`).
+  - Each new server was a nonvoter in the Raft configuration at the first read, 0.5 s after its start, healthy in
+    autopilot's report at 1.1 to 2.1 s (`s2` and `s3`), and a voter after 16.8, 17.8, 21.4 and 18.3 s; the report showed
+    the vote 2 s later.
+  - `FailureTolerance` was 0 with two voters and 1 with three (from 1 to 3), 1 with four voters and 2 with five.
+  - The error `peer has a conflicting expect value. All nodes should expect the same number` was logged by every new
+    server, 1 to 4 times each, about the servers that expected another number. `s1` logged none. Nothing else followed
+    from it.
+- **A follower removed** in tent's order (stop, wait for the member to fail, peer removal, force-leave with prune,
+  wait for healthy).
+  - From five voters (`s5`): the member read `failed` 38.3 s after the stop; autopilot had removed the peer at 39.8 s
+    and answered 429 with `FailureTolerance` 1 and the server `left`; the force-leave with prune dropped the member at
+    once; healthy with four voters at 42.0 s.
+  - From three voters (`s4`): the peer was gone and the member `failed` at the read 48.3 s after the stop; healthy with
+    two voters, `FailureTolerance` 0, at 50.6 s.
+  - For `s7`, also from three voters, the member read `failed` 38.3 s after the stop. At 39.3 s autopilot answered 429
+    with `s7` still in its report as a voter that had left, and the Raft configuration still listed it; tent's
+    `RemovePeer` answered 200 in 0.02 s, the force-leave answered at 39.9 s, and the two servers read healthy at
+    41.4 s. For `s5`, `s1` and `s4` autopilot had removed the peer before tent's order came to that call.
+- **The leader removed from four voters** (`s1`): the transfer to `s2` answered 200 in 0.10 s; the next read, 0.2 s
+  after it, showed `s2` leading, every `StableSince` at the transfer's second and autopilot healthy, and none of the
+  reads in the 4 s watched was unhealthy. `s1` was stopped 4.2 s after the transfer (tent waits 70 s here): `failed`
+  at 35.4 s, its peer gone and 429 with `FailureTolerance` 0 at 36.4 s, healthy with three voters at 38.3 s.
+- **From two voters to one, with the hold** (`s3`, a follower; `s2` led since 03:28:42.254). The peer of the running
+  `s3` was removed at 03:30:42.902, 0.65 s after the leader's reconcile of 120 s (200 in 0.03 s). The leader added it
+  again as a nonvoter at 03:31:42.275, 180.02 s after it took the leadership and 59.4 s after the removal. The second
+  removal answered 200 in 0.01 s; the agent was stopped 2.1 s after the re-add, with `s2` alone in the Raft
+  configuration. A force-leave with prune answered 200; the member read `leaving` and was gone 6.3 s later. In the 135 s
+  after the stop, across the leader's reconciles at 240 s and 300 s, `s2` led with one healthy voter and nothing was
+  added.
+- **The server that was left, restarted.** `s2`'s configuration says `bootstrap_expect = 3`. It was stopped and
+  started again 3 s later: it logged `cluster leadership acquired` and answered as the leader of a Raft configuration
+  of itself 2.0 s after its start.
+- **Growth back from 1 to 3 under new names.** `s6` and `s7` (`bootstrap_expect = 3`) joined `s2`: nonvoters at 0.5 s,
+  voters after 19.4 and 17.8 s. Neither logged the error about the expect value, since `s2` expects 3 too.
+- **A new server under a removed server's name, after tent's own steps.** A new agent `s7` at the same address with an
+  empty data directory started 21.7 s after the prune. Its member was listed at 0.5 s (`leaving` at that read, `alive`
+  at 1.1 s). The leader added it as a nonvoter at 36.1 s and autopilot removed it 9.9 s later (`nomad.autopilot:
+  removed server`), and again at 95.8 s, removed at 105.8 s. In each of those spans autopilot answered 429 with
+  `FailureTolerance` 0 and an unnamed `left` nonvoter in its report. It did not vote in the 110 s watched. This is the
+  finding of the block on servers in a roll again, after a removal by tent.
+- **A drain whose allocations have nowhere to go** (a service job held on `c1` by a constraint on its node class, with
+  `migrate { max_parallel = 1, health_check = "task_states", min_healthy_time = "5s" }`; `c2` was ready and could not
+  take it; `c1` marked ineligible and drained with a deadline of 45 s and the meta `tent_machine`).
+  - One allocation: its desired status was `stop` at 3.2 s; the drain read `complete` and the allocation `complete` at
+    8.4 s. Its replacement stayed blocked, so the job ran nothing.
+  - Two allocations: the first got `stop` at 3.2 s and was complete at 8.4 s; the second ran on until the deadline. At
+    46.1 s the drain read `complete` while that allocation still read `running` with the desired status `stop`; 6 s
+    later both were complete.
+- **Not measured:** any of this on a real cloud (the runs of 2026-10-12 are in [3.16](#316-spike-runs)); combined
+  agents in a shrink; two new servers whose agents start in the same second; a drain of two nodes at once.
+
 **Heartbeats of a client whose server stops** (lab of 2026-10-10 on local Nomad 2.0.7, darwin/arm64, `nomad` revision
 `9dcbdc5e`: four servers and twelve clients on 127.0.0.1 with ACL, mTLS, gossip encryption and strict client
 introduction, one plain `raw_exec` job pinned to each client; the source lines are of v1.11.3, the closest on disk, and
@@ -945,6 +1007,11 @@ tag:
   [1.2](#12-features-tent-relies-on)). After a leader change every node that is not terminal gets
   `failover_heartbeat_ttl`, 300 s (read in the code and measured on 2026-10-10: [1.2](#12-features-tent-relies-on)), so
   a dead client can read `ready` for up to 5 minutes then.
+- **A client keeps its node through the removal of every server** (lab of 2026-10-10,
+  [1.2](#12-features-tent-relies-on)). `c1` and `c2`, each with the RPC address of `s1` alone in its configuration,
+  read `ready` and eligible at every read through the removal of five servers and the restart of the last one, and
+  still 5 min 35 s after that restart, past Nomad's 300 s timer after a leader change. `c2`'s log shows its RPCs going
+  to `s4`, then `s3`, then `s2` as the servers went.
 - **The node stays listed.** 5 minutes later it was still `down`; `node_gc_threshold` is 24 h (not waited for).
 - **A new client of the same name registers at once**, as a second node. With an empty data directory, the same HTTP
   address and a new intro token, `GET /v1/nodes` listed two nodes called `c1`: one `down` and one `ready`, with
@@ -2344,6 +2411,85 @@ first removal read the configuration after it. The script is fixed, and its anal
   `e2e-m35one-nodes-1`, with both jobs on it.
 - **Not measured:** a poll every second (the poller needed 1.3 to 2.4 s a poll); a system task that is cut at a stop
   (none was, in four stops of the two runs).
+
+**M3.6 scale-down, first run (2026-10-12, 18:19 to 18:38 UTC)**, tent `v0.1.0-78-g5b4ac01`, cluster `e2e-m36scale`,
+region `ams`, plan `vc2-1c-1gb`, ubuntu-24.04, Nomad 2.0.7: three servers and two workers, and a job of two allocations
+on distinct hosts, so that each worker runs one and the drain of a worker has one to stop. With one worker left that
+allocation has no other host: it read `complete` and was not placed again. A poller read the leader, the Raft
+configuration, autopilot, the nodes and the job's allocations over the operator's access. All four steps ran. The script
+ended FAILED at its last line for a wrong expectation of its own: it looked for the line `cluster <name> is up to date`,
+which only `update --yes` prints, and a plan without `--yes` prints `No changes.`. It stopped before the servers' logs
+were read and before the analysis. The analysis of the saved data has no failure, and the second run (below) reads the
+logs.
+- **Step 1, workers from 2 to 1** (the plan: `- node e2e-m36scale-workers-1 (ID ..., surplus, after a drain within
+  1h0m0s)`): the mark at 18:29:10, the drain 6.8 s, the delete at 18:29:17, where the run was cut. The plan 8 s later
+  read `No changes.` (the node still read `ready`). The node read `down` 35.4 s after the delete, at a poll. The plan
+  after that held `- Nomad node e2e-m36scale-workers-1 (10.64.0.7, down, no machine)` and `Nomad nodes: 1 to purge.`,
+  and `update --yes` purged it in 14 s: `Removed: 0 drained, 0 stopped, 1 purged.` The drained worker's allocation read
+  `complete` before the delete. The other worker's allocation ran at each of 222 polls, and its node stayed `ready`
+  through all four steps.
+- **Step 2, servers from 3 to 1** (the plan lists `-2` and `-0`; `-1` led and stays).
+  - `-2`: the stop call at 18:30:39 took 2.1 s, the last accepted connect came 0.3 s after the call began, Vultr listed
+    it stopped 2.4 s after, autopilot stopped counting it 42.5 s after, tent removed its peer at 18:31:21, and the
+    delete came 45.2 s after the stop.
+  - `-0`: the first `RemovePeer` at 18:31:26.1 (two voters to one), the hold from 18:31:27.9, the cut at 18:31:28. In
+    the 80 s that followed, the leader added `-0` again as a nonvoter (first seen at the poll of 18:32:15) and
+    autopilot promoted it (18:32:25).
+  - The second run removed its peer at 18:33:00.2, held from 18:33:02.4 for 14.7 s, saw the re-add (a nonvoter at the
+    poll of 18:33:15), removed it at 18:33:17.1, and sent the stop at 18:33:18.7, 2.8 s after that poll. The call took
+    2.6 s and the last accepted connect came 0.4 s after it began; the force-leave came 4.1 s and the delete 4.8 s after
+    the stop. That run took 36 s: `Nodes: 0 created, 0 waited for, 1 deleted. Removed: 0 drained, 1 stopped, 0
+    purged.` The Raft configuration never held two voters with one stopped. After it: valid with
+    `--allow-single-server`, two instances, one voter, one `alive` member.
+- **Step 3:** the server led again 59 s after the reboot call (uptime 41 s), with the worker ready and its allocation
+  running. Its `10-node.hcl` has `bootstrap_expect = 3`. The worker's `05-join.hcl` still named two addresses 69 s after
+  the shrink ended.
+- **Step 4, servers back to 3** (the plan: `+ node e2e-m36scale-servers-3` and `-4`): the create calls took 52.0 and
+  53.2 s; the servers were in the Raft configuration 53.7 and 46.3 s after their create's end and voted 74.0 and 61.1 s
+  after it; the run took 180 s. `names/servers` holds `4`; `validate cluster` exits 0; the servers `-1`, `-3` and `-4`
+  vote at their private addresses with a failure tolerance of 1; the next plan reads `No changes.`
+- **The service:** a leader answered at every poll outside the reboot: at 259 of the run's 297 polls, the other 38
+  falling between 18:33:32 and 18:34:24, while the server rebooted (one leader for the whole run). The polls were 1.7 s
+  apart in the median and at most 5.0 s; all 44 observation lines of the loop name a leader.
+
+**M3.6 scale-down, second run (2026-10-12, 18:39 to 18:59 UTC): passed**, the same tent, region and image, cluster
+`e2e-m36scale2`, the same four steps, plan lines and job as the first run. The script and the analysis report no
+failure. The cluster was deleted with no instance left. What differs from the first run:
+- **Step 1, workers from 2 to 1:** the delete at 18:49:30. The plan 7 s later read `No changes.` The node read `down`
+  36.9 s after the delete, and `update --yes` purged it in 13 s. The other worker's allocation ran and its node read
+  `ready` at each of 252 polls outside the reboot.
+- **Step 2, servers from 3 to 1** (the plan lists `-2` and `-1`; `-0` led and stays).
+  - `-2`: the stop call at 18:51:07 took 2.7 s, Vultr listed it stopped 12.8 s after, autopilot stopped counting it
+    39.9 s after, tent removed its peer at 18:51:47, and the delete came 41.6 s after the stop.
+  - `-1`: the first `RemovePeer` at 18:51:50, the cut in the hold (`failed to wait for the leader's reconcile: context
+    canceled`, `Error: interrupted`). The leader added `-1` again as a nonvoter (the poll of 18:52:03) and autopilot
+    promoted it (18:52:14).
+  - The second run held from 18:53:26 for 41.2 s (14.7 s in the first run: the leader's reconcile comes once a minute),
+    saw the re-add (a nonvoter at the poll of 18:54:04), removed the peer at 18:54:07 and sent the stop at 18:54:09,
+    4.9 s after that poll. That run took 62 s. The Raft configuration never held two voters with one stopped.
+- **Step 3:** the server led again 52 s after the reboot call. The worker's `05-join.hcl` named the one server alone
+  (`retry_join = ["10.64.0.3:4647"]`) at the first read, 60 s after the shrink ended; the first run's two addresses
+  were a file that `refresh-join` had not rewritten yet.
+- **Step 4, servers back to 3** (`Nomad: wait for 3 healthy servers.`): the create calls took 53.2 and 41.9 s; the
+  servers voted 61.2 and 60.6 s after their create's end; the run took 170 s. `names/servers` holds `4`, and the next
+  plan reads `No changes.`
+- **The servers' logs:** no line with `conflicting expect value` on any of the three servers. The agents started at
+  18:55:08 (`-0`, after its reboot), 18:57:15 (`-3`) and 18:57:55 (`-4`), 40 s apart or more.
+- **The service:** a leader answered at every poll outside the reboot: at 291 of the run's 322 polls, the other 31
+  falling between 18:54:25 and 18:55:08. The polls were 1.7 s apart in the median and at most 9.8 s; all 50
+  observation lines of the loop name a leader.
+- **Not measured:** a poll every second; two new servers whose agents start in the same second; combined agents in a
+  scale-down.
+
+**M3.6 cluster check (`awhnve`, spike v13 with the scale-down rows, `--only cluster`, 2026-10-12, 19:01 to 19:14
+UTC)** ran tent `v0.1.0-78-g5b4ac01`. Every row read as expected, and the client check was skipped. `tent create
+cluster --yes` exited 0 after 444 s; the leader showed at 204 s and the bootstrap, the healthy servers and the keyring
+at 205 s; the clients registered 119 s and 239 s after the leader line; five of five instances carried
+`tent/joined=true`. The rows of the scale-down, which stand where the rows of the delete guard stood: with one client
+in the specs `tent update cluster` exited 0 in 6 s with `- node spk-awhnve-workers-1 (ID ..., surplus, after a drain
+within 1h0m0s)` and five instances listed, and `tent update cluster --yes` exited 0 in 38 s and left four. With the
+saved specs back, `update --exit-code` exited 2 in 4 s with `+ node spk-awhnve-workers-1 (client, vc2-1c-1gb, ams)`,
+and `update --yes` exited 0 in 125 s and left five. `tent delete cluster --yes` exited 0 after 21 s and left nothing.
 
 **Still open:**
 - A halt whose call gets no answer, and how late Vultr may carry one out.

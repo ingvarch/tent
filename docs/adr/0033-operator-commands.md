@@ -1,6 +1,8 @@
 # ADR-0033: Operator commands: validate, export nomad and ui
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by
+  [ADR-0040](0040-scale-down-through-the-rollout.md) (`validate cluster` names the machines that `update` would
+  remove; a client that never registered reads `client-not-registered` and its replacement `machine-missing`)
 - **Date:** 2026-10-07
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0007](0007-security-baseline.md), [ADR-0018](0018-vultr-provider-design.md),

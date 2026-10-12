@@ -332,7 +332,7 @@ This table is also the check that the abstraction survives several providers.
 |---|---|---|
 | Cluster name | `^[a-z][a-z0-9-]{0,18}[a-z0-9]$` (≤ 20), except `con`, `prn`, `aux`, `nul`, `com1`–`com9` and `lpt1`–`lpt9` | prefix of every resource name. Names become state store keys, and Windows reserves the excluded ones ([10.1](#101-backends)). |
 | NodeGroup name | same rules (≤ 20) | a state store key too |
-| Machines | `<cluster>-<group>-<index>` (≤ 63) | Hetzner servers: index = slot. Otherwise the lowest free index; a roll gives a new server or combined node the index above the highest that its group has had ([13.3](#133-tent-rolling-update-cluster---yes)). Also the hostname and the Nomad node name. |
+| Machines | `<cluster>-<group>-<index>` (≤ 63) | Hetzner servers: index = slot. Otherwise a client group takes the lowest free index, and a new server or combined node, of `update` or of a roll, takes the index above the highest that its group has had ([10.2](#102-layout), [13.4](#134-scaling)). Also the hostname and the Nomad node name. |
 | Network | `<cluster>` | Vultr: VPC description carries the ownership marker |
 | Firewalls | Hetzner: `<cluster>-nodes`, `<cluster>-servers`; Vultr: `<cluster>-servers`, `<cluster>-clients` | Vultr: the clients' group exists only with a client group ([11.5](#115-firewall-and-host-firewall)) |
 | Placement groups (Hetzner) | `<cluster>-<group>-<shard>` | shards of ≤ 10 servers |
@@ -413,8 +413,8 @@ This split is the central decision.
    - `internal/rollout` decides. `Next` takes what the cloud lists and what Nomad reports and returns the next step,
      and it calls nothing ([ADR-0035](adr/0035-rollout-decisions.md)).
    - `internal/app` carries the steps out: it observes, calls `Next`, does the step with the provider primitives
-     (`List`, `Create`, `Stop` and `Delete`) and `internal/nomadops`, and observes again. It does so from M3.3 on, for
-     `rolling-update`, and from M3.6 on for the removals of `update`.
+     (`List`, `Create`, `Stop` and `Delete`) and `internal/nomadops`, and observes again. It does so for
+     `rolling-update`, and for the removals of `update` ([ADR-0040](adr/0040-scale-down-through-the-rollout.md)).
    - Nodes are **not** tasks in the engine graph. In kops the Hetzner "ServerGroup" is a task, so replacing one node
      re-runs the whole plan.
 3. **Nomad configuration**: agent config, TLS material, ACL bootstrap, node pool membership and the rest of day-1
@@ -492,13 +492,16 @@ github.com/ingvarch/tent
 └── docs/                # this document, ADRs, platform notes, roadmap
 ```
 
-The node planner of M1, which scales node groups without Nomad ([13.4](#134-scaling)), is in `internal/app`. Since M3.1
+The node planner of `update` ([13.4](#134-scaling)) is in `internal/app`. Since M3.1
 the pure helpers that it shares with the rollout decisions are in `internal/rollout`: `NodeName`, `FreeName` (the
 lowest free index), `LeastUsedZone` and `CompareCreated` (a machine without a creation time counts as the newest).
-`planNodes` calls them there. The rest of the planner moves to `internal/rollout` with the removals of `update`
-(M3.6, [ADR-0005](adr/0005-immutable-nodes-and-nomad-aware-rollouts.md),
-[ADR-0035](adr/0035-rollout-decisions.md)). `validate cluster` is in `internal/app` as well, since it reuses that
-planner ([13.6](#136-tent-validate-cluster---wait-duration), [ADR-0033](adr/0033-operator-commands.md)).
+`planNodes` calls them there. The choice of the machines that a group loses (`Surplus`) and the index of a new server
+or combined machine (`NextIndex`) are in `internal/rollout` too, and `planNodes` calls them
+([ADR-0040](adr/0040-scale-down-through-the-rollout.md)). The rules that read `cloud.Instance` stay in the planner:
+which machines are the cluster's, the rule that keeps one of several machines of one name, the machines of groups
+that the specs lack, the clients that never registered, the waits and the creates. `validate cluster` is in
+`internal/app` as well, since it reuses that planner ([13.6](#136-tent-validate-cluster---wait-duration),
+[ADR-0033](adr/0033-operator-commands.md)).
 
 `depguard` in golangci-lint enforces the dependency rules ([ADR-0021](adr/0021-import-rules.md)):
 
@@ -1911,7 +1914,9 @@ and writes it. A server group's new machine takes the index above it ([13.3](#13
   apply sends no extra request.
 - **A run uses the index it stored itself:** the decisions of a roll take the stored value at every poll, so the
   create of a run moves the floor of the same run.
-- **The planner of `update` does not read it to name a machine yet;** see [13.4](#134-scaling).
+- **The planner of `update` reads it to name a new server or combined machine,** from the index above it on, one
+  higher for each further create of the plan ([13.4](#134-scaling),
+  [ADR-0040](adr/0040-scale-down-through-the-rollout.md)). A client group keeps the lowest free name.
 
 Names that start with `.` belong to the backends, and `List` never returns them: `.tent-store.lock` and
 `.tent-locks/` in the root of a `file://` store, the temp files of its writes (`.tent-tmp-*`), and the objects that
@@ -2184,17 +2189,19 @@ create that may have been carried out is never sent again.
   - `Nodes.Delete` sends `DELETE /v2/instances/{id}`, which destroys the instance at once, even while it runs.
   - An instance that is gone (404) counts as stopped or deleted. Other errors name the node, such as
     `stop node prod-servers-0 (<id>): …`.
-- **Until M3.6, `update` deletes only nodes that never joined.** It refuses to delete a machine that carries
-  `tent/joined=true`, and checks with Nomad before each delete ([13.4](#134-scaling),
-  [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)). The paths below are the target; `delete cluster`
-  destroys every machine as before.
-- **Servers** follow the Nomad-API removal path of [ADR-0017](adr/0017-api-driven-server-removal.md):
-  1. surge;
-  2. transfer leadership if needed;
-  3. `DELETE` the old instance;
-  4. remove the Raft peer, then `force-leave` with `prune`;
-  5. verify.
-- **Clients:** drain through the Nomad API → `DELETE` → purge.
+- **`update` deletes a machine that never joined at once**, after it asked Nomad
+  ([ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)), and removes a node that joined through the loop of
+  `rolling-update` ([13.4](#134-scaling), [ADR-0040](adr/0040-scale-down-through-the-rollout.md)). `delete cluster`
+  destroys every machine without these steps.
+- **Servers** follow the removal path of [ADR-0017](adr/0017-api-driven-server-removal.md) as
+  [ADR-0038](adr/0038-rolling-update-of-server-groups.md) built it:
+  1. in a roll, the new server first (a scale-down creates none);
+  2. transfer leadership if the victim leads;
+  3. stop the old instance (`Nodes.Stop`) and wait until autopilot no longer counts its server;
+  4. remove the Raft peer, then `force-leave` with `prune` (beside fewer than two other voters the peer goes first and
+     the stop is held);
+  5. wait for healthy servers, then `DELETE` the instance.
+- **Clients:** mark ineligible → drain through the Nomad API → `DELETE` → purge once Nomad lists the node down.
 
 ### 11.5 Firewall and host firewall
 
@@ -2560,16 +2567,17 @@ groups to the specs. Since M2.7a it also builds the Nomad cluster on them: serve
 ACL system bootstrapped with the stored secret, healthy servers that all vote, and clients with intro tokens that
 register ([ADR-0031](adr/0031-bootstrap-in-update.md)). Before M2.7a the nodes were empty machines that booted a
 placeholder cloud-config without secrets. Since M2.7b it scrubs the user data of each node that has joined and labels
-its machine, replaces a client that never registered, and refuses to delete a node that joined
-([ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)).
+its machine, and replaces a client that never registered
+([ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)). Since M3.6 it also removes the nodes that a smaller spec
+no longer has, those that joined included ([ADR-0040](adr/0040-scale-down-through-the-rollout.md)).
 
 ```
  1. load specs → defaults → validate → the channel and the Nomad version (M2.2) → provider.Validate (region, plans,
     images)
- 2. plan: inventory → provider.BuildInfra → engine plan; Nodes.List → node changes (13.4), which asks Nomad when
-    a client may never have registered; the refusal to delete a node that joined; the completed spec; the missing
-    secrets (M2.1); the Nomad step; for a plan that creates a node or repeats the create of one, the assets, a node
-    config per group and the size of each node's user data
+ 2. plan: inventory → provider.BuildInfra → engine plan; Nodes.List → node changes (13.4), which asks Nomad for
+    its nodes and, when a node that joined may go, for what a roll observes; the refusals about nodes that joined;
+    the completed spec; the missing secrets (M2.1); the Nomad step; for a plan that creates a node or repeats the
+    create of one, the assets, a node config per group and the size of each node's user data
  3. without --yes: print the plan and stop
  4. lock → check the tent version → steps 1 and 2 again; the plan made under the lock is the one applied
  5. raise the tent version → write the missing secrets → write the completed spec when the plan says so → raise the
@@ -2585,8 +2593,10 @@ its machine, replaces a client that never registered, and refuses to delete a no
  9. client nodes: the waits; then the deletes of clients that never registered; then the creates, one at a time, by
     group and index. A create, and a wait that repeats one, boots the machine with an intro token. Each client is
     waited for until it has registered, then scrubbed and labelled, before the next change
-10. node deletes, one at a time, by name: duplicates, surplus nodes, nodes of groups not in the spec; each after
-    Nomad's answer that its machine has not joined
+10. the deletes of machines that never joined, one at a time, by name: duplicates, surplus machines, machines of groups
+    not in the spec; each after Nomad's answer that its machine has not joined
+    → the removals of nodes that joined and the purges of nodes without a machine: the loop of rolling-update in the
+    mode Shrink (13.4)
 11. the infrastructure's deletes: prune and duplicates (Plan.ApplyDeletes) → unlock
 ```
 
@@ -2631,9 +2641,16 @@ its machine, replaces a client that never registered, and refuses to delete a no
     - node prod-old-0 (ID instance-7, not in the spec)
     - node prod-workers-0 (ID instance-5, duplicate)
     - node prod-workers-3 (ID instance-8, surplus)
+    - node prod-all-2 (ID instance-3, surplus, after a drain within 1h0m0s and after its server leaves the cluster)
+    - node prod-servers-4 (ID instance-11, surplus, after its server leaves the cluster)
+    - node prod-old-1 (ID instance-10, not in the spec, after a drain within 1h0m0s)
+    - node prod-workers-1 (ID instance-9, surplus, after a drain within 30m0s)
+    - Nomad node prod-old-2 (10.64.0.7, down, no machine)
+    - Nomad node prod-workers-5 (10.64.0.9, down, no machine)
 
     Plan: 2 to create, 1 to update, 0 to replace, 1 to delete.
-    Nodes: 2 to create, 1 to wait for, 3 to delete.
+    Nodes: 2 to create, 1 to wait for, 7 to delete.
+    Nomad nodes: 2 to purge.
     Nomad: bootstrap the ACL system and wait for 3 healthy servers.
     State: pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token, cluster.completed.yaml and nomad/bootstrapped will be written.
     Outdated: prod-servers-0 and prod-workers-2; tent rolling-update cluster replaces them.
@@ -2647,16 +2664,21 @@ its machine, replaces a client that never registered, and refuses to delete a no
     changed, such as `Applied: 4 created, 0 updated, 0 replaced, 0 deleted. Nodes: 5 created, 0 waited for, 0
     deleted. Nomad: bootstrapped the ACL system; 3 servers are healthy. Wrote pki/private/ca.key,
     pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token, cluster.completed.yaml and
-    nomad/bootstrapped.` Without a bootstrap the Nomad part is `Nomad: 3 servers are healthy.` The writes to the
+    nomad/bootstrapped.` Without a bootstrap the Nomad part is `Nomad: 3 servers are healthy.` A run that drained,
+    stopped or purged something adds `Removed: 2 drained, 1 stopped, 2 purged.` after the nodes part. The writes to the
     state store print no progress lines. A cluster without changes prints `cluster prod is up to date`, followed by
     the `Outdated:` line when machines are outdated.
-  - `-o json` and `-o yaml` print the plan as data: `{"infrastructure": <the engine's plan>, "nodes": [...], "outdated":
-    [], "nomad": {"bootstrap": true, "servers": 3}, "secrets": ["pki/private/ca.key", ...], "completedSpec": true}`, the
-    node changes in the order they run and the secrets in the order they are written. `outdated` lists the outdated
-    machines (`name`, `id`, `group` and `reason`), and is `[]` when there are none. A create, and a wait that repeats a
-    create, carry `"specHash"`, the hash of the group's node configuration; a wait without an operation id has neither
-    `op` nor `specHash`. `nomad` is left out when the plan has no Nomad step, and `secrets` when the store holds them
-    all. With `--yes` they print only the plan that was applied, with `"applied": true`.
+  - `-o json` and `-o yaml` print the plan as data: `{"infrastructure": <the engine's plan>, "nodes": [...], "purges":
+    [...], "outdated": [], "nomad": {"bootstrap": true, "servers": 3}, "secrets": ["pki/private/ca.key", ...],
+    "completedSpec": true}`, the node changes in the order they run and the secrets in the order they are written.
+    The delete of a node that joined carries `"drain"` (the deadline, such as `"30m0s"`) for a client and `"server":
+    true` for a server. `purges` lists the nodes to purge (`name`, `address`, `id` and `group`) and is left out when
+    there are none; an applied plan adds `"removed": {"drained": 2, "stopped": 1, "purged": 3}` unless all three are 0.
+    `outdated` lists the outdated machines (`name`, `id`, `group` and `reason`), and is `[]` when there are none. A
+    create, and a wait that repeats a create, carry `"specHash"`, the hash of the group's node configuration; a wait
+    without an operation id has neither `op` nor `specHash`. `nomad` is left out when the plan has no Nomad step, and
+    `secrets` when the store holds them all. With `--yes` they print only the plan that was applied, with `"applied":
+    true`.
 - **`--exit-code`.** Without `--yes`, a plan with changes makes tent exit with 2 and print no error, for drift
   detection in CI. Outdated nodes are no change and never make it exit with 2. With `--yes` it is refused.
 
@@ -2670,9 +2692,28 @@ nodes, step 12 of the target below.
   Every tent
   release, a new CA bundle or a change of any hashed file makes every node outdated, and `update` reports them and
   exits with 0.
-- **When the files cannot be read.** A plan that creates no node goes on without the report and tells `OnWarning`
-  once, `tent could not tell which nodes are outdated: <error>`. A plan that creates a node fails, as it did before.
+- **When the files cannot be read.** A plan that creates no node and may remove no node that joined goes on without
+  the report and without a purge, and tells `OnWarning` once, `tent could not tell which nodes are outdated:
+  <error>`. A plan that creates a node fails, as it did before, and so does a plan that may remove a node that joined.
   When the run's context ends, the read fails with the interruption and `update` ends.
+
+**Built in M3.6** ([ADR-0040](adr/0040-scale-down-through-the-rollout.md), decision 34). The removals of nodes that
+joined and the purges of nodes without a machine, in step 10 above. How the machines are chosen and what the loop does
+is in [13.4](#removing-nodes-that-joined).
+- **Nomad in a plan.** Every plan of a cluster that can answer reads Nomad's nodes with one `Nodes` call: the store
+  holds the bootstrap mark, and a server or combined machine has joined, runs and has a public address. The question
+  of decision 28 ([13.4](#a-client-that-never-registered)) shares the call. `Update` plans twice when it applies, so an
+  applied run reads twice. A node of a deleted machine shows nowhere else, so a plan that removes nothing reads too.
+  - A read that fails is a warning when no client is to be judged and no node that joined may go: `tent could not ask
+    Nomad whether a node of a deleted machine is left: <error>`, told once to `OnWarning` after the first plan, and the
+    plan lists no purge. The removals and the purges are the only new use of Nomad in an apply, so an `update --yes`
+    that only widens `access.api` still applies when the API cannot be reached.
+  - A plan that may remove a node that joined reads what a roll observes (`Peers`, `Health`, `Members`, `Nodes`) and
+    needs the release files for the spec hashes. A read that fails ends the plan with the read's error.
+- **Changes.** A removal is a change, so is a purge, and `update --exit-code` exits with 2 for either. A purge appears
+  only when Nomad lists the node as down, so a plan that comes sooner than that shows no change for it.
+- **The loop** runs inside the lock that `update` holds, after the deletes of step 10. A first Ctrl-C ends it at the
+  next poll with `Error: interrupted`; nothing is undone, and the next `update` goes on.
 
 **Built in M2.1.** Step 2 of the target below, ensure secrets, runs after tent raises the tent version and before the
 infrastructure (step 5 above). The secrets are the CA's key and bundle, the gossip key and the ACL bootstrap secret
@@ -2819,8 +2860,9 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
 `internal/app` and reaches Nomad only through `internal/nomadops`.
 - **The order of node changes.** The waits for server and combined nodes run first, by name; then their creates, by
   group, then index; then the waits of client nodes, the deletes of clients that never registered (M2.7b), and the
-  creates of client nodes, in the same order; the other deletes come last, by name, then ID. A wait is ranked by the
-  machine's own role label: every role other than client, an empty one included, counts with the servers. The reason
+  creates of client nodes, in the same order; then the other deletes of machines that never joined, by name, then ID;
+  the removals of nodes that joined come last, in the order of [13.4](#removing-nodes-that-joined). A wait is ranked by
+  the machine's own role label: every role other than client, an empty one included, counts with the servers. The reason
   for the order is in [11.2](#112-server-discovery-seed-and-refresh).
 - **Node configs.** A plan that creates a node, or waits for one with an operation id, asks the provider for the
   architecture of each distinct machine type of the groups (`Provider.Arch`, [8.6](#86-operating-systems)) and makes
@@ -2867,8 +2909,8 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
     the bootstrap. Neither the delete nor the put of the mark sends a progress event.
   - **No Nomad client.** The service's Nomad factory must be set when the plan has a Nomad step, a client create or
     wait, or a node delete. Without it the apply fails at its start with `no Nomad client is set up`, before it raises
-    the tent version or writes anything. A plan without `--yes` fails only when it must ask Nomad about a client that
-    may never have registered ([13.4](#134-scaling)).
+    the tent version or writes anything. A plan without `--yes` fails only when it must ask Nomad: about a client that
+    may never have registered, or, since M3.6, when a node that joined may go ([13.4](#134-scaling)).
   - **The calls.** One `nomadops` client per known server with a public address, at `<public IP>:4646`, with the
     region, the CA bundle, the operator certificate and the bootstrap secret as the token, over `nomadops.Servers`. A
     cluster with no such server fails with `cluster prod: no server has a public address`. Then `WaitLeader`; with the
@@ -2936,8 +2978,8 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
     or a vote check meets a machine without an address.
 - **Calls.** On the fakes, a build of three servers and two clients makes one `Peers` call, then one `GetInstance` and
   one `UpdateInstance` per server; each client's `Nodes` wait is followed by its own pair
-  (`internal/app/testdata/flow_build.calls.golden`). A second `update --yes` plans nothing, makes no Nomad call and
-  only reads the cloud.
+  (`internal/app/testdata/flow_build.calls.golden`). A second `update --yes` plans nothing, makes one Nomad call, the
+  `Nodes` read of its plan (since M3.6), and only reads the cloud.
 
 **Target, with Nomad.** The whole flow:
 
@@ -2953,6 +2995,7 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
  7. clients: for each missing node → intro token → Nodes.Create (seeded with current server IPs) → wait ready
  8. scrub the user data of nodes that joined and label them (Nodes.MarkJoined)
  9. scale down surplus nodes: drain → stop/delete → purge
+    (built in M3.6, after the deletes of machines that never joined)
 10. apply the plan's deletes, the prune and the duplicates (a second engine pass)
 11. validate → write the history → unlock
 12. report: "N nodes are out of date (reason: config diff) → run tent rolling-update cluster"
@@ -2963,8 +3006,10 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
   scrubbed after they are healthy and before the mark is written, and each client is scrubbed right after it
   registers. The day-1 configuration (step 6, without node pools: decision
   17 of [18](#18-open-questions)) is not built.
-- The drain and the purge (step 9) and the history (step 11) are not built yet; M3.6 builds step 9 with the steps of
-  `rolling-update`. The report of outdated nodes (step 12) is built in M3.3. `tent validate cluster` is built
+- The drain and the purge (step 9) are built in M3.6 with the steps of `rolling-update`. They run in step 10 of the
+  built flow above: after the deletes of machines that never joined, and before the infrastructure's deletes (step 10
+  of this list). The history (step 11) is not built.
+  The report of outdated nodes (step 12) is built in M3.3. `tent validate cluster` is built
   ([13.6](#136-tent-validate-cluster---wait-duration)), but `update` does not call it at its end: that part of step
   11 stays a target.
 
@@ -2976,8 +3021,8 @@ Built in parts: M3.1 built the decisions (`internal/rollout`, [ADR-0035](adr/003
 Nomad calls ([ADR-0036](adr/0036-nomad-calls-of-a-roll.md)) and M3.3 the command for client groups, with its loop
 ([ADR-0037](adr/0037-rolling-update-of-client-groups.md)). M3.4 added the steps of server groups, a group of one
 server included, and the Raft and gossip calls ([ADR-0038](adr/0038-rolling-update-of-server-groups.md)). M3.5 added
-combined groups ([ADR-0039](adr/0039-rolling-update-of-combined-groups.md)), and M3.6 wires the removals into
-`update`.
+combined groups ([ADR-0039](adr/0039-rolling-update-of-combined-groups.md)), and M3.6 wired the removals into
+`update` ([ADR-0040](adr/0040-scale-down-through-the-rollout.md)).
 
 **Built in M3.3 to M3.5.** `tent rolling-update cluster [NAME] [--yes] [--nodegroups a,b] [--force] [--exit-code]
 [--allow-single-server]`, in `internal/app` (`Service.RollingUpdate`) and `internal/cli`. It rolls client groups (M3.3),
@@ -3026,7 +3071,8 @@ server groups (M3.4) and combined groups (M3.5).
   - **Carrying out.** A client's create is `bootClient` with an operation id that the loop makes, and a server's is
     `bootServer`, which `update` uses too: the seed and no intro token. A mark, a drain, a purge, a transfer, a peer
     removal and a force-leave are the calls of [ADR-0036](adr/0036-nomad-calls-of-a-roll.md). A stop is `Nodes.Stop`. A
-    delete is `Nodes.Delete` without `update`'s guard, which refuses joined nodes because `update` does not drain them.
+    delete is `Nodes.Delete` without `update`'s guard, which asks Nomad before it deletes a machine that is not known to
+    have joined.
   - **Waiting for a new node to join.** At each poll, the first that applies: the cloud reports the machine not ready
     and its operation id is valid, so the create is repeated with it; the cloud reports no private address (`node
     prod-workers-2: the cloud reports no private address for it yet; run the command again`); the machine has joined
@@ -3101,20 +3147,19 @@ server groups (M3.4) and combined groups (M3.5).
     does: it counted a killed server healthy until Serf marked it failed, 36 to 66 s after the kill, and removed its
     peer 1.3 to 6.4 s later. The decisions then skip `RemovePeer`; when tent's comes first, autopilot finds nothing to
     remove. `WaitServerDown` stays, since it shows that the machine stopped before its peer goes.
-  - A cut a second after a create's answer, followed by a run whose list misses the machine, can leave two machines of
-    one name: a roll of a client group names from the listed machines and Nomad's nodes, and `update` names from the
-    listed machines alone. `rollout` refuses them
-    (`node group servers: machines instance-9 and instance-10 share the name prod-servers-3; run tent update cluster
-    first`). `update` deletes the twin that has not joined, since its guard asks
-    Nomad and not the label; when both joined, its guard refuses ([13.4](#the-delete-guard)). When both booted and
-    entered the Raft configuration, the operator deletes one machine in the cloud and removes it from Nomad. Whether
-    two live servers of one name can both join the gossip pool is not measured. A roll of a server or combined group
-    makes no twin: it reads the remembered index, so a run whose list misses a server that a cut run created takes the
-    next name. The group then has `size + 2` machines for a round, and the decisions remove two old servers before the
-    next create.
+  - A cut a second after a create's answer, followed by a run whose list misses the machine, makes no twin of a server
+    or combined machine: the next create takes the next name above the remembered index. After a roll the group has
+    `size + 2` machines for a round, and the decisions remove two old servers before the next create. After `update`
+    it has one machine more than its size; the guard labels the missed server when it finds it in the Raft
+    configuration, and the next run removes the newest ([13.4](#134-scaling)). A client group of `update` is named from
+    the listed machines alone and can get two machines of one name. `rollout` refuses them (`node group workers:
+    machines instance-9 and instance-10 share the name prod-workers-3; run tent update cluster first`). `update`
+    deletes the twin that has not joined, since its guard asks Nomad and not the label; when both joined, its plan
+    refuses ([13.4](#the-delete-guard)), and the operator deletes one machine in the cloud and removes it from Nomad.
 - **Names.** A new node takes the lowest `<cluster>-<group>-<index>` that no machine of the cluster has and of which
   Nomad lists no node, in any status. A purge frees a name. A group of 3 with `maxSurge` 1 may so have
-  `prod-workers-4`, and keeps such names. `update`'s planner still names from the machines alone ([13.4](#134-scaling)).
+  `prod-workers-4`, and keeps such names. `update`'s planner names a client group from the machines alone, and a server
+  or combined group above the remembered index ([13.4](#134-scaling)).
   - **Server and combined groups** take the index above the highest of these (decisions 43 and 48): the index that
     tent remembers for the group ([10.2](#102-layout)), and the highest `<cluster>-<group>-<digits>` that a listed
     machine, a server of the Raft configuration or a member of the gossip pool has (the region is cut off a server's and
@@ -3422,13 +3467,16 @@ address.
 instances with the cluster's label count. A node group's nodes are the instances whose group label names it. The
 planner is in `internal/app`; its shared helpers are in `internal/rollout`
 ([5](#5-repository-layout-and-dependency-rules)).
-- **Scale up.** A missing node gets the lowest free index: its name `<cluster>-<group>-<index>` is one that no listed
-  instance of the cluster has, whatever its group. The planner does not read the highest name index of a server or
-  combined group ([10.2](#102-layout)) yet, so a new server can take the name of a removed one; M3.6 builds that. It
-  goes into the group's zone with the fewest nodes, the zone listed first on a tie.
-- **Scale down.** A group with more nodes than its size loses the newest ones, by creation time, then by id. Until
-  M3.6 `update` drains nothing, so it deletes only machines that never joined: a delete of a machine that carries the
-  joined label fails the plan ([the guard](#the-delete-guard) below).
+- **Scale up.** A missing node of a client group gets the lowest free index: its name `<cluster>-<group>-<index>` is
+  one that no listed instance of the cluster has, whatever its group. A missing node of a server or combined group
+  takes `rollout.NextIndex`: the index above the highest that a listed machine has and above the index that tent
+  remembers for the group ([10.2](#102-layout)), one higher for each further create of the plan. Names so only grow:
+  `-0`, `-1` and `-2` with `-2` deleted gives `-3`, and a cluster whose machines are all gone is built again as `-3`,
+  `-4` and `-5`. A cut after the write of the index and before the create leaves a gap. The node goes into the group's
+  zone with the fewest nodes, the zone listed first on a tie.
+- **Scale down.** A group with more nodes than its size loses the machines that `rollout.Surplus` lists. A machine
+  that never joined is deleted at once. A machine that joined is removed through the rollout decisions
+  ([below](#removing-nodes-that-joined)).
 - **Zones.** A node in a zone that its group no longer lists counts toward the group's size and stays. New nodes go
   only into the listed zones.
 - **Duplicates.** Of instances with one name, one that carries the joined label stays before one that does not, then
@@ -3436,11 +3484,86 @@ planner is in `internal/app`; its shared helpers are in `internal/rollout`
   as `duplicate`. A twin that registered, which carries no label yet, is labelled by the guard and stays at the next
   plan.
 - **Groups not in the spec.** An instance whose group label names no group of the spec, or is empty, is deleted as
-  `not in the spec`.
+  `not in the spec`. If it joined, the machine of a client group is removed through the rollout and any other is
+  refused ([the guard](#the-delete-guard)).
 - **Nodes that have not joined.** A machine that stays and carries no joined label, left by an interrupted run,
   counts, and `update` waits for it ([13.2](#132-tent-update-cluster---yes)). When the cloud reports it not ready and
   its operation id is valid, the wait calls `Create` with that id. A machine that is ready, or has no valid operation
   id, is waited for until its node joins, and the wait calls no cloud until the scrub.
+
+#### Removing nodes that joined
+
+Built in M3.6 ([ADR-0040](adr/0040-scale-down-through-the-rollout.md), decision 34). The machines are chosen by
+`rollout.Surplus`; the planner of `update` calls it for every group above its size, and the loop of `rolling-update`
+carries the removals out in the mode `Shrink` ([13.3](#133-tent-rolling-update-cluster---yes)).
+- **Which machines.** `Surplus` picks one machine at a time, the first of the machines that are left, with the zones
+  counted over those. The order for a client group: a machine whose removal has started (a drain that completed, a
+  drain under way, an ineligible node), one that has not joined, an outdated one, one whose node is not available, one
+  in the zone with the most machines, the newest, then the highest ID. For a server or combined group: removal started,
+  not joined, outdated, not counted healthy by autopilot, not the leader, the fullest zone, the newest. A client machine
+  that joined and has no private address in the cloud's list comes before all of them, and no step is taken on it. The
+  cloud lists a deleted machine so for a moment: a plan made then shows it as a removal like any other (`- node
+  prod-workers-1 (ID instance-5, surplus, after a drain within 10m0s)`), nothing is sent for it, and no machine with an
+  address goes in its place. A group that only such a machine keeps above its size is refused, in a plan and in a run
+  that has sent no write: `node group workers: cannot go on: prod-workers-1 has no node in Nomad: the cloud reports no
+  private address for it; with maxUnavailable 1 no surplus node can be removed`. A run that has sent a write waits up to
+  a minute for the cloud to stop listing the machine.
+- **Which view of Nomad it uses.** With the nodes and the Raft state read from Nomad, `Surplus` uses them. Without them
+  (a plan that removes no node that joined, `validate` when it cannot ask) the planner trusts the joined label: a
+  joined server machine is a healthy voter, a joined client machine a ready, eligible node, and no machine is
+  outdated.
+- **The plan.** A delete of a node that joined says how it goes: `after a drain within 30m0s` for a client, `after its
+  server leaves the cluster` for a server, both for a combined node. In `UpdatePlan.Nodes` the removals come last: the
+  server and combined groups first, each in the order in which `Surplus` loses its machines, then the client groups by
+  name, each group's machines by name.
+- **The read of Nomad** is in [13.2](#132-tent-update-cluster---yes). The whole observation is read when a node that
+  joined may go (`removesJoined`): a group above its size has a machine with the joined label, or a client of a group
+  that the specs lack has it. The plan then asks `rollout.Next` in the mode `Shrink` about the removals, once on the
+  whole state and then about each group that loses a node alone. A refusal fails the plan whole, with and without
+  `--yes` and with `--exit-code`, before any change: `update cannot remove prod-servers-4 and prod-servers-3: node group
+  servers: autopilot reports the servers unhealthy (prod-servers-1); tent removes a server only while every server is
+  healthy`. The refusals are those of `rollout`, such as a group whose role changed, a server without a private address
+  and a leader with no other healthy voter that stays.
+- **No server to ask.** A plan that removes a node that joined fails: `update would remove a node that joined Nomad:
+  prod-workers-1 (ID i-5, surplus); cluster prod has no server that joined and runs for tent to ask: keep this node in
+  the specs until the servers run, or delete the whole cluster with tent delete cluster` (`nodes that joined ... keep
+  these nodes` for several). A plan without a removal goes on by the labels.
+- **A client group that the specs lack** is given to the decisions with size 0, no limit on unavailable nodes and the
+  default `drainTimeout`, `1h`. All its nodes are marked and drained together. A server or combined group that the
+  specs lack is refused.
+- **Purges.** A node that Nomad lists as `down` and that no listed machine has at its name and address is purged:
+  the nodes of client and combined groups, and those of a client group that the specs lack (by the group in the node's
+  name, `rollout.GroupOfNode`). A node that is not down is not listed and never purged; a run that works on its group
+  waits up to 6 minutes for it to read down (C8, [13.3](#133-tent-rolling-update-cluster---yes)) and purges it then. A
+  node of a server group is left alone. A group that `rollout` refuses gets no purge. A down node whose name and
+  address a create of the same plan takes again is not purged. An applied update can purge more nodes than its plan
+  lists, such as the node of a machine that a cut run deleted at the last delete. Text: `- Nomad node prod-workers-5
+  (10.64.0.9, down, no machine)` and `Nomad nodes: 1 to purge.`
+- **The apply** ([13.2](#132-tent-update-cluster---yes), step 10). It keeps the IDs of the machines that it deleted
+  before the loop and gives them to the loop as deleted ones, counted as a write of the run. The loop lists the
+  machines afresh, makes the Nomad API over the server machines that joined and run, and removes only machines that the
+  plan lists; a step for another machine ends the run with `node group workers: tent would now remove node
+  prod-workers-0 (ID instance-4), which the plan of this run does not list; run tent update cluster again`. A purge
+  names a node and passes. The loop's texts name `tent update cluster`, and its debug line is `update observed`. The
+  limits are the roll's: a drain waits its `drainTimeout` plus 5 minutes, a node going down 6 minutes. A drain that
+  runs out ends with `node prod-workers-2 did not finish draining within 15m0s (Nomad lists it draining); run tent
+  update cluster again to go on waiting`.
+- **A smaller server group** goes one server at a time, 5 to 3, 5 to 1 or 3 to 1, by the steps of
+  [13.3](#133-tent-rolling-update-cluster---yes): the checks at rest, the window, a transfer to a server that stays
+  when the victim leads, the stop, the wait for its server to go down, the removal of its peer, the force-leave, the
+  wait for healthy servers, the delete. From two voters to one the peer of the running victim goes first and the stop
+  is held, so that step takes about a minute more. A shrink to one server needs `--allow-single-server`. The server
+  that stays keeps the `bootstrap_expect` of its creation.
+- **A larger server group** is `update`'s creates, as before: each new server is seeded with the servers that exist
+  and carries the new size as `bootstrap_expect`, then the Nomad step waits for as many healthy servers as the specs
+  give. The cluster has two voters while it grows from one server to three, and four from three to five.
+- **A combined node** is marked and drained, then leaves as a server does. Its node is purged after the group's last
+  removal.
+- **What a cut leaves.** A machine that was marked or drains is listed first by the next plan. A server that was
+  stopped or lost its peer is listed first, and the next run goes on with the step that applies. A machine that was
+  deleted with its node not purged leaves a node that the first plan to see it down lists as a purge. A scale-down
+  that was taken back in the specs leaves the nodes ineligible; `validate cluster` reports them, and `nomad node
+  eligibility -enable` brings them back.
 
 #### A client that never registered
 
@@ -3483,40 +3606,37 @@ workload, so nothing is drained.
 
 #### The delete guard
 
-Until M3.6 `update` deletes only nodes that never joined (decision 27 of [18](#18-open-questions)). Since M3.3 the
-text of the guard names `rolling-update` and no longer says that tent cannot drain a node
-([ADR-0037](adr/0037-rolling-update-of-client-groups.md)).
-- **The plan refuses.** A plan that deletes a machine that carries the joined label fails with one error that names
-  each such machine, its ID and the reason of its delete: `not in the spec`, `surplus` or `duplicate of ID <id>`, the
+`update` removes a node that joined through the rollout, so the guard of decision 27 stays in two cases
+([ADR-0040](adr/0040-scale-down-through-the-rollout.md), [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)).
+- **The plan refuses** a delete of a machine that carries the joined label and is no removal. It fails with one error
+  that names each such machine, its ID and the reason of its delete: `not in the spec` or `duplicate of ID <id>`, the
   machine of that name that the plan does not delete as a duplicate or as not in the spec. It fails with and without
-  `--yes` and with `--exit-code`, before any change, with exit code 1:
-  `update would delete a node that joined Nomad: prod-workers-2 (ID instance-6, surplus); update deletes only nodes
-  that never joined: run tent rolling-update cluster to finish a rolling update that stopped, keep this node in the
-  specs, or delete the whole cluster with tent delete cluster`. The advice to run `tent rolling-update cluster` comes
-  with a surplus node only: a roll that stopped between a create and the delete of its victim leaves its group one
-  machine above its size. With several, the text reads `nodes that joined Nomad: A, B and C` and `keep these nodes in
-  the specs`. For a duplicate it says `remove one of the two machines called <name> from
-  Nomad and delete it in the cloud`, and for several duplicates `of the machines that share a name, remove one from
-  Nomad and delete it in the cloud`. Advice for different reasons is joined with `, and `.
-- **The apply asks Nomad** before each delete, whatever its reason, since a machine may have joined without a label:
+  `--yes` and with `--exit-code`, before any change, with exit code 1. The two cases:
+  - **A machine of a group that the specs lack whose role label is not `client`, or that has no group label:**
+    `update would delete nodes that joined Nomad: prod-servers-0 (ID instance-1, not in the spec), prod-servers-1 (ID
+    instance-2, not in the spec) and prod-servers-2 (ID instance-3, not in the spec); tent removes a whole node group
+    only when its nodes are clients: keep node group servers in the specs, or delete the whole cluster with tent delete
+    cluster`. For several groups the text says `keep node groups A and B in the specs`, and a machine without a group
+    label `keep it in a node group of the specs`.
+  - **Two machines of one name that both joined,** in a group of the specs or in a client group that the specs lack:
+    `update would delete a node that joined Nomad: prod-workers-0 (ID instance-6, duplicate of ID instance-4); tent
+    does not choose between machines of one name that joined: remove one of the two machines called prod-workers-0 from
+    Nomad and delete it in the cloud, or delete the whole cluster with tent delete cluster`. For several names it says
+    `of the machines that share a name, remove one from Nomad and delete it in the cloud`. Twins of a client group that
+    the specs lack are both named, each with the reason `not in the spec`.
+  - With several machines the text reads `nodes that joined Nomad: A, B and C`. Advice for both causes is joined with
+    `; `.
+- **The apply asks Nomad** before each delete of a machine that the plan does not remove as a node that joined,
+  whatever its reason, since a machine may have joined without a label:
   - a client of the machine's name and private address that is not `down` (`Nodes`), or
   - a server of the Raft configuration at that address, voter or not (`Peers`).
 
   A machine that the cloud lists without a private address counts as not joined, and no call is made. A machine found
   joined is scrubbed and labelled, and the step fails with `delete node <name> (<id>): the node has joined Nomad (a
-  registered client at <ip>)` or `(a server at <ip>:4647)`, followed by `; update deletes only nodes that never
-  joined`. The next plan then refuses the delete with the plan's error.
+  registered client at <ip>); run tent update cluster again, which removes it as a node that joined or says why it
+  cannot` (`(a server at <ip>:4647)` for a server). The next run removes the node or refuses it by the plan's cases.
   When Nomad cannot be asked, nothing is deleted: `delete node <name> (<id>): ask Nomad whether the node joined:
   <error>`. A delete, then, needs the Nomad factory.
-
-**Target, with Nomad.**
-- **Scale up** is part of `update`.
-- **Scale down** is also part of `update`. It is always shown in the plan and always drains first. Victims are
-  chosen in this order:
-  1. outdated nodes;
-  2. nodes in the most loaded zone;
-  3. the newest nodes.
-- **Server group size** can change 1 → 3 → 5 and back, one server at a time, never below quorum.
 
 ### 13.5 `tent upgrade cluster [--yes]`
 
@@ -3569,13 +3689,30 @@ while something does. It is `Service.ValidateCluster` in `internal/app`.
   - The cloud: one `Nodes.List`. No inventory and no preflight. Since M3.3 it also reads the release files, to tell the
     outdated machines (below and [8.5](#85-artifacts-and-verification)); each round of `--wait` reads them again.
   - Nomad: one round is `Leader`, `Peers`, `Health` and `Nodes`, once each and in this order, through every server or
-    combined machine that stays and has a public address, with tent's own access (an in-memory operator certificate and
-    the bootstrap secret, as `update` has).
+    combined machine of the cluster that runs and has a public address, whether the specs keep it or not, with tent's
+    own access (an in-memory operator certificate and the bootstrap secret, as `update` has). Since M3.6 the round comes
+    before the machines are judged.
 - **The machines** are judged by the node planner of `update` ([13.4](#134-scaling)) over the cluster's machines, with
   no machine that never registered: each node change that `update` would plan is a failure, and so is a machine that
   stays and that the cloud does not report as running or that has no joined label. So what `update` would change and
   what `validate` reports cannot differ. `validate` runs the node planner, not the whole plan of `update`
   ([ADR-0033](adr/0033-operator-commands.md)).
+  - Since M3.6 it plans with the view that `update` plans with ([ADR-0040](adr/0040-scale-down-through-the-rollout.md)):
+    where `update` reads Nomad to choose the machines that a group loses, so does `validate`, with the same spec
+    hashes, so it names the same machine as surplus. Where `update` plans by the joined labels (no node that joined may
+    go, no server that joined runs to ask) or `validate` cannot ask Nomad (`nomad-not-set-up`, `nomad-no-leader`), it
+    plans by the labels too. When the release files cannot be read it uses the reading without spec hashes and adds
+    the warning about outdated nodes.
+  - When Nomad answered, `validate` tells the clients that never registered from the nodes it read, as `update` does:
+    such a machine is `client-not-registered` and does not stay, and the node that `update` would create in its place is
+    `machine-missing` (`no machine: node group workers has 2 of its 3`). Before, the machine read `not-joined` and
+    `client-not-registered` and was counted. Without an answer of Nomad it still reads `not-joined`.
+  - A missing server or combined machine is named as `update` would name it, above the index that tent remembers
+    ([10.2](#102-layout)): `machine-missing` for `prod-servers-3` where it said `prod-servers-1`. An object of names
+    that holds no index fails `validate` with the error of the plan.
+  - A node that Nomad lists as down and that no machine has gets no row and no warning: it holds no work, and
+    `update`'s plan shows its purge. A node that a cut scale-down left drained shows as the surplus machine
+    `machine-surplus`, not as `client-not-ready`.
 - **The failures.** A failure has a check, a node (left out for a failure of the whole cluster, shown as `-`), the
   machine's ID and a detail. The check names are in the JSON, so they stay.
 
@@ -3587,10 +3724,10 @@ while something does. It is `Service.ValidateCluster` in `internal/app`.
   | `machine-duplicate` | the names of the machines | `machine ID instance-9 has the name of machine ID instance-4` |
   | `machine-unknown` | a machine's group label with the specs | `machine ID instance-7 is of node group old, which the specs do not have`, or `machine ID instance-7 has no node group label` |
   | `not-joined` | the `tent/joined` label of a machine that stays | `machine ID instance-3 has not joined Nomad: it carries no tent/joined label` |
-  | `nomad-not-set-up` | the secrets, the mark, a server's public address | `the state store lacks <paths>`, `Nomad is not bootstrapped yet: tent update cluster --yes bootstraps it`, or `no server has a public address`, checked in this order; Nomad is not asked |
+  | `nomad-not-set-up` | the secrets, the mark, a server's public address | `the state store lacks <paths>`, `Nomad is not bootstrapped yet: tent update cluster --yes bootstraps it`, or `no server runs and has a public address`, checked in this order; Nomad is not asked |
   | `nomad-no-leader` | the first call of the round that fails | `Nomad has no leader, or tent cannot reach it: <error>; tent reaches the servers on port 4646: check spec.access.api`; the error of `Peers`, `Health` or `Nodes` is also this check, with the step in front of it (`read the Raft configuration: `, `read autopilot's health: `, `list the nodes: `); the rest of the round is skipped |
   | `server-no-vote` | each expected server with the Raft configuration | `no server votes at its address 10.64.0.4`, `its server at 10.64.0.5:4647 has no vote`, or `the cloud reports no private address for it` |
-  | `server-unknown` | each Raft peer with the expected servers | `the Raft configuration lists a server at 10.64.0.9:4647 (prod-servers-9.global) that is no server machine of the cluster`, or `a server named <name> with no usable address, which is no server machine of the cluster` |
+  | `server-unknown` | each Raft peer with the addresses of the cluster's listed machines | `the Raft configuration lists a server at 10.64.0.9:4647 (prod-servers-9.global) that is no server machine of the cluster`, or `a server named <name> with no usable address, which is no server machine of the cluster` |
   | `autopilot-unhealthy` | `Health.Healthy` | `autopilot reports the servers unhealthy` |
   | `server-not-alive` | each expected server's entry in autopilot's report, found by private address | `Serf reports its server as left` (the status Nomad gave), or `autopilot does not list its server` |
   | `server-unhealthy` | the same entry | `autopilot reports its server unhealthy` |
@@ -3774,7 +3911,7 @@ The last column names the milestone that built the command. The spec commands of
 | `tent edit cluster [NAME]`, `tent edit nodegroup NAME` | `edit` | an editor, with validation and a diff before saving | M0 |
 | `tent replace -f FILE` | `replace` | GitOps: replace stored specs with those of a file | M0 |
 | `tent apply -f FILE` | — | `replace` + `update` | — |
-| `tent update cluster [NAME] [--yes] [--exit-code]` | `update cluster` | infrastructure, node counts, the Nomad cluster: servers, ACL bootstrap, clients, the scrub of user data, the delete guard ([13.2](#132-tent-update-cluster---yes)) | M1; Nomad in M2.7a; scrub and guard in M2.7b; the report of outdated nodes in M3.3 |
+| `tent update cluster [NAME] [--yes] [--exit-code]` | `update cluster` | infrastructure, node counts, the Nomad cluster: servers, ACL bootstrap, clients, the scrub of user data, the delete guard, the removal of nodes that joined ([13.2](#132-tent-update-cluster---yes)) | M1; Nomad in M2.7a; scrub and guard in M2.7b; the report of outdated nodes in M3.3; the removals in M3.6 |
 | `tent rolling-update cluster [NAME] [--yes] [--nodegroups a,b] [--force] [--exit-code] [--allow-single-server]` | `rolling-update cluster` | Nomad-aware replacement of the outdated nodes: client groups by `maxSurge` and `maxUnavailable`, server and combined groups one node at a time ([13.3](#133-tent-rolling-update-cluster---yes)) | M3.3 for client groups; M3.4 for server groups; M3.5 for combined groups |
 | `tent upgrade cluster [--yes]` | `upgrade cluster` | version bumps from the channel | — |
 | `tent validate cluster [NAME] [--wait DURATION] [--allow-single-server]` | `validate cluster` | the machines and Nomad against the specs; exits with 2 while they differ ([13.6](#136-tent-validate-cluster---wait-duration)) | M2.8 |
@@ -3813,7 +3950,8 @@ The last column names the milestone that built the command. The spec commands of
   text or JSON by `--log-format`; `-v` shows info logs and `-vv` debug logs. tent's own logs are debug logs;
   `rolling-update cluster` logs one line per observation, `level=DEBUG msg="rolling update observed" cluster=prod
   leader=prod-servers-1 voters=4 healthy=true tolerance=1 next="wait until 12:04:20 UTC for the servers to be stable"`
-  ([13.3](#133-tent-rolling-update-cluster---yes)). The Vultr provider logs its warnings at the level `WARN`, which
+  ([13.3](#133-tent-rolling-update-cluster---yes)); the removals of `update cluster` log the same line with
+  `msg="update observed"`. The Vultr provider logs its warnings at the level `WARN`, which
   shows without `-v`, such as an object that it skips because its marker does not parse.
 - `-o table`, the default, prints tables and lines of text, such as `node group workers created`. `-o yaml` and
   `-o json` print the same results as data. JSON never escapes HTML characters such as `<` and `&`.
@@ -3849,7 +3987,8 @@ The last column names the milestone that built the command. The spec commands of
     `Nomad's keyring is ready`, `failed to wait for Nomad's keyring: <error>`; and, for each node that the run waits
     for, `waiting for node prod-workers-0 to register`, `node prod-workers-0 registered`, `failed to wait for node
     prod-workers-0 to register: <error>`. One server reads `1 healthy Nomad server` and `1 Nomad server is healthy`.
-  - Nomad lines (`rolling-update`), for each step started, done and failed, the failed one with `: <error>` at its end:
+  - Nomad lines of the roll's loop (`rolling-update`, and the removals of `update`), for each step started, done and
+    failed, the failed one with `: <error>` at its end:
     `marking node prod-workers-0 ineligible`, `node prod-workers-0 is ineligible`, `failed to mark node prod-workers-0
     ineligible`; `draining node prod-workers-0 within 1h0m0s`, `node prod-workers-0 is draining`, `failed to drain node
     prod-workers-0`; `waiting for node prod-workers-0 to drain`, `node prod-workers-0 is drained`, `failed to wait for
@@ -3858,7 +3997,8 @@ The last column names the milestone that built the command. The spec commands of
     `purging node prod-workers-0 (10.64.0.6) from Nomad`, `purged node prod-workers-0 (10.64.0.6) from Nomad`,
     `failed to purge node prod-workers-0 (10.64.0.6) from Nomad`. The creates, the waits for a node to register, the
     scrubs and the deletes of a roll use the lines above.
-  - Lines of a server roll, each step started, done and failed, the failed one with `: <error>` at its end:
+  - Lines of a server roll, and of a server that `update` removes, each step started, done and failed, the failed one
+    with `: <error>` at its end:
     `stopping node prod-servers-0 (ID instance-2)`, `stopped node prod-servers-0 (ID instance-2)`, `failed to stop node
     prod-servers-0 (ID instance-2)`; `waiting for node prod-servers-3 to vote`, `node prod-servers-3 votes`, `failed to
     wait for node prod-servers-3 to vote`; `waiting for node prod-all-3 to vote and to register`, `node prod-all-3
@@ -4010,16 +4150,28 @@ The last column names the milestone that built the command. The spec commands of
     stable tests 2.0.7`. `create`, `replace` and `edit` check the version that the spec sets, and `update` also a
     pinned one ([13.2](#132-tent-update-cluster---yes));
   - `update cluster`, with or without `--yes`, warns once `tent could not tell which nodes are outdated: <error>`
-    when it cannot read the release files of a plan that creates no node
-    ([13.2](#132-tent-update-cluster---yes));
+    when it cannot read the release files of a plan that creates no node and may remove none that joined
+    ([13.2](#132-tent-update-cluster---yes)), and warns once `tent could not ask Nomad whether a node of a deleted
+    machine is left: <error>` when its read of Nomad's nodes fails and nothing in the plan needs the read;
   - and `validate cluster` also warns about a cluster in one failure domain, about certificates that end within 30
     days and about outdated nodes ([13.6](#136-tent-validate-cluster---wait-duration)).
 - An error goes to stderr after `Error: `. An invalid spec prints `Error: invalid spec:` and then one indented line
-  per problem, with the field path ([3.3](#33-api-rules)). An `update cluster` that would delete a node that joined
-  prints the one error of [13.4](#134-scaling) and exits with 1, with and without `--yes` and with `--exit-code`.
+  per problem, with the field path ([3.3](#33-api-rules)). An `update cluster` that would delete a node of a server
+  or combined group that the specs lack, a machine without a group label, or one of two machines of one name that both
+  joined, prints the one error of [13.4](#the-delete-guard) and exits with 1, with and without `--yes` and with
+  `--exit-code`. So does one whose removals `rollout` refuses, such as `update cannot remove prod-servers-4: node group
+  servers: autopilot reports the servers unhealthy (prod-servers-1); tent removes a server only while every server is
+  healthy`.
 - The long help of `update cluster` says that tent replaces the user data of a node that has joined with a stub, that
-  a client that did not register within 31 minutes of its creation is deleted and created again, and that an update
-  that would delete a node that joined fails, and that it lists the nodes that `rolling-update cluster` replaces. The
+  a client that did not register within 31 minutes of its creation is deleted and created again, that a node group
+  with more nodes than its size loses nodes (a node that joined is marked ineligible, drained within the group's
+  `drainTimeout`, deleted and purged from Nomad once Nomad lists it down; Nomad stops the allocations that find no
+  other node at the drain's deadline), that a server leaves one at a time (the leadership moves away when it leads,
+  the machine stops, it is removed from the Raft configuration and the gossip pool, and the servers that stay are
+  healthy before the next one; going to one server takes about a minute more and needs `--allow-single-server`), that
+  the client nodes of a node group that the specs no longer have are removed the same way and a server group that the
+  specs no longer have fails the update, that a node that Nomad lists as down and that no machine has is purged, that
+  the names of new servers only grow, and that it lists the nodes that `rolling-update cluster` replaces. The
   long help of `rolling-update cluster` says what makes a node outdated, how a server group rolls (a new server, its
   vote, the leadership moved away, the stop, the removal from the Raft configuration and the gossip pool, the wait for
   the servers that stay, the delete) and how a group of one server or one combined node does (it needs
@@ -4179,7 +4331,8 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
        logs merge by the cloud call count at each Nomad call.
      - **The flows.** A fresh cluster of three servers and two clients is built with the seeds, tokens, labels, spec
        hashes and user data that the tests name; so is a combined cluster of three nodes and one of a single node. A
-       second `update --yes` plans nothing, makes no Nomad call and only reads the cloud. A call moves to the next
+       second `update --yes` plans nothing, makes one Nomad call, the `Nodes` read of its plan (since M3.6), and only
+       reads the cloud. A call moves to the next
        server after a not-ready error. No leader for 10 minutes fails the leader wait after 10 minutes and creates no
        client. A client that never registers fails after its 10 minutes with the node named.
      - **Cuts.** The context of a run ends before and after each call of the golden, cloud and Nomad calls together.
@@ -4205,16 +4358,17 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
        `vultrfake.InstanceVPCs`, and only while the cluster has a leader. `vultrfake.SetInstanceTags` and
        `SetInstanceUserData` change an instance without a call.
      - **Golden files.** `flow_build.calls.golden` holds the `Peers` call and the `GetInstance` and
-       `UpdateInstance` of each scrub; `flow_scale.calls.golden` holds the pair of the new client's scrub and no
-       `Peers` call. `flow_unregistered.plan.golden` and
+       `UpdateInstance` of each scrub; `flow_scale.calls.golden` holds the pair of the new client's scrub, one `Nodes`
+       call in each of its two plans (since M3.6) and no `Peers` call. `flow_unregistered.plan.golden` and
        `flow_unregistered.calls.golden` hold the replacement of a client.
      - **The flows.** A fresh cluster of three servers and two clients, a combined cluster of three and a cluster of
        one node end with the label and the stub on every instance, as the golden files show; a second `update --yes`
-       plans nothing, makes no Nomad call and only reads the cloud. A client that never registers is waited for while
-       it is younger than 31 minutes; after that the plan shows its delete as `not registered` and a create of the
-       same name, which the apply carries out with a new token. A plan that would delete a node that joined fails with
-       the error of [13.4](#134-scaling), with and without `--yes`; a machine without the label that registered is not
-       deleted. `delete cluster` deletes a cluster of labelled nodes as before.
+       plans nothing, makes one Nomad call, the `Nodes` read of its plan (since M3.6), and only reads the cloud. A
+       client that never registers is waited for while it is younger than 31 minutes; after that the plan shows its
+       delete as `not registered` and a create of the same name, which the apply carries out with a new token. A plan
+       that would delete a node that joined fails with the error of [13.4](#the-delete-guard), with and without
+       `--yes`, where it fails since M3.6 only for the two cases that section names; a machine without the label that
+       registered is not deleted. `delete cluster` deletes a cluster of labelled nodes as before.
      - **Cuts.** The context of a run ends before and after each cloud call and each Nomad call of a build and
        of a rebuild, and each state write fails before and after it. The replacement of a client is cut before and
        after the delete of its machine. The next run ends
@@ -4479,6 +4633,56 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
        error with the path `spec.role`; the same role, a new group and an empty role pass; a stored group that does not
        decode is not compared; without `cluster.yaml` nothing is compared; and the problems come in the order of the
        cloud's, the role's and validation's.
+   - **Built in M3.6** ([ADR-0040](adr/0040-scale-down-through-the-rollout.md)): tests of the scale-down through
+     `update`, on the same fakes.
+     - **The decisions** (`internal/rollout`). `Surplus` has the order of a client group, of a server group and of a
+       combined group in tests of its own: one machine at a time with the zones counted over the machines that are
+       left, a joined client without a private address first and with no step taken on it, and a state that the
+       call does not change.
+       `GroupOfNode` is tested as the reverse of `NodeName`. The simulator checks, at every state of every shrink
+       scenario, that each machine a step of `Next` marks, drains, deletes, stops, hands the leadership from, or removes
+       the peer or member of is among the machines of `Surplus`; a decider that takes another machine fails the check.
+       The goldens of the shrink scenarios are unchanged.
+     - **The planner and the plan** (`internal/app`). `planNodes` is tested with the remembered indexes and the view of
+       a reading, the decision about the removals and the purges, and the plan's lines, with `update_plan.golden` and
+       `update_plan.json.golden`, and the removals and the purges as YAML. A plan whose read fails must fail though
+       the surplus machine by the labels never joined, and a plan that cannot read the release files lists no purge.
+     - **The loop** (`roll_loop_internal_test.go`, and `roll_hold_internal_test.go` for the held stop). The mode and the
+       name of the command, the check of the planned machines, the machines that the apply deleted before the loop,
+       and the wait for a machine whose delete was sent.
+     - **The invariants** (`scale_watch_test.go`) hold at every call of both fakes: a client group never has more
+       machines than when the watch began and no create names it; the nodes that can take work are at least its size
+       less `maxUnavailable`; a machine goes only after a drain that is complete for it; a purge names a node that reads
+       down and that no listed machine has; and a shrinking server or combined group stays within the machines it had.
+       Each invariant has a test that breaks it on purpose and expects the check to fail.
+       `vultrfake.SetDeleteReads` lets a deleted instance show for a number of reads.
+     - **The flows** (`scale_flow_test.go`, `scale_grow_test.go`) run through `Update` with apply: client groups from
+       three to one (`flow_shrink_clients.*.golden`), a machine that never joined, a machine without the label, the
+       purge of the node that a deleted machine left and of a client group that the specs lack, nodes that tent does
+       not know, a read that failed, the refusals at the plan, a removed client group beside another and as the last
+       one (the firewall group goes after its machines), servers from 5 to 3 and from 3 to 1
+       (`flow_shrink_servers_*.steps.golden`), the leader among the victims, combined nodes from 3 to 1, and the growth
+       from one server to three and five (`flow_grow_servers.plan.golden`, whose first plan creates `prod-servers-1`
+       and `-2`), and the growth after a shrink to one under the names `-3` to `-6`. After each, `validate cluster`
+       passes and Nomad lists exactly the machines that stay. The lock is held while a drain runs, and a run that a
+       server outside the plan would end for removes the planned victim and ends with the text of the planned check.
+       While the cloud lists a deleted worker, neither the run nor the plan and the run after a cut at that delete
+       lists, marks, drains or deletes the worker that stays.
+     - **Cuts, lost answers and deadlines** (`scale_cut_test.go`, with drains of three reads, under the invariants at
+       every call of both runs). A scale-down is cut before and after its writes and finished by the next `update`, with
+       no lock left: the first mark, drain, delete and purge of client groups from three to one; the first stop, peer
+       removal, force-leave and delete of servers from 5 to 3; both peer removals of the last victim and its stop in
+       servers from 3 to 1; the second mark, drain, stop and purge of combined nodes from 3 to 1; and the last machine's
+       delete and the firewall group's delete of a client group that the specs lack. One cut needs an update more: right
+       after the last delete of that removed group the next update deletes the firewall group while both nodes still
+       read ready, and the update after they read down purges them. A lost answer of a mark, a drain or a purge does not
+       end the run; a lost answer of a machine's delete ends it, and the next update finishes. A drain that never
+       completes ends the run at `drainTimeout` plus 5 minutes with `node prod-workers-2 did not finish draining within
+       15m0s (Nomad lists it draining); run tent update cluster again to go on waiting`, the plan not applied, and the
+       next update goes on. The growth of a server group is cut at its writes too (`scale_grow_test.go`).
+     - **`validate`** names the surplus machine that `update` would remove, with and without a reading of Nomad, and
+       the client that never registered as `update` plans it, and asks Nomad before it plans the machines
+       (`validate_test.go`, `validate_nomad_internal_test.go`).
 4. **tent-node tests.** Phases run with an abstracted filesystem and exec. Occasionally they run in a
    systemd-enabled container or a VM.
    - **Built in M2.5.** `internal/nodeup/nodeuptest` holds the fakes: an in-memory filesystem that behaves as
@@ -4696,6 +4900,11 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
 | A system allocation of a drained node is marked `stop` about 1 s after the drain completes, and its task ran 4 to 5.6 s longer on a local Nomad ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)); the roll stops the machine soon after | a system task may be cut at the stop; this holds for client rolls too | not seen in four stops on Vultr (2026-10-12); a wait until the system allocations have stopped is not built |
 | A roll of a combined group takes long: 372 s for one node, and 14 min 14 s for three with two cuts (2026-10-12), and every tent release makes every combined node outdated | a release costs a long roll, and the leader's replacement waits 70 s after its transfer | `--nodegroups` defers the combined group and rolls the clients; `--exit-code` exits 2 meanwhile |
 | A roll of a group of one node has two voters from the new node's vote to the old node's first peer removal, which spans the whole drain | the cluster survives the loss of neither server for up to `drainTimeout` and about a minute on each side | a shorter `drainTimeout` bounds it; the roll needs `--allow-single-server` ([13.3](#133-tent-rolling-update-cluster---yes)) |
+| A scale-down leaves too few nodes for the drained work: tent checks that the other nodes are ready, eligible and not draining, and not that they have room ([ADR-0040](adr/0040-scale-down-through-the-rollout.md)) | Nomad stops the allocations that find no node at the drain's deadline (a node with more allocations of a group than `migrate.max_parallel` lasts its whole deadline), and `update` holds the cluster's lock for up to `drainTimeout` | a short `drainTimeout` bounds both; the long help of `update cluster` says that Nomad stops the allocations that find no other node |
+| Nomad reported a drain `complete` while its last allocation still ran with the desired status `stop` (local Nomad 2.0.7, [platform notes §1.2](platform-notes.md#12-features-tent-relies-on)); tent deletes the machine 1 to 3 s after | a task's `kill_timeout` can be cut short; this holds for every roll since M3.3 | none yet; no such cut was seen on Vultr |
+| A scale-down is cut and then taken back in the specs | the nodes that were marked stay ineligible; nothing in tent makes a node eligible again | `validate cluster` reports `ready but not eligible`, and `nomad node eligibility -enable` brings the node back |
+| The node of the machine that a cut `update` deleted last is purged by the first `update` that sees it down, which may be the run after the next | a down node stays listed for a while; a plan that comes before the node reads down shows no change for it | the node read down 35 to 37 s after the delete on Vultr ([platform notes §3.16](platform-notes.md#316-spike-runs)); the next plan lists its purge |
+| The server that stays after a shrink keeps the `bootstrap_expect` of its creation, and a growth goes through two or four voters | none seen: a restarted server with `bootstrap_expect = 3` and a Raft configuration of itself led 2.0 s after its start, and new servers voted after 17 to 74 s | a new server of a group that grows carries the new size |
 | Hetzner rate limit (3600/h per project) | slow or failing large rollouts | snapshots, batched waits, adaptive throttling, targeted rollouts, one project per cluster |
 
 ---
@@ -4804,11 +5013,13 @@ Decided on 2026-10-05:
     peer, and clients keep `true`. tent removes a server from Raft through the Nomad API, on every provider
     ([8.4](#84-nomad-configuration-rendering), [ADR-0017](adr/0017-api-driven-server-removal.md),
     [ADR-0031](adr/0031-bootstrap-in-update.md)).
-27. **Deleting nodes that joined** (decided on 2026-10-05, built in M2.7b): until M3, `update` refuses to delete a
+27. **Deleting nodes that joined** (decided on 2026-10-05, built in M2.7b): until M3.6, `update` refuses to delete a
     node that joined Nomad: a machine that carries the joined label, a registered client, or a server of the Raft
-    configuration. A Nomad node that is `down` does not count as registered (confirmed on 2026-10-06).
-    `delete cluster` works as before ([13.4](#134-scaling),
-    [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)).
+    configuration. A Nomad node that is `down` does not count as registered (confirmed on 2026-10-06). `delete cluster`
+    works as before. Since M3.6 decision 34 lifts the refusal where tent drains or removes the node safely; it stays for
+    a machine of a server or combined group that the specs lack, a machine without a group label, and two machines of
+    one name that both joined ([13.4](#the-delete-guard), [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md),
+    [ADR-0040](adr/0040-scale-down-through-the-rollout.md)).
 
 Decided on 2026-10-06:
 
@@ -4839,10 +5050,12 @@ Decided on 2026-10-07:
     leadership is moved away first, the server is stopped, its Raft peer is removed through the API, and autopilot must
     be healthy again before the next one. It refuses when the cluster is unhealthy or the removal would lose quorum.
     Going to one server needs `--allow-single-server`, as today. A scale-down of clients drains them first. This lifts
-    decision 27's guard for the nodes that tent drains or removes safely. The decisions are built in M3.1 and
-    `update` uses them from M3.6. The step from two voters to one and the roll of a single server were refused until
-    M3.4 built the maintainer's answer (decisions 37 and 38; [13.3](#133-tent-rolling-update-cluster---yes),
-    [ADR-0038](adr/0038-rolling-update-of-server-groups.md)).
+    decision 27's guard for the nodes that tent drains or removes safely. The decisions are built in M3.1, the step from
+    two voters to one and the roll of a single server in M3.4 (decisions 37 and 38;
+    [13.3](#133-tent-rolling-update-cluster---yes), [ADR-0038](adr/0038-rolling-update-of-server-groups.md)), and
+    `update` uses them since M3.6: it removes the surplus nodes of client, server and combined groups, and of a client
+    group that the specs lack ([13.4](#removing-nodes-that-joined),
+    [ADR-0040](adr/0040-scale-down-through-the-rollout.md)).
 35. **`rolling-update` is its own command,** as [13.3](#133-tent-rolling-update-cluster---yes) and ADR-0005 say.
     `update` never replaces a node; it reports how many are outdated.
 
@@ -4882,8 +5095,8 @@ Decided on 2026-10-08 (the maintainer took every recommendation put to them at t
 48. **tent remembers the highest index of each server and combined group** in the state store
     (`names/<nodegroup>`, [10.2](#102-layout)), so that the names of such a group only grow, also after a shrink or an
     operator's delete (decided on 2026-10-09; the limit that M3.4 found in decision 43's rule). Built in M3.4 for the
-    roll ([ADR-0038](adr/0038-rolling-update-of-server-groups.md), item 22); the planner of `update` follows with the
-    scale-down part ([13.4](#134-scaling)).
+    roll ([ADR-0038](adr/0038-rolling-update-of-server-groups.md), item 22), and in M3.6 for the planner of `update`
+    ([13.4](#134-scaling), [ADR-0040](adr/0040-scale-down-through-the-rollout.md)).
 
 Decided on 2026-10-12:
 

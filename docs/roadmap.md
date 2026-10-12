@@ -23,9 +23,9 @@
 > M2 is complete (2026-10-07). M2.1 to M2.6b built the PKI and secrets, the channels and assets, NodeConfig, the
 > Nomad client, tent-node and its phases. M2.7a made `tent update cluster --yes` build a Nomad cluster: servers,
 > the ACL bootstrap and clients with intro tokens ([ADR-0031](adr/0031-bootstrap-in-update.md)). M2.7b scrubs the user
-> data of each node that has joined and labels its machine, replaces a client that never registered, and refuses to
-> delete a node that joined ([ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)). Its real-cloud check ran on
-> Vultr on 2026-10-06 and found two things, now fixed. M2.8 added the operator commands
+> data of each node that has joined and labels its machine, replaces a client that never registered, and refused to
+> delete a node that joined until M3.6 ([ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)). Its real-cloud
+> check ran on Vultr on 2026-10-06 and found two things, now fixed. M2.8 added the operator commands
 > ([ADR-0033](adr/0033-operator-commands.md)): `tent export nomad` writes a short-lived certificate and a management
 > token and prints the lines that point the `nomad` CLI at them, `tent ui` serves the Nomad UI and API on a loopback
 > port, `tent validate cluster` compares the machines and Nomad with the specs and exits with 2 while they differ, and
@@ -50,7 +50,10 @@
 > a reconcile of Nomad's leader that the run saw. The Nomad agent's heartbeat settings keep the nodes of clients ready
 > when the server they talk to stops hard. M3.5 built the roll of combined groups
 > ([ADR-0039](adr/0039-rolling-update-of-combined-groups.md)), and `replace` and `edit` refuse a change of a node
-> group's role. M3.8 wires the snapshots into `tent backup`.
+> group's role. M3.6 built the scale-down in `update` ([ADR-0040](adr/0040-scale-down-through-the-rollout.md)): the
+> nodes that a smaller spec no longer has are removed through the rollout decisions, a client drained first and a
+> server removed through the Raft and gossip calls, a node that Nomad lists as down and that no machine has is purged,
+> and a new server takes a name above the highest that its group has had. M3.8 wires the snapshots into `tent backup`.
 >
 > **Work items live in GitHub:** each milestone below links to its GitHub milestone, and the
 > [tent roadmap project][project] shows the open issues. This file keeps the goals and exit criteria; close issues as
@@ -96,14 +99,14 @@ extended the twenty-third on 2026-10-02.
 | 24 | The secrets of the tent-node VM check | `hack/tent-node-userdata` makes a throwaway CA, node certificate and gossip key per run; they sit in the user data of a VM that is deleted after the check, and tent scrubs nothing there, since no cluster owns the VM |
 | 25 | Draining at shutdown | clients do not drain themselves when Nomad stops, since Nomad's self-drain leaves them ineligible after their next start; tent's own removals drain a client through the Nomad API ([ADR-0030](adr/0030-nomad-on-nodes.md)) |
 | 26 | `leave_on_terminate` by role | server and combined agents set it to `false`, so a stopped server stays a Raft peer, and clients keep `true`; tent removes servers through the Nomad API on every provider ([ADR-0031](adr/0031-bootstrap-in-update.md)) |
-| 27 | Deleting nodes that joined | until M3, `update` refuses to delete a node that joined Nomad: a machine with the joined label, a registered client or a server of the Raft configuration; a Nomad node that is `down` does not count as registered (2026-10-06); `delete cluster` works as before; built in M2.7b ([ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)) |
+| 27 | Deleting nodes that joined | until M3.6, `update` refuses to delete a node that joined Nomad: a machine with the joined label, a registered client or a server of the Raft configuration; a Nomad node that is `down` does not count as registered (2026-10-06); `delete cluster` works as before; built in M2.7b ([ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)); since M3.6 the refusal stays only for a machine of a server or combined group that the specs lack, a machine without a group label, and two machines of one name that both joined ([ADR-0040](adr/0040-scale-down-through-the-rollout.md)) |
 | 28 | A client that never registered | `update` deletes a client that did not register before its intro token expired and creates it again, shown as `not registered`; nothing is drained, since it never ran a workload; the delete comes before the create, an exception to creating the replacement first (2026-10-06; [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md)) |
 | 29 | `tent ui` and the token | the proxy adds the token and mTLS; it listens on a loopback address only, and a request with a foreign `Host` or `Origin` gets 403; every local process that can reach the port acts with a management token while it runs ([ADR-0033](adr/0033-operator-commands.md)) |
 | 30 | The exported token | a management token with a TTL, 24 hours by default; tent owns no ACL policy yet ([ADR-0033](adr/0033-operator-commands.md)) |
 | 31 | Where `export nomad` writes | `$XDG_CACHE_HOME/tent/<cluster>`, else `~/.cache/tent/<cluster>`; the directory has mode 0700, the files 0600; `--dir` changes the place ([ADR-0033](adr/0033-operator-commands.md)) |
 | 32 | Exit codes of `validate cluster` | 2 when the cluster is not valid, with no `Error:` line; 1 when tent could not check ([ADR-0033](adr/0033-operator-commands.md)) |
 | 33 | `rollingUpdate` of a node group | `maxSurge` (default 1), `maxUnavailable` (default 0) and `drainTimeout` (default `1h`, Nomad's drain deadline); the first two apply to client groups, and server and combined groups roll one node at a time with one more node first; the settings never change the spec hash; built in M3.1 (2026-10-07; [ADR-0035](adr/0035-rollout-decisions.md)) |
-| 34 | Smaller server groups | `update` may shrink a server group one server at a time: leadership moved away, the server stopped, its peer removed through the API, autopilot healthy before the next; refused when the cluster is unhealthy or quorum would be lost; one server needs `--allow-single-server`; clients are drained before a scale-down; lifts decision 27's guard where tent drains or removes safely (2026-10-07; [ADR-0035](adr/0035-rollout-decisions.md)); the decisions are built in M3.1, and M3.4 built the answer for two voters and single servers (decisions 37 and 38) |
+| 34 | Smaller server groups | `update` may shrink a server group one server at a time: leadership moved away, the server stopped, its peer removed through the API, autopilot healthy before the next; refused when the cluster is unhealthy or quorum would be lost; one server needs `--allow-single-server`; clients are drained before a scale-down; lifts decision 27's guard where tent drains or removes safely (2026-10-07; [ADR-0035](adr/0035-rollout-decisions.md)); the decisions are built in M3.1, M3.4 built the answer for two voters and single servers (decisions 37 and 38), and M3.6 wired them into `update`, which removes the surplus nodes of client, server and combined groups ([ADR-0040](adr/0040-scale-down-through-the-rollout.md)) |
 | 35 | `rolling-update` is its own command | `update` never replaces a node and reports how many are outdated (2026-10-07; [ADR-0035](adr/0035-rollout-decisions.md)) |
 | 37 | From two voters to one | with two voters the live server's peer is removed first, the machine is stopped at once, then it is forced out of the gossip pool with prune; amends ADR-0017 for two voters (2026-10-08); built in M3.4: the peer goes first whenever fewer than two other voters vote, and the stop is held until a reconcile of Nomad's leader that the run saw ([ADR-0038](adr/0038-rolling-update-of-server-groups.md)) |
 | 38 | A single-server group rolls | without the failure-tolerance check, through two voters (decision 37), with `--allow-single-server` (2026-10-08); built in M3.4; the new server gets no `bootstrap_expect` ([ADR-0038](adr/0038-rolling-update-of-server-groups.md)) |
@@ -113,7 +116,7 @@ extended the twenty-third on 2026-10-02.
 | 42 | `update` before `rolling-update` | `rolling-update` refuses until `update` has applied the current specs, also after an upgrade of tent (2026-10-08); built in M3.3 ([ADR-0037](adr/0037-rolling-update-of-client-groups.md)) |
 | 43 | Server and combined names only grow | a roll of three servers makes `prod-servers-3`, `-4` and `-5` (2026-10-08); built in M3.4: the index above the highest that a machine, a server or a member has, and since decision 48 above the remembered index too ([ADR-0038](adr/0038-rolling-update-of-server-groups.md)) |
 | 44 | tent-node stays in every node's spec hash | each tent release rolls the servers too; an operator who wants to defer them rolls the client groups with `--nodegroups` (2026-10-08); the hash holds it already, and M3.4 lets the default selection roll the servers ([ADR-0038](adr/0038-rolling-update-of-server-groups.md)) |
-| 48 | tent remembers the highest index of each server and combined group | in the state store at `names/<nodegroup>`, so that the names of such a group only grow, also after a shrink or an operator's delete (2026-10-09); built in M3.4 for the roll, where a new server takes the index above it; the planner of `update` follows with the scale-down part in M3.6 ([ADR-0038](adr/0038-rolling-update-of-server-groups.md), item 22) |
+| 48 | tent remembers the highest index of each server and combined group | in the state store at `names/<nodegroup>`, so that the names of such a group only grow, also after a shrink or an operator's delete (2026-10-09); built in M3.4 for the roll, where a new server takes the index above it, and in M3.6 for the planner of `update` ([ADR-0038](adr/0038-rolling-update-of-server-groups.md), item 22, [ADR-0040](adr/0040-scale-down-through-the-rollout.md)) |
 | 49 | A node group keeps its role | `replace` and `edit` refuse to change the `spec.role` of a node group that the store holds (2026-10-12); built in M3.5: tent has no way to change the role of a stored group, since a cluster has exactly one server or combined group and no command deletes a node group ([ADR-0039](adr/0039-rolling-update-of-combined-groups.md)) |
 
 New questions for the maintainer are issues with the `decision` label.
@@ -284,6 +287,12 @@ Work after M6 or not scheduled yet: [issues with the `later` label][later].
   `replace` and `edit` refuse a change of a group's role (decision 49). Runs on Vultr: [platform notes
   §3.16](platform-notes.md#316-spike-runs). Recorded in [ADR-0039](adr/0039-rolling-update-of-combined-groups.md). Part
   of #100; the E2E scenario with a combined group is M3.9's.
+- 2026-10-12: M3.6 is built: `tent update cluster` removes the nodes that a smaller spec no longer has, those that
+  joined included, through the rollout decisions in the mode `Shrink` and the loop of `rolling-update`; a node that
+  Nomad lists as down and that no machine has is purged; a new server of `update` takes a name above the remembered
+  index; `validate cluster` names the machines that `update` would remove. Maintainer decisions 34 and 48 are built.
+  Runs on Vultr: [platform notes §3.16](platform-notes.md#316-spike-runs). Recorded in
+  [ADR-0040](adr/0040-scale-down-through-the-rollout.md). Closes #103.
 
 [project]: https://github.com/users/ingvarch/projects/2
 [later]: https://github.com/ingvarch/tent/issues?q=is%3Aissue%20label%3Alater
