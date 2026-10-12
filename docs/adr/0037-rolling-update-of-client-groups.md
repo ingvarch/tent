@@ -5,6 +5,9 @@
   grow; item 17: the default selection rolls the servers; item 22: `rolling-update --yes` writes the state store;
   the loop gains the API that follows the servers, a stop that the cloud lists late, the wait for a refusal after a
   write, and the hold of a stop beside fewer than two voters; its observation log is the field `Service.Log`)
+  and by [ADR-0039](0039-rolling-update-of-combined-groups.md) (item 11 and the follow-ups: combined groups roll; the
+  loop carries out their steps, and a combined node has joined when its server votes and its node is ready and
+  eligible)
 - **Date:** 2026-10-08
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),

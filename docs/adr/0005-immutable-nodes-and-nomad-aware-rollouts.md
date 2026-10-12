@@ -18,6 +18,9 @@
   fresh list before a stop or a transfer, the Nomad API follows the servers, a refusal after a write is polled for up to
   a minute, new server names only grow, and two voters and a group of one server roll, the peer of the live server
   going first; the refusals that ADR-0035 had for the last two are gone)
+  and by [ADR-0039](0039-rolling-update-of-combined-groups.md) (combined groups as built in M3.5: the new node first, a
+  drain of the old node before its leadership moves and it stops, and its node purged once Nomad lists it down; the
+  server steps are those of ADR-0038, with a window after the transfer of a drained leader)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0004](0004-layered-architecture.md), [ADR-0009](0009-server-discovery-fixed-ip-slots.md),

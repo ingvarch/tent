@@ -4,6 +4,8 @@
   cluster` finds a labelled node that died) and by [ADR-0037](0037-rolling-update-of-client-groups.md) (since M3.3 the
   guard's text names `rolling-update` and no longer says that tent cannot drain a node; M3.6 lifts the guard where
   tent drains or removes a node safely, decision 34)
+  and by [ADR-0039](0039-rolling-update-of-combined-groups.md) (the roll labels a combined node joined after both
+  halves, as `update` does: its server votes and its node is ready and eligible)
 - **Date:** 2026-10-06
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),

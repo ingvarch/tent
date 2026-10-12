@@ -13,6 +13,10 @@
   removal carry the victim; `Next` refuses a group that lists a machine of another role than its own; and line e1 (item
   14 below) makes a running voter's server wait for the window before it stops or loses its peer, a drained combined
   victim after its transfer included
+  and by [ADR-0039](0039-rolling-update-of-combined-groups.md) (item 16: a combined victim is marked ineligible and
+  drained only while every other machine of the group runs and has a node that is ready, eligible and not draining,
+  also in `Shrink`; before a create in a roll the node of an outdated machine whose removal has started is not asked
+  to take work)
 - **Date:** 2026-10-08
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0004](0004-layered-architecture.md),

@@ -13,6 +13,8 @@
   a seed gets no `bootstrap_expect`, 0 where the item says the size of the group; the first server and the servers of
   groups of three and five are as before; item 22: `update` writes the highest name index of each server and combined
   group to the state store, before the infrastructure and before each server create)
+  and by [ADR-0039](0039-rolling-update-of-combined-groups.md) (a combined node that a roll creates gets no intro token
+  either, as one that `update` creates)
 - **Date:** 2026-10-05
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),

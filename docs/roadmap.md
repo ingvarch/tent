@@ -1,6 +1,6 @@
 # Roadmap
 
-> **Current status (2026-10-10):** M0 Foundation, M1 Vultr infrastructure and M2 Nomad bootstrap are complete. M3 Day-2
+> **Current status (2026-10-12):** M0 Foundation, M1 Vultr infrastructure and M2 Nomad bootstrap are complete. M3 Day-2
 > operations is in progress.
 >
 > M0 built the Go module, `tent version`, the Makefile, the import rules in golangci-lint, CI on Linux, macOS and
@@ -48,8 +48,9 @@
 > before a stop, a Nomad API that follows the servers, and a wait of up to a minute for a refusal after a step. Two
 > voters and a group of one server roll too: the old server's peer goes first while it runs, and its stop is held until
 > a reconcile of Nomad's leader that the run saw. The Nomad agent's heartbeat settings keep the nodes of clients ready
-> when the server they talk to stops hard. Combined groups are refused until M3.5; M3.8 wires the snapshots into
-> `tent backup`.
+> when the server they talk to stops hard. M3.5 built the roll of combined groups
+> ([ADR-0039](adr/0039-rolling-update-of-combined-groups.md)), and `replace` and `edit` refuse a change of a node
+> group's role. M3.8 wires the snapshots into `tent backup`.
 >
 > **Work items live in GitHub:** each milestone below links to its GitHub milestone, and the
 > [tent roadmap project][project] shows the open issues. This file keeps the goals and exit criteria; close issues as
@@ -63,8 +64,9 @@ and, from M2 on, in the E2E suite on Vultr.
 These come from [architecture §18](architecture.md#18-open-questions). The first six were decided on 2026-09-25, the
 seventh to the fifteenth on 2026-09-28, the sixteenth to the twenty-first on 2026-09-29, the twenty-second to the
 twenty-fourth on 2026-09-30, the twenty-fifth to the twenty-seventh on 2026-10-05, and the twenty-eighth to the
-thirty-second on 2026-10-06, and the thirty-third to the thirty-fifth on 2026-10-07. The maintainer extended the
-twenty-third on 2026-10-02.
+thirty-second on 2026-10-06, the thirty-third to the thirty-fifth on 2026-10-07, the thirty-seventh to the
+forty-fourth on 2026-10-08, the forty-eighth on 2026-10-09, and the forty-ninth on 2026-10-12. The maintainer
+extended the twenty-third on 2026-10-02.
 
 | # | Question | Decision |
 |---|---|---|
@@ -112,6 +114,7 @@ twenty-third on 2026-10-02.
 | 43 | Server and combined names only grow | a roll of three servers makes `prod-servers-3`, `-4` and `-5` (2026-10-08); built in M3.4: the index above the highest that a machine, a server or a member has, and since decision 48 above the remembered index too ([ADR-0038](adr/0038-rolling-update-of-server-groups.md)) |
 | 44 | tent-node stays in every node's spec hash | each tent release rolls the servers too; an operator who wants to defer them rolls the client groups with `--nodegroups` (2026-10-08); the hash holds it already, and M3.4 lets the default selection roll the servers ([ADR-0038](adr/0038-rolling-update-of-server-groups.md)) |
 | 48 | tent remembers the highest index of each server and combined group | in the state store at `names/<nodegroup>`, so that the names of such a group only grow, also after a shrink or an operator's delete (2026-10-09); built in M3.4 for the roll, where a new server takes the index above it; the planner of `update` follows with the scale-down part in M3.6 ([ADR-0038](adr/0038-rolling-update-of-server-groups.md), item 22) |
+| 49 | A node group keeps its role | `replace` and `edit` refuse to change the `spec.role` of a node group that the store holds (2026-10-12); built in M3.5: tent has no way to change the role of a stored group, since a cluster has exactly one server or combined group and no command deletes a node group ([ADR-0039](adr/0039-rolling-update-of-combined-groups.md)) |
 
 New questions for the maintainer are issues with the `decision` label.
 
@@ -275,6 +278,12 @@ Work after M6 or not scheduled yet: [issues with the `later` label][later].
   names in the state store. Maintainer decisions 37, 38, 43, 44 and 48 are built, with
   [ADR-0038](adr/0038-rolling-update-of-server-groups.md). Runs on Vultr: [platform notes
   §3.16](platform-notes.md#316-spike-runs). Closes #101.
+- 2026-10-12: M3.5 is built: `tent rolling-update cluster` rolls combined groups, a single combined node included,
+  through the loop of `internal/app`. Each old node is marked ineligible and drained while the other nodes can take its
+  work, a drained leader waits 70 s after its transfer, and the old node is purged once Nomad lists it down.
+  `replace` and `edit` refuse a change of a group's role (decision 49). Runs on Vultr: [platform notes
+  §3.16](platform-notes.md#316-spike-runs). Recorded in [ADR-0039](adr/0039-rolling-update-of-combined-groups.md). Part
+  of #100; the E2E scenario with a combined group is M3.9's.
 
 [project]: https://github.com/users/ingvarch/projects/2
 [later]: https://github.com/ingvarch/tent/issues?q=is%3Aissue%20label%3Alater
