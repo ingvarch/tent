@@ -136,6 +136,42 @@ func TestSimNodeOfADeletedMachineGoesDownAfterTheScenarioDelay(t *testing.T) {
 	}
 }
 
+func TestSimNodeOfAStoppedMachineGoesDownAfterTwoTicksAndTheOtherNodesStayUp(t *testing.T) {
+	w := combinedWorld(3)
+	w.stopMachine("prod-control-1")
+	statuses := func() []string {
+		var got []string
+		for _, n := range w.observe().Nomad.Nodes {
+			got = append(got, n.Name+" "+n.Status)
+		}
+		return got
+	}
+	w.tick()
+	want := []string{"prod-control-0 ready", "prod-control-1 ready", "prod-control-2 ready"}
+	if diff := cmp.Diff(want, statuses()); diff != "" {
+		t.Errorf("nodes after 1 tick (-want +got):\n%s", diff)
+	}
+	w.tick()
+	want[1] = "prod-control-1 down"
+	if diff := cmp.Diff(want, statuses()); diff != "" {
+		t.Errorf("nodes after 2 ticks (-want +got):\n%s", diff)
+	}
+}
+
+func TestSimNodeOfAStoppedMachineGoesDownAfterTheScenarioDelay(t *testing.T) {
+	w := combinedWorld(3)
+	w.downAfter = 5
+	w.stopMachine("prod-control-1")
+	w.ticks(4)
+	if got := w.observe().Nomad.Nodes[1].Status; got != "ready" {
+		t.Fatalf("node after 4 ticks = %s, want ready", got)
+	}
+	w.tick()
+	if got := w.observe().Nomad.Nodes[1].Status; got != "down" {
+		t.Errorf("node after 5 ticks = %s, want down", got)
+	}
+}
+
 func TestSimNewMachineTakesTheLowestFreeAddressWhenTheScenarioAsksForIt(t *testing.T) {
 	create := rollout.Step{Action: rollout.Create, Group: "workers", Machine: rollout.Machine{
 		Name: "prod-workers-3", Zone: "fra"}}

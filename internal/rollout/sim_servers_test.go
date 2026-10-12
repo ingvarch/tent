@@ -278,6 +278,9 @@ func (w *world) stop(step rollout.Step) error {
 	if err := w.checkVoters(step, step.Machine.ID); err != nil {
 		return err
 	}
+	if err := w.checkNodeEmpty(step, step.Machine.ID); err != nil {
+		return err
+	}
 	w.machines[i].stopped, w.machines[i].Ready = true, false
 	return nil
 }

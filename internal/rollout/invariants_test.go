@@ -2,6 +2,7 @@ package rollout_test
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -196,6 +197,47 @@ func TestRunBreaksOnInvariants(t *testing.T) {
 				{Action: rollout.Create, Group: "control", Machine: rollout.Machine{Name: "prod-control-1", Zone: "ams"}},
 			}
 		}, "prod-control-1 was the name of a machine, a server or a member before"},
+		{"a combined machine is stopped while its node holds allocations", func() *world { return combinedWorld(3) },
+			func(w *world) []rollout.Step { return []rollout.Step{w.serverStep(rollout.Stop, "prod-control-1")} },
+			"stop node prod-control-1 (ID m-2): its node is up and holds 2 allocations"},
+		{"a combined node is marked while another node is ineligible", func() *world {
+			w := combinedWorld(3)
+			w.makeIneligible("prod-control-1")
+			return w
+		}, func(w *world) []rollout.Step {
+			return []rollout.Step{w.machineStep(rollout.MarkIneligible, "prod-control-0")}
+		},
+			"prod-control-1 cannot take the work of the node"},
+		{"a combined node is drained while another node is ineligible", func() *world {
+			w := combinedWorld(3)
+			w.makeIneligible("prod-control-1")
+			return w
+		}, func(w *world) []rollout.Step { return []rollout.Step{w.machineStep(rollout.Drain, "prod-control-0")} },
+			"prod-control-1 cannot take the work of the node"},
+		{"a combined node is drained while another node is down", func() *world {
+			w := combinedWorld(3)
+			w.nodes[1].Status = "down"
+			return w
+		}, func(w *world) []rollout.Step { return []rollout.Step{w.machineStep(rollout.Drain, "prod-control-0")} },
+			"prod-control-1 cannot take the work of the node"},
+		{"a combined node is drained while another node drains", func() *world {
+			w := combinedWorld(3)
+			w.nodes[1].Draining = true
+			return w
+		}, func(w *world) []rollout.Step { return []rollout.Step{w.machineStep(rollout.Drain, "prod-control-0")} },
+			"prod-control-1 cannot take the work of the node"},
+		{"a combined node is drained while another machine has no node", func() *world {
+			w := combinedWorld(3)
+			w.nodes = slices.Delete(w.nodes, 1, 2)
+			return w
+		}, func(w *world) []rollout.Step { return []rollout.Step{w.machineStep(rollout.Drain, "prod-control-0")} },
+			"prod-control-1 cannot take the work of the node"},
+		{"a combined node is drained while another machine is stopped", func() *world {
+			w := combinedWorld(3)
+			w.stopMachine("prod-control-1")
+			return w
+		}, func(w *world) []rollout.Step { return []rollout.Step{w.machineStep(rollout.Drain, "prod-control-0")} },
+			"prod-control-1 cannot take the work of the node"},
 		{"two machines get one name", func() *world { return outdatedWorkers(1, 0).arm() },
 			func(*world) []rollout.Step {
 				return []rollout.Step{{Action: rollout.Create, Group: "workers", Machine: rollout.Machine{
@@ -418,4 +460,46 @@ func TestRollOfACombinedNodeAloneIsRefusedWhenTheNewNodeGoesDownAfterTheMark(t *
 	if res.lines[last] != want || !strings.HasPrefix(res.lines[last-1], "mark node prod-control-0 ") {
 		t.Errorf("the run ends with %q, want the mark and then %q", res.lines[last-1:], want)
 	}
+}
+
+func TestAStopOfACombinedMachineNeedsADrainedOrDownNode(t *testing.T) {
+	t.Run("a drained node", func(t *testing.T) {
+		w := combinedWorld(3)
+		w.mustApply(t, w.machineStep(rollout.Drain, "prod-control-2"))
+		w.ticks(2)
+		w.mustApply(t, w.serverStep(rollout.Stop, "prod-control-2"))
+	})
+	t.Run("a node that is down and holds allocations", func(t *testing.T) {
+		w := combinedWorld(3)
+		w.nodes[2].Status = "down"
+		w.mustApply(t, w.serverStep(rollout.Stop, "prod-control-2"))
+	})
+	t.Run("a node that drains", func(t *testing.T) {
+		w := combinedWorld(3)
+		w.mustApply(t, w.machineStep(rollout.Drain, "prod-control-2"))
+		var v *violation
+		if err := w.apply(w.serverStep(rollout.Stop, "prod-control-2")); !errors.As(err, &v) {
+			t.Errorf("stop = %v, want a violation", err)
+		}
+	})
+}
+
+func TestAMarkOrDrainLooksOnlyAtTheOtherNodesOfACombinedGroup(t *testing.T) {
+	t.Run("a client node while another client node is ineligible", func(t *testing.T) {
+		w := outdatedWorkers(0, 1)
+		w.makeIneligible("prod-workers-1")
+		w.mustApply(t, w.machineStep(rollout.Drain, "prod-workers-0"))
+	})
+	t.Run("a combined node beside an unavailable node of another group", func(t *testing.T) {
+		w := combinedWorld(3)
+		w.addGroup(workersGroup(0, 1))
+		w.addClients("workers", 1, newHash, curVersion)
+		w.makeIneligible("prod-workers-0")
+		w.mustApply(t, w.machineStep(rollout.Drain, "prod-control-0"))
+	})
+	t.Run("a combined node beside nodes that can take work", func(t *testing.T) {
+		w := combinedWorld(3)
+		w.mustApply(t, w.machineStep(rollout.MarkIneligible, "prod-control-0"))
+		w.mustApply(t, w.machineStep(rollout.Drain, "prod-control-0"))
+	})
 }

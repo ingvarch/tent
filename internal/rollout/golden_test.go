@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -164,6 +165,7 @@ var scenarios = []scenario{
 		return w.arm()
 	}},
 	{"combined3", rollout.Roll, func() *world { return outdatedCombined(3) }},
+	{"combined1", rollout.Roll, func() *world { return outdatedCombined(1) }},
 	{"cluster", rollout.Roll, func() *world {
 		w := outdatedServers(3)
 		g := workersGroup(1, 0)
@@ -321,6 +323,9 @@ func TestRollsEndUpToDate(t *testing.T) {
 					t.Errorf("node %s of a deleted machine is still listed", n.Name)
 				}
 			}
+			if w.unplaced != 0 {
+				t.Errorf("%d allocations are unplaced, want 0", w.unplaced)
+			}
 			voters, _ := w.voterCounts()
 			if got, want := len(w.servers), w.countServers(); got != want || voters != want {
 				t.Errorf("the Raft configuration has %d servers and %d voters, want %d of each", got, voters, want)
@@ -431,6 +436,67 @@ func TestResumeAfterIdleTicks(t *testing.T) {
 				if problem != "" {
 					t.Fatal(problem)
 				}
+			}
+		})
+	}
+}
+
+// A combined node alone is resumed after the leader added its removed peer again, once while the peer is a nonvoter
+// and once after its promotion: the run removes the peer once more before the stop, and does not mark or drain the
+// node a second time.
+func TestAReaddedOldNodeLosesItsPeerAgainAndIsNotDrainedAgain(t *testing.T) {
+	w := outdatedCombined(1)
+	res, err := w.run(rollout.Roll, rollout.Next, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(res.snapshots, func(s snapshot) bool {
+		return strings.HasPrefix(res.lines[s.line], "stop node prod-control-0 ")
+	})
+	if i < 0 {
+		t.Fatalf("the full run has no stop of prod-control-0: %q", res.lines)
+	}
+	for _, tt := range []struct {
+		name  string
+		voter bool
+	}{{"as a nonvoter", false}, {"promoted", true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			resumed := res.snapshots[i].world.clone()
+			victim := resumed.machines[resumed.machineIndexByName("prod-control-0")].ID
+			if resumed.serverIndexByMachine(victim) >= 0 {
+				t.Fatal("the peer of prod-control-0 is in the Raft configuration before the stop of the full run")
+			}
+			back := func() bool {
+				s := resumed.serverIndexByMachine(victim)
+				return s >= 0 && resumed.servers[s].voter == tt.voter
+			}
+			for range 2 * reconcileEvery {
+				if back() {
+					break
+				}
+				resumed.tick()
+			}
+			if !back() {
+				t.Fatalf("the leader did not add prod-control-0 again with voter = %t", tt.voter)
+			}
+			rest, err := resumed.run(rollout.Roll, rollout.Next, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			remove := slices.Index(rest.lines, "remove prod-control-0 from the Raft configuration")
+			stop := slices.IndexFunc(rest.lines, func(l string) bool {
+				return strings.HasPrefix(l, "stop node prod-control-0 ")
+			})
+			if remove < 0 || stop < remove {
+				t.Errorf("the resumed run = %q, want the removal of the peer before the stop", rest.lines)
+			}
+			for _, l := range rest.lines {
+				if strings.HasPrefix(l, "mark node ") || strings.HasPrefix(l, "drain node ") {
+					t.Errorf("the resumed run has %q, want the drain left as it is", l)
+				}
+			}
+			if rest.refused {
+				t.Errorf("the resumed run ended refused: %q", rest.lines)
 			}
 		})
 	}

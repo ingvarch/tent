@@ -32,6 +32,7 @@ func TestNoStopOrTransferWhileAnotherVoterIsDown(t *testing.T) {
 	}
 	for _, sc := range []scenario{
 		{"combined3", rollout.Roll, func() *world { return outdatedCombined(3) }},
+		{"combined1", rollout.Roll, func() *world { return outdatedCombined(1) }},
 		{"servers3", rollout.Roll, func() *world { return outdatedServers(3) }},
 		{"server1", rollout.Roll, func() *world { return outdatedServers(1) }},
 	} {
