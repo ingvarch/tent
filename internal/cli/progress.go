@@ -144,6 +144,11 @@ func nomadText(p app.Progress) string {
 			"waiting for node " + e.Node + " to vote", "node " + e.Node + " votes",
 			"failed to wait for node " + e.Node + " to vote",
 		}
+	case app.NomadJoin:
+		lines = [3]string{
+			"waiting for node " + e.Node + " to vote and to register", "node " + e.Node + " votes and has registered",
+			"failed to wait for node " + e.Node + " to vote and to register",
+		}
 	case app.NomadStable:
 		lines = [3]string{
 			"waiting until " + e.Until.UTC().Format(time.TimeOnly) + " UTC for the servers to be stable",
