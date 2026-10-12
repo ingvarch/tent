@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"slices"
 
-	"golang.org/x/mod/semver"
-
 	"github.com/ingvarch/tent/internal/english"
 )
 
@@ -257,19 +255,17 @@ func (c *clientGroup) serversHold() (Step, bool, error) {
 	if c.mode != Roll {
 		return Step{}, false, nil
 	}
-	unknown, voters := false, 0
-	for _, srv := range c.s.Nomad.Servers {
-		if srv.Voter {
-			voters++
-		}
-		if srv.Version == "" {
-			unknown = true
-		} else if semver.Compare("v"+srv.Version, "v"+c.s.Version) < 0 {
-			return Step{}, false, refuse("node group %s: a new node would run Nomad %s, newer than the %s of server %s; "+
-				"roll the servers first", c.g.Name, c.s.Version, srv.Version, srv.Name)
-		}
+	unknown, err := CheckNewNode(c.s.Nomad, c.s.Version, true)
+	if err != nil {
+		return Step{}, false, refuse("node group %s: %s", c.g.Name, err)
 	}
 	if unknown {
+		voters := 0
+		for _, srv := range c.s.Nomad.Servers {
+			if srv.Voter {
+				voters++
+			}
+		}
 		return Step{Action: WaitHealthy, Group: c.g.Name, Voters: voters}, true, nil
 	}
 	return Step{}, false, nil

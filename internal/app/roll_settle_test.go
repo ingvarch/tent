@@ -24,11 +24,11 @@ const (
 	// settleRefusal is what the decisions say while autopilot reports the cluster unhealthy and names no server.
 	settleRefusal = "node group servers: autopilot reports the servers unhealthy; " +
 		"tent replaces a server only while every server is healthy"
-	// versionRefusalPrefix starts what the decisions say while a node runs a version older than the pin.
-	versionRefusalPrefix = "tent never moves a node to an older Nomad: the cluster is pinned to "
+	// versionRefusalPrefix starts what the decisions say while a node runs a newer Nomad than the cluster's version.
+	versionRefusalPrefix = "tent never moves a node to an older Nomad: the cluster's version is "
 )
 
-// refuseVersionFor makes the decisions refuse because the node prod-workers-1 runs an older version, and lets the
+// refuseVersionFor makes the decisions refuse because the node prod-workers-1 runs a newer version, and lets the
 // refusal clear d later.
 func refuseVersionFor(w *nomadWorld, d time.Duration) {
 	w.ChangeNode("prod-workers-1", func(n *nomadops.Node) { n.Version = "9.9.9" })

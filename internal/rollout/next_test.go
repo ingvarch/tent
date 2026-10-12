@@ -108,26 +108,26 @@ func TestNextRefusesVersions(t *testing.T) {
 		}, `the Nomad version of node prod-workers-0 is "x.y", which is not a version number`},
 		{"a server is newer than the new version", func(_ *testing.T, s *rollout.State) {
 			s.Nomad.Servers[0].Version = "2.1.0"
-		}, "tent never moves a node to an older Nomad: the cluster is pinned to 2.0.7, and server " +
+		}, "tent never moves a node to an older Nomad: the cluster's version is 2.0.7, and server " +
 			"prod-servers-0.global runs 2.1.0"},
 		{"a node is newer than the new version", func(t *testing.T, s *rollout.State) {
 			nodeNamed(t, s, workerName(1)).Version = "2.0.8"
-		}, "tent never moves a node to an older Nomad: the cluster is pinned to 2.0.7, and node prod-workers-1 runs " +
+		}, "tent never moves a node to an older Nomad: the cluster's version is 2.0.7, and node prod-workers-1 runs " +
 			"2.0.8"},
 		{"a version with a build suffix compares by its number", func(t *testing.T, s *rollout.State) {
 			nodeNamed(t, s, workerName(1)).Version = "2.0.8+ent"
-		}, "tent never moves a node to an older Nomad: the cluster is pinned to 2.0.7, and node prod-workers-1 runs " +
+		}, "tent never moves a node to an older Nomad: the cluster's version is 2.0.7, and node prod-workers-1 runs " +
 			"2.0.8+ent"},
 		{"it comes before every other check", func(t *testing.T, s *rollout.State) {
 			s.Nomad.Servers[0].Version = "2.1.0"
 			machineOf(t, s, workerName(1)).Name = workerName(0)
 			addOrphan(s, workerName(7), "down", 50)
-		}, "tent never moves a node to an older Nomad: the cluster is pinned to 2.0.7, and server " +
+		}, "tent never moves a node to an older Nomad: the cluster's version is 2.0.7, and server " +
 			"prod-servers-0.global runs 2.1.0"},
 		{"it comes before the decisions of a server group", func(_ *testing.T, s *rollout.State) {
 			s.Groups = append(s.Groups, rollout.Group{Name: "control", Role: v1alpha1.RoleServer, Size: 3})
 			s.Nomad.Servers[0].Version = "2.1.0"
-		}, "tent never moves a node to an older Nomad: the cluster is pinned to 2.0.7, and server " +
+		}, "tent never moves a node to an older Nomad: the cluster's version is 2.0.7, and server " +
 			"prod-servers-0.global runs 2.1.0"},
 	}
 	for _, tt := range tests {

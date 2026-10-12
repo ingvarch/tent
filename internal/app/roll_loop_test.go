@@ -1023,7 +1023,7 @@ func TestRollLoopEndsAtARefusalOfTheDecisions(t *testing.T) {
 
 		counts, err := roll(svc, app.RollOptions{})
 
-		wantError(t, err, "tent never moves a node to an older Nomad: the cluster is pinned to "+
+		wantError(t, err, "tent never moves a node to an older Nomad: the cluster's version is "+
 			decode(t, string(get(t, svc.Store, completedPath))).Cluster.Spec.Nomad.Version+
 			", and node prod-workers-0 runs 9.9.9")
 		wantNoWrites(t, f.Calls()[cloudCalls:])
