@@ -148,3 +148,43 @@ func TestNodeIndex(t *testing.T) {
 		})
 	}
 }
+
+func TestGroupOfNode(t *testing.T) {
+	tests := []struct {
+		name, cluster, node string
+		group               string
+		ok                  bool
+	}{
+		{"a node of a group", "prod", "prod-workers-3", "workers", true},
+		{"an index of several digits", "prod", "prod-workers-120", "workers", true},
+		{"a group with dashes", "prod", "prod-web-workers-3", "web-workers", true},
+		{"a group whose name ends in digits", "prod", "prod-pool-2-7", "pool-2", true},
+		{"a cluster with dashes", "my-prod", "my-prod-workers-3", "workers", true},
+		{"the name of another cluster", "prod", "dev-workers-3", "", false},
+		{"a cluster whose name only starts the same", "prod", "prod2-workers-3", "", false},
+		{"no index", "prod", "prod-workers", "", false},
+		{"an empty index", "prod", "prod-workers-", "", false},
+		{"no group", "prod", "prod--3", "", false},
+		{"a suffix after the index", "prod", "prod-workers-3-x", "", false},
+		{"a sign in the index", "prod", "prod-workers-+3", "", false},
+		{"the cluster alone", "prod", "prod", "", false},
+		{"empty", "prod", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			group, ok := rollout.GroupOfNode(tt.cluster, tt.node)
+			if group != tt.group || ok != tt.ok {
+				t.Errorf("GroupOfNode(%q, %q) = %q, %t, want %q, %t", tt.cluster, tt.node, group, ok, tt.group, tt.ok)
+			}
+		})
+	}
+}
+
+func TestGroupOfNodeIsTheReverseOfNodeName(t *testing.T) {
+	for _, group := range []string{"workers", "web-workers", "pool-2"} {
+		got, ok := rollout.GroupOfNode("prod", rollout.NodeName("prod", group, 12))
+		if got != group || !ok {
+			t.Errorf("GroupOfNode(NodeName(%q)) = %q, %t, want the group", group, got, ok)
+		}
+	}
+}

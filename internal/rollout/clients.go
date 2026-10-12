@@ -17,19 +17,30 @@ type clientGroup struct {
 	leaving map[string]bool
 }
 
-// nextClient returns the first step of the group that applies, and false when the group is done.
-func nextClient(s State, mode Mode, g Group) (Step, bool, error) {
-	c := clientGroup{groupView: newGroupView(s, mode, g), nodes: map[string]Node{}}
+// newClientGroup reads the nodes of the group's machines from the state, and finds the machines whose removal has
+// started and that the run takes out. In a shrink it also lists the machines that the group loses.
+func newClientGroup(s State, mode Mode, g Group) *clientGroup {
+	c := &clientGroup{groupView: newGroupView(s, mode, g), nodes: map[string]Node{}, leaving: map[string]bool{}}
 	for _, m := range c.ms {
 		if n, ok := nodeOf(s.Nomad.Nodes, m); ok {
 			c.nodes[m.ID] = n
 		}
 	}
-	c.leaving = c.leavers()
+	if mode == Shrink {
+		c.lose = c.surplus()
+	}
+	for _, m := range c.leavers() {
+		c.leaving[m.ID] = true
+	}
+	return c
+}
+
+// nextClient returns the first step of the group that applies, and false when the group is done.
+func nextClient(s State, mode Mode, g Group) (Step, bool, error) {
+	c := newClientGroup(s, mode, g)
 	rules := []func() (Step, bool, error){
 		func() (Step, bool, error) { return purgeOrphan(c.s, c.g) }, c.deleteRemoved, c.create, c.startRemoval, c.drain,
-		c.waitDrained, func() (Step, bool, error) { return c.settleUnjoined(c.removing) },
-		func() (Step, bool, error) { return waitOrphan(c.s, c.g) },
+		c.waitDrained, c.settleUnjoined, func() (Step, bool, error) { return waitOrphan(c.s, c.g) },
 	}
 	for _, rule := range rules {
 		if step, found, err := rule(); err != nil || found {
@@ -39,32 +50,44 @@ func nextClient(s State, mode Mode, g Group) (Step, bool, error) {
 	return c.finish()
 }
 
-// removing reports whether the machine's removal has started: it has joined, its node is ineligible or draining, and
-// the run takes it out. (An up to date machine whose node an operator made ineligible is not removed by a roll, and a
-// shrink takes no more of such nodes than the group must lose.)
+// surplus lists the machines that a shrink takes from the group: those whose removal has started, a completed drain
+// before a drain under way before a node that is only ineligible, then those that have not joined, the outdated ones
+// and those whose node is not available. A machine that joined and for which the cloud reports no private address is
+// left out: its node may still run work.
+func (c *clientGroup) surplus() []Machine {
+	beyond := func(m Machine, rank int) bool { return c.started(m) && c.drainRank(m) > rank }
+	return c.surplusBy(
+		func(m Machine) bool { return m.Joined && !m.PrivateIP.IsValid() },
+		not(c.started),
+		func(m Machine) bool { return beyond(m, 0) },
+		func(m Machine) bool { return beyond(m, 1) },
+		func(m Machine) bool { return m.Joined },
+		func(m Machine) bool { return !outdated(c.s, c.g, m) },
+		c.available,
+	)
+}
+
+// started reports whether the removal of the machine's node has begun: the machine has joined, and its node is
+// ineligible or draining.
+func (c *clientGroup) started(m Machine) bool {
+	n, ok := c.nodes[m.ID]
+	return ok && m.Joined && (!n.Eligible || n.Draining)
+}
+
+// removing reports whether the machine's removal has started and the run takes it out. (An up to date machine whose
+// node an operator made ineligible is not removed by a roll, and a shrink takes no more of such nodes than the group
+// must lose.)
 func (c *clientGroup) removing(m Machine) bool { return c.leaving[m.ID] }
 
-// leavers returns, by machine ID, the machines whose removal has started and that the run takes out. In a roll these
-// are the outdated ones. A shrink takes as many as the group has machines beyond its size: first those whose drain
-// completed, then those that drain, then the others in the order of victims.
-func (c *clientGroup) leavers() map[string]bool {
-	var started []Machine
-	for _, m := range c.ms {
-		n, ok := c.nodes[m.ID]
-		if ok && m.Joined && (!n.Eligible || n.Draining) && (c.mode == Shrink || outdated(c.s, c.g, m)) {
-			started = append(started, m)
-		}
-	}
+// leavers returns the machines whose removal has started and that the run takes out. In a roll these are the outdated
+// ones. A shrink takes those that the group loses.
+func (c *clientGroup) leavers() []Machine {
 	if c.mode == Shrink {
-		c.victimOrder(started, func(Machine) bool { return false })
-		slices.SortStableFunc(started, func(a, b Machine) int { return c.drainRank(a) - c.drainRank(b) })
-		started = started[:max(0, min(len(started), len(c.ms)-c.g.Size))]
+		return slices.DeleteFunc(slices.Clone(c.lose), func(m Machine) bool { return !c.started(m) })
 	}
-	leaving := make(map[string]bool, len(started))
-	for _, m := range started {
-		leaving[m.ID] = true
-	}
-	return leaving
+	return slices.DeleteFunc(slices.Clone(c.ms), func(m Machine) bool {
+		return !c.started(m) || !outdated(c.s, c.g, m)
+	})
 }
 
 // drainRank orders the nodes that a shrink may take: a completed drain, then a drain under way, then the others.
@@ -77,20 +100,6 @@ func (c *clientGroup) drainRank(m Machine) int {
 		return 0
 	default:
 		return 2
-	}
-}
-
-// victim reports whether the run may choose the machine to remove, which is not leaving yet. A roll takes outdated
-// machines that have joined. A shrink takes any machine, except one that has joined and for which the cloud reports no
-// private address: its node may still run work.
-func (c *clientGroup) victim(m Machine) bool {
-	switch {
-	case c.removing(m):
-		return false
-	case c.mode == Roll:
-		return m.Joined && m.PrivateIP.IsValid() && outdated(c.s, c.g, m)
-	default:
-		return !m.Joined || m.PrivateIP.IsValid()
 	}
 }
 
@@ -138,24 +147,20 @@ func (c *clientGroup) create() (Step, bool, error) {
 
 // startRemoval starts the removal of the first victim when the group keeps enough available nodes without it. A
 // victim that is not available costs no availability. A victim whose node is missing or down is deleted, any other
-// is marked ineligible. A shrink starts a removal only while the group has surplus machines, and leaves a victim that
-// has not joined to settleUnjoined. A roll is held back, as create is, unless a drain is due.
+// is marked ineligible. A shrink takes the first machine that the group loses and whose removal has not started, and
+// leaves it to settleUnjoined when it has not joined. A roll takes an outdated machine that has joined and has a
+// private address, and is held back, as create is, unless a drain is due.
 func (c *clientGroup) startRemoval() (Step, bool, error) {
-	var victims []Machine
+	v, ok := c.firstVictim()
+	if !ok {
+		return Step{}, false, nil
+	}
 	available := 0
 	for _, m := range c.ms {
 		if c.available(m) {
 			available++
 		}
-		if c.victim(m) {
-			victims = append(victims, m)
-		}
 	}
-	if len(victims) == 0 || (c.mode == Shrink && c.spare(c.removing) <= 0) {
-		return Step{}, false, nil
-	}
-	c.victimOrder(victims, c.removing, c.available)
-	v := victims[0]
 	if !v.Joined || (c.available(v) && available-1 < c.g.Size-c.g.MaxUnavailable) {
 		return Step{}, false, nil
 	}
@@ -170,6 +175,28 @@ func (c *clientGroup) startRemoval() (Step, bool, error) {
 		step.Deadline = c.g.DrainTimeout
 	}
 	return step, true, nil
+}
+
+// firstVictim returns the machine whose removal starts next, and false when there is none.
+func (c *clientGroup) firstVictim() (Machine, bool) {
+	if c.mode == Shrink {
+		i := slices.IndexFunc(c.lose, func(m Machine) bool { return !c.removing(m) })
+		if i < 0 {
+			return Machine{}, false
+		}
+		return c.lose[i], true
+	}
+	var victims []Machine
+	for _, m := range c.ms {
+		if !c.removing(m) && m.Joined && m.PrivateIP.IsValid() && outdated(c.s, c.g, m) {
+			victims = append(victims, m)
+		}
+	}
+	if len(victims) == 0 {
+		return Machine{}, false
+	}
+	sortVictims(victims, c.ms, false, c.available)
+	return victims[0], true
 }
 
 // drainOr gives the drain of a machine under removal when one is due, and what holds the roll back otherwise: a

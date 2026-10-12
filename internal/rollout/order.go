@@ -73,33 +73,29 @@ func evictionOf(m Machine, n Node) Action {
 	return MarkIneligible
 }
 
-// groupView is what the rules of one group share: the state, the mode, the group and its machines by name.
+// groupView is what the rules of one group share: the state, the mode, the group and its machines by name. In a
+// shrink it holds the machines that the group loses, in the order of their loss.
 type groupView struct {
 	s    State
 	mode Mode
 	g    Group
 	ms   []Machine
+	lose []Machine
 }
 
 func newGroupView(s State, mode Mode, g Group) groupView {
 	return groupView{s: s, mode: mode, g: g, ms: machinesOf(s, g)}
 }
 
-// victimOrder sorts machines in the order in which the group loses them. A machine whose removal has started comes
-// first. In a shrink, machines that have not joined come next, then outdated ones. A machine for which a later
-// predicate holds comes after one for which it does not, the predicates taken in turn. Then come the machines in the
-// zone with the most machines of the group, and the oldest, the lowest ID on a tie; a shrink takes the newest and the
-// highest ID instead.
-func (v *groupView) victimOrder(ms []Machine, started func(Machine) bool, later ...func(Machine) bool) {
-	rules := []func(Machine) bool{func(m Machine) bool { return !started(m) }}
+// sortVictims sorts ms in the order in which a group loses them. A machine for which a rule holds comes after one for
+// which it does not, the rules taken in turn. Then come the machines in the zone with the most machines of left, and
+// the oldest, the lowest ID on a tie; with newest set, the newest and the highest ID instead.
+func sortVictims(ms, left []Machine, newest bool, rules ...func(Machine) bool) {
 	age := 1
-	if v.mode == Shrink {
-		rules = append(rules, func(m Machine) bool { return m.Joined },
-			func(m Machine) bool { return !outdated(v.s, v.g, m) })
+	if newest {
 		age = -1
 	}
-	rules = append(rules, later...)
-	perZone := zoneCounts(v.ms)
+	perZone := zoneCounts(left)
 	slices.SortStableFunc(ms, func(a, b Machine) int {
 		for _, after := range rules {
 			if c := compareBool(after(a), after(b)); c != 0 {
@@ -111,6 +107,11 @@ func (v *groupView) victimOrder(ms []Machine, started func(Machine) bool, later 
 			age*cmp.Or(CompareCreated(a.Created, b.Created), cmp.Compare(a.ID, b.ID)),
 		)
 	})
+}
+
+// not is the rule that holds for the machines for which rule does not.
+func not(rule func(Machine) bool) func(Machine) bool {
+	return func(m Machine) bool { return !rule(m) }
 }
 
 // upToDate returns the machines that are not outdated.
@@ -191,27 +192,13 @@ func NextIndex(s State, g Group) int {
 	return next
 }
 
-// spare is how many machines beyond its size the group has, not counting those whose removal has started.
-func (v *groupView) spare(started func(Machine) bool) int {
-	n := len(v.ms) - v.g.Size
-	for _, m := range v.ms {
-		if started(m) {
-			n--
-		}
-	}
-	return n
-}
-
 // settleUnjoined deals with the machines that have not joined. A roll waits for the first of them. A shrink deletes
-// the one that the group would lose first when it has machines to spare and Nomad does not list it, though it may
-// still join; a machine that Nomad lists is waited for until it is labelled.
-func (v *groupView) settleUnjoined(started func(Machine) bool) (Step, bool, error) {
-	if v.mode == Shrink && v.spare(started) > 0 {
-		unjoined := slices.DeleteFunc(slices.Clone(v.ms), func(m Machine) bool { return m.Joined })
-		v.victimOrder(unjoined, started)
-		if len(unjoined) > 0 && !knownToNomad(v.s, unjoined[0]) {
-			return Step{Action: Delete, Group: v.g.Name, Machine: unjoined[0]}, true, nil
-		}
+// the first of them that the group loses when Nomad does not list it, though it may still join; a machine that Nomad
+// lists is waited for until it is labelled.
+func (v *groupView) settleUnjoined() (Step, bool, error) {
+	i := slices.IndexFunc(v.lose, func(m Machine) bool { return !m.Joined })
+	if i >= 0 && !knownToNomad(v.s, v.lose[i]) {
+		return Step{Action: Delete, Group: v.g.Name, Machine: v.lose[i]}, true, nil
 	}
 	return waitJoined(v.g, v.ms)
 }

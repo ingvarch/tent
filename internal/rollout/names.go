@@ -27,6 +27,20 @@ func NodeIndex(cluster, group, name string) (int, bool) {
 	return int(index), true
 }
 
+// GroupOfNode returns the node group in the name of a node of the cluster, which is <cluster>-<group>-<digits>, and
+// false for a name of another form.
+func GroupOfNode(cluster, name string) (string, bool) {
+	rest, ok := strings.CutPrefix(name, cluster+"-")
+	if !ok {
+		return "", false
+	}
+	i := strings.LastIndex(rest, "-")
+	if i <= 0 || !isNodeOf(cluster, rest[:i], name) {
+		return "", false
+	}
+	return rest[:i], true
+}
+
 // FreeName returns the group's node name of the lowest index that taken does not hold as true. The caller marks the
 // name it uses.
 func FreeName(cluster, group string, taken map[string]bool) string {

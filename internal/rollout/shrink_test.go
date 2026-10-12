@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/rollout"
 )
@@ -139,6 +141,26 @@ func TestShrinkMachinesThatNeverJoinedGoFirst(t *testing.T) {
 	})
 }
 
+func TestShrinkStartsNoRemovalWhileAMachineOfTheSurplusHasNotJoined(t *testing.T) {
+	// Four workers for size 2. Worker 3 has not joined and Nomad lists its node, so it is waited for, and worker 2,
+	// the next to go, is not marked yet.
+	s := shrinkClientsState(4, 5)
+	machineOf(t, &s, workerName(3)).Joined = false
+	checkOutcome(t, nextIn(t, rollout.Shrink, s), outcome{Action: rollout.WaitJoined, Group: "workers",
+		Machine: workerName(3), MachineID: "m-4", Zone: "ams"})
+}
+
+func TestShrinkLooksOnlyAtTheFirstUnjoinedMachineOfTheSurplus(t *testing.T) {
+	// Four workers for size 2. Workers 2 and 3 have not joined; Nomad lists the node of worker 3, the first to go,
+	// and none of worker 2. Worker 2 is not deleted while worker 3 is waited for.
+	s := shrinkClientsState(4, 5)
+	machineOf(t, &s, workerName(2)).Joined = false
+	machineOf(t, &s, workerName(3)).Joined = false
+	dropNode(&s, workerName(2))
+	checkOutcome(t, nextIn(t, rollout.Shrink, s), outcome{Action: rollout.WaitJoined, Group: "workers",
+		Machine: workerName(2), MachineID: "m-3", Zone: "ams"})
+}
+
 func TestShrinkTakesTheWholeBatchOutBeforeDrainingAny(t *testing.T) {
 	base := func() rollout.State { return shrinkClientsState(4, 0) }
 	drainOf := func(i int) outcome {
@@ -254,7 +276,7 @@ func TestShrinkStillRefusesDuplicatesAndOrdersGroups(t *testing.T) {
 		twin.ID = "m-77"
 		s.Machines = append(s.Machines, twin)
 		checkRefusedIn(t, rollout.Shrink, s, "node group workers: machines m-2 and m-77 share the name "+
-			"prod-workers-1; run tent update cluster first")
+			"prod-workers-1; run tent update cluster again")
 	})
 	t.Run("the server group comes before the clients", func(t *testing.T) {
 		s := shrinkServersState(3, 2)
@@ -388,6 +410,11 @@ func TestShrinkMachinesOfAServerGroupThatNeverJoined(t *testing.T) {
 			unknown(t, s, 3)
 			unknown(t, s, 4)
 		}, deleteOf(4)},
+		{"one that Nomad does not list goes before a newer one that it lists", func(t *testing.T, s *rollout.State) {
+			unknown(t, s, 3)
+			unjoined(t, s, 4)
+			serverNode(t, s, 4).Voter = false
+		}, deleteOf(3)},
 		{"one without an address whose server Nomad lists by name is waited for", func(t *testing.T,
 			s *rollout.State) {
 			unjoined(t, s, 4)
@@ -455,6 +482,33 @@ func TestShrinkLeadershipMayGoToAnyHealthyVoter(t *testing.T) {
 		}
 		checkRefusedIn(t, rollout.Shrink, s, "node group servers: prod-servers-0 leads, and no other healthy voter of "+
 			"the group can take the leadership")
+	})
+}
+
+func TestShrinkChecksAtRestEndWithTheAdviceToValidate(t *testing.T) {
+	// Four combined nodes for size 3; the node of server 1 is down, so the group is not at rest.
+	s := combinedState(3)
+	addCombinedNode(&s, 3, newHash)
+	nodeNamed(t, &s, serverName(1)).Status = "down"
+	checkRefusedIn(t, rollout.Shrink, s, "node group servers: node prod-servers-1 is down in Nomad"+restAdvice)
+}
+
+func TestShrinkLeadershipGoesToAServerThatStays(t *testing.T) {
+	// Five servers for size 3. Server 0 leads and is outdated, so it goes first; server 1, the first other server by
+	// name, is the newest, so it goes second. Server 2 stays.
+	s := shrinkServersState(5, 3)
+	s.Machines[0].SpecHash = oldHash
+	s.Machines[1].Created = epoch
+	if diff := cmp.Diff(machineNames(serverName, 0, 1), surplusNames(s)); diff != "" {
+		t.Fatalf("Surplus (-want +got):\n%s", diff)
+	}
+	checkServerStep(t, nextIn(t, rollout.Shrink, s), serverOutcome{Action: rollout.TransferLeadership,
+		Machine: serverName(0), Server: "r-3"})
+	t.Run("a roll keeps its rule", func(t *testing.T) {
+		s := shrinkServersState(5, 3)
+		s.Machines[0].SpecHash = oldHash
+		checkServerStep(t, nextRoll(t, s), serverOutcome{Action: rollout.TransferLeadership, Machine: serverName(0),
+			Server: "r-2"})
 	})
 }
 

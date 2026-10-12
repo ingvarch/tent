@@ -6,8 +6,10 @@ import (
 	"strings"
 )
 
-// orphans returns the nodes of the group's name pattern that no machine of the cluster has, by name and ID.
-func orphans(s State, g Group) []Node {
+// Orphans returns the nodes that Nomad lists under a name of the group g and that no listed machine of the cluster has
+// at its name and address, by name, then ID. A node is none of them while a machine of the group has its name and no
+// private address: its node cannot be told from an orphan.
+func Orphans(s State, g Group) []Node {
 	var found []Node
 	for _, n := range s.Nomad.Nodes {
 		if isNodeOf(s.Cluster, g.Name, n.Name) && !hasMachine(s, g, n) {
@@ -36,7 +38,7 @@ func isNodeOf(cluster, group, name string) bool {
 
 // purgeOrphan purges a node of the group that is down and that no machine has.
 func purgeOrphan(s State, g Group) (Step, bool, error) {
-	for _, n := range orphans(s, g) {
+	for _, n := range Orphans(s, g) {
 		if n.Status == nodeDown {
 			return Step{Action: Purge, Group: g.Name, Node: n}, true, nil
 		}
@@ -46,7 +48,7 @@ func purgeOrphan(s State, g Group) (Step, bool, error) {
 
 // waitOrphan waits for a node of the group that no machine has to go down.
 func waitOrphan(s State, g Group) (Step, bool, error) {
-	if found := orphans(s, g); len(found) > 0 {
+	if found := Orphans(s, g); len(found) > 0 {
 		return Step{Action: WaitNodeDown, Group: g.Name, Node: found[0]}, true, nil
 	}
 	return Step{}, false, nil
