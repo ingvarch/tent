@@ -74,6 +74,38 @@ func TestReplaceKeepsTheRole(t *testing.T) {
 	s.want(t, prodObjects)
 }
 
+// completedPath is the stored completed spec of the test cluster.
+const completedPath = "prod/cluster.completed.yaml"
+
+// pinnedCluster returns the Cluster of the test cluster with Nomad version v set.
+func pinnedCluster(t *testing.T, v string) string {
+	t.Helper()
+	return replaced(t, clusterYAML, "spec:\n", "spec:\n  nomad:\n    version: "+v+"\n")
+}
+
+// moveError is the field error of a Nomad version that is too far above the pin of 2.0.7, as the CLI prints it.
+const moveError = "Cluster prod: spec.nomad.version: 2.2.0 is more than one minor version above 2.0.7, the Nomad " +
+	"version that the cluster is pinned to; move to 2.1 first"
+
+// TestReplaceHoldsTheNomadVersionToThePin refuses a Nomad version more than one minor version above the pin, and
+// accepts the next minor version.
+func TestReplaceHoldsTheNomadVersionToThePin(t *testing.T) {
+	s := withCluster(t)
+	s.put(t, completedPath, pinnedCluster(t, "2.0.7"))
+	want := map[string]string{
+		clusterPath: clusterYAML, serversPath: serversYAML, workersPath: workersYAML,
+		completedPath: pinnedCluster(t, "2.0.7"),
+	}
+	wantError(t, runIn(t, pinnedCluster(t, "2.2.0"), "replace", "-f", "-", "--state", s.url),
+		"Error: invalid spec:\n  "+moveError+"\n")
+	s.want(t, want)
+
+	got := runIn(t, pinnedCluster(t, "2.1.0"), "replace", "-f", "-", "--state", s.url)
+	if got.code != 0 || got.out != "cluster prod replaced\n" {
+		t.Errorf("replace with the next minor version: exit code %d, stdout %q, stderr %q", got.code, got.out, got.errOut)
+	}
+}
+
 func TestSpecFileFlagHelp(t *testing.T) {
 	for _, name := range []string{"create", "replace"} {
 		got := runIn(t, "", name, "--help")

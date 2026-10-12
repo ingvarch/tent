@@ -427,7 +427,13 @@ func (s *Service) plan(ctx context.Context, in input, m mode, readVersion states
 	if len(errs) > 0 {
 		return nil, nil, nil, errors.Join(errs...)
 	}
-	warnings, err := s.validate(st, in)
+	var pinned string
+	if in.cluster != nil {
+		if pinned, err = s.writerPin(ctx, in.layout); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	warnings, err := s.validate(st, in, pinned)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -551,11 +557,24 @@ func isGroup(l statestore.Layout, p string) bool {
 	return ok
 }
 
+// writerPin returns the Nomad version that the cluster's stored completed spec holds, for the check of a Cluster that
+// is written. It returns "" when the store has no completed spec or the stored one does not decode: update reports that
+// when it needs the pin.
+func (s *Service) writerPin(ctx context.Context, l statestore.Layout) (string, error) {
+	stored, err := s.readCompleted(ctx, l)
+	if err != nil {
+		return "", err
+	}
+	pinned, _ := storedPin(l, stored)
+	return pinned, nil
+}
+
 // validate checks the cluster that results from storing the input: the stored objects that the input does not
 // replace, and the input. A Cluster that replaces a stored one keeps its provider and region, and the stored one must
 // decode to show them. A node group of a stored cluster keeps its role: without cluster.yaml tent has made no machine.
-// It returns the warnings about the resulting cluster.
-func (s *Service) validate(st map[string]entry, in input) ([]string, error) {
+// A Cluster that sets a Nomad version moves it at most one minor version above pinned, the version of the completed
+// spec, when there is one. It returns the warnings about the resulting cluster.
+func (s *Service) validate(st map[string]entry, in input, pinned string) ([]string, error) {
 	replaced := make(map[string]bool, len(in.docs))
 	for _, d := range in.docs {
 		replaced[d.path] = true
@@ -581,7 +600,29 @@ func (s *Service) validate(st map[string]entry, in input) ([]string, error) {
 	}
 	objs.NodeGroups = append(objs.NodeGroups, in.groups...)
 	warnings, err := check(objs, s.Validate, s.channel)
+	if in.cluster != nil {
+		moves = append(moves, versionMoves(in.cluster, pinned, err)...)
+	}
 	return warnings, withProblems(moves, err)
+}
+
+// versionMoves returns a problem for the Nomad version of the cluster c when it is more than one minor version above
+// pinned. It returns none when checked, the error of Check for c, already has a problem with that version: the
+// channel's alone is reported.
+func versionMoves(c *v1alpha1.Cluster, pinned string, checked error) v1alpha1.Errors {
+	const path = "spec.nomad.version"
+	if problems, ok := errors.AsType[v1alpha1.Errors](checked); ok && slices.ContainsFunc(problems,
+		func(p v1alpha1.FieldError) bool { return p.Object == clusterObject(c) && p.Path == path }) {
+		return nil
+	}
+	why, advice := moveProblem(pinned, c.Spec.Nomad.Version)
+	if why == "" {
+		return nil
+	}
+	if advice != "" {
+		why += "; " + advice
+	}
+	return v1alpha1.Errors{{Object: clusterObject(c), Path: path, Detail: why}}
 }
 
 // cloudMoves returns a problem for the provider and one for the region of the cluster c when they differ from those

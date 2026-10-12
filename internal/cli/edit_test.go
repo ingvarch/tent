@@ -442,6 +442,23 @@ func TestEditKeepsTheRole(t *testing.T) {
 	e.wantNoFile(t)
 }
 
+// TestEditHoldsTheNomadVersionToThePin opens the editor again when the edit sets a Nomad version more than one minor
+// version above the pin, and changes nothing when the operator reverts it.
+func TestEditHoldsTheNomadVersionToThePin(t *testing.T) {
+	s := withCluster(t)
+	s.put(t, completedPath, pinnedCluster(t, "2.0.7"))
+	e := newFakeEditor(t, "", editStep{Old: "spec:\n", New: "spec:\n  nomad:\n    version: 2.2.0\n"},
+		editStep{Old: "  nomad:\n    version: 2.2.0\n", New: ""})
+	wantOK(t, runEdit(t, "", "edit", "cluster", "prod", "--yes", "--state", s.url), "edit cancelled; nothing changed\n")
+	s.want(t, map[string]string{
+		clusterPath: clusterYAML, serversPath: serversYAML, workersPath: workersYAML,
+		completedPath: pinnedCluster(t, "2.0.7"),
+	})
+	e.wantRuns(t, clusterYAML, fixErrorsHeader+"# "+moveError+"\n"+
+		pinnedCluster(t, "2.2.0"))
+	e.wantNoFile(t)
+}
+
 func TestEditAnswers(t *testing.T) {
 	for _, tc := range []struct {
 		answer string
