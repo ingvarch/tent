@@ -17,6 +17,11 @@
   drained only while every other machine of the group runs and has a node that is ready, eligible and not draining,
   also in `Shrink`; before a create in a roll the node of an outdated machine whose removal has started is not asked
   to take work)
+  and by
+  [ADR-0040](0040-scale-down-through-the-rollout.md) (M3.6 wired `Shrink` into `update`; items 6, 7, 13, 17 and 22
+  changed; in a shrink a victim that leads hands the leadership only to a server that stays, and a joined client
+  without a private address is the first machine that its group loses, with no step taken on it and no other machine
+  taken in its place)
 - **Date:** 2026-10-08
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0004](0004-layered-architecture.md),

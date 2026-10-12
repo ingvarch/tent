@@ -2,7 +2,10 @@
 
 - **Status:** Accepted; amended by [ADR-0039](0039-rolling-update-of-combined-groups.md) (combined groups roll, so its
   refusal of them is gone; the join rule goes by the machine's role; `replace` and `edit` refuse a change of a
-  group's role, item 9)
+  group's role, item 9) and by
+  [ADR-0040](0040-scale-down-through-the-rollout.md) (the planner of `update` reads the remembered
+  index, the follow-up of item 22, so `update` leaves no twin server either, item 18; the loop serves the removals of
+  `update`)
 - **Date:** 2026-10-10
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),

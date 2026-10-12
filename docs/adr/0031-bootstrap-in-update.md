@@ -15,6 +15,10 @@
   group to the state store, before the infrastructure and before each server create)
   and by [ADR-0039](0039-rolling-update-of-combined-groups.md) (a combined node that a roll creates gets no intro token
   either, as one that `update` creates)
+  and by
+  [ADR-0040](0040-scale-down-through-the-rollout.md) (the order of an apply gains the removals of nodes that joined
+  and the purges, after the node deletes; every plan of a cluster that can answer reads Nomad's nodes, so a second
+  `update --yes` makes one Nomad call)
 - **Date:** 2026-10-05
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),

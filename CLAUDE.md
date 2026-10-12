@@ -75,11 +75,11 @@ packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries that
   - M2.7b added the scrub and the delete guard (`internal/app`, `internal/cloud`, `internal/nomadops`, ADR-0032): once a
     node has joined, `update` replaces its user data with a stub and labels its machine `tent/joined=true`
     (`Nodes.MarkJoined`, one PATCH on Vultr); a machine without the label is waited for; a client without it that is
-    older than 31 minutes and that Nomad does not list is deleted and created again (decision 28); and `update` refuses
-    to delete a node that joined (decision 27). A node is told by its name and private address. The real-cloud check
-    ran on Vultr on 2026-10-06 (spike v10 run `rugw2m`, v11 runs `sv3vwb` and `rgfckj`). It found that cloud-init
-    read the stub as degraded and that the account's instance limit refused the replacement's create right after
-    the delete; both are fixed in the code (a line `{}` in the stub, a retry in the Vultr provider).
+    older than 31 minutes and that Nomad does not list is deleted and created again (decision 28); and `update` refused
+    to delete a node that joined (decision 27; lifted in M3.6). A node is told by its name and private address. The
+    real-cloud check ran on Vultr on 2026-10-06 (spike v10 run `rugw2m`, v11 runs `sv3vwb` and `rgfckj`). It found that
+    cloud-init read the stub as degraded and that the account's instance limit refused the replacement's create right
+    after the delete; both are fixed in the code (a line `{}` in the stub, a retry in the Vultr provider).
   - M2.8 added `tent export nomad`, `tent ui` and `tent validate cluster` (`internal/app`, `internal/cli`,
     `internal/nomadops`, `internal/shellenv`, ADR-0033; maintainer decisions 29 to 32), a warning about combined
     clusters, and removed `hack/tent-operator`. The three commands need `VULTR_API_KEY`. The real-cloud check ran on
@@ -100,7 +100,7 @@ packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries that
     resume test from every state proves it. It also added `spec.rollingUpdate` of a node group (`maxSurge`,
     `maxUnavailable`, `drainTimeout`), which never changes the spec hash. M3.3 wired them into `tent rolling-update
     cluster` for client groups, and M3.4 for server groups. M3.4 also built the maintainer's answer for two voters and
-    a single server (decisions 37 and 38, ADR-0035).
+    a single server (decisions 37 and 38, ADR-0035). M3.6 wired `Shrink` into `update`.
   - M3.2 added the Nomad calls of a roll (`internal/nomadops`, `nomadfake`, ADR-0036): nine calls, reads with the Raft
     IDs, the failure tolerance, `StableSince` and the drain state, and a third error class, `ErrGone`. Snapshots are
     `secret.Secret` with a 5-minute bound. M3.3 calls the node calls; M3.4 wired the Raft and gossip calls into `tent
@@ -113,8 +113,7 @@ packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries that
     - `--force` labels each machine `tent/replace=true` (`cloud.Nodes.MarkReplace`), so a plain run after a cut replaces
       every labelled machine.
     - It refuses until `update` has applied the specs. A step of a combined group was refused until M3.5.
-    - `update` reports outdated nodes without exit code 2 and `validate cluster` warns about them; `update`'s delete
-      guard names `rolling-update`.
+    - `update` reports outdated nodes without exit code 2 and `validate cluster` warns about them.
   - M3.4 added the roll of server groups (`internal/app` `roll_servers.go`, `roll_hold.go`; `internal/rollout`
     `servers.go`, `order.go`, `next.go`; `internal/cli` `progress.go`; ADR-0038; maintainer decisions 37, 38, 43, 44
     and 48): a server group rolls one server at a time with the new one first, a group of one server included.
@@ -131,8 +130,7 @@ packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries that
       `names/<nodegroup>` (`internal/app/name_index.go`, `statestore.Layout.NameIndex`). Plans only read it. It is
       raised under the lock before every server create, in every apply of `update` that has changes and in every apply
       of `rolling-update` that has a next step. Such a roll also raises `tent-version`, so an older tent is refused
-      after it. `delete cluster` deletes it. `update`'s
-      planner does not read it yet, so M3.6 builds that.
+      after it. `delete cluster` deletes it. `update`'s planner reads it (M3.6).
     - A running voter's server waits for the stability window before it stops or loses its peer (line e1).
     - `--nodegroups` rolls the clients alone and defers the servers, which every tent release makes outdated.
     - The test world models servers over time and the leader's reconcile; flows and cuts run under quorum invariants
@@ -157,7 +155,30 @@ packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries that
     - `replace` and `edit` refuse a change of a node group's role (`roleMoves`, decision 49), only while `cluster.yaml`
       is stored.
     - The real-cloud checks ran on Vultr on 2026-10-12 (platform notes §3.16). The E2E scenario with a combined group
-      is M3.9's, and `Shrink` of a combined group in `update` is M3.6's.
+      is M3.9's.
+  - M3.6 added the scale-down in `update` (`internal/rollout` `surplus.go`, `orphans.go`, `names.go`; `internal/app`
+    `removal.go`, `nodes.go`, `update.go`, `update_plan.go`, `guard.go`, `roll_loop.go`, `validate.go`; ADR-0040;
+    maintainer decisions 34 and 48): `tent update cluster --yes` removes the nodes that a smaller spec no longer has,
+    those that joined included. A client is marked ineligible, drained and deleted, and its node purged; a server leaves
+    the Raft configuration and the gossip pool before its machine is deleted; a combined node does both.
+    - `rollout.Surplus` chooses the machines, one at a time with the zones counted over the machines that are left.
+      `Next` in the mode `Shrink` takes its victims from it, and the leadership goes to a server that stays. A joined
+      client without a private address, as the cloud lists a machine that it deleted, is the first machine its group
+      loses, and no step is taken on it.
+    - The loop of `rolling-update` carries out the removals (`rollRun` has `mode`, `command`, `planned` and `gone`),
+      after the deletes of machines that never joined and before the infrastructure's deletes. It removes no machine
+      that the plan does not list.
+    - Every plan of a cluster that can answer reads Nomad's nodes. A plan that may remove a node that joined reads what
+      a roll observes and fails whole when the decisions refuse.
+    - A node that Nomad lists as down and that no machine has is purged, also one of a client group that the specs lack.
+      A node that is not down is never purged.
+    - The delete guard stays for a machine of a server or combined group that the specs lack, a machine without a group
+      label, and two machines of one name that both joined (`guard.go`).
+    - `update`'s planner names a new server or combined machine above the remembered index (`rollout.NextIndex`); a
+      client group keeps `FreeName`. A list that misses a new server no longer makes twins.
+    - `validate cluster` asks Nomad before it plans the machines and names the surplus and the clients that never
+      registered as `update` does.
+    - The real-cloud checks ran on Vultr on 2026-10-12 (platform notes §3.16).
 
 ## Read before changing anything
 

@@ -3,7 +3,9 @@
 - **Status:** Accepted. Amended by [ADR-0023](0023-vultr-inventory-dedupe-and-images.md) (which copy the dedupe
   pass keeps on Vultr) and by [ADR-0032](0032-joined-label-scrub-and-delete-guard.md) (the dedupe of machines keeps a
   machine that carries the joined label, then one that is not a client that never registered, then the oldest; a twin
-  that registered is labelled and kept). The follow-ups are done.
+  that registered is labelled and kept) and by
+  [ADR-0040](0040-scale-down-through-the-rollout.md) (a list that misses a new server makes no twin).
+  The follow-ups are done.
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** extends [ADR-0003](0003-cloud-is-source-of-truth.md); [ADR-0010](0010-state-store-and-locking.md),

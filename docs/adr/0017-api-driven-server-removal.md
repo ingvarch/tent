@@ -17,6 +17,8 @@
   the run saw, `ForceLeave`, with no wait for autopilot, which settles the two voters that ADR-0035 left open)
   and by [ADR-0039](0039-rolling-update-of-combined-groups.md) (a combined victim is drained first, the order of this
   ADR follows its drain, and the node of the deleted machine is purged once Nomad lists it down)
+  and by
+  [ADR-0040](0040-scale-down-through-the-rollout.md) (`update` removes servers in this order too)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md); [ADR-0016](0016-server-discovery-seed-and-refresh.md),

@@ -21,6 +21,8 @@
   and by [ADR-0039](0039-rolling-update-of-combined-groups.md) (combined groups as built in M3.5: the new node first, a
   drain of the old node before its leadership moves and it stops, and its node purged once Nomad lists it down; the
   server steps are those of ADR-0038, with a window after the transfer of a drained leader)
+  and by
+  [ADR-0040](0040-scale-down-through-the-rollout.md) (scale-down is built; the guard stays for two cases)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0004](0004-layered-architecture.md), [ADR-0009](0009-server-discovery-fixed-ip-slots.md),
