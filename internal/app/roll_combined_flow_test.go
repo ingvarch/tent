@@ -138,7 +138,7 @@ func TestRollCombinedFlowForceReplacesEveryNodeOnceWhenTheyAreTheOnlyClients(t *
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := newRelease(t, keyedClusterYAML, combinedDrainYAML)
 		w.ServersOverTime()
-		w.SetDrainReads(3)
+		w.SetDrainReads(drainReads)
 		mustUpdate(t, svc)
 		inv := watchCombined(t, f, w, combinedGroup, 3)
 		old := serverMachines(f, combinedGroup)
@@ -229,7 +229,7 @@ func newCombinedSingleWorld(t *testing.T) *singleWorld {
 	t.Helper()
 	svc, f, w := newRelease(t, keyedClusterYAML, edit(t, combinedDrainYAML, "size: 3", "size: 1"))
 	w.ServersOverTime()
-	w.SetDrainReads(3)
+	w.SetDrainReads(drainReads)
 	w.SetReconcile(time.Minute, 10*time.Second)
 	w.SetHaltLag(singleHaltLag)
 	mustUpdate(t, svc)
