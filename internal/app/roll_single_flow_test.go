@@ -23,8 +23,9 @@ import (
 	"github.com/ingvarch/tent/internal/nomadops/nomadfake"
 )
 
-// singleWorld is a cluster of one outdated server and the workers, with the leader's reconcile on, a halted machine
-// that runs for 9 s more as far as Nomad goes, and the invariants of a group of one watching. T, the time of the
+// singleWorld is a cluster of one outdated server and the workers, or of one outdated combined node
+// (newCombinedSingleWorld), with the leader's reconcile on, a halted machine that runs for 9 s more as far as Nomad
+// goes, and the invariants of a group of one watching. T, the time of the
 // roll's transfer of the leadership, is when the leader's minute starts: its reconciles come at T plus a multiple of
 // the reconcile interval.
 type singleWorld struct {

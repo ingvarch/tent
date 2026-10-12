@@ -1,0 +1,36 @@
+node started create prod-all-1
+node done create prod-all-1
+nomad started join prod-all-1
+nomad done join prod-all-1
+node started scrub prod-all-1
+node done scrub prod-all-1
+nomad started stable
+nomad done stable
+nomad started ineligible prod-all-0
+nomad done ineligible prod-all-0
+nomad started drain prod-all-0
+nomad done drain prod-all-0
+nomad started drained prod-all-0
+nomad done drained prod-all-0
+nomad started transfer prod-all-0
+nomad done transfer prod-all-0
+nomad started stable
+nomad done stable
+nomad started remove-peer prod-all-0
+nomad done remove-peer prod-all-0
+nomad started reconcile prod-all-0
+nomad done reconcile prod-all-0
+nomad started remove-peer prod-all-0
+nomad done remove-peer prod-all-0
+node started stop prod-all-0
+node done stop prod-all-0
+nomad started force-leave prod-all-0.global
+nomad done force-leave prod-all-0.global
+nomad started healthy
+nomad done healthy
+node started delete prod-all-0
+node done delete prod-all-0
+nomad started down prod-all-0
+nomad done down prod-all-0
+nomad started purge prod-all-0
+nomad done purge prod-all-0
