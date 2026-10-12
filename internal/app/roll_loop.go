@@ -32,8 +32,8 @@ const (
 	settleTimeout = time.Minute
 )
 
-// rollAgain is what the operator does after a wait ran out.
-const rollAgain = "run tent rolling-update cluster again to go on waiting"
+// again is what the operator does after a wait ran out.
+func (r *rollRun) again() string { return "run " + r.command + " again to go on waiting" }
 
 // stepKey names a step by its action, its group, the machine or the node it acts on, and the server or the member that
 // it moves the leadership to, removes or forces out; the machine of a create by its name, which is all it has yet.
@@ -163,9 +163,14 @@ func newRollLoop() rollLoop {
 // out is tried again a poll later, and the third try in a row ends the run. A refusal of the decisions ends the run at
 // once, unless the run has sent a write: then it waits for the refusal to clear, for up to settleTimeout. The stop of
 // a server that has no peer beside fewer than two voters is held until the leader's reconcile has passed (see
-// holdStop). It takes no lock.
+// holdStop). The machines in gone start as deleted ones whose delete was sent, and count as a write that the run has
+// sent. A wait for a deleted machine to join waits for the cloud to stop listing it. It takes no lock.
 func (r *rollRun) run(ctx context.Context) (RollCounts, error) {
 	r.rollLoop = newRollLoop()
+	for _, id := range r.gone {
+		r.deleting[id] = time.Now()
+	}
+	r.wrote = len(r.gone) > 0
 	err := r.loop(ctx)
 	r.endSettle(err)
 	r.endWait(err)
@@ -189,7 +194,7 @@ func (r *rollRun) loop(ctx context.Context) error {
 			}
 			continue
 		}
-		step, err := rollout.Next(r.state(reading), rollout.Roll)
+		step, err := rollout.Next(r.state(reading), r.mode)
 		r.logObserved(reading, step, err)
 		if r.waitsFor(err) {
 			if err := r.settle(ctx, err); err != nil {
@@ -222,7 +227,9 @@ func (r *rollRun) loop(ctx context.Context) error {
 			}
 			continue
 		}
-		if step.Action.Waits() {
+		if since, sent := r.deleting[step.Machine.ID]; sent && step.Action == rollout.WaitJoined {
+			err = r.waitGone(ctx, step, since)
+		} else if step.Action.Waits() {
 			err = r.poll(ctx, step, reading)
 		} else {
 			err = r.act(ctx, step)
@@ -285,11 +292,15 @@ func (r *rollRun) logObserved(reading nomadReading, step rollout.Step, refusal e
 	if i := slices.IndexFunc(nomad.Servers, func(s rollout.Server) bool { return s.Leader }); i >= 0 {
 		leader = rollout.NodeOfServer(nomad.Servers[i].Name)
 	}
+	message := "rolling update observed"
+	if r.mode == rollout.Shrink {
+		message = "update observed"
+	}
 	next := step.String()
 	if refusal != nil {
 		next = refusal.Error()
 	}
-	r.s.Log.Debug("rolling update observed", "cluster", r.kit.cluster, "leader", leader, "voters", voting(nomad.Servers),
+	r.s.Log.Debug(message, "cluster", r.kit.cluster, "leader", leader, "voters", voting(nomad.Servers),
 		"healthy", nomad.Healthy, "tolerance", nomad.FailureTolerance, "next", next)
 }
 
@@ -512,7 +523,7 @@ func (r *rollRun) poll(ctx context.Context, step rollout.Step, reading nomadRead
 	}
 	if time.Since(first.since) >= w.limit {
 		r.open = &openWait{key: key, step: step, event: w.event}
-		return fmt.Errorf("%s did not %s within %s (%s); %s", w.subject, w.verb, w.limit, showing(step, reading), rollAgain)
+		return fmt.Errorf("%s did not %s within %s (%s); %s", w.subject, w.verb, w.limit, showing(step, reading), r.again())
 	}
 	if step.Action == rollout.WaitJoined {
 		if err := r.joinPoll(ctx, step, reading); err != nil {
@@ -591,7 +602,8 @@ func (r *rollRun) endWait(err error) {
 // decisions give right after it was carried out waits a poll before it is tried again; the third try in a row ends the
 // run. A write that fails because the node is gone or no server answered, and a create that failed before it sent
 // anything because no server answered, wait a poll and count as a try; any other failure ends the run. A step that it
-// carries out counts as a write that the run has sent, whatever the answer.
+// carries out counts as a write that the run has sent, whatever the answer. In a shrink, a step on a machine that the
+// plan does not list is refused, after the check of the deleted and stopped machines.
 func (r *rollRun) act(ctx context.Context, step rollout.Step) error {
 	key := keyOf(step)
 	if since, sent := r.deleting[step.Machine.ID]; sent {
@@ -599,6 +611,9 @@ func (r *rollRun) act(ctx context.Context, step rollout.Step) error {
 	}
 	if since, sent := r.stopping[step.Machine.ID]; sent && step.Action == rollout.Stop {
 		return r.waitStopped(ctx, step, since)
+	}
+	if err := r.checkPlanned(step); err != nil {
+		return err
 	}
 	if key == r.last && !r.settled {
 		r.settled = true
@@ -626,6 +641,22 @@ func (r *rollRun) act(ctx context.Context, step rollout.Step) error {
 	}
 	r.lastErr, r.settled = err, true
 	return r.sleep(ctx)
+}
+
+// checkPlanned fails, in a shrink, for a step that marks, drains, deletes, stops, hands over the leadership from, or
+// removes the peer or the member of a machine that the plan of the run does not list. A purge names a node and no
+// machine, and passes. A held stop is checked too (see holdStop).
+func (r *rollRun) checkPlanned(step rollout.Step) error {
+	if r.mode != rollout.Shrink || r.planned[step.Machine.ID] {
+		return nil
+	}
+	switch step.Action {
+	case rollout.MarkIneligible, rollout.Drain, rollout.Delete, rollout.Stop, rollout.TransferLeadership,
+		rollout.RemovePeer, rollout.ForceLeave:
+		return fmt.Errorf("node group %s: tent would now remove node %s (ID %s), which the plan of this run does not "+
+			"list; run %s again", step.Group, step.Machine.Name, step.Machine.ID, r.command)
+	}
+	return nil
 }
 
 // tryAgain reports whether the failure err of the step is one that a try a poll later may get past.

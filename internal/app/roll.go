@@ -141,7 +141,10 @@ func (s *Service) beginRoll(r *rollRun, plan RollPlan) error {
 	return nil
 }
 
-// rollRun is a rolling update of a cluster: what it knows of the cluster when it starts.
+// rollCommand is the command of a rolling update, as an error tells the operator to run it again.
+const rollCommand = "tent rolling-update cluster"
+
+// rollRun is a rolling update of a cluster, or the removals of an update: what it knows of the cluster when it starts.
 type rollRun struct {
 	s       *Service
 	kit     nodeKit
@@ -152,6 +155,10 @@ type rollRun struct {
 	listed  []cloud.Instance // the last list of the machines
 	api     nomadops.API     // over the servers that joined and run; followAPI keeps it so
 	apiAt   []string         // the addresses that api was made over
+	mode    rollout.Mode     // what the run does with its groups: Roll, or Shrink for the removals of an update
+	command string           // the command that an error tells the operator to run again, such as tent update cluster
+	planned map[string]bool  // Shrink: the machines whose removal the plan lists, by ID
+	gone    []string         // Shrink: the machines that the apply deleted before the run, by ID
 	// unlabelled are the machines of a forced run that lack the replace label when it lists them.
 	unlabelled []cloud.Instance
 	// warnings are about the cluster, for the run to tell before its first step.
@@ -215,7 +222,8 @@ func (s *Service) prepareRoll(ctx context.Context, l statestore.Layout, opts Rol
 		return nil, err
 	}
 	r := &rollRun{
-		s: s, kit: kit, model: c.m, groups: groups, version: c.objs.Cluster.Spec.Nomad.Version, listed: listed,
+		s: s, kit: kit, model: c.m, groups: groups, mode: rollout.Roll,
+		command: rollCommand, version: c.objs.Cluster.Spec.Nomad.Version, listed: listed,
 		api: api, apiAt: addressesOf(machines),
 		warnings: s.updateWarnings(c.objs.Cluster, c.objs.NodeGroups, c.ch),
 	}

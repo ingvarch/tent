@@ -202,10 +202,10 @@ func (r *rollRun) waitStopped(ctx context.Context, step rollout.Step, since time
 		return r.sleep(ctx)
 	case callErr != nil:
 		return fmt.Errorf("stop node %s (ID %s): %w; the cloud still lists it as running after %s; "+
-			"run tent rolling-update cluster again", m.Name, m.ID, callErr, stopTimeout)
+			"run %s again", m.Name, m.ID, callErr, stopTimeout, r.command)
 	}
 	return fmt.Errorf("the cloud still lists node %s (ID %s) as running %s after tent stopped it; "+
-		"run tent rolling-update cluster again", m.Name, m.ID, stopTimeout)
+		"run %s again", m.Name, m.ID, stopTimeout, r.command)
 }
 
 // apiMachines returns the machines whose Nomad API a roll calls: the machines of the server and combined groups of m
