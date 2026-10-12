@@ -216,9 +216,6 @@ func (r *rollRun) loop(ctx context.Context) error {
 		if step.Action == rollout.Done {
 			return nil
 		}
-		if err := r.refuseRole(step); err != nil {
-			return err
-		}
 		if handled, err := r.holdStop(ctx, step, reading); handled {
 			if err != nil {
 				return err

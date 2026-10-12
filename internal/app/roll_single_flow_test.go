@@ -64,7 +64,8 @@ func newSingleWorld(t *testing.T, every, promote time.Duration) *singleWorld {
 	svc, f, w := singleCluster(t, every, promote)
 	mustReplace(t, svc, keyedClusterYAML+serversExtraYAML)
 	mustUpdate(t, svc)
-	s := &singleWorld{svc: svc, f: f, w: w, inv: watchServers(t, f, w, 1), old: serverMachines(f),
+	s := &singleWorld{svc: svc, f: f, w: w, inv: watchServers(t, f, w, serversGroup, 1),
+		old:     serverMachines(f, serversGroup),
 		creates: countCalls(f, "CreateInstance")}
 	s.hooks(nil, nil)
 	return s
@@ -231,7 +232,7 @@ func (s *singleWorld) wantRemovedCalls(t *testing.T, most int) {
 func (s *singleWorld) wantRolled(t *testing.T, workers []string) {
 	t.Helper()
 	wantRollEnded(t, s.svc, s.f, idsOf(s.old))
-	wantServersRolledOf(t, s.svc, s.f, 1, s.old, true)
+	wantServersRolledOf(t, s.svc, s.f, serversGroup, 1, s.old, true)
 	if got := workerIDs(s.f); !slices.Equal(got, workers) {
 		t.Errorf("the workers are the machines %v, want %v", got, workers)
 	}
@@ -351,8 +352,8 @@ func TestSingleFlowForceReplacesTheServerAndTheWorkersOnce(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w := singleCluster(t, time.Minute, 10*time.Second)
-		inv := watchServers(t, f, w, 1)
-		oldServers, oldWorkers := serverMachines(f), workerIDs(f)
+		inv := watchServers(t, f, w, serversGroup, 1)
+		oldServers, oldWorkers := serverMachines(f, serversGroup), workerIDs(f)
 
 		plan, err := applyRoll(svc, app.RollOptions{Force: true})
 
@@ -363,7 +364,7 @@ func TestSingleFlowForceReplacesTheServerAndTheWorkersOnce(t *testing.T) {
 			t.Errorf("the roll did %+v, want %+v", plan.Rolled, want)
 		}
 		wantRollEnded(t, svc, f, append(idsOf(oldServers), oldWorkers...))
-		wantServersRolledOf(t, svc, f, 1, oldServers, false)
+		wantServersRolledOf(t, svc, f, serversGroup, 1, oldServers, false)
 		if got := len(workerIDs(f)); got != workerCount {
 			t.Errorf("the workers have %d machines, want %d", got, workerCount)
 		}

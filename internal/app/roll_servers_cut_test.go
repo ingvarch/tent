@@ -115,7 +115,7 @@ func wantServersCutDone(
 ) {
 	t.Helper()
 	wantRollEnded(t, svc, f, idsOf(old))
-	wantServersRolled(t, svc, f, old, true)
+	wantServersRolled(t, svc, f, serversGroup, old, true)
 	if got := countCalls(f, "CreateInstance"); got != creates {
 		t.Errorf("CreateInstance was called %d times in all, want %d", got, creates)
 	}
@@ -132,7 +132,7 @@ func TestServersRollFinishesAfterACutAtAnyWrite(t *testing.T) {
 	calls := uninterruptedServersRoll(t)
 	eachCutAt(t, calls, func(i int) bool { return isRollWrite(callKey(calls[i])) }, func(t *testing.T, c cutCase) {
 		svc, f, w, inv := serversFlowWorld(t)
-		old := serverMachines(f)
+		old := serverMachines(f, serversGroup)
 		creates := countCalls(f, "CreateInstance") + callsOfKind(calls, "CreateInstance ")
 
 		cutServersRun(t, svc, f, w, inv, c)
@@ -163,7 +163,7 @@ func TestServersRollSendsTheStopAgainAfterACutWhileTheCloudListsTheServerRunning
 			synctest.Test(t, func(t *testing.T) {
 				svc, f, w, inv := serversFlowWorld(t)
 				f.SetHaltReads(t, 4)
-				old := serverMachines(f)
+				old := serverMachines(f, serversGroup)
 				creates := countCalls(f, "CreateInstance") + callsOfKind(calls, "CreateInstance ")
 				halts := countCalls(f, "HaltInstance") + serverGroupSize + 1
 
@@ -173,7 +173,7 @@ func TestServersRollSendsTheStopAgainAfterACutWhileTheCloudListsTheServerRunning
 				}
 
 				wantRollEnded(t, svc, f, idsOf(old))
-				wantServersRolled(t, svc, f, old, true)
+				wantServersRolled(t, svc, f, serversGroup, old, true)
 				if got := countCalls(f, "CreateInstance"); got != creates {
 					t.Errorf("CreateInstance was called %d times in all, want %d", got, creates)
 				}
@@ -219,7 +219,7 @@ func TestServersRollFinishesAfterALostAnswerOfEachWrite(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
 				svc, f, w, inv := serversFlowWorld(t)
-				old := serverMachines(f)
+				old := serverMachines(f, serversGroup)
 				creates := countCalls(f, "CreateInstance") + callsOfKind(calls, "CreateInstance ")
 				lost := false
 				inv.watch(
@@ -372,7 +372,7 @@ func TestServersRollGoesOnAfterADeadlineEndedTheRun(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
 				svc, f, w, inv := serversFlowWorld(t)
-				old := serverMachines(f)
+				old := serverMachines(f, serversGroup)
 				creates := countCalls(f, "CreateInstance") + serverGroupSize
 				tc.hold(t, f, w, inv)
 
@@ -435,7 +435,7 @@ func TestServersRollNamesTheNextServerWhenTheListsMissTheOneItCreated(t *testing
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _ := serversWorld(t, (*nomadWorld).ServersOverTime)
-		old := serverMachines(f)
+		old := serverMachines(f, serversGroup)
 
 		first := rollUntilCreated(t, svc, f, "")
 		second := rollUntilCreated(t, svc, f, first)
@@ -453,9 +453,9 @@ func TestServersRollNamesTheNextServerWhenTheListsMissTheOneItCreated(t *testing
 		}
 
 		wantRollEnded(t, svc, f, idsOf(old))
-		wantServersRolled(t, svc, f, old, true)
+		wantServersRolled(t, svc, f, serversGroup, old, true)
 		var names []string
-		for _, m := range serverMachines(f) {
+		for _, m := range serverMachines(f, serversGroup) {
 			names = append(names, m.name)
 		}
 		if want := []string{"prod-servers-3", "prod-servers-4", "prod-servers-5"}; !slices.Equal(names, want) {

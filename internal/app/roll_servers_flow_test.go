@@ -25,6 +25,12 @@ import (
 // serverGroupSize is the size of the test cluster's server group.
 const serverGroupSize = 3
 
+// serversGroup is the name of the test cluster's server group.
+const serversGroup = "servers"
+
+// machinePrefix is what the names of the machines of the node group called group start with.
+func machinePrefix(group string) string { return "prod-" + group + "-" }
+
 // stopWindow is how long the servers must have been unchanged before the roll stops one: the window of a minute and
 // ten seconds, less the second that the whole seconds of StableSince can take off.
 const stopWindow = time.Minute + 10*time.Second - time.Second
@@ -97,10 +103,16 @@ type nomadAt struct {
 // a server that joins the Raft configuration as a nonvoter, or a transfer of the leadership. At every HaltInstance
 // it also checks haltFacts.broken, and wantQuorumFor judges the voters that run over time.
 type serverInvariants struct {
-	tb   testing.TB
-	f    *vultrfake.Fake
-	w    *nomadWorld
-	size int // the size of the server group
+	tb    testing.TB
+	f     *vultrfake.Fake
+	w     *nomadWorld
+	group string // the name of the node group
+	size  int    // the size of the group
+	// combined makes the invariants hold what a roll keeps of the nodes of a combined group too: it halts a machine
+	// only once its node is ineligible and drained for it, or down; it marks or drains a node only while the other
+	// nodes of the group are ready, eligible and not draining; it purges a node only once the node is down and no
+	// machine has its name and address; and it asks for no intro token for a node of the group.
+	combined bool
 
 	mu          sync.Mutex
 	outside     map[string]bool // the machines that the test halted itself, by ID
@@ -111,14 +123,23 @@ type serverInvariants struct {
 	vultr, seen int             // how many calls had reached the Vultr fake and Nomad when the watch began
 }
 
-// watchServers makes every call to f and to w check the invariants of a server group of the given size before it
-// runs, and takes the hooks of both.
-func watchServers(tb testing.TB, f *vultrfake.Fake, w *nomadWorld, size int) *serverInvariants {
+// watchServers makes every call to f and to w check the invariants of the server group called group, of the given
+// size, before it runs, and takes the hooks of both.
+func watchServers(tb testing.TB, f *vultrfake.Fake, w *nomadWorld, group string, size int) *serverInvariants {
 	tb.Helper()
 	inv := &serverInvariants{
-		tb: tb, f: f, w: w, size: size, outside: map[string]bool{}, vultr: len(f.Calls()), seen: len(w.Log()),
+		tb: tb, f: f, w: w, group: group, size: size, outside: map[string]bool{}, vultr: len(f.Calls()),
+		seen: len(w.Log()),
 	}
 	inv.watch(nil, nil)
+	return inv
+}
+
+// watchCombined is watchServers for a combined group: the invariants also hold what a roll keeps of its nodes.
+func watchCombined(tb testing.TB, f *vultrfake.Fake, w *nomadWorld, group string, size int) *serverInvariants {
+	tb.Helper()
+	inv := watchServers(tb, f, w, group, size)
+	inv.combined = true
 	return inv
 }
 
@@ -130,6 +151,7 @@ func (inv *serverInvariants) watch(onVultr vultrfake.Hook, onNomad nomadHook) {
 		inv.check(ctx, "Vultr "+c.Name+" "+c.Arg)
 		if c.Name == "HaltInstance" {
 			inv.checkStop(c.Arg)
+			inv.checkHaltedNode(c.Arg)
 		}
 		if onVultr == nil {
 			return next(ctx)
@@ -138,6 +160,7 @@ func (inv *serverInvariants) watch(onVultr vultrfake.Hook, onNomad nomadHook) {
 	})
 	inv.w.SetHook(func(ctx context.Context, c nomadfake.Call, next func(context.Context) error) error {
 		inv.check(ctx, "Nomad "+c.Name+" "+c.Arg)
+		inv.checkNodeWrite(c)
 		inv.mu.Lock()
 		inv.nomad = append(inv.nomad, nomadAt{c.Name, time.Now()})
 		inv.mu.Unlock()
@@ -179,7 +202,7 @@ func (inv *serverInvariants) halt(id string) {
 func (inv *serverInvariants) view() serverView {
 	var v serverView
 	for _, in := range inv.f.Instances() {
-		if strings.HasPrefix(in.Hostname, "prod-servers-") {
+		if strings.HasPrefix(in.Hostname, machinePrefix(inv.group)) {
 			v.machines++
 		}
 	}
@@ -229,6 +252,118 @@ func (inv *serverInvariants) checkStop(id string) {
 	}
 	for _, msg := range inv.haltFacts(id).broken(id) {
 		inv.tb.Errorf("%s", msg)
+	}
+}
+
+// nodeViews returns the nodes that Nomad lists as the world last saw them, by node ID, shaped as the test's edits
+// shape the answers.
+func (w *nomadWorld) nodeViews() map[string]nomadops.Node {
+	w.mu.Lock()
+	listed := slices.Collect(maps.Values(w.listed))
+	w.mu.Unlock()
+	out := make(map[string]nomadops.Node, len(listed))
+	for _, n := range w.shapeNodes(listed) {
+		out[n.ID] = n
+	}
+	return out
+}
+
+// inGroup reports whether the cloud lists the machine id and it belongs to the group.
+func (inv *serverInvariants) inGroup(id string) bool {
+	for _, in := range inv.f.Instances() {
+		if in.ID == id && strings.HasPrefix(in.Hostname, machinePrefix(inv.group)) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkHaltedNode fails the test when the roll halts a machine of a combined group whose node Nomad lists up and not
+// ineligible, or draining, or with a last drain that is not complete or is not for the machine. A node that is down or
+// not listed, and a machine that the test halted itself, are left alone.
+func (inv *serverInvariants) checkHaltedNode(id string) {
+	inv.tb.Helper()
+	if !inv.combined || !inv.inGroup(id) {
+		return
+	}
+	inv.mu.Lock()
+	outside := inv.outside[id]
+	inv.mu.Unlock()
+	n, listed := inv.w.nodeViews()[nodeIDOf(id)]
+	if outside || !listed || n.Status == "down" {
+		return
+	}
+	if n.Eligible || n.Draining || n.LastDrain.Status != "complete" || n.LastDrain.Meta["tent_machine"] != id {
+		inv.tb.Errorf("halt of %s: its node reads %s, eligible %v, draining %v, last drain %q for %q; "+
+			"want a node that is down, or ineligible with a drain that is complete for the machine",
+			id, n.Status, n.Eligible, n.Draining, n.LastDrain.Status, n.LastDrain.Meta["tent_machine"])
+	}
+}
+
+// checkNodeWrite fails the test for the write to a node of a combined group that breaks its invariants: a mark or a
+// drain while another node cannot take work, a purge of a node that is not down or whose machine is listed, and an
+// intro token for a node of the group.
+func (inv *serverInvariants) checkNodeWrite(c nomadfake.Call) {
+	inv.tb.Helper()
+	if !inv.combined {
+		return
+	}
+	switch c.Name {
+	case "MarkIneligible", "Drain":
+		nodeID, _, _ := strings.Cut(c.Arg, " ")
+		inv.checkOtherNodes(nodeID)
+	case "Purge":
+		inv.checkPurge(c.Arg)
+	case "IntroToken":
+		if strings.HasPrefix(c.Arg, machinePrefix(inv.group)) {
+			inv.tb.Errorf("intro token for %s, a node of the combined group", c.Arg)
+		}
+	}
+}
+
+// checkOtherNodes fails the test unless every machine of the group but the one of the node nodeID has a node that is
+// ready, eligible and not draining; a node that Nomad does not list has no status. It leaves the check out once the
+// test has halted a machine itself.
+func (inv *serverInvariants) checkOtherNodes(nodeID string) {
+	inv.tb.Helper()
+	inv.mu.Lock()
+	halted := len(inv.outside) > 0
+	inv.mu.Unlock()
+	victim := instanceOf(nodeID)
+	if halted || !inv.inGroup(victim) {
+		return
+	}
+	nodes := inv.w.nodeViews()
+	for _, in := range inv.f.Instances() {
+		if in.ID == victim || !strings.HasPrefix(in.Hostname, machinePrefix(inv.group)) {
+			continue
+		}
+		if n := nodes[nodeIDOf(in.ID)]; n.Status != "ready" || !n.Eligible || n.Draining {
+			inv.tb.Errorf("mark or drain of %s: the node of %s cannot take work: status %q, eligible %v, draining %v",
+				nodeID, in.Hostname, n.Status, n.Eligible, n.Draining)
+		}
+	}
+}
+
+// checkPurge fails the test when the roll purges a node of the group that Nomad lists up, or whose name and address a
+// listed machine has. A node that Nomad does not list is not one of the group.
+func (inv *serverInvariants) checkPurge(nodeID string) {
+	inv.tb.Helper()
+	n := inv.w.nodeViews()[nodeID]
+	if !strings.HasPrefix(n.Name, machinePrefix(inv.group)) {
+		return
+	}
+	if n.Status != "down" {
+		inv.tb.Errorf("purge of %s (%s): Nomad lists the node %s, want down", nodeID, n.Name, n.Status)
+	}
+	for _, in := range inv.f.Instances() {
+		hasAddress := false
+		for _, v := range inv.f.InstanceVPCs(in.ID) {
+			hasAddress = hasAddress || v.IPAddress == n.Address.String()
+		}
+		if in.Hostname == n.Name && hasAddress {
+			inv.tb.Errorf("purge of %s (%s): the machine %s has the node's name and address", nodeID, n.Name, in.ID)
+		}
 	}
 }
 
@@ -365,17 +500,17 @@ func serversFlowWorld(
 			setup(w)
 		}
 	})
-	return svc, f, w, watchServers(t, f, w, serverGroupSize)
+	return svc, f, w, watchServers(t, f, w, serversGroup, serverGroupSize)
 }
 
 // serverMachine is a server machine of the cluster as a roll sees it.
 type serverMachine struct{ id, name, hash string }
 
-// serverMachines returns the machines of the server group that f lists, in creation order.
-func serverMachines(f *vultrfake.Fake) []serverMachine {
+// serverMachines returns the machines of the node group called group that f lists, in creation order.
+func serverMachines(f *vultrfake.Fake, group string) []serverMachine {
 	var out []serverMachine
 	for _, in := range f.Instances() {
-		if strings.HasPrefix(in.Hostname, "prod-servers-") {
+		if strings.HasPrefix(in.Hostname, machinePrefix(group)) {
 			out = append(out, serverMachine{id: in.ID, name: in.Hostname, hash: tagOf(in.Tags, cloud.LabelSpecHash)})
 		}
 	}
@@ -391,22 +526,24 @@ func idsOf(machines []serverMachine) []string {
 	return out
 }
 
-// wantServersRolled fails the test unless the servers are three, none of them an old one or with an old one's name,
-// each with a spec hash that differs from the old one's when hashChanged and equals it otherwise, and Nomad lists
-// exactly them as voters and as alive members, and no peer or member of an old machine.
-func wantServersRolled(t *testing.T, svc *app.Service, f *vultrfake.Fake, old []serverMachine, hashChanged bool) {
+// wantServersRolled fails the test unless the machines of the group called group are three, none of them an old one or
+// with an old one's name, each with a spec hash that differs from the old one's when hashChanged and equals it
+// otherwise, and Nomad lists exactly them as voters and as alive members, and no peer or member of an old machine.
+func wantServersRolled(
+	t *testing.T, svc *app.Service, f *vultrfake.Fake, group string, old []serverMachine, hashChanged bool,
+) {
 	t.Helper()
-	wantServersRolledOf(t, svc, f, serverGroupSize, old, hashChanged)
+	wantServersRolledOf(t, svc, f, group, serverGroupSize, old, hashChanged)
 }
 
 // wantServersRolledOf is wantServersRolled for a group of the given size.
 func wantServersRolledOf(
-	t *testing.T, svc *app.Service, f *vultrfake.Fake, size int, old []serverMachine, hashChanged bool,
+	t *testing.T, svc *app.Service, f *vultrfake.Fake, group string, size int, old []serverMachine, hashChanged bool,
 ) {
 	t.Helper()
-	now := serverMachines(f)
+	now := serverMachines(f, group)
 	if len(now) != size {
-		t.Errorf("the server group has %d machines, want %d", len(now), size)
+		t.Errorf("the group %s has %d machines, want %d", group, len(now), size)
 	}
 	var wantPeers, wantMembers []string
 	for _, m := range now {
@@ -508,7 +645,7 @@ func TestRollServersFlowReplacesTheServers(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, w, inv := serversFlowWorld(t)
-		old := serverMachines(f)
+		old := serverMachines(f, serversGroup)
 		var plan app.RollPlan
 		var err error
 
@@ -530,7 +667,7 @@ func TestRollServersFlowReplacesTheServers(t *testing.T) {
 		checkGolden(t, "flow_roll_servers.plan.golden", text.String())
 		checkGolden(t, "flow_roll_servers.calls.golden", callsText(collapsePolls(calls)))
 		wantRollEnded(t, svc, f, idsOf(old))
-		wantServersRolled(t, svc, f, old, true)
+		wantServersRolled(t, svc, f, serversGroup, old, true)
 		inv.wantKept()
 	})
 }
@@ -556,7 +693,7 @@ func clusterFlowWorld(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld,
 	svc, f, w, _ := serversFlowWorld(t)
 	mustReplace(t, svc, workersMetaYAML)
 	mustUpdate(t, svc)
-	return svc, f, w, watchServers(t, f, w, serverGroupSize)
+	return svc, f, w, watchServers(t, f, w, serversGroup, serverGroupSize)
 }
 
 // TestRollServersFlowRollsTheServersBeforeTheWorkers applies the roll of a cluster whose servers and workers are
@@ -565,7 +702,7 @@ func TestRollServersFlowRollsTheServersBeforeTheWorkers(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _, inv := clusterFlowWorld(t)
-		oldServers, oldWorkers := serverMachines(f), workerIDs(f)
+		oldServers, oldWorkers := serverMachines(f, serversGroup), workerIDs(f)
 		before := workerHashes(f)
 		lines := recordProgress(svc)
 
@@ -580,7 +717,7 @@ func TestRollServersFlowRollsTheServersBeforeTheWorkers(t *testing.T) {
 		checkGolden(t, "flow_roll_cluster.steps.golden", strings.Join(*lines, "\n")+"\n")
 		wantInOrder(t, *lines, "node done delete prod-servers-0", "node started create prod-workers-2")
 		wantWorkersRolled(t, svc, f, before, oldWorkers)
-		wantServersRolled(t, svc, f, oldServers, true)
+		wantServersRolled(t, svc, f, serversGroup, oldServers, true)
 		inv.wantKept()
 	})
 }
@@ -592,7 +729,7 @@ func TestRollServersFlowMovesTheLeadershipOnceAndSettlesAfterTheBlip(t *testing.
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _, inv := serversFlowWorld(t, func(w *nomadWorld) { w.SetTransferBlip(2 * time.Second) })
-		old := serverMachines(f)
+		old := serverMachines(f, serversGroup)
 		lines := recordProgress(svc)
 
 		plan, err := applyRoll(svc, app.RollOptions{})
@@ -606,7 +743,7 @@ func TestRollServersFlowMovesTheLeadershipOnceAndSettlesAfterTheBlip(t *testing.
 		wantInOrder(t, *lines, "nomad started transfer prod-servers-0", "nomad done transfer prod-servers-0",
 			"nomad started settle", "nomad done settle", "node started stop prod-servers-0")
 		wantRollEnded(t, svc, f, idsOf(old))
-		wantServersRolled(t, svc, f, old, true)
+		wantServersRolled(t, svc, f, serversGroup, old, true)
 		inv.wantKept()
 	})
 }
@@ -649,7 +786,7 @@ func TestRollServersFlowRemovesAnOldServerThatWasHaltedDuringTheWindow(t *testin
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _, inv := serversFlowWorld(t)
-		old := serverMachines(f)
+		old := serverMachines(f, serversGroup)
 		lines := recordProgress(svc)
 		haltAtStable(t, svc, f, "prod-servers-2", 1, inv.halt)
 		halted := instanceNamed(t, f, "prod-servers-2")
@@ -672,7 +809,7 @@ func TestRollServersFlowRemovesAnOldServerThatWasHaltedDuringTheWindow(t *testin
 			t.Errorf("the cloud halted %v, want the halted server %s and then the two that the roll stops", halts, halted)
 		}
 		wantRollEnded(t, svc, f, idsOf(old))
-		wantServersRolled(t, svc, f, old, true)
+		wantServersRolled(t, svc, f, serversGroup, old, true)
 		inv.wantKept()
 	})
 }
@@ -752,7 +889,7 @@ func TestRollServersFlowEndsTheSameWhoeverRemovesThePeer(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
 				svc, f, w, inv := serversFlowWorld(t, tc.setup)
-				old := serverMachines(f)
+				old := serverMachines(f, serversGroup)
 
 				plan, err := applyRoll(svc, app.RollOptions{})
 
@@ -795,7 +932,7 @@ func TestRollServersFlowEndsTheSameWhoeverRemovesThePeer(t *testing.T) {
 					}
 				}
 				wantRollEnded(t, svc, f, idsOf(old))
-				wantServersRolled(t, svc, f, old, true)
+				wantServersRolled(t, svc, f, serversGroup, old, true)
 				inv.wantKept()
 			})
 		})
@@ -811,8 +948,8 @@ func TestRollServersFlowForceReplacesEveryServerAndWorkerOnce(t *testing.T) {
 		svc, f, w := newRelease(t)
 		w.ServersOverTime()
 		mustUpdate(t, svc)
-		inv := watchServers(t, f, w, serverGroupSize)
-		oldServers, oldWorkers := serverMachines(f), workerIDs(f)
+		inv := watchServers(t, f, w, serversGroup, serverGroupSize)
+		oldServers, oldWorkers := serverMachines(f, serversGroup), workerIDs(f)
 
 		plan, err := applyRoll(svc, app.RollOptions{Force: true})
 
@@ -823,7 +960,7 @@ func TestRollServersFlowForceReplacesEveryServerAndWorkerOnce(t *testing.T) {
 			t.Errorf("the roll did %+v, want %+v", plan.Rolled, want)
 		}
 		wantRollEnded(t, svc, f, append(idsOf(oldServers), oldWorkers...))
-		wantServersRolled(t, svc, f, oldServers, false)
+		wantServersRolled(t, svc, f, serversGroup, oldServers, false)
 		if got := len(workerIDs(f)); got != workerCount {
 			t.Errorf("the workers have %d machines, want %d", got, workerCount)
 		}
@@ -869,7 +1006,7 @@ func TestRollServersFlowRollsAGroupOfOneServerAndTheWorkers(t *testing.T) {
 		mustUpdate(t, svc)
 		mustReplace(t, svc, keyedClusterYAML+serversExtraYAML, workersMetaYAML)
 		mustUpdate(t, svc)
-		inv := watchServers(t, f, w, 1)
+		inv := watchServers(t, f, w, serversGroup, 1)
 		var halted time.Time
 		inv.watch(func(ctx context.Context, c vultrfake.Call, next func(context.Context) error) error {
 			if c.Name == "HaltInstance" {
@@ -877,7 +1014,7 @@ func TestRollServersFlowRollsAGroupOfOneServerAndTheWorkers(t *testing.T) {
 			}
 			return next(ctx)
 		}, nil)
-		oldServers, oldWorkers := serverMachines(f), workerIDs(f)
+		oldServers, oldWorkers := serverMachines(f, serversGroup), workerIDs(f)
 		lines := recordProgress(svc)
 
 		plan, err := applyRoll(svc, app.RollOptions{})
@@ -916,7 +1053,7 @@ func TestRollServersFlowRollsAGroupOfOneServerAndTheWorkers(t *testing.T) {
 			t.Errorf("the roll called a removed server that runs: %v", got)
 		}
 		wantRollEnded(t, svc, f, append(idsOf(oldServers), oldWorkers...))
-		wantServersRolledOf(t, svc, f, 1, oldServers, true)
+		wantServersRolledOf(t, svc, f, serversGroup, 1, oldServers, true)
 		if got := len(workerIDs(f)); got != workerCount {
 			t.Errorf("the workers have %d machines, want %d", got, workerCount)
 		}
@@ -933,7 +1070,7 @@ func TestRollServersFlowCountsTheWaitForTheServersOfEachVictimFromItsOwnStart(t 
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f, _, inv := serversFlowWorld(t, func(w *nomadWorld) { w.SetReportLag(6 * time.Minute) })
-		old := serverMachines(f)
+		old := serverMachines(f, serversGroup)
 		lines := recordProgress(svc)
 		start := time.Now()
 
@@ -948,7 +1085,7 @@ func TestRollServersFlowCountsTheWaitForTheServersOfEachVictimFromItsOwnStart(t 
 			t.Errorf("the roll took %v, want at least the three waits of 6 minutes", got)
 		}
 		wantRollEnded(t, svc, f, idsOf(old))
-		wantServersRolled(t, svc, f, old, true)
+		wantServersRolled(t, svc, f, serversGroup, old, true)
 		inv.wantKept()
 	})
 }
@@ -1016,7 +1153,7 @@ func wantInvariants(t *testing.T, cases []invariantCase) {
 				ftb := &failureTB{TB: t}
 				b := reconcileWorld(t, append([]func(*nomadWorld){func(w *nomadWorld) { w.FailOnLeaderLoss(ftb) }},
 					tc.setups...)...)
-				inv := watchServers(ftb, b.f, b.w, serverGroupSize)
+				inv := watchServers(ftb, b.f, b.w, serversGroup, serverGroupSize)
 				b.peers(t)
 				if got := ftb.failures(); len(got) > 0 {
 					t.Fatalf("the invariants failed for a healthy cluster: %q", got)
@@ -1096,7 +1233,7 @@ func TestServerInvariantsTakeTheSizeOfTheGroup(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				ftb := &failureTB{TB: t}
 				b := newLiveWorldWith(t, func(w *nomadWorld) { w.ServersOverTime() })
-				watchServers(ftb, b.f, b.w, tc.size)
+				watchServers(ftb, b.f, b.w, serversGroup, tc.size)
 
 				b.peers(t)
 
@@ -1320,7 +1457,7 @@ func TestWantQuorumForJudgesTheVotersThatRun(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				ftb := &failureTB{TB: t}
 				b := reconcileWorld(t, tc.setups...)
-				inv := watchServers(ftb, b.f, b.w, 2)
+				inv := watchServers(ftb, b.f, b.w, serversGroup, 2)
 				at, victim := b.startLeadership(t)
 				for _, s := range b.followers(t) {
 					if s != victim {
@@ -1349,7 +1486,7 @@ func TestWantQuorumForLetsTheClockRunForTheTimeAsked(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		b := newLiveWorldWith(t, func(w *nomadWorld) { w.ServersOverTime() })
-		inv := watchServers(t, b.f, b.w, serverGroupSize)
+		inv := watchServers(t, b.f, b.w, serversGroup, serverGroupSize)
 		start := time.Now()
 
 		inv.wantQuorumFor(12 * time.Second)

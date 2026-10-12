@@ -54,7 +54,7 @@ func (s *singleWorld) wantFreshServerNames(t *testing.T, lines []string) {
 		seen[name] = true
 		highest = max(highest, serverIndex(t, name))
 	}
-	servers := serverMachines(s.f)
+	servers := serverMachines(s.f, serversGroup)
 	if len(servers) != 1 {
 		t.Fatalf("the server group has %d machines after the rolls, want 1: %v", len(servers), servers)
 	}
