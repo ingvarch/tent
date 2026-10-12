@@ -1,12 +1,16 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -18,6 +22,7 @@ import (
 	"github.com/ingvarch/tent/internal/model"
 	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/rollout"
+	"github.com/ingvarch/tent/internal/secret"
 )
 
 // TestKeyOfKeysACreateByItsName tells two creates of one group apart by the name of their machines, which have no ID
@@ -992,14 +997,15 @@ func TestPollEndsTheWaitOfACombinedNodeNamingTheHalfThatIsMissing(t *testing.T) 
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var steps []string
-			r := &rollRun{s: testService(&steps), rollLoop: newRollLoop()}
+			r := &rollRun{s: testService(&steps), rollLoop: newRollLoop(), command: rollCommand}
 			step := rollout.Step{Action: rollout.WaitJoined, Group: "all", Machine: rollout.Machine{
 				ID: "i-3", Name: "prod-all-3", Role: v1alpha1.RoleCombined, PrivateIP: addr}}
 			r.seen[keyOf(step)] = seenWait{step: step, since: time.Now().Add(-nodeTimeout)}
 
 			err := r.poll(t.Context(), step, tc.reading)
 
-			want := "node prod-all-3 did not join within 10m0s (" + tc.missing + "); " + rollAgain
+			want := "node prod-all-3 did not join within 10m0s (" + tc.missing + "); " +
+				"run tent rolling-update cluster again to go on waiting"
 			if err == nil || err.Error() != want {
 				t.Errorf("poll error = %v, want %q", err, want)
 			}
@@ -1035,4 +1041,485 @@ func TestStopStopsTheMachineAndNotesItAsBeingStopped(t *testing.T) {
 			}
 		})
 	}
+}
+
+// updateCommand is the command that a removal tells the operator to run again.
+const updateCommand = "tent update cluster"
+
+// TestAgainNamesTheCommandOfTheRun tells the operator to run the command of the run again.
+func TestAgainNamesTheCommandOfTheRun(t *testing.T) {
+	t.Parallel()
+	for command, want := range map[string]string{
+		rollCommand:   "run tent rolling-update cluster again to go on waiting",
+		updateCommand: "run tent update cluster again to go on waiting",
+	} {
+		r := &rollRun{command: command}
+		if got := r.again(); got != want {
+			t.Errorf("again of %q = %q, want %q", command, got, want)
+		}
+	}
+}
+
+// TestPollAndWaitStoppedNameTheCommandOfTheRun ends a wait, and a wait for a stop that the cloud lists late, with the
+// command of the run.
+func TestPollAndWaitStoppedNameTheCommandOfTheRun(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		healthy := rollout.Step{Action: rollout.WaitHealthy, Group: "workers", Voters: 3}
+		machine := rollout.Machine{ID: "i-1", Name: "prod-servers-0"}
+		stop := rollout.Step{Action: rollout.Stop, Group: "servers", Machine: machine}
+		for _, tc := range []struct {
+			name string
+			run  func(r *rollRun) error
+			want string
+		}{
+			{"a wait that ran out", func(r *rollRun) error {
+				r.seen[keyOf(healthy)] = seenWait{step: healthy, since: time.Now().Add(-nomadTimeout)}
+				return r.poll(t.Context(), healthy, nomadReading{})
+			}, "the servers did not become healthy and vote within 10m0s (autopilot reports 0 voters and the servers " +
+				"not healthy); run tent update cluster again to go on waiting"},
+			{"a stop whose call answered", func(r *rollRun) error {
+				return r.waitStopped(t.Context(), stop, time.Now().Add(-stopTimeout))
+			}, "the cloud still lists node prod-servers-0 (ID i-1) as running 2m0s after tent stopped it; " +
+				"run tent update cluster again"},
+			{"a stop whose call failed", func(r *rollRun) error {
+				r.heldSent[machine.ID] = errors.New("boom")
+				return r.waitStopped(t.Context(), stop, time.Now().Add(-stopTimeout))
+			}, "stop node prod-servers-0 (ID i-1): boom; the cloud still lists it as running after 2m0s; " +
+				"run tent update cluster again"},
+		} {
+			r := &rollRun{s: &Service{}, rollLoop: newRollLoop(), command: updateCommand}
+
+			err := tc.run(r)
+
+			if err == nil || err.Error() != tc.want {
+				t.Errorf("%s: got %v, want %q", tc.name, err, tc.want)
+			}
+		}
+	})
+}
+
+// TestCheckPlannedRefusesAMachineOutsideThePlan refuses each step that marks, drains, deletes, stops, hands over the
+// leadership from, or removes the peer or the member of a machine that the plan of the run does not list, and names
+// the command. A purge, which names no machine, goes through.
+func TestCheckPlannedRefusesAMachineOutsideThePlan(t *testing.T) {
+	t.Parallel()
+	machine := rollout.Machine{ID: "instance-4", Name: "prod-workers-0"}
+	node := rollout.Node{ID: "n-1", Name: "prod-workers-0"}
+	const refusal = "node group workers: tent would now remove node prod-workers-0 (ID instance-4), which the plan " +
+		"of this run does not list; run tent update cluster again"
+	newRun := func() *rollRun {
+		return &rollRun{
+			rollLoop: newRollLoop(), mode: rollout.Shrink, command: updateCommand,
+			planned: map[string]bool{"instance-9": true},
+		}
+	}
+	for name, action := range map[string]rollout.Action{
+		"mark": rollout.MarkIneligible, "drain": rollout.Drain, "delete": rollout.Delete, "stop": rollout.Stop,
+		"transfer": rollout.TransferLeadership, "remove peer": rollout.RemovePeer, "force leave": rollout.ForceLeave,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			step := rollout.Step{Action: action, Group: "workers", Machine: machine, Node: node}
+
+			err := newRun().checkPlanned(step)
+
+			if err == nil || err.Error() != refusal {
+				t.Errorf("checkPlanned = %v, want %q", err, refusal)
+			}
+		})
+	}
+	t.Run("act sends nothing", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			var steps []string
+			marks := &marksIneligible{}
+			r := newRun()
+			r.s, r.api = testService(&steps), marks
+			step := rollout.Step{Action: rollout.MarkIneligible, Group: "workers", Machine: machine, Node: node}
+
+			err := r.act(t.Context(), step)
+
+			if err == nil || err.Error() != refusal {
+				t.Errorf("act = %v, want %q", err, refusal)
+			}
+			if len(marks.marked) != 0 || r.wrote || r.tries != 0 {
+				t.Errorf("act marked %v, wrote %v and tried %d times, want nothing sent", marks.marked, r.wrote, r.tries)
+			}
+		})
+	})
+}
+
+// purgesNode is a Nomad API that records the nodes it was asked to purge.
+type purgesNode struct {
+	nomadops.API
+	purged []string
+}
+
+func (p *purgesNode) Purge(_ context.Context, nodeID string) error {
+	p.purged = append(p.purged, nodeID)
+	return nil
+}
+
+// TestActInAShrinkCarriesOutAPlannedMachineAndAPurge sends the step of a machine that the plan lists, and a purge,
+// whose machine is empty.
+func TestActInAShrinkCarriesOutAPlannedMachineAndAPurge(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		var steps []string
+		marks, purges := &marksIneligible{}, &purgesNode{}
+		r := &rollRun{
+			s: testService(&steps), rollLoop: newRollLoop(), api: marks, mode: rollout.Shrink, command: updateCommand,
+			planned: map[string]bool{"instance-4": true},
+		}
+		mark := rollout.Step{
+			Action: rollout.MarkIneligible, Group: "workers", Machine: rollout.Machine{ID: "instance-4"},
+			Node: rollout.Node{ID: "n-1"},
+		}
+
+		if err := r.act(t.Context(), mark); err != nil || !slices.Equal(marks.marked, []string{"n-1"}) {
+			t.Errorf("act of a planned machine = %v with %v marked, want n-1 marked", err, marks.marked)
+		}
+		r.api = purges
+		purge := rollout.Step{Action: rollout.Purge, Group: "workers", Node: rollout.Node{ID: "n-2", Name: "prod-workers-9"}}
+		if err := r.act(t.Context(), purge); err != nil || !slices.Equal(purges.purged, []string{"n-2"}) {
+			t.Errorf("act of a purge = %v with %v purged, want n-2 purged", err, purges.purged)
+		}
+	})
+}
+
+// TestActInARollChecksNoPlan carries out the step of any machine in the mode Roll, which has no plan.
+func TestActInARollChecksNoPlan(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		var steps []string
+		marks := &marksIneligible{}
+		r := &rollRun{s: testService(&steps), rollLoop: newRollLoop(), api: marks, mode: rollout.Roll, command: rollCommand}
+		mark := rollout.Step{
+			Action: rollout.MarkIneligible, Group: "workers", Machine: rollout.Machine{ID: "instance-4"},
+			Node: rollout.Node{ID: "n-1"},
+		}
+
+		if err := r.act(t.Context(), mark); err != nil || len(marks.marked) != 1 {
+			t.Errorf("act = %v with %v marked, want the node marked", err, marks.marked)
+		}
+	})
+}
+
+// TestActChecksADeletedMachineBeforeThePlan waits for the machine whose delete was sent, also when the plan does not
+// list it.
+func TestActChecksADeletedMachineBeforeThePlan(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		var steps []string
+		r := &rollRun{
+			s: testService(&steps), rollLoop: newRollLoop(), mode: rollout.Shrink, command: updateCommand,
+			planned: map[string]bool{},
+		}
+		r.deleting["i-2"] = time.Now()
+		del := rollout.Step{
+			Action: rollout.Delete, Group: "workers", Machine: rollout.Machine{ID: "i-2", Name: "prod-workers-1"},
+		}
+		start := time.Now()
+
+		if err := r.act(t.Context(), del); err != nil || time.Since(start) != rollPoll {
+			t.Errorf("act = %v after %v, want a wait of one poll", err, time.Since(start))
+		}
+	})
+}
+
+// lingers is a cloud that lists the machines of a group, and lists the machines in gone for the first shows lists
+// only. It records the deletes it is asked for.
+type lingers struct {
+	cloud.Nodes
+	listed  []cloud.Instance
+	gone    map[string]bool
+	shows   int
+	lists   int
+	deleted []string
+}
+
+func (l *lingers) List(context.Context, string) ([]cloud.Instance, error) {
+	l.lists++
+	var out []cloud.Instance
+	for _, in := range l.listed {
+		if !l.gone[in.ID] || l.lists <= l.shows {
+			out = append(out, in)
+		}
+	}
+	return out, nil
+}
+
+func (l *lingers) Delete(_ context.Context, in cloud.Instance) error {
+	l.deleted = append(l.deleted, in.ID)
+	return nil
+}
+
+// workerNodes returns the nodes of Nomad that list the clients of the machines as ready.
+func workerNodes(machines ...cloud.Instance) []nomadops.Node {
+	var nodes []nomadops.Node
+	for _, in := range machines {
+		nodes = append(nodes, nomadops.Node{
+			ID: "n-" + in.ID, Name: in.Name, Address: in.PrivateIP, Status: "ready", Eligible: true, Version: "2.0.7",
+		})
+	}
+	return nodes
+}
+
+// listsWorkers is a Nomad API of a cluster at rest that lists nodes.
+type listsWorkers struct {
+	readsNomad
+	nodes []nomadops.Node
+}
+
+func (l listsWorkers) Nodes(context.Context) ([]nomadops.Node, error) { return l.nodes, nil }
+
+// shrinkRunOver returns a run in the mode Shrink over the group workers of size size, whose machines are listed by
+// nodes, with the machines in gone as its deleted ones. No plan lists a machine.
+func shrinkRunOver(t *testing.T, nodes *lingers, size int, gone ...string) *rollRun {
+	t.Helper()
+	var steps []string
+	fail := false
+	var ready []cloud.Instance
+	for _, in := range nodes.listed {
+		if in.Joined {
+			ready = append(ready, in)
+		}
+	}
+	return &rollRun{
+		s: testService(&steps), kit: nodeKit{cluster: "prod", nodes: nodes}, model: apiModel, mode: rollout.Shrink,
+		command: updateCommand, planned: map[string]bool{}, gone: gone, listed: nodes.listed,
+		groups: []rollout.Group{{Name: "workers", Role: v1alpha1.RoleClient, Size: size, SpecHash: "new"}},
+		api:    listsWorkers{readsNomad: readsNomad{fail: &fail}, nodes: workerNodes(ready...)}, version: "2.0.7",
+	}
+}
+
+// worker returns a machine of the group workers that runs and, when joined, has joined, at 10.0.0.<the last digit of
+// its ID>.
+func worker(id, name string, joined bool) cloud.Instance {
+	return cloud.Instance{
+		ID: id, Name: name, Group: "workers", Role: v1alpha1.RoleClient, Ready: true, Joined: joined, SpecHash: "new",
+		PrivateIP: netip.AddrFrom4([4]byte{10, 0, 0, id[len(id)-1] - '0'}),
+	}
+}
+
+// TestRunStartsWithTheDeletedMachinesAsDeleting lists a machine that the apply deleted before the run for two polls,
+// and the run neither sends its delete again nor holds it to the plan: it waits until the cloud stops listing it.
+func TestRunStartsWithTheDeletedMachinesAsDeleting(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		nodes := &lingers{
+			listed: []cloud.Instance{worker("i-1", "prod-workers-0", true), worker("i-2", "prod-workers-1", false)},
+			gone:   map[string]bool{"i-2": true}, shows: 2,
+		}
+		r := shrinkRunOver(t, nodes, 1, "i-2")
+		start := time.Now()
+
+		_, err := r.run(t.Context())
+
+		if err != nil {
+			t.Fatalf("run = %v, want the run to end once the cloud stops listing the machine", err)
+		}
+		if len(nodes.deleted) != 0 {
+			t.Errorf("the run deleted %v, want no delete: the apply sent it", nodes.deleted)
+		}
+		if got := time.Since(start); got != 2*rollPoll || nodes.lists != 3 {
+			t.Errorf("the run lasted %v and listed %d times, want two polls and three lists", got, nodes.lists)
+		}
+	})
+}
+
+// TestRunEndsWhenTheCloudListsADeletedMachineForTooLong ends the run with the built text after goneTimeout.
+func TestRunEndsWhenTheCloudListsADeletedMachineForTooLong(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		nodes := &lingers{
+			listed: []cloud.Instance{worker("i-1", "prod-workers-0", true), worker("i-2", "prod-workers-1", false)},
+			gone:   map[string]bool{"i-2": true}, shows: 1 << 30,
+		}
+		r := shrinkRunOver(t, nodes, 1, "i-2")
+		start := time.Now()
+
+		_, err := r.run(t.Context())
+
+		want := "the cloud still lists node prod-workers-1 (ID i-2) 5m0s after its delete"
+		if err == nil || err.Error() != want {
+			t.Errorf("run = %v, want %q", err, want)
+		}
+		if got := time.Since(start); got != goneTimeout {
+			t.Errorf("the run lasted %v, want %v", got, goneTimeout)
+		}
+	})
+}
+
+// TestRunCountsTheDeletedMachinesAsAWrite waits for the refusal that a deleted duplicate causes while the cloud lists
+// it. A run without such a machine ends with the refusal at once.
+func TestRunCountsTheDeletedMachinesAsAWrite(t *testing.T) {
+	t.Parallel()
+	duplicate := func() *lingers {
+		return &lingers{
+			listed: []cloud.Instance{
+				worker("i-1", "prod-workers-0", true), worker("i-2", "prod-workers-1", true),
+				worker("i-3", "prod-workers-1", false),
+			},
+			gone: map[string]bool{"i-3": true}, shows: 2,
+		}
+	}
+	t.Run("with a deleted machine", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			nodes := duplicate()
+
+			_, err := shrinkRunOver(t, nodes, 2, "i-3").run(t.Context())
+
+			if err != nil {
+				t.Errorf("run = %v, want the refusal to clear once the cloud stops listing the duplicate", err)
+			}
+		})
+	})
+	t.Run("without one", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			nodes := duplicate()
+
+			start := time.Now()
+
+			_, err := shrinkRunOver(t, nodes, 2).run(t.Context())
+
+			const want = "node group workers: machines i-2 and i-3 share the name prod-workers-1"
+			if !errors.Is(err, rollout.ErrRefused) || !strings.HasPrefix(err.Error(), want) || time.Since(start) != 0 {
+				t.Errorf("run = %v after %v, want the refusal %q at once", err, time.Since(start), want)
+			}
+		})
+	})
+}
+
+// TestLogObservedNamesTheMessageByMode logs "rolling update observed" in a roll and "update observed" in a shrink.
+func TestLogObservedNamesTheMessageByMode(t *testing.T) {
+	t.Parallel()
+	for mode, want := range map[rollout.Mode]string{
+		rollout.Roll: "rolling update observed", rollout.Shrink: "update observed",
+	} {
+		var buf bytes.Buffer
+		r := &rollRun{s: &Service{Log: slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))},
+			mode: mode}
+
+		r.logObserved(nomadReading{}, rollout.Step{Action: rollout.Done}, nil)
+
+		var rec map[string]any
+		if err := json.Unmarshal(buf.Bytes(), &rec); err != nil || rec["msg"] != want {
+			t.Errorf("mode %d logged %q (%v), want the message %q", mode, buf.String(), err, want)
+		}
+	}
+}
+
+// joinCalls counts the creates and the intro tokens that a run sends.
+type joinCalls struct{ creates, tokens int }
+
+// joinCloud is a cloud that lingers and counts the creates.
+type joinCloud struct {
+	*lingers
+	calls *joinCalls
+}
+
+func (c joinCloud) Create(context.Context, cloud.CreateRequest) (cloud.Instance, error) {
+	c.calls.creates++
+	return cloud.Instance{}, errors.New("unexpected create")
+}
+
+// joinAPI is a Nomad API that lists nodes and counts the intro tokens.
+type joinAPI struct {
+	listsWorkers
+	calls *joinCalls
+}
+
+// Purge drops the node, as Nomad does.
+func (a *joinAPI) Purge(_ context.Context, id string) error {
+	a.nodes = slices.DeleteFunc(a.nodes, func(n nomadops.Node) bool { return n.ID == id })
+	return nil
+}
+
+func (a *joinAPI) IntroToken(context.Context, nomadops.IntroRequest) (secret.Secret, error) {
+	a.calls.tokens++
+	return secret.Secret{}, errors.New("unexpected intro token")
+}
+
+// goneRunOver returns a shrink run whose machine gone was deleted by the apply, is listed for shows lists and has a
+// down node in Nomad.
+func goneRunOver(t *testing.T, gone cloud.Instance, shows int) (*rollRun, *joinCalls) {
+	t.Helper()
+	nodes := &lingers{
+		listed: []cloud.Instance{worker("i-1", "prod-workers-0", true), gone},
+		gone:   map[string]bool{gone.ID: true}, shows: shows,
+	}
+	r := shrinkRunOver(t, nodes, 1, gone.ID)
+	nodes.listed = append(nodes.listed, cloud.Instance{
+		ID: "i-0", Name: "prod-servers-0", Group: "servers", Role: v1alpha1.RoleServer, Ready: true, Joined: true,
+		PrivateIP: netip.AddrFrom4([4]byte{10, 0, 0, 9}),
+	})
+	r.listed = nodes.listed
+	down := workerNodes(gone)
+	down[0].Status = "down"
+	calls := &joinCalls{}
+	api := r.api.(listsWorkers)
+	api.nodes = append(workerNodes(nodes.listed[0]), down...)
+	r.kit, r.api = testKit(t, joinCloud{lingers: nodes, calls: calls}), &joinAPI{listsWorkers: api, calls: calls}
+	return r, calls
+}
+
+// TestRunWaitsForTheCloudNotForAJoinOfADeletedMachineThatNomadListsDown ends the run once the cloud stops listing a
+// deleted client that is old and has a down node, with no join text.
+func TestRunWaitsForTheCloudNotForAJoinOfADeletedMachineThatNomadListsDown(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		old := worker("i-2", "prod-workers-1", false)
+		old.Created = testNow.Add(-32 * time.Minute)
+		r, _ := goneRunOver(t, old, 2)
+
+		_, err := r.run(t.Context())
+
+		if err != nil {
+			t.Errorf("run = %v, want the run to end once the cloud stops listing the machine", err)
+		}
+	})
+}
+
+// TestRunDoesNotCreateOrAskForATokenForADeletedMachineListedAsNotReady sends neither a create nor an intro token for a
+// deleted machine that the cloud lists as not ready with its operation id.
+func TestRunDoesNotCreateOrAskForATokenForADeletedMachineListedAsNotReady(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		pending := worker("i-2", "prod-workers-1", false)
+		pending.Ready, pending.Op = false, cloud.NewOpID()
+		r, calls := goneRunOver(t, pending, 2)
+
+		_, err := r.run(t.Context())
+
+		if err != nil {
+			t.Errorf("run = %v, want the run to end once the cloud stops listing the machine", err)
+		}
+		if calls.creates != 0 || calls.tokens != 0 {
+			t.Errorf("creates = %d, intro tokens = %d, want none", calls.creates, calls.tokens)
+		}
+	})
+}
+
+// TestRunEndsWithTheBuiltTextWhenTheCloudListsADeletedMachineThatNomadListsDown ends the run after goneTimeout.
+func TestRunEndsWithTheBuiltTextWhenTheCloudListsADeletedMachineThatNomadListsDown(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		in := worker("i-2", "prod-workers-1", false)
+		r, _ := goneRunOver(t, in, 1<<30)
+		start := time.Now()
+
+		_, err := r.run(t.Context())
+
+		want := "the cloud still lists node prod-workers-1 (ID i-2) 5m0s after its delete"
+		if err == nil || err.Error() != want {
+			t.Errorf("run = %v, want %q", err, want)
+		}
+		if got := time.Since(start); got != goneTimeout {
+			t.Errorf("the run lasted %v, want %v", got, goneTimeout)
+		}
+	})
 }

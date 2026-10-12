@@ -235,6 +235,7 @@ func TestActWaitsForAStoppedMachineAndEndsAtTheLimit(t *testing.T) {
 		node := &marksIneligible{}
 		r := &rollRun{
 			s: testService(&steps), kit: nodeKit{cluster: "prod", nodes: nodes}, rollLoop: newRollLoop(), api: node,
+			command: rollCommand,
 		}
 		r.stopping["i-1"] = time.Now()
 		machine := rollout.Machine{ID: "i-1", Name: "prod-servers-1"}

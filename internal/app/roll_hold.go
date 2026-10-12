@@ -136,13 +136,18 @@ func (r *rollRun) noteHeld(servers []rollout.Server) {
 
 // holdStop holds the step when it is a stop that the run holds (see heldVictim): it sends it when the held stop allows,
 // and otherwise polls once, with the victim out of the run's API, and forgets the step it carried out last, so that
-// the removal of a server that the leader adds again is a first try. It reports whether it handled the step; it
-// ends a hold that is open when the step is another. It fails once the holds of the victim have lasted holdTimeout.
+// the removal of a server that the leader adds again is a first try. In a shrink it refuses, before any hold or stop,
+// a victim that the plan does not list (a held victim is never one that was deleted or stopped). It reports whether
+// it handled the step; it ends a hold that is open when the step is another. It fails once the holds of the victim
+// have lasted holdTimeout.
 func (r *rollRun) holdStop(ctx context.Context, step rollout.Step, reading nomadReading) (bool, error) {
 	in, held := r.heldVictim(step, reading.state().Servers)
 	if !held {
 		r.endHold(nil)
 		return false, nil
+	}
+	if err := r.checkPlanned(step); err != nil {
+		return true, err
 	}
 	m := step.Machine
 	h, ok := r.held[m.ID]
@@ -156,7 +161,7 @@ func (r *rollRun) holdStop(ctx context.Context, step rollout.Step, reading nomad
 	}
 	if time.Since(h.first) >= holdTimeout {
 		return true, fmt.Errorf("tent could not stop node %s right after a reconcile of Nomad's leader within %s; "+
-			"both servers run; run tent rolling-update cluster again", m.Name, holdTimeout)
+			"both servers run; run %s again", m.Name, holdTimeout, r.command)
 	}
 	r.startHold(m, h)
 	if !r.unpeered[m.ID] {

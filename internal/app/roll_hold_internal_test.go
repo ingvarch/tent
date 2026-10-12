@@ -193,7 +193,7 @@ func (w *holdWorld) newRun() *rollRun {
 	s.OnWarning = func(msg string) { w.warnings = append(w.warnings, msg) }
 	r := &rollRun{
 		s: s, kit: testKit(w.t, holdCloud{w: w}), model: apiModel, rollLoop: newRollLoop(), version: "2.0.7",
-		listed: slices.Clone(w.listed),
+		mode: rollout.Roll, command: rollCommand, listed: slices.Clone(w.listed),
 		groups: []rollout.Group{{Name: "servers", Role: v1alpha1.RoleServer, Size: 1, SpecHash: "new"}},
 	}
 	if err := r.followAPI(); err != nil {
@@ -1651,6 +1651,69 @@ func TestStartHoldRoundsWhatIsLeftUp(t *testing.T) {
 			if !slices.Equal(got, []time.Duration{tc.want}) {
 				t.Errorf("a hold that starts %v into the limit reported %v, want %v", tc.since, got, tc.want)
 			}
+		}
+	})
+}
+
+// TestRunInAShrinkRefusesTheHeldStopOfAMachineOutsideThePlan ends the run at once, with no stop and no hold, when the
+// held stop is of a machine that the plan does not list.
+func TestRunInAShrinkRefusesTheHeldStopOfAMachineOutsideThePlan(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		w, r := victimRun(t, "failed")
+		r.mode, r.command, r.planned = rollout.Shrink, updateCommand, map[string]bool{}
+
+		_, err := r.run(t.Context())
+
+		want := "node group servers: tent would now remove node prod-servers-0 (ID i-1), which the plan of this run " +
+			"does not list; run tent update cluster again"
+		if err == nil || err.Error() != want {
+			t.Errorf("run = %v, want %q", err, want)
+		}
+		if len(w.stops) != 0 || len(w.reconcileEvents()) != 0 {
+			t.Errorf("stops %v and hold events %v, want none", w.stops, w.reconcileEvents())
+		}
+	})
+}
+
+// TestRunInAShrinkHoldsAndSendsTheStopOfAPlannedMachine holds and sends the stop of a machine that the plan lists.
+func TestRunInAShrinkHoldsAndSendsTheStopOfAPlannedMachine(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		w, r := victimRun(t, "failed")
+		r.mode, r.command, r.planned = rollout.Shrink, updateCommand, map[string]bool{"i-1": true}
+		w.stopCall = func(context.Context) error {
+			w.stopMachine()
+			return nil
+		}
+
+		_, err := r.run(t.Context())
+
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		if want := []string{"started 5m0s", "done"}; !slices.Equal(w.reconcileEvents(), want) {
+			t.Errorf("the hold reported %v, want %v", w.reconcileEvents(), want)
+		}
+		if !slices.Equal(w.stops, []string{"i-1"}) {
+			t.Errorf("stops %v, want the victim once", w.stops)
+		}
+	})
+}
+
+// TestHoldNamesTheCommandOfTheRun ends the holds of a removal with the command of the run.
+func TestHoldNamesTheCommandOfTheRun(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		w, r := victimRun(t, "alive")
+		r.mode, r.command, r.planned = rollout.Shrink, updateCommand, map[string]bool{"i-1": true}
+
+		_, err := r.run(t.Context())
+
+		want := "tent could not stop node prod-servers-0 right after a reconcile of Nomad's leader within 5m0s; " +
+			"both servers run; run tent update cluster again"
+		if err == nil || err.Error() != want || len(w.stops) != 0 {
+			t.Errorf("run = %v with the stops %v, want %q and no stop", err, w.stops, want)
 		}
 	})
 }
