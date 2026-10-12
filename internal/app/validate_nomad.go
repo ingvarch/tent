@@ -13,6 +13,7 @@ import (
 	"github.com/ingvarch/tent/internal/model"
 	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/pki"
+	"github.com/ingvarch/tent/internal/rollout"
 	"github.com/ingvarch/tent/internal/statestore"
 )
 
@@ -26,73 +27,119 @@ const noPrivateAddress = "the cloud reports no private address for it"
 type nomadFindings struct {
 	failures []Failure
 	warnings []string
-	secrets  *clusterSecrets // the stored secrets, nil when the store lacks some
 }
 
-// checkNomad makes the checks of Nomad and of the certificates for the cluster c, whose machines are set, at now. The
-// store must hold the CA, the gossip key, the bootstrap secret and the mark of the bootstrap, and a server that stays
-// must have a public address: otherwise the one failure nomad-not-set-up says what is missing, and Nomad is not asked.
-// The certificates of the machines that stay, and the CA, are checked when the store holds all four secrets.
-func (s *Service) checkNomad(ctx context.Context, l statestore.Layout, c loadedCluster, set machineSet, now time.Time,
-) (nomadFindings, error) {
+// nomadAnswer is what ValidateCluster asked of Nomad, in one round: the stored secrets, nil when the store lacks some,
+// the failures that say why Nomad was not asked or did not answer, and what it answered, nil unless it answered.
+type nomadAnswer struct {
+	secrets  *clusterSecrets
+	failures []Failure
+	view     *nomadView
+}
+
+// askCluster asks Nomad one round of questions over the server machines of the cluster c that run and have a public
+// address, whether the specs keep them or not, oldest first. The store must hold the CA, the gossip key, the
+// bootstrap secret and the mark of the bootstrap, and one such server must exist: otherwise the one failure
+// nomad-not-set-up says what is missing, and Nomad is not asked. A Nomad that does not answer is the failure
+// nomad-no-leader. The errors are a store that cannot be read, a Nomad client that cannot be made, and the end of ctx.
+func (s *Service) askCluster(ctx context.Context, l statestore.Layout, c loadedCluster, instances []cloud.Instance,
+) (nomadAnswer, error) {
 	secrets, err := s.storedSecrets(ctx, l)
 	if missing, ok := errors.AsType[*missingSecretsError](err); ok {
-		return nomadFindings{failures: []Failure{notSetUp(missing.Error())}}, nil
+		return nomadAnswer{failures: []Failure{notSetUp(missing.Error())}}, nil
 	}
 	if err != nil {
-		return nomadFindings{}, err
+		return nomadAnswer{}, err
 	}
-	found := nomadFindings{secrets: &secrets}
-	found.failures, found.warnings = certificateFindings(secrets.ca.Certificate().NotAfter, set.stays, now)
-	asked, err := s.askNomad(ctx, l, c, set, secrets)
-	found.failures = append(found.failures, asked...)
-	return found, err
-}
-
-// notSetUp returns the failure of a cluster whose Nomad tent cannot ask, for the reason detail.
-func notSetUp(detail string) Failure { return Failure{Check: checkNomadNotSetUp, Detail: detail} }
-
-// askNomad asks the servers that stay and have a public address one round of questions, and returns the failures of
-// the answers. A Nomad that does not answer, and a cluster that tent cannot ask, are failures. The errors are a store
-// that cannot be read, a Nomad client that cannot be made, and the end of ctx.
-func (s *Service) askNomad(ctx context.Context, l statestore.Layout, c loadedCluster, set machineSet,
-	secrets clusterSecrets,
-) ([]Failure, error) {
+	answer := nomadAnswer{secrets: &secrets}
 	marked, err := s.bootstrapped(ctx, l)
 	if err != nil {
-		return nil, err
+		return nomadAnswer{}, err
 	}
 	if !marked {
-		return []Failure{notSetUp("Nomad is not bootstrapped yet: tent update cluster --yes bootstraps it")}, nil
+		answer.failures = []Failure{notSetUp("Nomad is not bootstrapped yet: tent update cluster --yes bootstraps it")}
+		return answer, nil
 	}
-	servers, clients := set.servers(c.m), set.clients(c.m)
-	reachable := slices.DeleteFunc(slices.Clone(servers), func(in cloud.Instance) bool { return !in.PublicIP.IsValid() })
+	reachable := slices.DeleteFunc(slices.Clone(instances), func(in cloud.Instance) bool {
+		return in.Cluster != c.m.Name || !isServerMachine(c.m, in) || !in.Ready || !in.PublicIP.IsValid()
+	})
+	slices.SortFunc(reachable, compareAge)
 	if len(reachable) == 0 {
-		return []Failure{notSetUp("no server has a public address")}, nil
+		answer.failures = []Failure{notSetUp("no server runs and has a public address")}
+		return answer, nil
 	}
 	api, err := s.nomadOver(reachable, nomadAccess{
 		cluster: c.m.Name, region: c.objs.Cluster.Spec.Nomad.Region, secrets: secrets,
 	})
 	if err != nil {
-		return nil, err
+		return nomadAnswer{}, err
 	}
 	view, unreachable, err := askRound(ctx, api)
-	if err != nil || unreachable != nil {
-		return orNone(unreachable), err
+	if err != nil {
+		return nomadAnswer{}, err
 	}
-	pinned := c.objs.Cluster.Spec.Nomad.Version
-	fs := serverFailures(servers, view.peers, view.health)
-	fs = append(fs, clientFailures(clients, view.nodes)...)
-	return append(fs, versionFailures(servers, view.health, clients, view.nodes, pinned)...), nil
+	if unreachable != nil {
+		answer.failures = []Failure{*unreachable}
+		return answer, nil
+	}
+	answer.view = &view
+	return answer, nil
 }
 
-// orNone returns the failure f as a list, or nil for no failure.
-func orNone(f *Failure) []Failure {
-	if f == nil {
-		return nil
+// shrinkView returns what the node planner reads of the answer when it chooses the machines that the groups of m
+// lose among the listed machines: the reading of Nomad, with the spec hashes of the builder b if there is one, and
+// the machines to replace whatever their hash. It is the zero view unless Nomad answered and an update would plan with
+// a reading: a machine that joined may go and a server machine that joined runs to ask. Otherwise validate names the
+// surplus by the labels, as an update does.
+func (a nomadAnswer) shrinkView(m *model.Cluster, listed []cloud.Instance, b *nodeBuilder) shrinkView {
+	if a.view == nil || !removesJoined(m, listed) || len(apiMachines(m, listed, nil, nil)) == 0 {
+		return shrinkView{}
 	}
-	return []Failure{*f}
+	groups := make([]rollout.Group, len(m.Groups))
+	for i, g := range m.Groups {
+		groups[i].Name = g.Name
+	}
+	v := shrinkView{
+		read:   true,
+		nomad:  nomadReading{peers: a.view.peers, health: a.view.health, nodes: a.view.nodes}.state(),
+		forced: forcedMachines(listed, groups, false),
+	}
+	if b != nil {
+		v.hash = b.specHash
+	}
+	return v
 }
+
+// clientsSeen returns the nodes that Nomad listed and the stale clients of the cluster among listed at now, which an
+// update judges by them; the zero value unless Nomad answered, since an update then plans by the labels.
+func (a nomadAnswer) clientsSeen(cluster string, listed []cloud.Instance, now time.Time) clientsSeen {
+	if a.view == nil {
+		return clientsSeen{}
+	}
+	return clientsSeen{nodes: a.view.nodes, stale: staleClients(cluster, listed, now)}
+}
+
+// checkNomad makes the checks of Nomad and of the certificates for the cluster c, whose machines are set, from the
+// answer of Nomad, at now. The certificates of the machines that stay, and the CA, are checked when the store holds
+// all four secrets.
+func checkNomad(c loadedCluster, set machineSet, answer nomadAnswer, now time.Time) nomadFindings {
+	var found nomadFindings
+	if answer.secrets != nil {
+		found.failures, found.warnings = certificateFindings(answer.secrets.ca.Certificate().NotAfter, set.stays, now)
+	}
+	found.failures = append(found.failures, answer.failures...)
+	if view := answer.view; view != nil {
+		servers, clients := set.servers(c.m), set.clients(c.m)
+		pinned := c.objs.Cluster.Spec.Nomad.Version
+		found.failures = append(found.failures, serverFailures(servers, set.owned, view.peers, view.health)...)
+		found.failures = append(found.failures, clientFailures(clients, view.nodes)...)
+		found.failures = append(found.failures, versionFailures(servers, view.health, clients, view.nodes, pinned)...)
+	}
+	return found
+}
+
+// notSetUp returns the failure of a cluster whose Nomad tent cannot ask, for the reason detail.
+func notSetUp(detail string) Failure { return Failure{Check: checkNomadNotSetUp, Detail: detail} }
 
 // nomadView is what one round of questions got from Nomad.
 type nomadView struct {
@@ -139,8 +186,9 @@ func nodeFailure(check string, in cloud.Instance, detail string) Failure {
 // serverFailures returns the failures of the servers, which are the machines of the server and combined groups that
 // stay, against the Raft configuration peers and autopilot's report health, in no particular order. A server is told
 // by its private address: the vote comes from the Raft configuration, and whether it is alive and healthy from the
-// report, in which Nomad changes the order of the servers between calls.
-func serverFailures(servers []cloud.Instance, peers []nomadops.Peer, health nomadops.Health) []Failure {
+// report, in which Nomad changes the order of the servers between calls. A peer is unknown when none of the listed
+// machines of the cluster has its address, whether that machine stays or not.
+func serverFailures(servers, listed []cloud.Instance, peers []nomadops.Peer, health nomadops.Health) []Failure {
 	var fs []Failure
 	if !health.Healthy {
 		fs = append(fs, Failure{Check: checkAutopilotUnhealthy, Detail: "autopilot reports the servers unhealthy"})
@@ -154,7 +202,7 @@ func serverFailures(servers []cloud.Instance, peers []nomadops.Peer, health noma
 		fs = append(fs, reportFailures(in, health.Servers)...)
 	}
 	for _, p := range peers {
-		if !isMachine(servers, p) {
+		if !isMachine(listed, p) {
 			fs = append(fs, unknownPeerFailure(p))
 		}
 	}
@@ -236,20 +284,23 @@ func clientNode(nodes []nomadops.Node, in cloud.Instance) (nomadops.Node, bool) 
 	return listed[0], true
 }
 
+// noClientDetail says why the client of the machine in is not registered with Nomad.
+func noClientDetail(in cloud.Instance) string {
+	if !in.PrivateIP.IsValid() {
+		return noPrivateAddress
+	}
+	return "Nomad lists no client of its name at " + in.PrivateIP.String()
+}
+
 // clientFailures returns the failures of the clients, which are the machines of the client and combined groups that
 // stay, against the nodes that Nomad lists, in no particular order. A client is told by its name and private address.
 func clientFailures(clients []cloud.Instance, nodes []nomadops.Node) []Failure {
 	var fs []Failure
 	for _, in := range clients {
-		if !in.PrivateIP.IsValid() {
-			fs = append(fs, nodeFailure(checkClientNotRegistered, in, noPrivateAddress))
-			continue
-		}
 		n, ok := clientNode(nodes, in)
 		switch {
-		case !ok:
-			fs = append(fs, nodeFailure(checkClientNotRegistered, in,
-				"Nomad lists no client of its name at "+in.PrivateIP.String()))
+		case !in.PrivateIP.IsValid() || !ok:
+			fs = append(fs, nodeFailure(checkClientNotRegistered, in, noClientDetail(in)))
 		case !n.Ready():
 			state := n.Status
 			if n.Status == "ready" {

@@ -5,7 +5,7 @@ prod-workers-2  machine ID instance-6 is one more than the size of node group wo
 prod-workers-0  machine ID instance-9 has the name of machine ID instance-4
 prod-old-0      machine ID instance-7 is of node group old, which the specs do not have
 prod-servers-2  machine ID instance-3 has not joined Nomad: it carries no tent/joined label
--               no server has a public address
+-               no server runs and has a public address
 -               Nomad has no leader, or tent cannot reach it: no route; tent reaches the servers on port 4646: check spec.access.api
 prod-servers-1  no server votes at its address 10.64.0.4
 -               the Raft configuration lists a server at 10.64.0.9:4647 (prod-servers-9.global) that is no server machine of the cluster

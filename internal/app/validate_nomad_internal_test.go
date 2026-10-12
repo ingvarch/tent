@@ -213,9 +213,29 @@ func TestServerFailures(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			wantSortedFailures(t, serverFailures(tc.servers, tc.peers, tc.health), tc.want...)
+			wantSortedFailures(t, serverFailures(tc.servers, tc.servers, tc.peers, tc.health), tc.want...)
 		})
 	}
+}
+
+// TestServerFailuresAskTheListedMachinesForAPeer finds no unknown server for a peer at the address of a listed machine
+// that does not stay, and one for a peer at the address of no listed machine.
+func TestServerFailuresAskTheListedMachinesForAPeer(t *testing.T) {
+	t.Parallel()
+	listed := serversOf()
+	stays := listed[:2]
+	t.Run("a listed machine that does not stay", func(t *testing.T) {
+		t.Parallel()
+		wantSortedFailures(t, serverFailures(stays, listed, peersOf(listed), healthOf(stays, "2.0.7")))
+	})
+	t.Run("no listed machine", func(t *testing.T) {
+		t.Parallel()
+		wantSortedFailures(t, serverFailures(stays, stays, peersOf(listed), healthOf(stays, "2.0.7")), Failure{
+			Check: "server-unknown",
+			Detail: "the Raft configuration lists a server at 10.64.0.5:4647 (prod-servers-2.global) that is no " +
+				"server machine of the cluster",
+		})
+	})
 }
 
 func TestClientFailures(t *testing.T) {
@@ -481,7 +501,8 @@ func TestFindingsAreOfTheRoles(t *testing.T) {
 	m := validateModel()
 	m.Groups = append(m.Groups,
 		model.NodeGroup{Name: "mixed", Role: v1alpha1.RoleCombined, Zones: []string{"ams"}, Size: 1})
-	set := planMachines(m, append(fullCluster(), machine(6, "prod-mixed-0", "mixed", v1alpha1.RoleCombined)), nil)
+	mixed := machine(6, "prod-mixed-0", "mixed", v1alpha1.RoleCombined)
+	set := planMachines(m, append(fullCluster(), mixed), nil, shrinkView{}, clientsSeen{})
 
 	servers, clients := names(set.servers(m)), names(set.clients(m))
 
@@ -501,4 +522,47 @@ func names(machines []cloud.Instance) []string {
 		out = append(out, in.Name)
 	}
 	return out
+}
+
+// TestShrinkViewReadsOnlyWhenAnUpdateWouldPlanWithAReading checks a group of three workers for a size of two: validate
+// plans with the reading only when a machine that joined may go and a joined server runs to ask, as update does.
+func TestShrinkViewReadsOnlyWhenAnUpdateWouldPlanWithAReading(t *testing.T) {
+	t.Parallel()
+	m := validateModel()
+	listed := func(change func(cloud.Instance) cloud.Instance) []cloud.Instance {
+		all := append(fullCluster(), machine(6, "prod-workers-2", "workers", v1alpha1.RoleClient))
+		for i := range all {
+			all[i].PublicIP = netip.MustParseAddr("192.0.2." + strings.TrimPrefix(all[i].ID, "instance-"))
+			all[i] = change(all[i])
+		}
+		return all
+	}
+	cases := []struct {
+		name   string
+		answer nomadAnswer
+		listed []cloud.Instance
+		want   bool
+	}{
+		{"no answer", nomadAnswer{}, listed(func(in cloud.Instance) cloud.Instance { return in }), false},
+		{"no machine that joined may go", nomadAnswer{view: &nomadView{}},
+			listed(func(in cloud.Instance) cloud.Instance {
+				in.Joined = in.Joined && in.Group != "workers"
+				return in
+			}), false},
+		{"no server machine that joined runs", nomadAnswer{view: &nomadView{}},
+			listed(func(in cloud.Instance) cloud.Instance {
+				in.Joined = in.Joined && in.Role != v1alpha1.RoleServer
+				return in
+			}), false},
+		{"a machine that joined may go", nomadAnswer{view: &nomadView{}},
+			listed(func(in cloud.Instance) cloud.Instance { return in }), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.answer.shrinkView(m, tc.listed, nil).read; got != tc.want {
+				t.Errorf("read = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }

@@ -305,9 +305,7 @@ func (s *Service) planNodeChanges(ctx context.Context, m *model.Cluster, listed 
 			return nodePlan{}, err
 		}
 	}
-	if gone := notRegistered(seen.nodes, stale, servers); len(gone) > 0 || seen.full {
-		changes, servers = planNodes(m, listed, gone, in.next, view)
-	}
+	changes, servers, _ = clientsSeen{seen.nodes, stale}.plan(m, listed, in.next, view, changes, servers)
 	plan := nodePlan{changes: changes, servers: servers, warning: seen.warning}
 	if groups == nil {
 		return plan, nil
