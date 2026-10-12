@@ -125,6 +125,12 @@ func workerHashes(f *vultrfake.Fake) map[string]string {
 func wantWorkersRolled(t *testing.T, svc *app.Service, f *vultrfake.Fake, before map[string]string, old []string) {
 	t.Helper()
 	wantRollEnded(t, svc, f, old)
+	wantNewWorkerHashes(t, f, before)
+}
+
+// wantNewWorkerHashes fails the test unless every worker has a spec hash that no worker had in before.
+func wantNewWorkerHashes(t *testing.T, f *vultrfake.Fake, before map[string]string) {
+	t.Helper()
 	for name, hash := range workerHashes(f) {
 		if hash == "" || slices.Contains([]string{before["prod-workers-0"], before["prod-workers-1"]}, hash) {
 			t.Errorf("worker %s has the spec hash %q after the roll, want a new one", name, hash)
