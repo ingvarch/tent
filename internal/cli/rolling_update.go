@@ -22,28 +22,32 @@ func newRollingUpdateClusterCommand(opts *globalOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cluster [NAME]",
 		Short: "Replace the outdated nodes of a cluster",
-		Long: "Replace the outdated nodes of the cluster named by NAME or --name. A node is outdated when its spec " +
-			"hash differs from its node group's, when it carries the label tent/replace=true that a run with " +
-			"--force writes, or when --force is given and its group rolls. A server group rolls one node at a " +
-			"time: tent creates a new server, waits until it votes and every node has had time to learn of it, " +
-			"moves the leadership away from the old server when it leads, stops it, removes it from the Raft " +
-			"configuration and the gossip pool, waits until the servers that stay are healthy, and deletes it. A " +
-			"group of one server rolls through two servers: tent removes the old server from the Raft configuration " +
-			"while it still runs, waits until Nomad's leader has added it again, removes it once more, stops it " +
-			"right then and forces it out of the gossip pool; that takes about a minute more, and it needs " +
-			"--allow-single-server. A client group rolls by its maxSurge and maxUnavailable: tent creates new nodes " +
-			"first, marks each old node ineligible, drains it within the group's drainTimeout, deletes its machine " +
-			"and purges its node from Nomad once Nomad lists it down. The servers roll before the clients. tent " +
-			"cannot roll combined groups yet: select the client groups with --nodegroups. Run tent update cluster " +
-			"first after a change of the specs. Without --yes it prints the outdated nodes of each group and the next " +
-			"step; with --exit-code it exits with 2 while a next step is due. With --yes it takes the cluster's " +
-			"lock, prints the plan, prints each step on stderr as it goes and then what it did; with -o json or -o " +
-			"yaml it prints the plan it applied. A run that stops is finished by running the command again. With " +
-			"--yes and --force, tent first labels each node of the selected groups tent/replace=true, so a forced " +
-			"run that stops is finished by running the command again: without --force it replaces the nodes that carry " +
-			"the label; with --force it labels and replaces the rest too, including the nodes that the first run " +
-			"made. A development build of tent needs TENT_NODE_URL and TENT_NODE_SHA256 to find the tent-node that its " +
-			"nodes run. tent reads the cloud's credentials from the environment: VULTR_API_KEY for Vultr.",
+		Long: "Replace the outdated nodes of the cluster named by NAME or --name. A node is outdated when its " +
+			"spec hash differs from its node group's, when it carries the label tent/replace=true that a run " +
+			"with --force writes, or when --force is given and its group rolls. A server group rolls one node " +
+			"at a time: tent creates a new server, waits until it votes and every node has had time to learn " +
+			"of it, moves the leadership away from the old server when it leads, stops it, removes it from " +
+			"the Raft configuration and the gossip pool, waits until the servers that stay are healthy, and " +
+			"deletes it. A group of one server or one combined node rolls through two servers: tent removes " +
+			"the old server from the Raft configuration while it still runs, waits until Nomad's leader has " +
+			"added it again, removes it once more, stops it right then and forces it out of the gossip pool; " +
+			"that takes about a minute more, and it needs --allow-single-server. A client group rolls by its " +
+			"maxSurge and maxUnavailable: tent creates new nodes first, marks each old node ineligible, " +
+			"drains it within the group's drainTimeout, deletes its machine and purges its node from Nomad " +
+			"once Nomad lists it down. A combined group rolls like a server group, and before an old node's " +
+			"leadership moves and it stops, tent marks it ineligible and drains it within the group's " +
+			"drainTimeout; after the delete it purges the node from Nomad once Nomad lists it down. The " +
+			"server or combined group rolls before the client groups. Run tent update cluster first after a " +
+			"change of the specs. Without --yes it prints the outdated nodes of each group and the next step; " +
+			"with --exit-code it exits with 2 while a next step is due. With --yes it takes the cluster's " +
+			"lock, prints the plan, prints each step on stderr as it goes and then what it did; with -o json " +
+			"or -o yaml it prints the plan it applied. A run that stops is finished by running the command " +
+			"again. With --yes and --force, tent first labels each node of the selected groups " +
+			"tent/replace=true, so a forced run that stops is finished by running the command again: without " +
+			"--force it replaces the nodes that carry the label; with --force it labels and replaces the rest " +
+			"too, including the nodes that the first run made. A development build of tent needs " +
+			"TENT_NODE_URL and TENT_NODE_SHA256 to find the tent-node that its nodes run. tent reads the " +
+			"cloud's credentials from the environment: VULTR_API_KEY for Vultr.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if yes && exitCode {

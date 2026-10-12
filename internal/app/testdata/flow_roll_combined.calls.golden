@@ -1,0 +1,341 @@
+AvailablePlans ams
+ListPlans
+ListOS
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-all-0>
+ListInstanceVPCs <prod-all-1>
+ListInstanceVPCs <prod-all-2>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+AvailablePlans ams
+ListPlans
+ListOS
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-all-0>
+ListInstanceVPCs <prod-all-1>
+ListInstanceVPCs <prod-all-2>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+... the block above, 1 more times
+ListInstances tent/op=<op1>
+ListSSHKeys
+ListVPCs
+ListFirewallGroups
+ListInstances tent/cluster=prod
+ListFirewallRules <vultr.FirewallGroup/prod-clients>
+ListFirewallRules <vultr.FirewallGroup/prod-servers>
+CreateInstance prod-all-3
+GetInstance <prod-all-3>
+... the block above, 2 more times
+ListInstanceVPCs <prod-all-3>
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-all-0>
+ListInstanceVPCs <prod-all-1>
+ListInstanceVPCs <prod-all-2>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+ListInstanceVPCs <prod-all-3>
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+... the block above, 8 more times
+GetInstance <prod-all-3>
+UpdateInstance <prod-all-3>
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-all-0>
+ListInstanceVPCs <prod-all-1>
+ListInstanceVPCs <prod-all-2>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+ListInstanceVPCs <prod-all-3>
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+... the block above, 26 more times
+nomad MarkIneligible n-instance-2 (prod-all-0)
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+nomad Drain n-instance-2 30m0s tent_machine=instance-2 (prod-all-0)
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+... the block above, 3 more times
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-all-0>
+ListInstanceVPCs <prod-all-1>
+ListInstanceVPCs <prod-all-2>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+ListInstanceVPCs <prod-all-3>
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+HaltInstance <prod-all-1>
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-all-0>
+ListInstanceVPCs <prod-all-1>
+ListInstanceVPCs <prod-all-2>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+ListInstanceVPCs <prod-all-3>
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+... the block above, 20 more times
+nomad RemovePeer r-instance-2 (prod-all-0)
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+nomad ForceLeave prod-all-1.global (prod-all-0)
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+... the block above, 1 more times
+DeleteInstance <prod-all-1>
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-all-0>
+ListInstanceVPCs <prod-all-2>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+ListInstanceVPCs <prod-all-3>
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+nomad Purge n-instance-2 (prod-all-0)
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+ListInstances tent/op=<op2>
+ListSSHKeys
+ListVPCs
+ListFirewallGroups
+ListInstances tent/cluster=prod
+ListFirewallRules <vultr.FirewallGroup/prod-clients>
+ListFirewallRules <vultr.FirewallGroup/prod-servers>
+CreateInstance prod-all-4
+GetInstance <prod-all-4>
+... the block above, 2 more times
+ListInstanceVPCs <prod-all-4>
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-all-0>
+ListInstanceVPCs <prod-all-2>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+ListInstanceVPCs <prod-all-3>
+ListInstanceVPCs <prod-all-4>
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+... the block above, 8 more times
+GetInstance <prod-all-4>
+UpdateInstance <prod-all-4>
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-all-0>
+ListInstanceVPCs <prod-all-2>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+ListInstanceVPCs <prod-all-3>
+ListInstanceVPCs <prod-all-4>
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+... the block above, 26 more times
+nomad MarkIneligible n-instance-3 (prod-all-0)
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+nomad Drain n-instance-3 30m0s tent_machine=instance-3 (prod-all-0)
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+... the block above, 3 more times
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-all-0>
+ListInstanceVPCs <prod-all-2>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+ListInstanceVPCs <prod-all-3>
+ListInstanceVPCs <prod-all-4>
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+HaltInstance <prod-all-2>
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-all-0>
+ListInstanceVPCs <prod-all-2>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+ListInstanceVPCs <prod-all-3>
+ListInstanceVPCs <prod-all-4>
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+... the block above, 20 more times
+nomad RemovePeer r-instance-3 (prod-all-0)
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+nomad ForceLeave prod-all-2.global (prod-all-0)
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+... the block above, 1 more times
+DeleteInstance <prod-all-2>
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-all-0>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+ListInstanceVPCs <prod-all-3>
+ListInstanceVPCs <prod-all-4>
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+nomad Purge n-instance-3 (prod-all-0)
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+ListInstances tent/op=<op3>
+ListSSHKeys
+ListVPCs
+ListFirewallGroups
+ListInstances tent/cluster=prod
+ListFirewallRules <vultr.FirewallGroup/prod-clients>
+ListFirewallRules <vultr.FirewallGroup/prod-servers>
+CreateInstance prod-all-5
+GetInstance <prod-all-5>
+... the block above, 2 more times
+ListInstanceVPCs <prod-all-5>
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-all-0>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+ListInstanceVPCs <prod-all-3>
+ListInstanceVPCs <prod-all-4>
+ListInstanceVPCs <prod-all-5>
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+... the block above, 8 more times
+GetInstance <prod-all-5>
+UpdateInstance <prod-all-5>
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-all-0>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+ListInstanceVPCs <prod-all-3>
+ListInstanceVPCs <prod-all-4>
+ListInstanceVPCs <prod-all-5>
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+... the block above, 26 more times
+nomad MarkIneligible n-instance-1 (prod-all-0)
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+nomad Drain n-instance-1 30m0s tent_machine=instance-1 (prod-all-0)
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+... the block above, 3 more times
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-all-0>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+ListInstanceVPCs <prod-all-3>
+ListInstanceVPCs <prod-all-4>
+ListInstanceVPCs <prod-all-5>
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+nomad TransferLeadership r-instance-6 (prod-all-0)
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+... the block above, 35 more times
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-all-0>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+ListInstanceVPCs <prod-all-3>
+ListInstanceVPCs <prod-all-4>
+ListInstanceVPCs <prod-all-5>
+nomad Peers (prod-all-0)
+nomad Health (prod-all-0)
+nomad Members (prod-all-0)
+nomad Nodes (prod-all-0)
+HaltInstance <prod-all-0>
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-all-0>
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+ListInstanceVPCs <prod-all-3>
+ListInstanceVPCs <prod-all-4>
+ListInstanceVPCs <prod-all-5>
+nomad Peers (prod-all-3)
+nomad Health (prod-all-3)
+nomad Members (prod-all-3)
+nomad Nodes (prod-all-3)
+... the block above, 20 more times
+nomad RemovePeer r-instance-1 (prod-all-3)
+nomad Peers (prod-all-3)
+nomad Health (prod-all-3)
+nomad Members (prod-all-3)
+nomad Nodes (prod-all-3)
+nomad ForceLeave prod-all-0.global (prod-all-3)
+nomad Peers (prod-all-3)
+nomad Health (prod-all-3)
+nomad Members (prod-all-3)
+nomad Nodes (prod-all-3)
+... the block above, 1 more times
+DeleteInstance <prod-all-0>
+ListInstances tent/cluster=prod
+ListInstanceVPCs <prod-workers-0>
+ListInstanceVPCs <prod-workers-1>
+ListInstanceVPCs <prod-all-3>
+ListInstanceVPCs <prod-all-4>
+ListInstanceVPCs <prod-all-5>
+nomad Peers (prod-all-3)
+nomad Health (prod-all-3)
+nomad Members (prod-all-3)
+nomad Nodes (prod-all-3)
+nomad Purge n-instance-1 (prod-all-3)
+nomad Peers (prod-all-3)
+nomad Health (prod-all-3)
+nomad Members (prod-all-3)
+nomad Nodes (prod-all-3)

@@ -42,9 +42,9 @@ type RollOptions struct {
 // object holds no index. It lists the machines once and reads Nomad's Raft configuration, autopilot's report, gossip
 // members and nodes, in that order. The plan holds the selected groups with their outdated machines, and in Next the
 // step that comes next. Next is nil when nothing is left to roll. A failed check or read returns no plan. The plan
-// comes with an error and no Next when the decisions of rollout refuse the run, when the next step is one of a combined
-// group, which a roll does not replace yet, and when the next step waits for a machine to join that a run would refuse
-// to wait for. Without Apply it changes nothing in the cloud, in Nomad and in the store, and takes no lock.
+// comes with an error and no Next when the decisions of rollout refuse the run, and when the next step waits for a
+// machine to join that a run would refuse to wait for. Without Apply it changes nothing in the cloud, in Nomad and in
+// the store, and takes no lock.
 //
 // With Apply, a plan that has no next step or an error ends the run as it is, without a lock; a plan without a next
 // step comes back applied. Otherwise it takes the cluster's lock and plans again under it. When that plan has a next
@@ -289,8 +289,7 @@ func (s *Service) rollAPI(cluster string, machines []cloud.Instance, kit nodeKit
 }
 
 // plan reads Nomad and returns the plan of the run: its groups, and the step that comes next. A failed read returns no
-// plan. A refusal of the decisions, of a step that the roll cannot carry out and of a wait that the run would refuse
-// comes with the groups.
+// plan. A refusal of the decisions and of a wait that the run would refuse comes with the groups.
 func (r *rollRun) plan(ctx context.Context) (RollPlan, error) {
 	reading, err := readNomad(ctx, r.api)
 	if err != nil {
@@ -335,29 +334,15 @@ func (r *rollRun) state(reading nomadReading) rollout.State {
 	}
 }
 
-// refuse returns why the run cannot carry out the step, or nil: see refuseRole. A wait for a machine to join is refused
-// as its first poll would refuse it, given what Nomad reports.
+// refuse returns why the run cannot carry out the step, or nil. A wait for a machine to join is refused as its first
+// poll would refuse it, given what Nomad reports.
 func (r *rollRun) refuse(step rollout.Step, reading nomadReading) error {
-	if err := r.refuseRole(step); err != nil || step.Action != rollout.WaitJoined {
-		return err
+	if step.Action != rollout.WaitJoined {
+		return nil
 	}
 	in, _ := instanceByID(r.listed, step.Machine.ID)
 	_, err := joinCheck(in, reading, r.s.now())
 	return err
-}
-
-// refuseRole returns why the run cannot carry out the step of a group of its role, or nil. A roll replaces no combined
-// group yet.
-func (r *rollRun) refuseRole(step rollout.Step) error {
-	g, _ := findGroup(r.model, step.Group)
-	if g.Role != v1alpha1.RoleCombined {
-		return nil
-	}
-	msg := fmt.Sprintf("node group %s: tent cannot roll combined groups yet", step.Group)
-	if r.model.HasClientGroup() {
-		msg += "; select client groups with --nodegroups"
-	}
-	return errors.New(msg)
 }
 
 // joinStep is what a poll of the wait for a new node to join does.

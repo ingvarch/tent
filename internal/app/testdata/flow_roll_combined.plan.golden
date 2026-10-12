@@ -1,0 +1,4 @@
+node group all (combined, size 3): 3 outdated: prod-all-0 (ID instance-1), prod-all-1 (ID instance-2) and prod-all-2 (ID instance-3)
+node group workers (client, size 2): up to date
+
+Next: create node prod-all-3 (combined of all, ams).

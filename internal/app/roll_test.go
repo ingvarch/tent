@@ -161,7 +161,7 @@ func TestRollingUpdateWithNothingOutdated(t *testing.T) {
 
 // TestRollingUpdateRefusalOfAnUpToDateClusterIsNotNothingToRoll ends the text of a refused plan, whose groups have
 // nothing outdated, after the group lines: it does not say that there is nothing to roll. Each case is a refusal of
-// another check: the rollout (a newer Nomad), the join check and the role check.
+// another check: the rollout (a newer Nomad) and the join check.
 func TestRollingUpdateRefusalOfAnUpToDateClusterIsNotNothingToRoll(t *testing.T) {
 	t.Parallel()
 	const example = "node group servers (server, size 3): up to date\n" +
@@ -181,12 +181,6 @@ func TestRollingUpdateRefusalOfAnUpToDateClusterIsNotNothingToRoll(t *testing.T)
 		{"unjoined client", func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
 			return unjoinedWorld(t, func(_ *vultrfake.Fake, w *nomadWorld) { w.DropNode("prod-workers-1") })
 		}, true, "has not joined within 31 minutes", example},
-		{"unjoined combined node", func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
-			svc, f, w := combinedWorld(t, "")
-			dropJoinedTag(t, f, instanceNamed(t, f, "prod-all-0"))
-			return svc, f, w
-		}, false, "tent cannot roll combined groups yet",
-			"node group all (combined, size 3): up to date\nnode group workers (client, size 2): up to date\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -281,7 +275,6 @@ func TestRollingUpdateSelectsGroups(t *testing.T) {
 // and no change of the store. A refusal of the decisions comes with the plan of the groups, a failed check without.
 func TestRollingUpdateRefusesAtTheStart(t *testing.T) {
 	t.Parallel()
-	const combined = "node group all: tent cannot roll combined groups yet; select client groups with --nodegroups"
 	for _, tc := range []struct {
 		name   string
 		world  func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld)
@@ -354,14 +347,12 @@ func TestRollingUpdateRefusesAtTheStart(t *testing.T) {
 			}
 			return svc, f, w
 		}, app.RollOptions{}, noServerRuns, false},
-		{"outdated combined group in the default selection", func(
-			t *testing.T,
-		) (*app.Service, *vultrfake.Fake, *nomadWorld) {
-			return combinedWorld(t, serversExtraYAML)
-		}, app.RollOptions{}, combined, true},
-		{"force with the default selection", func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
-			return combinedWorld(t, "")
-		}, app.RollOptions{Force: true}, combined, true},
+		{"servers that autopilot reports unhealthy", func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
+			svc, f, w := combinedWorld(t, "")
+			w.Unhealthy()
+			return svc, f, w
+		}, app.RollOptions{Force: true}, "node group all: autopilot reports the servers unhealthy; " +
+			"tent replaces a server only while every server is healthy", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -396,32 +387,49 @@ func combinedWorld(t *testing.T, extra string) (*app.Service, *vultrfake.Fake, *
 	return svc, f, w
 }
 
-// TestRollingUpdateRefusesACombinedGroup refuses a step of a combined group, and gives the advice about --nodegroups
-// only when the specs have a client group. The refusal comes with the groups.
-func TestRollingUpdateRefusesACombinedGroup(t *testing.T) {
+// TestRollingUpdatePlansTheRollOfACombinedGroup names the creation of a new combined node as the first step for
+// outdated nodes and, with Force, for nodes that are up to date, with and without a client group in the specs. It
+// lists the combined group, comes with no error and only reads.
+func TestRollingUpdatePlansTheRollOfACombinedGroup(t *testing.T) {
 	t.Parallel()
+	forced := app.RollOptions{Force: true}
 	for _, tc := range []struct {
-		name string
-		docs []string
-		want string
+		name  string
+		world func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld)
+		opts  app.RollOptions
 	}{
-		{"with a client group", []string{keyedClusterYAML, combinedYAML, workersYAML},
-			"node group all: tent cannot roll combined groups yet; select client groups with --nodegroups"},
-		{"without a client group", []string{keyedClusterYAML, combinedYAML},
-			"node group all: tent cannot roll combined groups yet"},
+		{"outdated nodes", func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
+			return combinedWorld(t, serversExtraYAML)
+		}, app.RollOptions{}},
+		{"force with a client group", func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
+			return combinedWorld(t, "")
+		}, forced},
+		{"force without a client group", func(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
+			svc, f, w := newRelease(t, keyedClusterYAML, combinedYAML)
+			mustUpdate(t, svc)
+			return svc, f, w
+		}, forced},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				svc, f, w := newRelease(t, tc.docs...)
-				mustUpdate(t, svc)
+				svc, f, w := tc.world(t)
 				u := watch(t, svc, f, w)
 
-				plan, err := rollingUpdate(svc, app.RollOptions{Force: true})
+				plan, err := rollingUpdate(svc, tc.opts)
 
-				wantError(t, err, tc.want)
+				if err != nil {
+					t.Fatalf("RollingUpdate: %v", err)
+				}
 				u.check(t)
-				if len(plan.Groups) == 0 || plan.Next != nil {
-					t.Errorf("plan = %+v, want the groups and no next step", plan)
+				want := &app.RollStep{
+					Action: "create", Group: "all", Node: "prod-all-3",
+					Text: "create node prod-all-3 (combined of all, ams)",
+				}
+				if diff := cmp.Diff(want, plan.Next); diff != "" {
+					t.Errorf("Next (-want +got):\n%s", diff)
+				}
+				if len(plan.Groups) == 0 || plan.Groups[0].Name != "all" || len(plan.Groups[0].Outdated) != 3 {
+					t.Errorf("groups = %+v, want the combined group first with its three nodes outdated", plan.Groups)
 				}
 			})
 		})
@@ -586,6 +594,36 @@ func TestRollingUpdateRefusesAMachineWithoutAnAddress(t *testing.T) {
 		plan, err := rollingUpdate(svc, app.RollOptions{})
 
 		wantError(t, err, "node prod-workers-1: the cloud reports no private address for it yet; run the command again")
+		u.check(t)
+		if len(plan.Groups) != 2 || plan.Next != nil {
+			t.Errorf("plan = %+v, want the two groups and no next step", plan)
+		}
+	})
+}
+
+// TestRollingUpdateRefusesACombinedMachineWithoutAnAddress fails for a wait for a combined machine that the cloud
+// reports without a private address.
+func TestRollingUpdateRefusesACombinedMachineWithoutAnAddress(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, w := combinedWorld(t, "")
+		id := instanceNamed(t, f, "prod-all-2")
+		for _, in := range f.Instances() {
+			if in.ID != id {
+				continue
+			}
+			if err := f.DeleteInstance(t.Context(), id); err != nil {
+				t.Fatal(err)
+			}
+			in.ID, in.MainIP = "", ""
+			in.Tags = withoutJoined(in.Tags)
+			f.AddInstance(t, in) // no VPC: the cloud reports no private address
+		}
+		u := watch(t, svc, f, w)
+
+		plan, err := rollingUpdate(svc, app.RollOptions{})
+
+		wantError(t, err, "node prod-all-2: the cloud reports no private address for it yet; run the command again")
 		u.check(t)
 		if len(plan.Groups) != 2 || plan.Next != nil {
 			t.Errorf("plan = %+v, want the two groups and no next step", plan)
