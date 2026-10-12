@@ -150,6 +150,16 @@ func TestShrinkStartsNoRemovalWhileAMachineOfTheSurplusHasNotJoined(t *testing.T
 		Machine: workerName(3), MachineID: "m-4", Zone: "ams"})
 }
 
+func TestShrinkStartsNoRemovalWhileAnUnjoinedMachineOfTheSurplusHasNoAddress(t *testing.T) {
+	// Four workers for size 2. Worker 3 has not joined, the cloud reports no address for it and Nomad lists a node of
+	// its name, so it is waited for: only a machine that joined is passed over, and worker 2 is not marked yet.
+	s := shrinkClientsState(4, 5)
+	machineOf(t, &s, workerName(3)).Joined = false
+	machineOf(t, &s, workerName(3)).PrivateIP = netip.Addr{}
+	checkOutcome(t, nextIn(t, rollout.Shrink, s), outcome{Action: rollout.WaitJoined, Group: "workers",
+		Machine: workerName(3), MachineID: "m-4", Zone: "ams"})
+}
+
 func TestShrinkLooksOnlyAtTheFirstUnjoinedMachineOfTheSurplus(t *testing.T) {
 	// Four workers for size 2. Workers 2 and 3 have not joined; Nomad lists the node of worker 3, the first to go,
 	// and none of worker 2. Worker 2 is not deleted while worker 3 is waited for.
@@ -215,9 +225,10 @@ func TestShrinkRemovesAnIneligibleNodeOnlyFromAGroupAboveItsSize(t *testing.T) {
 	})
 }
 
-func TestShrinkRespectsTheBudgetOfUnavailableNodes(t *testing.T) {
-	// Five workers for size 3; workers 3 and 4 are joined and the cloud reports no address for them, so they are no
-	// victims and not available.
+func TestShrinkTakesNoStepOnAMachineWithoutAnAddress(t *testing.T) {
+	// Five workers for size 3; workers 3 and 4 are joined and the cloud reports no address for them. They are the
+	// machines that the group loses, and no step is taken on them, whatever the budget of unavailable nodes: the
+	// group waits until the cloud stops listing them.
 	base := func(maxUnavailable int) rollout.State {
 		s := shrinkClientsState(3, maxUnavailable)
 		s.Groups[0].Size = 3
@@ -228,14 +239,28 @@ func TestShrinkRespectsTheBudgetOfUnavailableNodes(t *testing.T) {
 		}
 		return s
 	}
-	t.Run("no node can go when the others are needed", func(t *testing.T) {
-		checkRefusedIn(t, rollout.Shrink, base(0), "node group workers: cannot go on: prod-workers-3 has no node in "+
-			"Nomad: the cloud reports no private address for it and prod-workers-4 has no node in Nomad: the cloud "+
-			"reports no private address for it; with maxUnavailable 0 no surplus node can be removed")
+	for _, maxUnavailable := range []int{0, 1, 5} {
+		t.Run(fmt.Sprintf("maxUnavailable %d", maxUnavailable), func(t *testing.T) {
+			checkRefusedIn(t, rollout.Shrink, base(maxUnavailable), "node group workers: cannot go on: "+
+				"prod-workers-3 has no node in Nomad: the cloud reports no private address for it and prod-workers-4 "+
+				"has no node in Nomad: the cloud reports no private address for it; with maxUnavailable "+
+				fmt.Sprint(maxUnavailable)+" no surplus node can be removed")
+		})
+	}
+	t.Run("one machine without an address and one more machine than the size", func(t *testing.T) {
+		s := base(1)
+		s.Machines = s.Machines[:len(s.Machines)-1]
+		checkRefusedIn(t, rollout.Shrink, s, "node group workers: cannot go on: prod-workers-3 has no node in "+
+			"Nomad: the cloud reports no private address for it; with maxUnavailable 1 no surplus node can be removed")
 	})
-	t.Run("a node goes when the budget allows", func(t *testing.T) {
-		checkOutcome(t, nextIn(t, rollout.Shrink, base(1)), markOf(2, "ams"))
-	})
+}
+
+func TestShrinkGoesOnWithTheOtherSurplusBesideAMachineWithoutAnAddress(t *testing.T) {
+	// Four workers for size 2; worker 3 has no address. It is one of the two machines that the group loses, and the
+	// step is on the other, the newest of the machines that have addresses.
+	s := shrinkClientsState(4, 1)
+	s.Machines[4].PrivateIP = netip.Addr{}
+	checkOutcome(t, nextIn(t, rollout.Shrink, s), markOf(2, "ams"))
 }
 
 func TestShrinkLeavesAGroupAtOrBelowItsSizeDone(t *testing.T) {

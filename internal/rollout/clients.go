@@ -50,14 +50,14 @@ func nextClient(s State, mode Mode, g Group) (Step, bool, error) {
 	return c.finish()
 }
 
-// surplus lists the machines that a shrink takes from the group: those whose removal has started, a completed drain
-// before a drain under way before a node that is only ineligible, then those that have not joined, the outdated ones
-// and those whose node is not available. A machine that joined and for which the cloud reports no private address is
-// left out: its node may still run work.
+// surplus lists the machines that a shrink takes from the group: first those that joined and for which the cloud
+// reports no private address, as it reports a machine that it deleted and still lists; then those whose removal has
+// started, a completed drain before a drain under way before a node that is only ineligible, then those that have not
+// joined, the outdated ones and those whose node is not available.
 func (c *clientGroup) surplus() []Machine {
 	beyond := func(m Machine, rank int) bool { return c.started(m) && c.drainRank(m) > rank }
 	return c.surplusBy(
-		func(m Machine) bool { return m.Joined && !m.PrivateIP.IsValid() },
+		not(noAddress),
 		not(c.started),
 		func(m Machine) bool { return beyond(m, 0) },
 		func(m Machine) bool { return beyond(m, 1) },
@@ -147,9 +147,10 @@ func (c *clientGroup) create() (Step, bool, error) {
 
 // startRemoval starts the removal of the first victim when the group keeps enough available nodes without it. A
 // victim that is not available costs no availability. A victim whose node is missing or down is deleted, any other
-// is marked ineligible. A shrink takes the first machine that the group loses and whose removal has not started, and
-// leaves it to settleUnjoined when it has not joined. A roll takes an outdated machine that has joined and has a
-// private address, and is held back, as create is, unless a drain is due.
+// is marked ineligible. A shrink takes the first machine that the group loses, whose removal has not started and
+// that is not a joined machine without a private address, and leaves it to settleUnjoined when it has not joined. A
+// roll takes an outdated machine that has joined and has a private address, and is held back, as create is, unless a
+// drain is due.
 func (c *clientGroup) startRemoval() (Step, bool, error) {
 	v, ok := c.firstVictim()
 	if !ok {
@@ -177,10 +178,12 @@ func (c *clientGroup) startRemoval() (Step, bool, error) {
 	return step, true, nil
 }
 
-// firstVictim returns the machine whose removal starts next, and false when there is none.
+// firstVictim returns the machine whose removal starts next, and false when there is none. A shrink passes over a
+// machine that joined and has no private address: no step is taken on it, and finish refuses the group while such a
+// machine keeps it above its size.
 func (c *clientGroup) firstVictim() (Machine, bool) {
 	if c.mode == Shrink {
-		i := slices.IndexFunc(c.lose, func(m Machine) bool { return !c.removing(m) })
+		i := slices.IndexFunc(c.lose, func(m Machine) bool { return !c.removing(m) && !noAddress(m) })
 		if i < 0 {
 			return Machine{}, false
 		}
@@ -271,3 +274,6 @@ func (c *clientGroup) serversHold() (Step, bool, error) {
 	}
 	return Step{}, false, nil
 }
+
+// noAddress reports whether the machine joined and the cloud reports no private address for it.
+func noAddress(m Machine) bool { return m.Joined && !m.PrivateIP.IsValid() }

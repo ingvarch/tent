@@ -743,12 +743,12 @@ func TestPlanNodesSurplusFollowsTheOrderOfTheDecisions(t *testing.T) {
 			want: []NodeChange{wantRemovalOf(member(wide, 1, "i-2", minutes(2)), "surplus")},
 		},
 		{
-			name:   "a joined client without a private address is not chosen",
+			name:   "a joined client without a private address goes before a machine that stays",
 			groups: []model.NodeGroup{w1},
 			instances: []cloud.Instance{
-				member(w1, 0, "i-1", minutes(1)), noAddress(member(w1, 1, "i-2", minutes(2))),
+				noAddress(member(w1, 0, "i-1", minutes(1))), member(w1, 1, "i-2", minutes(2)),
 			},
-			want: []NodeChange{wantRemovalOf(member(w1, 0, "i-1", minutes(1)), "surplus")},
+			want: []NodeChange{wantRemovalOf(noAddress(member(w1, 0, "i-1", minutes(1))), "surplus")},
 		},
 		{
 			name:      "without a reading no machine is outdated, whatever its hash",

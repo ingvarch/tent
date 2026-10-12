@@ -104,35 +104,92 @@ func TestSurplusOfAClientGroupLosesDrainedBeforeDrainingBeforeIneligible(t *test
 	}
 }
 
-func TestSurplusOfAClientGroupLeavesOutAJoinedMachineWithoutAnAddress(t *testing.T) {
-	// Three workers for size 1: two to lose, but workers 1 and 2 joined and have no private address, so their node
-	// may still run work.
+func TestSurplusOfAClientGroupLosesAJoinedMachineWithoutAnAddressFirst(t *testing.T) {
+	// Three workers for size 1: two to lose, and workers 1 and 2 joined and have no private address, so the cloud
+	// lists them though it deleted them. Both go, and worker 0 stays.
 	s := shrinkClientsState(3, 0)
 	s.Groups[0].Size = 1
 	for _, i := range []int{2, 3} {
 		s.Machines[i].PrivateIP = netip.Addr{}
 	}
-	if diff := cmp.Diff(machineNames(workerName, 0), surplusNames(s)); diff != "" {
+	if diff := cmp.Diff(machineNames(workerName, 2, 1), surplusNames(s)); diff != "" {
 		t.Errorf("Surplus (-want +got):\n%s", diff)
 	}
-	t.Run("a machine that has not joined is listed", func(t *testing.T) {
+	t.Run("a machine that has not joined is no machine without an address", func(t *testing.T) {
 		s := s
 		s.Machines = append([]rollout.Machine(nil), s.Machines...)
 		s.Machines[3].Joined = false
-		if diff := cmp.Diff(machineNames(workerName, 2, 0), surplusNames(s)); diff != "" {
+		if diff := cmp.Diff(machineNames(workerName, 1, 2), surplusNames(s)); diff != "" {
 			t.Errorf("Surplus (-want +got):\n%s", diff)
 		}
 	})
 }
 
-func TestSurplusCountsAMachineThatIsLeftOutForItsZone(t *testing.T) {
-	// Worker 0 is in ams and counts as the newest; workers 1 and 2 are in fra. Worker 2 joined and has no private
-	// address, so it stays and fra still has two machines: worker 1 goes.
+func TestSurplusTakesTheMachineWithoutAnAddressBeforeEveryOtherMachine(t *testing.T) {
+	// Three workers for size 2: one machine to lose. One worker joined and has no private address, and another is
+	// what the order takes first among machines with addresses. The group loses the one without an address, and Next
+	// takes no step that removes the other.
+	for _, tt := range []struct {
+		name      string
+		noAddress int
+		build     func(t *testing.T, s *rollout.State)
+	}{
+		{"one whose node is ineligible", 2, func(t *testing.T, s *rollout.State) {
+			nodeNamed(t, s, workerName(1)).Eligible = false
+		}},
+		{"one whose node drains", 2, func(t *testing.T, s *rollout.State) { drainedFor(t, s, 1, "", true) }},
+		{"one whose drain completed", 2, func(t *testing.T, s *rollout.State) { drainedFor(t, s, 1, "m-2", false) }},
+		{"one that has not joined", 2, func(_ *testing.T, s *rollout.State) {
+			s.Machines[2].Joined = false
+			dropNode(s, workerName(1))
+		}},
+		{"an outdated one", 2, func(_ *testing.T, s *rollout.State) { s.Machines[2].SpecHash = oldHash }},
+		{"a newer one whose node is down", 0, func(t *testing.T, s *rollout.State) { setNodeStatus(t, s, 2, "down") }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := shrinkClientsState(3, 1)
+			tt.build(t, &s)
+			s.Machines[tt.noAddress+1].PrivateIP = netip.Addr{}
+			if diff := cmp.Diff(machineNames(workerName, tt.noAddress), surplusNames(s)); diff != "" {
+				t.Errorf("Surplus (-want +got):\n%s", diff)
+			}
+			step, err := rollout.Next(s, rollout.Shrink)
+			switch step.Action {
+			case rollout.MarkIneligible, rollout.Drain, rollout.WaitDrained, rollout.Delete:
+				t.Errorf("Next = %q, %v, want no step that removes a machine", step, err)
+			}
+		})
+	}
+}
+
+func TestSurplusOfAClientGroupLosesTheMachineWithoutAnAddressInAnyPosition(t *testing.T) {
+	// Three workers for size 1; one of them has no address. It goes first, and the newest of the others goes after
+	// it, whatever the age and the zone of the machine without an address.
+	for ghost := range 3 {
+		for _, zone := range []string{"ams", "fra"} {
+			t.Run(workerName(ghost)+" in "+zone, func(t *testing.T) {
+				s := shrinkClientsState(3, 0)
+				s.Groups[0].Size = 1
+				s.Machines[ghost+1].PrivateIP = netip.Addr{}
+				s.Machines[ghost+1].Zone = zone
+				others := slices.DeleteFunc([]int{2, 1, 0}, func(i int) bool { return i == ghost })
+				want := machineNames(workerName, ghost, others[0])
+				if diff := cmp.Diff(want, surplusNames(s)); diff != "" {
+					t.Errorf("Surplus (-want +got):\n%s", diff)
+				}
+			})
+		}
+	}
+}
+
+func TestSurplusTakesAMachineWithoutAnAddressBeforeTheMachineOfTheCrowdedZone(t *testing.T) {
+	// Worker 0 is in ams and counts as the newest; workers 1 and 2 are in fra, and by age and zone worker 1 would go.
+	// Worker 2 joined and has no private address, so it goes in its place.
 	s := shrinkClientsState(3, 0)
 	s.Machines[1].Created = time.Time{}
 	s.Machines[2].Zone, s.Machines[3].Zone = "fra", "fra"
 	s.Machines[3].PrivateIP = netip.Addr{}
-	if diff := cmp.Diff(machineNames(workerName, 1), surplusNames(s)); diff != "" {
+	if diff := cmp.Diff(machineNames(workerName, 2), surplusNames(s)); diff != "" {
 		t.Errorf("Surplus (-want +got):\n%s", diff)
 	}
 }
