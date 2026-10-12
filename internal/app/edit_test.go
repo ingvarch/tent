@@ -224,3 +224,24 @@ func TestSaveKeepsTheCloud(t *testing.T) {
 	wantChanges(t, changes, cluster(app.Replaced))
 	wantStored(t, svc.Store, clusterPath, encode(t, narrow))
 }
+
+// TestSaveKeepsTheRole refuses an edit of a node group that changes its role, whether it plans or applies.
+func TestSaveKeepsTheRole(t *testing.T) {
+	t.Parallel()
+	for _, tc := range roleMoves {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			svc, _ := newService(t)
+			mustCreate(t, svc, tc.stored...)
+			stored := snapshot(t, svc.Store)
+			ref := load(t, svc, v1alpha1.KindNodeGroup, tc.group)
+			for _, apply := range []bool{false, true} {
+				_, err := svc.Save(t.Context(), ref, decode(t, tc.doc), apply)
+				wantFieldErrors(t, err, v1alpha1.FieldError{
+					Object: "NodeGroup " + tc.group, Path: "spec.role", Detail: tc.detail,
+				})
+			}
+			wantSnapshot(t, svc.Store, stored)
+		})
+	}
+}

@@ -134,10 +134,11 @@ func checkRoles(s State, groups []Group) error {
 	return nil
 }
 
-// createdAs says how a refusal names the role a machine was created with, and what to do about it. A machine with no
-// role or an unknown one has a label to fix; the group's role cannot match it.
+// createdAs says how a refusal names the role a machine was created with, and what to do about it. A group whose
+// role changed cannot get its old role back, since tent refuses every change of a stored group's role. A machine with
+// no role or an unknown one has a label to fix; the group's role cannot match it.
 func createdAs(role v1alpha1.Role) (created, advice string) {
-	const ofGroup = "give the group the role its nodes were created with"
+	const ofGroup = "a node group keeps its role, and a cluster moves by creating a new one"
 	switch role {
 	case v1alpha1.RoleServer:
 		return "as a server", ofGroup

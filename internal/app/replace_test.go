@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
@@ -71,9 +72,9 @@ func TestReplaceInvalid(t *testing.T) {
 	t.Parallel()
 	svc, _ := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
-	_, err := svc.Replace(t.Context(), decode(t, edit(t, serversYAML, "role: server", "role: client")), true)
+	_, err := svc.Replace(t.Context(), decode(t, edit(t, serversYAML, "size: 3", "size: 2")), true)
 	wantFieldErrors(t, err, v1alpha1.FieldError{
-		Object: "Cluster prod", Path: "nodeGroups", Detail: "need exactly one server or combined group, found 0",
+		Object: "NodeGroup servers", Path: "spec.size", Detail: "must be 1, 3 or 5 for role=server",
 	})
 	wantStored(t, svc.Store, serversPath, encode(t, serversYAML))
 }
@@ -201,4 +202,124 @@ func TestBrokenClusterSaysHowToRepairIt(t *testing.T) {
 			wantSnapshot(t, svc.Store, stored)
 		})
 	}
+}
+
+// kept is the detail of a problem with a node group's role that a change moves from was to now.
+func kept(was, now string) string {
+	return "cannot change from " + was + " to " + now + "; a node group keeps its role"
+}
+
+// roleMoves are the node groups whose role a change moves, with the stored specs of the cluster and the problem.
+var roleMoves = []struct {
+	name   string
+	stored []string
+	group  string // the node group that changes
+	doc    string // its new spec
+	detail string
+}{
+	{"combined to server", []string{clusterYAML, combinedYAML}, "all",
+		strings.Replace(combinedYAML, "role: combined", "role: server", 1), kept("combined", "server")},
+	{"server to combined", []string{clusterYAML, serversYAML, workersYAML}, "servers",
+		strings.Replace(serversYAML, "role: server", "role: combined", 1), kept("server", "combined")},
+}
+
+// TestReplaceKeepsTheRole refuses a node group whose role differs from the stored group's, whether it plans or
+// applies, and leaves the store as it was.
+func TestReplaceKeepsTheRole(t *testing.T) {
+	t.Parallel()
+	for _, tc := range roleMoves {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			svc, _ := newService(t)
+			mustCreate(t, svc, tc.stored...)
+			stored := snapshot(t, svc.Store)
+			for _, apply := range []bool{false, true} {
+				_, err := svc.Replace(t.Context(), decode(t, tc.doc), apply)
+				wantFieldErrors(t, err, v1alpha1.FieldError{
+					Object: "NodeGroup " + tc.group, Path: "spec.role", Detail: tc.detail,
+				})
+			}
+			wantSnapshot(t, svc.Store, stored)
+		})
+	}
+}
+
+// TestReplaceNamesTheRoleAfterTheCloudAndBeforeValidation replaces a cluster's region and a node group's role and size
+// at once: the problems of what must stay come first, the cluster's before the group's, and validation's follow.
+func TestReplaceNamesTheRoleAfterTheCloudAndBeforeValidation(t *testing.T) {
+	t.Parallel()
+	svc, _ := newService(t)
+	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
+	stored := snapshot(t, svc.Store)
+	servers := edit(t, edit(t, serversYAML, "role: server", "role: combined"), "size: 3", "size: 2")
+	_, err := svc.Replace(t.Context(), decode(t, edit(t, clusterYAML, "region: ams", "region: fra"), servers), true)
+	wantFieldErrors(t, err,
+		v1alpha1.FieldError{Object: "Cluster prod", Path: "spec.cloud.region", Detail: moved("ams", "fra")},
+		v1alpha1.FieldError{Object: "NodeGroup servers", Path: "spec.role", Detail: kept("server", "combined")},
+		v1alpha1.FieldError{
+			Object: "NodeGroup servers", Path: "spec.size", Detail: "must be 1, 3 or 5 for role=combined",
+		},
+	)
+	wantSnapshot(t, svc.Store, stored)
+}
+
+// TestReplaceEmptyRole leaves a node group without a role to validation: the problems are the missing role and the
+// missing server group, and none says that the role moved.
+func TestReplaceEmptyRole(t *testing.T) {
+	t.Parallel()
+	svc, _ := newService(t)
+	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
+	_, err := svc.Replace(t.Context(), decode(t, edit(t, serversYAML, "  role: server\n", "")), true)
+	wantFieldErrors(t, err, v1alpha1.FieldError{
+		Object: "NodeGroup servers", Path: "spec.role", Detail: "must be one of server, client, combined",
+	}, v1alpha1.FieldError{
+		Object: "Cluster prod", Path: "nodeGroups", Detail: "need exactly one server or combined group, found 0",
+	})
+	wantStored(t, svc.Store, serversPath, encode(t, serversYAML))
+}
+
+// TestReplaceStoredWithoutRole replaces a stored node group that names no role, as a hand-edited store may hold, with
+// a group that has one: the role did not move from anything.
+func TestReplaceStoredWithoutRole(t *testing.T) {
+	t.Parallel()
+	svc, _ := newService(t)
+	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
+	put(t, svc.Store, workersPath, encode(t, edit(t, workersYAML, "  role: client\n", "")))
+	changes, err := svc.Replace(t.Context(), decode(t, workersYAML), true)
+	if err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	wantChanges(t, changes, group("workers", app.Replaced))
+	wantStored(t, svc.Store, workersPath, encode(t, workersYAML))
+}
+
+// TestCreateLeftoverMayChangeRole runs a create again over a leftover node group with another role: tent made no
+// machine without cluster.yaml, so the role is free to change.
+func TestCreateLeftoverMayChangeRole(t *testing.T) {
+	t.Parallel()
+	svc, _ := newService(t)
+	const allPath = "prod/nodegroups/all.yaml"
+	put(t, svc.Store, allPath, encode(t, combinedYAML))
+	doc := edit(t, combinedYAML, "role: combined", "role: server")
+	changes, err := svc.Create(t.Context(), decode(t, clusterYAML, doc), true)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	wantChanges(t, changes, cluster(app.Created), group("all", app.Replaced))
+	wantStored(t, svc.Store, allPath, encode(t, doc))
+}
+
+// TestReplaceRepairsUndecodableGroup replaces a stored node group file that does not decode, which no other command
+// can repair: its role is unknown, so it did not move.
+func TestReplaceRepairsUndecodableGroup(t *testing.T) {
+	t.Parallel()
+	svc, _ := newService(t)
+	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
+	put(t, svc.Store, workersPath, []byte("kind: NodeGroup\n"))
+	changes, err := svc.Replace(t.Context(), decode(t, workersYAML), true)
+	if err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	wantChanges(t, changes, group("workers", app.Replaced))
+	wantStored(t, svc.Store, workersPath, encode(t, workersYAML))
 }
