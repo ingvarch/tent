@@ -15,6 +15,8 @@
   `RemovePeer` may come in either order, and the decisions skip a peer that is gone; with fewer than two other voters
   the order is the window, `RemovePeer` while the server runs, `Stop` held until a reconcile of Nomad's leader that
   the run saw, `ForceLeave`, with no wait for autopilot, which settles the two voters that ADR-0035 left open)
+  and by [ADR-0039](0039-rolling-update-of-combined-groups.md) (a combined victim is drained first, the order of this
+  ADR follows its drain, and the node of the deleted machine is purged once Nomad lists it down)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md); [ADR-0016](0016-server-discovery-seed-and-refresh.md),

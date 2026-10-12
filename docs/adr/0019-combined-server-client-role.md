@@ -8,6 +8,9 @@
   [ADR-0033](0033-operator-commands.md) (item 5: the warning is printed by `validate cluster` and by the commands that
   print the open-`access.api` warning, since "every mutating command" means the commands that warn about the cluster
   that results from a change; item 23 there)
+  and by [ADR-0039](0039-rolling-update-of-combined-groups.md) (item 3: the drain before the stop is built in M3.5;
+  the E2E scenario with a combined group moves to M3.9; a combined node that a roll creates gets no intro token
+  either; a node group keeps its role, so item 1's role cannot change by `replace` or `edit`)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0007](0007-security-baseline.md), [ADR-0008](0008-node-credential-delivery.md),

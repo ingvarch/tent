@@ -1,6 +1,8 @@
 # ADR-0038: Rolling update of server groups
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by [ADR-0039](0039-rolling-update-of-combined-groups.md) (combined groups roll, so its
+  refusal of them is gone; the join rule goes by the machine's role; `replace` and `edit` refuse a change of a
+  group's role, item 9)
 - **Date:** 2026-10-10
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),

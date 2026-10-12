@@ -112,7 +112,7 @@ packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries that
     - A new node never takes a name that Nomad lists a node of.
     - `--force` labels each machine `tent/replace=true` (`cloud.Nodes.MarkReplace`), so a plain run after a cut replaces
       every labelled machine.
-    - It refuses until `update` has applied the specs, and refuses a step of a combined group until M3.5.
+    - It refuses until `update` has applied the specs. A step of a combined group was refused until M3.5.
     - `update` reports outdated nodes without exit code 2 and `validate cluster` warns about them; `update`'s delete
       guard names `rolling-update`.
   - M3.4 added the roll of server groups (`internal/app` `roll_servers.go`, `roll_hold.go`; `internal/rollout`
@@ -141,6 +141,23 @@ packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries that
       "20s"` on server and combined nodes (ADR-0038, item 19), so a hard stop of a server does not mark the clients
       that talk to it down. The spec hash of every group moved with it.
     - The real-cloud checks ran on Vultr on 2026-10-10 (platform notes §3.16).
+  - M3.5 added the roll of combined groups (`internal/app` `roll.go`, `roll_loop.go`, `roll_servers.go`, `specs.go`;
+    `internal/rollout` `servers.go`; `internal/cli` `progress.go`, `rolling_update.go`; ADR-0039; maintainer decisions
+    33, 38, 43 and 44 for combined groups, and 49): a combined group rolls one node at a time with the new one first,
+    and the refusal of combined groups is gone. The old node is purged once Nomad lists it down, and a group of one
+    node rolls through two voters with `--allow-single-server`.
+    - A combined node has joined when its server votes and its node is ready and eligible (`joined`, by the machine's
+      role); the wait has the event `join` (`NomadJoin`).
+    - `rollout` marks and drains a combined node only while every other machine of the group has a node that is ready,
+      eligible and not draining (`checkOtherNodes`). Before a create, the node of an outdated machine whose removal has
+      started is not asked to take work (`leaving`), so a roll goes on when its group is back at its size with a marked
+      node.
+    - A drained victim that led waits the window of 70 s after its transfer, so its node reads down about 20 s after its
+      stop and not 300 s after the transfer; a transfer and a stop rest on a fresh list.
+    - `replace` and `edit` refuse a change of a node group's role (`roleMoves`, decision 49), only while `cluster.yaml`
+      is stored.
+    - The real-cloud checks ran on Vultr on 2026-10-12 (platform notes §3.16). The E2E scenario with a combined group
+      is M3.9's, and `Shrink` of a combined group in `update` is M3.6's.
 
 ## Read before changing anything
 

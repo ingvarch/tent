@@ -6,7 +6,7 @@ design relies on.
 > **Verified on 2026-09-25**, [section 5](#5-s3-compatible-object-stores) on 2026-09-26,
 > [section 6](#6-ubuntu-on-nodes) on 2026-09-29 ([6.4](#64-restarts-of-docker-containerd-and-nomad) on 2026-10-05,
 > [6.5](#65-cloud-init-and-the-stub) on 2026-10-06) and [1.6](#16-the-agent-on-a-node) from 2026-09-29 to 2026-10-05,
-> and the items of [1.2](#12-features-tent-relies-on) that give their own date.
+> and the items of [1.2](#12-features-tent-relies-on) and 1.6 that give their own date.
 > Sources: official documentation, the Hetzner Cloud OpenAPI spec
 > (`https://docs.hetzner.cloud/cloud.spec.json`), the Vultr API reference (OpenAPI spec from a Wayback copy of
 > `https://www.vultr.com/api/`, 2026-09-12) plus live calls to public Vultr endpoints, release APIs and upstream
@@ -274,9 +274,8 @@ Nomad forwarded it to the leader, which did what it does when asked directly.
     failed to decompress snapshot: gzip: invalid header`. The first 5000 bytes of a snapshot: 500 `failed to restore
     from snapshot: failed to read snapshot file: failed to read or write snapshot data: unexpected EOF`. The leader and
     the Raft configuration stayed as they were.
-- **Not settled:** a purge of a live node under `warn` (combined clusters), the removal of the leader's own peer, a
-  restore into a cluster that was rebuilt from the same state store, the size of a snapshot of a large cluster,
-  `prune=false`, and tokens narrower than management.
+- **Not settled:** the removal of the leader's own peer, a restore into a cluster that was rebuilt from the same state
+  store, the size of a snapshot of a large cluster, `prune=false`, and tokens narrower than management.
 
 **Servers in a roll** (v2.0.7, local on macOS darwin/arm64, `nomad` revision `9dcbdc5e`; every agent on 127.0.0.1 with
 ACL, mTLS and gossip encryption, `leave_on_terminate = false` and `cleanup_dead_servers = true`; every request used the
@@ -363,12 +362,53 @@ transfer. The roll of server groups rests on them ([ADR-0038](adr/0038-rolling-u
 - **The order by hand with two voters** (2026-10-09): transfer (200 in 0.06 s), the peer removed 0.75 s later while both
   ran (200 in 0.01 s), the old agent killed 0.7 s after that, force-leave with prune: one healthy voter 3.5 s after the
   transfer, the member gone after 7.7 s, nothing added again in the time watched.
-- **Heartbeat timers after a leader change** (2026-10-10, two runs): the node of a combined leader that was drained and
-  stopped 1 to 2 s after its transfer read `ready` for 300.4 and 300.7 s, which fits `failover_heartbeat_ttl` (300 s;
-  read in the code). Stopped 70.2 and 70.5 s after the transfer, such a node read `down` 13.4 and 15.3 s after the stop.
 - **Not measured:** two live servers of one name both joining the gossip pool; a re-add that a Serf event of the
   removed member starts (read in the source, not run); what a server in bootstrap mode answers to the cluster's token;
   clients of a removed live server; the source of 2.0.7.
+
+**Combined nodes in a roll** (v2.0.7, local on macOS darwin/arm64, `nomad` revision `9dcbdc5e`; every agent combined,
+on 127.0.0.1, with ACL, mTLS, gossip encryption, `client_introduction { enforcement = "warn" }`, `leave_on_terminate =
+false`, `cleanup_dead_servers = true`, `raw_exec` only and no intro token; a service job of `raw_exec` tasks with
+`migrate { max_parallel = 1, min_healthy_time = "5s" }` and a system job; every request used the management token and
+the operator certificate; reads came every 0.5 s; a stop is a SIGKILL of the agent). The runs were 2026-10-09 23:36 to
+2026-10-10 00:02 UTC in four clusters of two to five agents, and the check of the window 2026-10-10 04:15 to 04:21 UTC.
+The roll of combined groups rests on them ([ADR-0039](adr/0039-rolling-update-of-combined-groups.md)).
+- **Drains** (deadline 2 minutes, system jobs not ignored, the meta `tent_machine`).
+  - The leader's own node with two voters (two service allocations): 200; the allocations moved to the other node one
+    at a time; `LastDrain` read `complete` after 18.3 s; the node led throughout and stayed ineligible.
+  - A follower at four voters (one service allocation): complete after 6.7 s, while the replacement was still pending;
+    it ran 1.1 s later. The leader at four voters: complete after 7.3 s; it led throughout.
+  - The system allocation of a drained node got the desired status `stop` (`alloc not needed as node is tainted`) about
+    1 s after the drain read complete. Its task still ran 4 s after the drain read complete on the first node, and 5.6 s
+    and 5.1 s on the other two.
+- **A follower stopped with no leader change before** (drained, four voters): its node read `down` 23.1 s after the
+  stop; its member `failed` at 37.0 s; autopilot answered 429 with `FailureTolerance` 0 at 38.0 s, had removed the peer
+  at 38.6 s and was healthy with three voters at 40.1 s. A force-leave with prune then dropped the member at once.
+- **Purges.** The node of a down machine, purged 23.2 s after the stop while its server was still a voter and an
+  `alive` member: 200; the node was gone and did not come back. A live combined node under `warn`: 200; the node was
+  gone at the next read; its service allocation was replaced on another node within 0.5 s; the node registered again
+  1.1 s after the purge, ready and eligible, and got a new system allocation.
+- **Heartbeat timers after a leader change.** After a leader change Nomad gives every node `failover_heartbeat_ttl`,
+  300 s, until its next heartbeat ([1.6](#16-the-agent-on-a-node)). A drained leader whose leadership moved and whose
+  agent was stopped soon after read `ready` for that long: stopped 1.44 s (two voters) and 1.69 s (four voters) after
+  the transfer, its node read `ready` for 300.4 s and 300.7 s, and the leader logged `nomad.heartbeat: node TTL
+  expired` at 299.7 s in the first run. Both purges after it answered 200. The transfers answered 200 in 0.06 and
+  0.11 s, and no read in the 1.4 s after the second one (every 0.1 s) was unhealthy.
+- **Stopped 70 s after the transfer** (2026-10-10, two runs on a cluster of three agents with `bootstrap_expect = 3`, a
+  service job of two and a system job). In each run a new node joined, the leader's node was drained while it led, its
+  leadership moved, and the old leader ran on for 70 s before it was stopped; four voters.
+  - Run 1: the new node voted after 16.6 s; the drain read complete after 6.8 s; the transfer answered 200 in 0.08 s,
+    and autopilot gave all four servers a `StableSince` of the transfer; the agent was stopped 70.2 s after the
+    transfer; its node read `down` 13.4 s after the stop.
+  - Run 2 (its node held the system allocation alone): complete after 0.7 s, and the system allocation left the list of
+    running allocations 5.2 s after that; the transfer answered in 0.15 s with a new `StableSince` for every server;
+    stopped 70.5 s after the transfer; its node read `down` 15.3 s after the stop.
+  - After the two stops autopilot answered 429 with `FailureTolerance` 0 at 44.1 s and 39.9 s, the peer was out of the
+    Raft configuration at 50.3 s and 39.9 s, and the report read healthy with three voters at 52.4 s and 42.0 s.
+- **Not measured:** a drain that reaches its deadline on a combined node; a stop between 2 s and 70 s after a transfer;
+  two voters whose victim does not lead at the removal; unhealthy reads after a transfer with combined agents (none in
+  the two transfers of the first runs; M3.4 saw 8 in 52 with servers); Linux with Docker. Vultr is in
+  [3.16](#316-spike-runs).
 
 **Heartbeats of a client whose server stops** (lab of 2026-10-10 on local Nomad 2.0.7, darwin/arm64, `nomad` revision
 `9dcbdc5e`: four servers and twelve clients on 127.0.0.1 with ACL, mTLS, gossip encryption and strict client
@@ -903,7 +943,8 @@ tag:
   plus a random stagger of up to 10 s, plus a grace of 10 s (`nomad/config.go`, `nomad/heartbeat.go`). tent sets a grace
   of 20 s, which allows about 20 to 40 s from the kill (derived, not measured; see the block on heartbeats in
   [1.2](#12-features-tent-relies-on)). After a leader change every node that is not terminal gets
-  `failover_heartbeat_ttl`, 300 s (read, not run), so a dead client can read `ready` for up to 5 minutes then.
+  `failover_heartbeat_ttl`, 300 s (read in the code and measured on 2026-10-10: [1.2](#12-features-tent-relies-on)), so
+  a dead client can read `ready` for up to 5 minutes then.
 - **The node stays listed.** 5 minutes later it was still `down`; `node_gc_threshold` is 24 h (not waited for).
 - **A new client of the same name registers at once**, as a second node. With an empty data directory, the same HTTP
   address and a new intro token, `GET /v1/nodes` listed two nodes called `c1`: one `down` and one `ready`, with
@@ -917,6 +958,12 @@ tag:
   and a client without a token registers (`node registration without introduction token`). `newRegistrationAllowed`
   (`nomad/node_endpoint.go:312`) returns before it looks at the level when the token fails. The default enforcement is
   `warn` when the `server` block sets none (`nomad/structs/node.go:860`).
+- **A new combined agent under `warn` registers at once** (2026-10-09 and 10, seven agents, local Nomad 2.0.7 with
+  ACL, mTLS and gossip encryption, no intro token): its node was ready and eligible 0.5 to 0.6 s after the agent
+  started, and the leader logged `node registration without introduction token: enforcement_level=warn`. Its server
+  voted 12.8 to 22.2 s after the start (12.8, 15.4, 13.8, 22.2, 19.5, 20.2 and 19.8 s). A system job's allocation ran on
+  one of them 1.6 s after its start, while its server was a nonvoter. At the first start of three agents two nodes were
+  ready after 2.0 s and the third, the leader's, after 17.6 s.
 - **The server accepts any TTL.** `1s`, `5s`, `10s`, `20s`, `1m`, `0s` (the server default, 5 m), `500ms`, `1ms` and
   `-1s` all answered 200, so a TTL has no lower bound; one above `max_identity_ttl` is cut to it. A TTL that works is
   limited by the 60 s of leeway.
@@ -2234,6 +2281,69 @@ and one worker, a job with one allocation.
   with its check passing; the job had no other allocation. The check deleted its cluster with 0 instances left.
 - **The second run sent the first removal without a window:** the window counts the voters other than the victim, and
   the other voter had been stable for long.
+
+**M3.5 combined roll, three nodes (2026-10-12, 11:38 to 11:59 UTC)**, tent `v0.1.0-66-g97ecb2a`, region `ams`, plan
+`vc2-1c-1gb`, ubuntu-24.04, Nomad 2.0.7: three combined nodes, the job `e2e-web` with three allocations on distinct
+hosts (`distinct_hosts`, so that every drain moves one) and a system job of one small task. A poller read the leader,
+autopilot and the job's allocations over the operator's access. The run passed.
+- **Three runs:** the first was cut 0.5 s after `waiting for node e2e-m35roll-nodes-0 to drain`; the second found that
+  drain complete (its plan: `Next: stop node e2e-m35roll-nodes-0`), sent no second drain, and was cut 3 s into the
+  second node's wait for autopilot; the third finished in 383 s with `Rolled: 1 created, 1 drained, 1 stopped, 2
+  deleted, 2 purged.` From the start of the first run to the end: 14 min 14 s.
+- **The new nodes** (3, 4 and 5): the create call took 41.1, 52.8 and 51.4 s; from its end the node read ready after
+  76.0, 70.5 and 93.6 s and the server voted after 93.9, 93.7 and 112.7 s; tent's wait for the join ended 95.8, 94.1 and
+  113.2 s after the create's end. The node half came 18 to 23 s before the vote, as the lab saw.
+- **Drains** took 9.6 s and 8.5 s (the first was cut).
+- **The leader** (`nodes-1`) went last: drain, transfer at 11:57:11.5 (the call took 0.07 s), a settle of 3.8 s
+  (`autopilot reports the servers unhealthy (e2e-m35roll-nodes-1)`), the window until 11:58:22, and the stop at
+  11:58:25, 73.7 s after the transfer.
+- **Stops:** the call took 2.2, 2.6 and 2.1 s; Vultr listed the machine stopped 8.7, 1.8 and 20.0 s after the call;
+  Nomad listed the node down 33.9, 32.9 and 20.0 s after the call, the old leader's 20.0 s; autopilot stopped counting
+  the server 46.3, 40.0 and 44.0 s after the stop; autopilot removed the peer twice and tent once (the old leader's);
+  the delete came 47.6, 43.5 and 45.6 s after the stop, and the purge about 2 s later. No `waiting for Nomad to list
+  node ... as down` appeared: each node was down before its machine's delete.
+- **The service:** every one of the 321 observation lines of the loop names a leader. The poller saw a leader at each
+  of its 348 polls and one change of leader, at the transfer, between two polls 2 s apart. At least two of the job's
+  three allocations ran at every poll (three at 345 polls, two at 3); their checks passed for three at 309 polls, two
+  at 38 and one at one poll (the checks are read from the client through a server).
+- **The system task:** at the last poll before each stop the system job's allocation on the node read `complete` with
+  the desired status `stop`, and the service allocation `complete`. No task was cut at a stop in this run.
+- **After the roll:** `Nothing to roll.`, `validate cluster` exit 0, Vultr listed nodes 3 to 5, three voters at their
+  private addresses, autopilot healthy with failure tolerance 1, three `alive` members, three ready and eligible nodes,
+  both jobs on each new node, and no peer, member or node of an old machine. The cluster was deleted with no instance
+  left.
+- **Not measured:** a poll every second (the poller read every 2 s, since a poll with the checks of three allocations
+  takes about 2 s, and 5 s while a stopped machine is still asked, once 10.6 s).
+
+**M3.5 combined roll, one node (2026-10-12, 12:01 to 12:11 UTC)**, the same tent, region and image,
+`--allow-single-server`, a job of one allocation and the system job. The run passed. The script's own verdict first read
+FAILED for one line: it took a poll's start for the time of its Raft read, and the poll that began 0.3 s before the
+first removal read the configuration after it. The script is fixed, and its analysis of the saved data has no failure.
+- **The new node:** `10-node.hcl` has no `bootstrap_expect` (read over SSH), the old node's has `bootstrap_expect = 1`.
+  The create call took 51.7 s; from its end the node read ready after 81.2 s and the server voted after 98.7 s (a
+  nonvoter at 12:07:22, a voter at 12:07:39); tent's wait for the join ended after 99.2 s.
+- **The drain** took 9.6 s (12:08:35.4 to 12:08:45.0). The job's allocation ran on the old node at the poll of
+  12:08:40.7, nowhere at 12:08:42.0 and on the new node from 12:08:43.7: Nomad stops the one allocation before its
+  replacement runs. It ran on the new node 126 s before the stop call.
+- **The removals:** the transfer at 12:08:45.05 took 0.05 s; the window ran until 12:09:55; the first `RemovePeer` at
+  12:09:55.13 took 0.14 s (two voters before it, one after it); the hold began at 12:09:56.5 and lasted 52.0 s; the poll
+  that began at 12:10:42.2 was the first to show the old node in the Raft configuration again, as a nonvoter (the
+  leader's reconcile two minutes after it took the leadership was at 12:10:45.1); the second `RemovePeer` at
+  12:10:48.53; the stop call at 12:10:49.78, 7.6 s after that poll began, took 2.4 s. The old server never read as a
+  voter after the first removal, and the Raft configuration never held two voters with one stopped.
+- **The old node's client** read `ready` and `ineligible` at every poll in the 54 s from the first removal to the stop:
+  the client of a server that is out of the Raft configuration kept its heartbeats.
+- **After the stop:** force-leave at 12:10:54.0, the delete at 12:10:54.3, done at 12:10:54.6 (4.8 s after the stop
+  call began), the wait for the node to read down 21.8 s, and the purge at 12:11:17.2. Nomad listed the node down
+  27.4 s after the stop call began. The poller never saw it `down`: the purge came in the same second.
+- **The service:** the poller saw a leader at each of its 202 polls and one change of leader, at the transfer; the polls
+  came 1.3 to 2.4 s apart, at most 5.2 s. All 142 observation lines of the loop name a leader. The system job's
+  allocation on the old node read `complete` at the last poll before the stop.
+- **The run** took 372 s and ended with `Rolled: 1 created, 1 drained, 1 stopped, 1 deleted, 1 purged.` Then `Nothing to
+  roll.`, `validate cluster --allow-single-server` exit 0, and Nomad listed one voter, one member and one node, all of
+  `e2e-m35one-nodes-1`, with both jobs on it.
+- **Not measured:** a poll every second (the poller needed 1.3 to 2.4 s a poll); a system task that is cut at a stop
+  (none was, in four stops of the two runs).
 
 **Still open:**
 - A halt whose call gets no answer, and how late Vultr may carry one out.
