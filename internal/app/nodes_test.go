@@ -17,6 +17,7 @@ import (
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/model"
+	"github.com/ingvarch/tent/internal/rollout"
 )
 
 // Machine types and the image of the test groups.
@@ -48,20 +49,27 @@ func workers(size int, zones ...string) model.NodeGroup {
 func minutes(n int) time.Time { return time.Date(2026, 9, 28, 10, n, 0, 0, time.UTC) }
 
 // member returns a ready instance of cluster prod that has joined: the node index of group g, in the group's first
-// zone, with id and the operation id opFor(id), created at created.
+// zone, with id, the operation id opFor(id) and the private address addressFor(id), created at created.
 func member(g model.NodeGroup, index int, id string, created time.Time) cloud.Instance {
 	return cloud.Instance{
-		ID:      id,
-		Name:    "prod-" + g.Name + "-" + strconv.Itoa(index),
-		Cluster: "prod",
-		Group:   g.Name,
-		Role:    g.Role,
-		Zone:    g.Zones[0],
-		Op:      opFor(id),
-		Ready:   true,
-		Joined:  true,
-		Created: created,
+		ID:        id,
+		Name:      "prod-" + g.Name + "-" + strconv.Itoa(index),
+		Cluster:   "prod",
+		Group:     g.Name,
+		Role:      g.Role,
+		Zone:      g.Zones[0],
+		Op:        opFor(id),
+		Ready:     true,
+		Joined:    true,
+		Created:   created,
+		PrivateIP: addressFor(id),
 	}
+}
+
+// addressFor returns a private address made from the number in a test instance's id, such as 10.64.0.1 for i-1.
+func addressFor(id string) netip.Addr {
+	n, _ := strconv.Atoi(strings.TrimPrefix(id, "i-"))
+	return netip.AddrFrom4([4]byte{10, 64, byte(n >> 8), byte(n)})
 }
 
 // opFor returns an operation id made from a test instance's id of at most 6 bytes, such as
@@ -274,15 +282,12 @@ func TestPlanNodes(t *testing.T) {
 			},
 		},
 		{
-			name:   "a surplus node is chosen by age alone, even when the oldest has not joined",
+			name:   "a surplus node that has not joined goes before a newer one that did",
 			groups: []model.NodeGroup{w1},
 			instances: []cloud.Instance{
 				unjoined(member(w1, 0, "i-1", minutes(1))), member(w1, 1, "i-2", minutes(2)),
 			},
-			want: []NodeChange{
-				wantJoinWait(w1, unjoined(member(w1, 0, "i-1", minutes(1)))),
-				wantDelete(member(w1, 1, "i-2", minutes(2)), "surplus"),
-			},
+			want: []NodeChange{wantDelete(unjoined(member(w1, 0, "i-1", minutes(1))), "surplus")},
 		},
 		{
 			name:   "nodes that are not ready yet are waited for",
@@ -533,7 +538,7 @@ func TestPlanNodes(t *testing.T) {
 			want: []NodeChange{wantCreate(workers(3, "fsn1", "nbg1"), 2, "nbg1")},
 		},
 		{
-			name:   "a node in a zone that the group no longer lists goes as a surplus by its age alone",
+			name:   "a zone that the group no longer lists gives a surplus node no priority: the newest goes",
 			groups: []model.NodeGroup{workers(1, "fsn1")},
 			instances: []cloud.Instance{
 				inZone(member(w2, 0, "i-1", minutes(1)), "hel1"),
@@ -568,7 +573,7 @@ func TestPlanNodes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &model.Cluster{Name: "prod", Groups: tc.groups}
 			instances := slices.Clone(tc.instances)
-			got, _ := planNodes(m, instances, nil, nil)
+			got, _ := planNodes(m, instances, nil, nil, shrinkView{})
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("planNodes (-want +got):\n%s", diff)
 			}
@@ -576,9 +581,197 @@ func TestPlanNodes(t *testing.T) {
 				t.Errorf("planNodes changed the instances (-before +after):\n%s", diff)
 			}
 			slices.Reverse(instances)
-			reversed, _ := planNodes(m, instances, nil, nil)
+			reversed, _ := planNodes(m, instances, nil, nil, shrinkView{})
 			if diff := cmp.Diff(got, reversed); diff != "" {
 				t.Errorf("planNodes of the instances in reverse order (-in order +reversed):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestPlanNodesSurplusFollowsTheOrderOfTheDecisions checks which machines of a group above its size are deleted: the
+// ones that rollout.Surplus names, whether a reading of Nomad is given or the joined label is taken at its word.
+func TestPlanNodesSurplusFollowsTheOrderOfTheDecisions(t *testing.T) {
+	t.Parallel()
+	w1, w2, s2 := workers(1), workers(2), servers(2)
+	wide := workers(2, "ams", "fra")
+	inFra := func(in cloud.Instance) cloud.Instance {
+		return changed(in, func(in *cloud.Instance) { in.Zone = "fra" })
+	}
+	withHash := func(in cloud.Instance, hash string) cloud.Instance {
+		return changed(in, func(in *cloud.Instance) { in.SpecHash = hash })
+	}
+	noAddress := func(in cloud.Instance) cloud.Instance {
+		return changed(in, func(in *cloud.Instance) { in.PrivateIP = netip.Addr{} })
+	}
+	stopped := func(in cloud.Instance) cloud.Instance {
+		return changed(in, func(in *cloud.Instance) { in.Ready = false })
+	}
+	c1, c2 := nodeGroup("nodes", v1alpha1.RoleCombined, 1), nodeGroup("nodes", v1alpha1.RoleCombined, 2)
+	w1a, w1b := member(w1, 0, "i-1", minutes(1)), member(w1, 1, "i-2", minutes(2))
+	readNode := func(in cloud.Instance, eligible bool) rollout.Node {
+		return rollout.Node{
+			ID: "n-" + in.ID, Name: in.Name, Address: in.PrivateIP, Status: "ready", Eligible: eligible,
+		}
+	}
+	for _, tc := range []struct {
+		name        string
+		groups      []model.NodeGroup
+		instances   []cloud.Instance
+		view        shrinkView
+		want        []NodeChange
+		wantServers []string
+	}{
+		{
+			name:   "a client that stays and has not joined is still waited for",
+			groups: []model.NodeGroup{w2},
+			instances: []cloud.Instance{
+				unjoined(member(w2, 0, "i-1", minutes(1))), unjoined(member(w2, 1, "i-2", minutes(2))),
+				member(w2, 2, "i-3", minutes(3)),
+			},
+			want: []NodeChange{
+				wantJoinWait(w2, unjoined(member(w2, 0, "i-1", minutes(1)))),
+				wantDelete(member(w2, 1, "i-2", minutes(2)), "surplus"),
+			},
+		},
+		{
+			name:   "a server that has not joined goes before newer ones that did, and the others stay",
+			groups: []model.NodeGroup{s2},
+			instances: []cloud.Instance{
+				unjoined(member(s2, 0, "i-1", minutes(1))), member(s2, 1, "i-2", minutes(2)),
+				member(s2, 2, "i-3", minutes(3)),
+			},
+			want:        []NodeChange{wantDelete(unjoined(member(s2, 0, "i-1", minutes(1))), "surplus")},
+			wantServers: []string{"i-2", "i-3"},
+		},
+		{
+			name:   "a joined server that does not run goes before running ones",
+			groups: []model.NodeGroup{s2},
+			instances: []cloud.Instance{
+				stopped(member(s2, 0, "i-1", minutes(1))), member(s2, 1, "i-2", minutes(2)),
+				member(s2, 2, "i-3", minutes(3)),
+			},
+			want:        []NodeChange{wantDelete(stopped(member(s2, 0, "i-1", minutes(1))), "surplus")},
+			wantServers: []string{"i-2", "i-3"},
+		},
+		{
+			name:   "a joined client that does not run goes before running ones",
+			groups: []model.NodeGroup{w1},
+			instances: []cloud.Instance{
+				stopped(member(w1, 0, "i-1", minutes(1))), member(w1, 1, "i-2", minutes(2)),
+			},
+			want: []NodeChange{wantDelete(stopped(member(w1, 0, "i-1", minutes(1))), "surplus")},
+		},
+		{
+			name:   "of servers that have not joined the newest goes, with or without a private address",
+			groups: []model.NodeGroup{s2},
+			instances: []cloud.Instance{
+				member(s2, 0, "i-1", minutes(1)), noAddress(unjoined(member(s2, 2, "i-2", minutes(2)))),
+				unjoined(member(s2, 1, "i-3", minutes(3))),
+			},
+			want: []NodeChange{
+				wantJoinWait(s2, noAddress(unjoined(member(s2, 2, "i-2", minutes(2))))),
+				wantDelete(unjoined(member(s2, 1, "i-3", minutes(3))), "surplus"),
+			},
+			wantServers: []string{"i-1", "i-2"},
+		},
+		{
+			name:   "a combined node that has not joined goes before a newer one that did",
+			groups: []model.NodeGroup{c1},
+			instances: []cloud.Instance{
+				unjoined(member(c1, 0, "i-1", minutes(1))), member(c1, 1, "i-2", minutes(2)),
+			},
+			want:        []NodeChange{wantDelete(unjoined(member(c1, 0, "i-1", minutes(1))), "surplus")},
+			wantServers: []string{"i-2"},
+		},
+		{
+			name:   "a joined combined node that does not run goes before running ones",
+			groups: []model.NodeGroup{c2},
+			instances: []cloud.Instance{
+				stopped(member(c2, 0, "i-1", minutes(1))), member(c2, 1, "i-2", minutes(2)),
+				member(c2, 2, "i-3", minutes(3)),
+			},
+			want:        []NodeChange{wantDelete(stopped(member(c2, 0, "i-1", minutes(1))), "surplus")},
+			wantServers: []string{"i-2", "i-3"},
+		},
+		{
+			name:   "a server without a private address goes before ones that have one",
+			groups: []model.NodeGroup{servers(1)},
+			instances: []cloud.Instance{
+				noAddress(member(servers(1), 0, "i-1", minutes(1))), member(servers(1), 1, "i-2", minutes(2)),
+			},
+			want: []NodeChange{wantDelete(noAddress(member(servers(1), 0, "i-1", minutes(1))), "surplus")},
+		},
+		{
+			name:   "the zone with the most machines loses one before a newer machine elsewhere",
+			groups: []model.NodeGroup{wide},
+			instances: []cloud.Instance{
+				member(wide, 0, "i-1", minutes(1)), member(wide, 1, "i-2", minutes(2)),
+				inFra(member(wide, 2, "i-3", minutes(3))),
+			},
+			want: []NodeChange{wantDelete(member(wide, 1, "i-2", minutes(2)), "surplus")},
+		},
+		{
+			name:   "a joined client without a private address is not chosen",
+			groups: []model.NodeGroup{w1},
+			instances: []cloud.Instance{
+				member(w1, 0, "i-1", minutes(1)), noAddress(member(w1, 1, "i-2", minutes(2))),
+			},
+			want: []NodeChange{wantDelete(member(w1, 0, "i-1", minutes(1)), "surplus")},
+		},
+		{
+			name:      "without a reading no machine is outdated, whatever its hash",
+			groups:    []model.NodeGroup{w1},
+			instances: []cloud.Instance{withHash(w1a, "x"), withHash(w1b, "")},
+			want:      []NodeChange{wantDelete(withHash(w1b, ""), "surplus")},
+		},
+		{
+			name:      "an outdated machine goes first by the hash of its group",
+			groups:    []model.NodeGroup{w1},
+			instances: []cloud.Instance{withHash(w1a, "old"), withHash(w1b, "new")},
+			view:      shrinkView{hash: func(string) string { return "new" }},
+			want:      []NodeChange{wantDelete(withHash(w1a, "old"), "surplus")},
+		},
+		{
+			name:      "a machine to replace goes first",
+			groups:    []model.NodeGroup{w1},
+			instances: []cloud.Instance{withHash(w1a, "h"), withHash(w1b, "h")},
+			view:      shrinkView{hash: func(string) string { return "h" }, forced: map[string]bool{"i-1": true}},
+			want:      []NodeChange{wantDelete(withHash(w1a, "h"), "surplus")},
+		},
+		{
+			name:      "the reading of Nomad is used: the machine of an ineligible node goes first",
+			groups:    []model.NodeGroup{w1},
+			instances: []cloud.Instance{w1a, w1b},
+			view: shrinkView{read: true, nomad: rollout.Nomad{
+				Nodes: []rollout.Node{readNode(w1a, false), readNode(w1b, true)},
+			}},
+			want: []NodeChange{wantDelete(w1a, "surplus")},
+		},
+		{
+			name:      "the reading of Nomad is used: without nodes a stopped client goes no sooner than a running one",
+			groups:    []model.NodeGroup{w1},
+			instances: []cloud.Instance{stopped(w1a), w1b},
+			view:      shrinkView{read: true},
+			want:      []NodeChange{wantDelete(w1b, "surplus")},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := &model.Cluster{Name: "prod", Groups: tc.groups}
+			got, servers := planNodes(m, slices.Clone(tc.instances), nil, nil, tc.view)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("the changes (-want +got):\n%s", diff)
+			}
+			if tc.wantServers == nil {
+				return
+			}
+			var ids []string
+			for _, in := range servers {
+				ids = append(ids, in.ID)
+			}
+			if diff := cmp.Diff(tc.wantServers, ids); diff != "" {
+				t.Errorf("the servers that stay (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -660,7 +853,7 @@ func TestPlanNodesServerNames(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &model.Cluster{Name: "prod", Groups: tc.groups}
-			got, _ := planNodes(m, slices.Clone(tc.instances), nil, tc.next)
+			got, _ := planNodes(m, slices.Clone(tc.instances), nil, tc.next, shrinkView{})
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("planNodes (-want +got):\n%s", diff)
 			}
@@ -761,12 +954,12 @@ func TestPlanNodesUnregistered(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &model.Cluster{Name: "prod", Groups: tc.groups}
 			instances := slices.Clone(tc.instances)
-			got, _ := planNodes(m, instances, tc.unregistered, nil)
+			got, _ := planNodes(m, instances, tc.unregistered, nil, shrinkView{})
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("planNodes (-want +got):\n%s", diff)
 			}
 			slices.Reverse(instances)
-			reversed, _ := planNodes(m, instances, tc.unregistered, nil)
+			reversed, _ := planNodes(m, instances, tc.unregistered, nil, shrinkView{})
 			if diff := cmp.Diff(got, reversed); diff != "" {
 				t.Errorf("planNodes of the instances in reverse order (-in order +reversed):\n%s", diff)
 			}
@@ -808,7 +1001,8 @@ func TestPlanNodesServers(t *testing.T) {
 			[]cloud.Instance{s0, changed(s1, func(in *cloud.Instance) { in.Cluster = "dev" })}, []cloud.Instance{s0}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, got := planNodes(&model.Cluster{Name: "prod", Groups: tc.groups}, slices.Clone(tc.instances), nil, nil)
+			m := &model.Cluster{Name: "prod", Groups: tc.groups}
+			_, got := planNodes(m, slices.Clone(tc.instances), nil, nil, shrinkView{})
 			if diff := cmp.Diff(tc.want, got, cmpopts.EquateComparable(netip.Addr{})); diff != "" {
 				t.Errorf("the servers (-want +got):\n%s", diff)
 			}

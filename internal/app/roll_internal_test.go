@@ -255,7 +255,7 @@ func TestRollRunState(t *testing.T) {
 		Groups:  []rollout.Group{{Name: "workers", Role: v1alpha1.RoleClient, Size: 2}},
 		Machines: []rollout.Machine{{
 			ID: "i-1", Name: "prod-workers-0", Group: "workers", Role: v1alpha1.RoleClient, Zone: "ams", Ready: true,
-			Joined: true, Created: minutes(0),
+			Joined: true, Created: minutes(0), PrivateIP: addressFor("i-1"),
 		}},
 		Nomad:   rollout.Nomad{Nodes: []rollout.Node{{ID: "n-1", Name: "prod-workers-0"}}},
 		Version: "2.0.7", Forced: map[string]bool{"i-1": true}, Refresh: time.Minute, Now: now,
