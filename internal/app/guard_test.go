@@ -102,7 +102,8 @@ func privateOf(t *testing.T, f *vultrfake.Fake, id string) netip.Addr {
 }
 
 // TestUpdateDeletesASurplusNodeThatNeverJoined deletes a machine that no node of Nomad stands for, after it asked
-// Nomad for the clients and for the Raft configuration.
+// Nomad for the clients and for the Raft configuration. Each of the two plans reads what a roll observes, since the
+// group has a machine above its size and another that joined.
 func TestUpdateDeletesASurplusNodeThatNeverJoined(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
@@ -112,7 +113,8 @@ func TestUpdateDeletesASurplusNodeThatNeverJoined(t *testing.T) {
 		plan := mustUpdate(t, svc)
 
 		wantNodeChanges(t, plan, deleteOf("prod-workers-1", "instance-5", "surplus"))
-		if diff := cmp.Diff([]string{"Nodes", "Peers"}, nomadNames(w, before)); diff != "" {
+		reading := []string{"Peers", "Health", "Members", "Nodes"}
+		if diff := cmp.Diff(slices.Concat(reading, reading, []string{"Nodes", "Peers"}), nomadNames(w, before)); diff != "" {
 			t.Errorf("the Nomad calls (-want +got):\n%s", diff)
 		}
 		wantNodes(t, f, server(0), server(1), server(2), worker(0))
@@ -135,7 +137,8 @@ func TestUpdateKeepsADuplicateThatRegistered(t *testing.T) {
 
 		const wantErr = "delete node prod-workers-0 (instance-6): the node has joined Nomad (a registered client at "
 		addr := privateOf(t, f, twin)
-		wantError(t, err, wantErr+addr.String()+"); update deletes only nodes that never joined")
+		wantError(t, err, wantErr+addr.String()+"); run tent update cluster again, "+
+			"which removes it as a node that joined or says why it cannot")
 		wantLines(t, *lines, []string{
 			"node started scrub prod-workers-0",
 			"node done scrub prod-workers-0",
@@ -183,7 +186,8 @@ func TestUpdateFailedScrubStillKeepsTheJoinedNode(t *testing.T) {
 		_, err = svc.Update(t.Context(), "prod", true)
 
 		wantError(t, err, "delete node prod-workers-0 (instance-6): the node has joined Nomad (a registered client at "+
-			privateOf(t, f, twin).String()+"); update deletes only nodes that never joined")
+			privateOf(t, f, twin).String()+"); run tent update cluster again, "+
+			"which removes it as a node that joined or says why it cannot")
 		wantJoined(t, f, append(allNames, "prod-workers-0")...)
 		wantRefused(t, svc, f, duplicateRefusal("prod-workers-0", "instance-6", "instance-4"))
 	})
@@ -202,7 +206,8 @@ func TestUpdateKeepsAServerOfTheRaftConfiguration(t *testing.T) {
 
 		addr := privateOf(t, f, twin)
 		wantError(t, err, "delete node prod-servers-2 (instance-6): the node has joined Nomad (a server at "+
-			netip.AddrPortFrom(addr, 4647).String()+"); update deletes only nodes that never joined")
+			netip.AddrPortFrom(addr, 4647).String()+"); run tent update cluster again, "+
+			"which removes it as a node that joined or says why it cannot")
 		wantJoined(t, f, append(allNames, "prod-servers-2")...)
 		if unscrubbed := unscrubbedJoined(f); len(unscrubbed) != 0 {
 			t.Errorf("the joined machines %v hold user data other than the stub", unscrubbed)
@@ -220,7 +225,10 @@ func TestUpdateDeletesNothingWhenNomadCannotBeAsked(t *testing.T) {
 		t.Run(call, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				svc, f, w := unjoinedWorker(t)
-				w.Fail(t, call, boom)
+				svc.OnUpdatePlan = func(app.UpdatePlan) error { // both plans have read Nomad; the delete's question fails
+					w.Fail(t, call, boom)
+					return nil
+				}
 				view := cloudView(f)
 				lines := recordProgress(svc)
 
@@ -239,6 +247,7 @@ func TestUpdateDeletesNothingWhenNomadCannotBeAsked(t *testing.T) {
 				}
 				wantLockFree(t, svc.Store)
 
+				svc.OnUpdatePlan = nil
 				mustUpdate(t, svc)
 
 				wantNodes(t, f, server(0), server(1), server(2), worker(0))
@@ -266,10 +275,11 @@ func TestUpdateDeleteNeedsNomad(t *testing.T) {
 	})
 }
 
-// TestUpdateAfterACutRollNamesRollingUpdate cuts a rolling update just before the first delete of an outdated node,
-// when the new node has joined and the group is one machine above its size, and updates: the plan refuses to delete
-// the new node as surplus, with and without apply, and its advice names tent rolling-update cluster.
-func TestUpdateAfterACutRollNamesRollingUpdate(t *testing.T) {
+// TestUpdateAfterACutRollRemovesTheOutdatedNode cuts a rolling update just before the first delete of an outdated node,
+// when the new node has joined and the group is one machine above its size, and updates: the update drains and removes
+// the node that the roll was about to remove, not the new one, and a rolling update then replaces the other outdated
+// node.
+func TestUpdateAfterACutRollRemovesTheOutdatedNode(t *testing.T) {
 	t.Parallel()
 	calls := uninterruptedRoll(t)
 	del := slices.IndexFunc(calls, func(call string) bool { return strings.HasPrefix(callKey(call), "DeleteInstance ") })
@@ -277,13 +287,24 @@ func TestUpdateAfterACutRollNamesRollingUpdate(t *testing.T) {
 		t.Fatal("the roll made no DeleteInstance call")
 	}
 	synctest.Test(t, func(t *testing.T) {
-		svc, f, w, _, _ := cutWorld(t)
+		svc, f, w, before, old := cutWorld(t)
 		cut := cutCase{index: del + 1, key: callKey(calls[del]), n: 1}
 		runCut(t, f, w, svc.Store, cut, func(ctx context.Context) error {
 			_, err := svc.RollingUpdate(ctx, "prod", app.RollOptions{Apply: true})
 			return err
 		})
 
-		wantRefused(t, svc, f, joinedRefusal(true, "prod-workers-2 (ID instance-6, surplus)"))
+		plan := mustUpdate(t, svc)
+
+		wantNodeChanges(t, plan, removalOf("prod-workers-0", "instance-4", "surplus", "1h0m0s"))
+		if hasInstance(f, "instance-4") {
+			t.Error("the update left the outdated node that the roll was about to remove")
+		}
+		wantConverged(t, svc)
+
+		if _, err := applyRoll(svc, app.RollOptions{}); err != nil {
+			t.Fatalf("RollingUpdate: %v", err)
+		}
+		wantWorkersRolled(t, svc, f, before, old)
 	})
 }

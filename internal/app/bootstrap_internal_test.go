@@ -13,6 +13,7 @@ import (
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/model"
 	"github.com/ingvarch/tent/internal/nomadops"
+	"github.com/ingvarch/tent/internal/rollout"
 )
 
 // texts returns the addresses as text.
@@ -153,6 +154,38 @@ func TestSeed(t *testing.T) {
 			}
 			if diff := cmp.Diff(tc.want, texts(got)); diff != "" {
 				t.Errorf("seed (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestNeedsNomad says that applying a plan calls Nomad for the Nomad step, for a client, for a delete, and for a
+// removal or a purge, and not for the create of a server alone.
+func TestNeedsNomad(t *testing.T) {
+	t.Parallel()
+	create := func(role v1alpha1.Role) []NodeChange { return []NodeChange{{Action: NodeCreate, Role: role}} }
+	for _, tc := range []struct {
+		name string
+		run  updateRun
+		want bool
+	}{
+		{name: "nothing"},
+		{name: "the create of a server", run: updateRun{plan: UpdatePlan{Nodes: create(v1alpha1.RoleServer)}}},
+		{name: "the Nomad step", run: updateRun{plan: UpdatePlan{Nomad: &NomadStep{}}}, want: true},
+		{name: "the create of a client", run: updateRun{plan: UpdatePlan{Nodes: create(v1alpha1.RoleClient)}}, want: true},
+		{
+			name: "a delete",
+			run:  updateRun{plan: UpdatePlan{Nodes: []NodeChange{{Action: NodeDelete, Role: v1alpha1.RoleServer}}}},
+			want: true,
+		},
+		{
+			name: "a purge of a node",
+			run:  updateRun{removal: removalPlan{groups: []rollout.Group{{Name: "workers"}}}}, want: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.run.needsNomad(); got != tc.want {
+				t.Errorf("needsNomad = %v, want %v", got, tc.want)
 			}
 		})
 	}

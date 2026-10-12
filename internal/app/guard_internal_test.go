@@ -12,27 +12,42 @@ import (
 	"github.com/ingvarch/tent/internal/nomadops"
 )
 
-const (
-	refusalCause = "update deletes only nodes that never joined"
-	rollAdvice   = "run tent rolling-update cluster to finish a rolling update that stopped, "
-)
-
-// TestRefuseJoinedDeletes fails a plan that deletes a machine with the joined label, for every reason a delete has,
-// and names each such machine in one error. It accepts a plan whose deletes have never joined.
+// TestRefuseJoinedDeletes fails a plan that deletes a machine with the joined label and neither drains its node nor
+// makes its server leave: a machine of a group that the specs lack whose role is not client, a machine of a group that
+// the specs lack with no group label, and machines of one name that joined. It names each such machine in one error,
+// with the advice for each cause. It accepts a plan whose deletes have never joined or are removals.
 func TestRefuseJoinedDeletes(t *testing.T) {
 	t.Parallel()
-	joined := func(id, name string) cloud.Instance { return cloud.Instance{ID: id, Name: name, Joined: true} }
+	joined := func(id, name string, role v1alpha1.Role, group string) cloud.Instance {
+		return cloud.Instance{ID: id, Name: name, Role: role, Group: group, Joined: true}
+	}
 	idle := func(id, name string) cloud.Instance { return cloud.Instance{ID: id, Name: name} }
-	old, w1, w2, twin := joined("instance-7", "prod-old-0"), joined("instance-5", "prod-workers-1"),
-		joined("instance-6", "prod-workers-2"), joined("instance-8", "prod-workers-0")
+	db0 := joined("instance-1", "prod-db-0", v1alpha1.RoleServer, "db")
+	db1 := joined("instance-2", "prod-db-1", v1alpha1.RoleServer, "db")
+	cache := joined("instance-14", "prod-cache-0", v1alpha1.RoleCombined, "cache")
+	noGroup := joined("instance-15", "prod-lost-0", v1alpha1.RoleClient, "")
+	noGroup2 := joined("instance-16", "prod-lost-1", "", "")
+	unknown := joined("instance-17", "prod-odd-0", "", "odd")
+	w1 := joined("instance-5", "prod-workers-1", v1alpha1.RoleClient, "workers")
 	free := idle("instance-9", "prod-workers-3")
-	keeper, twin2 := joined("instance-3", "prod-workers-0"), joined("instance-10", "prod-workers-2")
-	// Three machines of one name: the first listed is outside the spec, the second stays, the third is its duplicate.
-	stray, keeper4, twin4 := joined("instance-11", "prod-workers-4"), joined("instance-12", "prod-workers-4"),
-		joined("instance-13", "prod-workers-4")
-	listed := []cloud.Instance{old, w1, w2, twin, free, keeper, twin2, stray, keeper4, twin4}
-	const tail = "; " + refusalCause + ": "
+	keeper, twin := joined("instance-3", "prod-workers-0", v1alpha1.RoleClient, "workers"),
+		joined("instance-8", "prod-workers-0", v1alpha1.RoleClient, "workers")
+	keeper2, twin2 := joined("instance-4", "prod-workers-2", v1alpha1.RoleClient, "workers"),
+		joined("instance-10", "prod-workers-2", v1alpha1.RoleClient, "workers")
+	// Two clients of a group that the specs lack, with one name.
+	old0, old0b := joined("instance-7", "prod-old-0", v1alpha1.RoleClient, "old"),
+		joined("instance-11", "prod-old-0", v1alpha1.RoleClient, "old")
+	listed := []cloud.Instance{
+		db0, db1, cache, noGroup, noGroup2, unknown, w1, free, keeper, twin, keeper2, twin2, old0, old0b,
+	}
 	const orCluster = ", or delete the whole cluster with tent delete cluster"
+	const wholeGroup = "tent removes a whole node group only when its nodes are clients: "
+	const twins = "tent does not choose between machines of one name that joined: "
+	removal := func(in cloud.Instance, reason string) NodeChange {
+		c := deleteNode(in, reason)
+		c.Drain = "1h0m0s"
+		return c
+	}
 	for _, tc := range []struct {
 		name    string
 		changes []NodeChange
@@ -46,90 +61,108 @@ func TestRefuseJoinedDeletes(t *testing.T) {
 				{Action: NodeCreate, Name: "prod-workers-4"}, {Action: NodeWait, Name: "prod-workers-3", ID: "instance-9"},
 			},
 		},
+		{name: "a removal with a drain", changes: []NodeChange{removal(w1, reasonSurplus)}},
 		{
-			name:    "one node that is not in the spec",
-			changes: []NodeChange{deleteNode(old, reasonNotInSpec)},
-			want: "update would delete a node that joined Nomad: prod-old-0 (ID instance-7, not in the spec)" +
-				"; " + refusalCause + ": keep this node in the specs, or delete the whole cluster with tent delete cluster",
+			name: "a removal with the leaving of a server",
+			changes: []NodeChange{
+				func() NodeChange { c := deleteNode(db0, reasonSurplus); c.Server = true; return c }(),
+			},
 		},
 		{
-			name:    "a surplus node among nodes that never joined",
-			changes: []NodeChange{deleteNode(free, reasonSurplus), deleteNode(w1, reasonSurplus)},
-			want: "update would delete a node that joined Nomad: prod-workers-1 (ID instance-5, surplus)" +
-				"; " + refusalCause + ": " + rollAdvice + "keep this node in the specs, or delete the whole cluster with tent " +
-				"delete cluster",
+			name:    "one server of a group that the specs lack",
+			changes: []NodeChange{deleteNode(db0, reasonNotInSpec)},
+			want: "update would delete a node that joined Nomad: prod-db-0 (ID instance-1, not in the spec); " + wholeGroup +
+				"keep node group db in the specs" + orCluster,
+		},
+		{
+			name:    "two servers of one group that the specs lack",
+			changes: []NodeChange{deleteNode(db0, reasonNotInSpec), deleteNode(db1, reasonNotInSpec)},
+			want: "update would delete nodes that joined Nomad: prod-db-0 (ID instance-1, not in the spec) and " +
+				"prod-db-1 (ID instance-2, not in the spec); " + wholeGroup + "keep node group db in the specs" + orCluster,
+		},
+		{
+			name:    "nodes of two groups that the specs lack",
+			changes: []NodeChange{deleteNode(db0, reasonNotInSpec), deleteNode(cache, reasonNotInSpec)},
+			want: "update would delete nodes that joined Nomad: prod-db-0 (ID instance-1, not in the spec) and " +
+				"prod-cache-0 (ID instance-14, not in the spec); " + wholeGroup + "keep node groups cache and db in the specs" +
+				orCluster,
+		},
+		{
+			name:    "a node with no group label",
+			changes: []NodeChange{deleteNode(noGroup, reasonNotInSpec)},
+			want: "update would delete a node that joined Nomad: prod-lost-0 (ID instance-15, not in the spec); " + wholeGroup +
+				"keep it in a node group of the specs" + orCluster,
+		},
+		{
+			name:    "nodes with no group label",
+			changes: []NodeChange{deleteNode(noGroup, reasonNotInSpec), deleteNode(noGroup2, reasonNotInSpec)},
+			want: "update would delete nodes that joined Nomad: prod-lost-0 (ID instance-15, not in the spec) and " +
+				"prod-lost-1 (ID instance-16, not in the spec); " + wholeGroup + "keep them in a node group of the specs" +
+				orCluster,
+		},
+		{
+			name:    "a node with no group label beside a node of a group that the specs lack",
+			changes: []NodeChange{deleteNode(db0, reasonNotInSpec), deleteNode(noGroup, reasonNotInSpec)},
+			want: "update would delete nodes that joined Nomad: prod-db-0 (ID instance-1, not in the spec) and " +
+				"prod-lost-0 (ID instance-15, not in the spec); " + wholeGroup +
+				"keep node group db in the specs, and keep it in a node group of the specs" + orCluster,
+		},
+		{
+			name:    "a node of a group that the specs lack with no role",
+			changes: []NodeChange{deleteNode(unknown, reasonNotInSpec)},
+			want: "update would delete a node that joined Nomad: prod-odd-0 (ID instance-17, not in the spec); " + wholeGroup +
+				"keep node group odd in the specs" + orCluster,
 		},
 		{
 			name:    "a duplicate",
 			changes: []NodeChange{deleteNode(twin, reasonDuplicate)},
 			want: "update would delete a node that joined Nomad: prod-workers-0 (ID instance-8, duplicate of ID " +
-				"instance-3)" + tail + "remove one of the two machines called prod-workers-0 from Nomad and delete it " +
+				"instance-3); " + twins + "remove one of the two machines called prod-workers-0 from Nomad and delete it " +
 				"in the cloud" + orCluster,
 		},
 		{
 			name:    "two duplicates",
 			changes: []NodeChange{deleteNode(twin, reasonDuplicate), deleteNode(twin2, reasonDuplicate)},
 			want: "update would delete nodes that joined Nomad: prod-workers-0 (ID instance-8, duplicate of ID " +
-				"instance-3) and prod-workers-2 (ID instance-10, duplicate of ID instance-6)" + tail +
+				"instance-3) and prod-workers-2 (ID instance-10, duplicate of ID instance-4); " + twins +
 				"of the machines that share a name, remove one from Nomad and delete it in the cloud" + orCluster,
 		},
 		{
-			name:    "a duplicate and a surplus node",
-			changes: []NodeChange{deleteNode(w1, reasonSurplus), deleteNode(twin, reasonDuplicate)},
-			want: "update would delete nodes that joined Nomad: prod-workers-1 (ID instance-5, surplus) and " +
-				"prod-workers-0 (ID instance-8, duplicate of ID instance-3)" + tail + rollAdvice + "keep this node in the specs, " +
-				"and remove one of the two machines called prod-workers-0 from Nomad and delete it in the cloud" +
-				orCluster,
+			name:    "a duplicate whose keeper is removed",
+			changes: []NodeChange{removal(keeper, reasonSurplus), deleteNode(twin, reasonDuplicate)},
+			want: "update would delete a node that joined Nomad: prod-workers-0 (ID instance-8, duplicate of ID " +
+				"instance-3); " + twins + "remove one of the two machines called prod-workers-0 from Nomad and delete it " +
+				"in the cloud" + orCluster,
 		},
 		{
-			name:    "a duplicate whose keeper is surplus",
-			changes: []NodeChange{deleteNode(keeper, reasonSurplus), deleteNode(twin, reasonDuplicate)},
-			want: "update would delete nodes that joined Nomad: prod-workers-0 (ID instance-3, surplus) and " +
-				"prod-workers-0 (ID instance-8, duplicate of ID instance-3)" + tail + rollAdvice + "keep this node in the specs, " +
-				"and remove one of the two machines called prod-workers-0 from Nomad and delete it in the cloud" +
-				orCluster,
-		},
-		{
-			name:    "a duplicate listed after a machine of its name that is not in the spec",
-			changes: []NodeChange{deleteNode(stray, reasonNotInSpec), deleteNode(twin4, reasonDuplicate)},
-			want: "update would delete nodes that joined Nomad: prod-workers-4 (ID instance-11, not in the spec) and " +
-				"prod-workers-4 (ID instance-13, duplicate of ID instance-12)" + tail + "keep this node in the specs, " +
-				"and remove one of the two machines called prod-workers-4 from Nomad and delete it in the cloud" +
-				orCluster,
-		},
-		{
-			name: "a duplicate beside two surplus nodes",
-			changes: []NodeChange{
-				deleteNode(w1, reasonSurplus), deleteNode(w2, reasonSurplus), deleteNode(twin, reasonDuplicate),
-			},
-			want: "update would delete nodes that joined Nomad: prod-workers-1 (ID instance-5, surplus), " +
-				"prod-workers-2 (ID instance-6, surplus) and prod-workers-0 (ID instance-8, duplicate of ID instance-3)" +
-				tail + rollAdvice + "keep these nodes in the specs, and remove one of the two machines called " +
-				"prod-workers-0 from Nomad and delete it in the cloud" + orCluster,
-		},
-		{
-			name:    "two nodes",
-			changes: []NodeChange{deleteNode(old, reasonNotInSpec), deleteNode(w1, reasonSurplus)},
+			name:    "two clients of a group that the specs lack with one name",
+			changes: []NodeChange{deleteNode(old0, reasonNotInSpec), deleteNode(old0b, reasonNotInSpec)},
 			want: "update would delete nodes that joined Nomad: prod-old-0 (ID instance-7, not in the spec) and " +
-				"prod-workers-1 (ID instance-5, surplus)" +
-				"; " + refusalCause + ": " + rollAdvice + "keep these nodes in the specs, or delete the whole cluster with tent " +
-				"delete cluster",
+				"prod-old-0 (ID instance-11, not in the spec); " + twins +
+				"remove one of the two machines called prod-old-0 from Nomad and delete it in the cloud" + orCluster,
 		},
 		{
-			name:    "two nodes that are not in the spec",
-			changes: []NodeChange{deleteNode(old, reasonNotInSpec), deleteNode(stray, reasonNotInSpec)},
-			want: "update would delete nodes that joined Nomad: prod-old-0 (ID instance-7, not in the spec) and " +
-				"prod-workers-4 (ID instance-11, not in the spec)" + tail + "keep these nodes in the specs" + orCluster,
-		},
-		{
-			name: "three nodes",
+			name: "twins of a group of the specs and of a group that the specs lack",
 			changes: []NodeChange{
-				deleteNode(old, reasonNotInSpec), deleteNode(w1, reasonSurplus), deleteNode(w2, reasonSurplus),
+				deleteNode(old0, reasonNotInSpec), deleteNode(old0b, reasonNotInSpec), deleteNode(twin, reasonDuplicate),
 			},
 			want: "update would delete nodes that joined Nomad: prod-old-0 (ID instance-7, not in the spec), " +
-				"prod-workers-1 (ID instance-5, surplus) and prod-workers-2 (ID instance-6, surplus)" +
-				"; " + refusalCause + ": " + rollAdvice + "keep these nodes in the specs, or delete the whole cluster with tent " +
-				"delete cluster",
+				"prod-old-0 (ID instance-11, not in the spec) and prod-workers-0 (ID instance-8, duplicate of ID instance-3); " +
+				twins + "of the machines that share a name, remove one from Nomad and delete it in the cloud" + orCluster,
+		},
+		{
+			name:    "a server of a group that the specs lack and a duplicate",
+			changes: []NodeChange{deleteNode(db0, reasonNotInSpec), deleteNode(twin, reasonDuplicate)},
+			want: "update would delete nodes that joined Nomad: prod-db-0 (ID instance-1, not in the spec) and " +
+				"prod-workers-0 (ID instance-8, duplicate of ID instance-3); " + wholeGroup + "keep node group db in the specs; " +
+				twins + "remove one of the two machines called prod-workers-0 from Nomad and delete it in the cloud" +
+				orCluster,
+		},
+		{
+			name:    "a removal beside a node that stays refused",
+			changes: []NodeChange{removal(w1, reasonSurplus), deleteNode(db0, reasonNotInSpec)},
+			want: "update would delete a node that joined Nomad: prod-db-0 (ID instance-1, not in the spec); " + wholeGroup +
+				"keep node group db in the specs" + orCluster,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

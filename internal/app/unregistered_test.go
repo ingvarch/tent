@@ -96,9 +96,9 @@ func writesOf(f *vultrfake.Fake, n int, nm map[string]string) []string {
 }
 
 // TestUpdateReplacesAClientThatNeverRegistered replaces a client that did not register within 31 minutes of its
-// creation. Until then the plan waits for it without a call to Nomad; after it the plan asks Nomad once, shows the
-// delete and the create, and the apply checks the delete, deletes the machine, makes a token and a machine under a
-// new operation id, waits for its registration and scrubs it.
+// creation. Until then the plan waits for it and asks Nomad once, for the nodes that deleted machines left; after it
+// the plan asks Nomad once, shows the delete and the create, and the apply checks the delete, deletes the machine,
+// makes a token and a machine under a new operation id, waits for its registration and scrubs it.
 func TestUpdateReplacesAClientThatNeverRegistered(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
@@ -113,7 +113,7 @@ func TestUpdateReplacesAClientThatNeverRegistered(t *testing.T) {
 			t.Fatalf("Update without apply: %v", err)
 		}
 		wantNodeChanges(t, plan, waitForWorker1)
-		if diff := cmp.Diff([]string(nil), nomadNames(w, before)); diff != "" {
+		if diff := cmp.Diff([]string{"Nodes"}, nomadNames(w, before)); diff != "" {
 			t.Errorf("the Nomad calls of a plan within 31 minutes (-want +got):\n%s", diff)
 		}
 
@@ -507,7 +507,8 @@ func TestUpdateResumesTheReplacementOfAClient(t *testing.T) {
 
 // TestUpdateKeepsTheTwinThatRegisteredOfAClientThatNeverRegistered finds a client that never registered beside a twin
 // of its name that registered without the label, both older than 31 minutes. The twin stays and the other machine
-// goes as a duplicate: no third machine is made, and the guard does not meet a joined twin.
+// goes as a duplicate: no third machine is made, and the guard does not meet a joined twin. The group has a machine
+// above its size, so the plan reads what a roll observes of Nomad.
 func TestUpdateKeepsTheTwinThatRegisteredOfAClientThatNeverRegistered(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
@@ -524,7 +525,7 @@ func TestUpdateKeepsTheTwinThatRegisteredOfAClientThatNeverRegistered(t *testing
 		waitForTwin := waitForWorker1
 		waitForTwin.ID = twin
 		wantNodeChanges(t, plan, waitForTwin, deleteOf("prod-workers-1", "instance-5", "duplicate"))
-		if diff := cmp.Diff([]string{"Nodes"}, nomadNames(w, before)); diff != "" {
+		if diff := cmp.Diff([]string{"Peers", "Health", "Members", "Nodes"}, nomadNames(w, before)); diff != "" {
 			t.Errorf("the Nomad calls of the plan (-want +got):\n%s", diff)
 		}
 
@@ -544,7 +545,8 @@ func nameOf(f *vultrfake.Fake, id string) string { return names(f)[id] }
 
 // TestUpdateReplacesTwoClientsThatNeverRegisteredWhenTheirGroupShrinks scales a group of two clients that never
 // registered down to one. Both are old and Nomad lists both as down: the plan deletes both as not registered and makes
-// one, which registers and is scrubbed.
+// one, which registers and is scrubbed. The node of the machine whose name is not taken again has no machine once the
+// delete is done, so the update purges it.
 func TestUpdateReplacesTwoClientsThatNeverRegisteredWhenTheirGroupShrinks(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
@@ -553,7 +555,9 @@ func TestUpdateReplacesTwoClientsThatNeverRegisteredWhenTheirGroupShrinks(t *tes
 		for _, id := range []string{"instance-4", "instance-5"} {
 			dropJoinedTag(t, f, id)
 			w.WithholdInstance(id)
-			w.Register(nomadops.Node{Name: nameOf(f, id), Status: "down", Address: privateOf(t, f, id)})
+			w.Register(nomadops.Node{
+				ID: nodeIDOf(id), Name: nameOf(f, id), Status: "down", Address: privateOf(t, f, id),
+			})
 		}
 		sleepUntilAge(t, f, "instance-5", oldClient)
 		mustReplace(t, svc, edit(t, workersYAML, "size: 2", "size: 1"))
@@ -562,6 +566,20 @@ func TestUpdateReplacesTwoClientsThatNeverRegisteredWhenTheirGroupShrinks(t *tes
 
 		wantNodeChanges(t, plan, deleteOf("prod-workers-0", "instance-4", "not registered"),
 			deleteOf("prod-workers-1", "instance-5", "not registered"), createOf("workers", v1alpha1.RoleClient, 0))
+		// The node of prod-workers-1 is purged. The replacement of prod-workers-0 takes its name and its address, so
+		// the old node is no orphan and stays until Nomad collects it.
+		if want := (app.RemovalCounts{Purged: 1}); plan.Removed != want {
+			t.Errorf("the update removed %+v, want %+v", plan.Removed, want)
+		}
+		var listed []string
+		for _, n := range nomadNodes(t, svc) {
+			if strings.HasPrefix(n.Name, "prod-workers-") {
+				listed = append(listed, n.ID+" "+n.Status)
+			}
+		}
+		if want := []string{"n-instance-4 down", "n-instance-6 ready"}; !slices.Equal(listed, want) {
+			t.Errorf("Nomad lists the workers %q, want %q", listed, want)
+		}
 		wantNodes(t, f, server(0), server(1), server(2), worker(0))
 		wantJoined(t, f, "prod-servers-0", "prod-servers-1", "prod-servers-2", "prod-workers-0")
 		wantConverged(t, svc)

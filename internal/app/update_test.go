@@ -690,27 +690,20 @@ func TestUpdateRepairsANode(t *testing.T) {
 	})
 }
 
-// joinedRefusal is the error of a plan that deletes the nodes of names, which joined Nomad: each name is
-// "<node> (ID <id>, <reason>)". The advice names tent rolling-update cluster when a node is surplus.
-func joinedRefusal(surplus bool, names ...string) string {
-	tail := "; update deletes only nodes that never joined: "
-	if surplus {
-		tail += "run tent rolling-update cluster to finish a rolling update that stopped, "
-	}
-	if len(names) == 1 {
-		return "update would delete a node that joined Nomad: " + names[0] + tail +
-			"keep this node in the specs, or delete the whole cluster with tent delete cluster"
-	}
-	return "update would delete nodes that joined Nomad: " + strings.Join(names[:len(names)-1], ", ") + " and " +
-		names[len(names)-1] + tail + "keep these nodes in the specs, or delete the whole cluster with tent delete cluster"
-}
-
 // duplicateRefusal is the error of a plan that deletes the machine id of the node name, a duplicate of the machine
 // stayer, which joined Nomad.
 func duplicateRefusal(name, id, stayer string) string {
 	return "update would delete a node that joined Nomad: " + name + " (ID " + id + ", duplicate of ID " + stayer + "); " +
-		"update deletes only nodes that never joined: remove one of the two machines called " + name + " from Nomad " +
-		"and delete it in the cloud, or delete the whole cluster with tent delete cluster"
+		"tent does not choose between machines of one name that joined: remove one of the two machines called " + name +
+		" from Nomad and delete it in the cloud, or delete the whole cluster with tent delete cluster"
+}
+
+// removalOf is the planned delete of the node name, the instance id, that joined and runs a client: its node drains
+// within the drain first.
+func removalOf(name, id, reason, drain string) app.NodeChange {
+	c := deleteOf(name, id, reason)
+	c.Drain = drain
+	return c
 }
 
 // wantRefused fails the test unless the update of the test cluster, with and without apply, fails with the error
@@ -730,21 +723,28 @@ func wantRefused(t *testing.T, svc *app.Service, f *vultrfake.Fake, want string)
 	wantSnapshot(t, svc.Store, storeBefore)
 }
 
+// TestUpdateScales scales the workers of the built cluster down, which drains and removes the newest worker and purges
+// its node, and up again, which makes the nodes under the lowest free names.
 func TestUpdateScales(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newUpdate(t)
 		mustUpdate(t, svc)
 
-		// Down: the newest worker joined, so the plan refuses to delete it.
+		// Down: the newest worker joined, so its node drains first.
 		mustReplace(t, svc, edit(t, workersYAML, "size: 2", "size: 1"))
-		wantRefused(t, svc, f, joinedRefusal(true, "prod-workers-1 (ID instance-5, surplus)"))
-		wantNodes(t, f, allNodes...)
-
-		// Up: the new node takes the next index.
-		mustReplace(t, svc, edit(t, workersYAML, "size: 2", "size: 3"))
 		plan := mustUpdate(t, svc)
-		wantNodeChanges(t, plan, createOf("workers", v1alpha1.RoleClient, 2))
+		wantNodeChanges(t, plan, removalOf("prod-workers-1", "instance-5", "surplus", "1h0m0s"))
+		if want := (app.RemovalCounts{Drained: 1, Purged: 1}); plan.Removed != want {
+			t.Errorf("the update removed %+v, want %+v", plan.Removed, want)
+		}
+		wantNodes(t, f, server(0), server(1), server(2), worker(0))
+		wantConverged(t, svc)
+
+		// Up: the new nodes take the lowest free indexes.
+		mustReplace(t, svc, edit(t, workersYAML, "size: 2", "size: 3"))
+		plan = mustUpdate(t, svc)
+		wantNodeChanges(t, plan, createOf("workers", v1alpha1.RoleClient, 1), createOf("workers", v1alpha1.RoleClient, 2))
 		wantNodes(t, f, server(0), server(1), server(2), worker(0), worker(1), worker(2))
 		wantStored(t, svc.Store, completedPath, fullSpec(t, svc))
 		wantConverged(t, svc)
@@ -752,8 +752,8 @@ func TestUpdateScales(t *testing.T) {
 }
 
 // TestUpdateRemovesTheLastClientGroup removes the only client group. One update deletes a worker that never joined,
-// then the clients' firewall group, which Vultr's guard keeps while nodes use it. When the workers joined, the plan
-// refuses.
+// then the clients' firewall group, which Vultr's guard keeps while nodes use it. When the workers joined, the update
+// drains both and deletes them first, each within the default drain timeout, and then the firewall group.
 func TestUpdateRemovesTheLastClientGroup(t *testing.T) {
 	t.Parallel()
 	t.Run("a worker that never joined", func(t *testing.T) {
@@ -778,7 +778,8 @@ func TestUpdateRemovesTheLastClientGroup(t *testing.T) {
 				"infra started " + kindFirewall + "/prod-clients delete",
 				"infra succeeded " + kindFirewall + "/prod-clients delete",
 			}))
-			if diff := cmp.Diff([]string{"Nodes", "Peers"}, nomadNames(w, asked)); diff != "" {
+			// Each of the two plans asks for the nodes, then the delete asks whether its node joined.
+			if diff := cmp.Diff([]string{"Nodes", "Nodes", "Nodes", "Peers"}, nomadNames(w, asked)); diff != "" {
 				t.Errorf("the Nomad calls before the delete (-want +got):\n%s", diff)
 			}
 			var deletes []vultrfake.Call
@@ -805,13 +806,36 @@ func TestUpdateRemovesTheLastClientGroup(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			svc, f := newUpdate(t)
 			mustUpdate(t, svc)
+			clients := firewallGroupID(t, f, "client")
 			if err := svc.Store.Delete(t.Context(), workersPath); err != nil {
 				t.Fatal(err)
 			}
+			before := len(f.Calls())
 
-			wantRefused(t, svc, f, joinedRefusal(false,
-				"prod-workers-0 (ID instance-4, not in the spec)", "prod-workers-1 (ID instance-5, not in the spec)"))
-			wantNodes(t, f, allNodes...)
+			plan := mustUpdate(t, svc)
+
+			wantInfraChanges(t, plan, "delete "+kindFirewall+"/prod-clients")
+			wantNodeChanges(t, plan,
+				removalOf("prod-workers-0", "instance-4", "not in the spec", "1h0m0s"),
+				removalOf("prod-workers-1", "instance-5", "not in the spec", "1h0m0s"))
+			if want := (app.RemovalCounts{Drained: 2, Purged: 2}); plan.Removed != want {
+				t.Errorf("the update removed %+v, want %+v", plan.Removed, want)
+			}
+			wantRemoved(t, plan, f)
+			var deletes []string
+			for _, c := range f.Calls()[before:] {
+				if strings.HasPrefix(c.Name, "Delete") {
+					deletes = append(deletes, c.Name)
+				}
+			}
+			if want := []string{"DeleteInstance", "DeleteInstance", "DeleteFirewallGroup"}; !slices.Equal(deletes, want) {
+				t.Errorf("the deletes are %v, want the machines first and then the firewall group", deletes)
+			}
+			if groups := f.FirewallGroups(); len(groups) != 1 || groups[0].ID == clients {
+				t.Errorf("the firewall groups are %+v, want the servers' alone", groups)
+			}
+			wantNodes(t, f, server(0), server(1), server(2))
+			wantConverged(t, svc)
 		})
 	})
 }

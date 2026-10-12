@@ -135,7 +135,7 @@ CL_SECRET_NAMES="" # cluster: what those files hold, as a list
 CL_SEARCHED=0   # cluster: the run's own secret search has written its row
 KEEP_WORK=0     # the exit trap leaves the temporary directory in place
 CL_LEFT_INST="" CL_LEFT_VPC="" CL_LEFT_FW="" CL_LEFT_KEY=""
-CL_SPECS=""     # cluster: the file with the specs that tent get printed before the guard check changed them
+CL_SPECS=""     # cluster: the file with the specs that tent get printed before the scale-down check changed them
 CL_SPECS_CHANGED=0 # cluster: the specs in the state store are not the saved ones
 CL_STOPPED=""   # cluster: the node whose Nomad the check stopped and whose joined tag it took off
 CL_SRV_IP=""    # cluster: the public address of the first server, which the Nomad API calls go to
@@ -4231,21 +4231,23 @@ cl_one_client_specs() {
     END { flush() }' "$1" >"$2"
 }
 
-# cl_guard_run LABEL TITLE ARGS...: tent update cluster with ARGS, which must fail with exit 1 and the error that names
-# the surplus client, and leave all instances in place.
-cl_guard_run() {
-  local label="$1" title="$2" want=$((CL_SERVERS + CL_WORKERS)) text n line res
-  text="update would delete a node that joined Nomad: $CL_NAME-workers-1"
-  shift 2
+# cl_scale_run LABEL TITLE WANT PATTERN ARGS...: tent update cluster with ARGS, which must exit 0 and leave WANT
+# instances in the API. When PATTERN is not empty, a line of the output must match the extended regular expression.
+cl_scale_run() {
+  local label="$1" title="$2" want="$3" pattern="$4" n line res
+  shift 4
   cl_run "$label" update cluster "$CL_NAME" "$@"
   n=$(cl_instance_count)
-  line=$({ grep -Fh -- "$text" "$CL_ERR" "$CL_OUT" || true; } | head -n 1 | sed 's/^[0-9]* //' | oneline 200)
-  if [ "$CL_RC" != 1 ]; then
-    res="UNEXPECTED: exit $CL_RC, want 1: ${line:-$(cl_last_line)}"
-  elif [ -z "$line" ]; then
-    res="UNEXPECTED: exit 1 without the line '$text': $(cl_last_line)"
+  line=""
+  if [ -n "$pattern" ]; then
+    line=$({ grep -Eh -- "$pattern" "$CL_ERR" "$CL_OUT" || true; } | head -n 1 | sed 's/^[0-9]* //' | oneline 200)
+  fi
+  if [ "$CL_RC" != 0 ]; then
+    res="FAILED: exit $CL_RC: $(cl_last_line)"
+  elif [ -n "$pattern" ] && [ -z "$line" ]; then
+    res="UNEXPECTED: exit 0 without a line that matches '$pattern': $(cl_last_line)"
   else
-    res="as expected: exit 1 in ${CL_SECS}s: $line"
+    res="as expected: exit 0 in ${CL_SECS}s${line:+: $line}"
   fi
   if [ "$n" = "$want" ]; then
     res="$res; the API lists $n instances"
@@ -4253,23 +4255,25 @@ cl_guard_run() {
     case "$res" in "as expected"*) res="UNEXPECTED${res#as expected}" ;; esac
     res="$res; the API lists $n instances, want $want"
   fi
-  row "$title" "$res" "until M3.6 update cannot drain: it refuses to delete a joined node, with or without --yes"
+  row "$title" "$res" "update drains the surplus client, deletes its machine and purges its node, or creates the client again"
   cl_out_detail "$title"
 }
 
-# cl_guard_rows: with one client in the specs, update refuses to delete the other one; with the saved specs back it
-# plans nothing. The surplus client is <cluster>-workers-1: planNodes deletes the newest machines of a group that is too
-# big, and tent creates the clients one after the other, so workers-1 is younger than workers-0.
-cl_guard_rows() {
+# cl_scale_rows: with one client in the specs, update drains and removes the other one; with the saved specs back it
+# plans the create of that client, and the next update makes it again. The surplus client is <cluster>-workers-1:
+# rollout.Surplus takes the newest machine of a group that is too big, and tent creates the clients one after the
+# other, so workers-1 is younger than workers-0.
+cl_scale_rows() {
   local t_save="Specs saved with tent get" t_one="Specs with one client in the state store"
   local t_plan="tent update cluster (one client in the specs)" t_yes="tent update cluster --yes (one client in the specs)"
-  local t_back="Specs restored" t_exit="tent update cluster --exit-code (specs restored)" res docs
+  local t_back="Specs restored" t_exit="tent update cluster --exit-code (specs restored)"
+  local t_again="tent update cluster --yes (specs restored)" res docs plan
   CL_SPECS="$WORK/cl-specs.yaml"
   cl_run get get "$CL_NAME"
   docs=$(($(grep -c '^---$' "$CL_OUT" || true) + 1))
   if [ "$CL_RC" != 0 ]; then
-    row "$t_save" "FAILED: exit $CL_RC: $(cl_last_line)" "the guard check changes the specs and puts these back"
-    cl_unknown_rows "the specs were not saved" "$t_one" "$t_plan" "$t_yes" "$t_back" "$t_exit"
+    row "$t_save" "FAILED: exit $CL_RC: $(cl_last_line)" "the scale-down check changes the specs and puts these back"
+    cl_unknown_rows "the specs were not saved" "$t_one" "$t_plan" "$t_yes" "$t_back" "$t_exit" "$t_again"
     return 0
   fi
   cp "$CL_OUT" "$CL_SPECS"
@@ -4278,11 +4282,11 @@ cl_guard_rows() {
   else
     res="UNEXPECTED: $docs documents, want 3 (the cluster and two node groups)"
   fi
-  row "$t_save" "$res" "the guard check changes the specs and puts these back"
+  row "$t_save" "$res" "the scale-down check changes the specs and puts these back"
   cl_one_client_specs "$CL_SPECS" "$WORK/cl-specs-one.yaml"
   if cmp -s "$CL_SPECS" "$WORK/cl-specs-one.yaml"; then
     row "$t_one" "UNEXPECTED: the specs have no client group with a size to change" "no check ran"
-    cl_unknown_rows "no specs with one client" "$t_plan" "$t_yes" "$t_back" "$t_exit"
+    cl_unknown_rows "no specs with one client" "$t_plan" "$t_yes" "$t_back" "$t_exit" "$t_again"
     return 0
   fi
   CL_SPECS_CHANGED=1
@@ -4290,21 +4294,30 @@ cl_guard_rows() {
   if [ "$CL_RC" != 0 ]; then
     CL_SPECS_CHANGED=0
     row "$t_one" "FAILED: exit $CL_RC: $(cl_last_line)" "tent replace -f changes the specs in the state store only"
-    cl_unknown_rows "the specs did not change" "$t_plan" "$t_yes" "$t_back" "$t_exit"
+    cl_unknown_rows "the specs did not change" "$t_plan" "$t_yes" "$t_back" "$t_exit" "$t_again"
     return 0
   fi
   row "$t_one" "as expected: exit 0 in ${CL_SECS}s" "tent replace -f changes the specs in the state store only"
-  cl_guard_run guard-plan "$t_plan"
-  cl_guard_run guard-yes "$t_yes" --yes
+  plan="^- node $CL_NAME-workers-1 \\(ID [^,]+, surplus, after a drain within 1h0m0s\\)\$"
+  cl_scale_run scale-plan "$t_plan" $((CL_SERVERS + CL_WORKERS)) "$plan"
+  cl_scale_run scale-yes "$t_yes" $((CL_SERVERS + CL_WORKERS - 1)) "$plan" --yes
   cl_run specs-back replace -f "$CL_SPECS"
   if [ "$CL_RC" != 0 ]; then
     row "$t_back" "FAILED: exit $CL_RC: $(cl_last_line)" "the saved specs go back into the state store"
-    cl_unknown_rows "the saved specs were not put back" "$t_exit"
+    cl_unknown_rows "the saved specs were not put back" "$t_exit" "$t_again"
     return 0
   fi
   CL_SPECS_CHANGED=0
   row "$t_back" "as expected: exit 0 in ${CL_SECS}s" "the saved specs go back into the state store"
-  cl_exit_code_row guard-exit "$t_exit" "the refused update changed nothing: the saved specs plan nothing"
+  cl_run scale-exit update cluster "$CL_NAME" --exit-code
+  case "$CL_RC" in
+    2) res="as expected: exit 2 in ${CL_SECS}s: $(oneline 200 <"$CL_OUT")" ;;
+    0) res="UNEXPECTED: exit 0 (the plan has no change): $(oneline 200 <"$CL_OUT")" ;;
+    *) res="FAILED: exit $CL_RC: $(cl_last_line)" ;;
+  esac
+  row "$t_exit" "$res" "the plan creates the client that the scale-down removed"
+  cl_out_detail "$t_exit"
+  cl_scale_run scale-again "$t_again" $((CL_SERVERS + CL_WORKERS)) "" --yes
 }
 
 # --unregistered: a client that never registers. The pieces below run in order, and a piece that fails stops the rest.
@@ -4766,7 +4779,7 @@ check_cluster() {
   cl_client_rows
   cl_server_rows
   cl_reboot_row
-  cl_guard_rows
+  cl_scale_rows
   if [ "$UNREG" != 1 ]; then
     row "Client that never registers (--unregistered)" "skipped: --unregistered not given" \
       "the check takes about 30 minutes more: it waits until an instance is 32 minutes old"
@@ -4820,8 +4833,8 @@ cl_cleanup() {
   # A run stopped during create has read none: read what the store holds before anything deletes it.
   [ "$CL_SECRETS" != 0 ] || cl_collect_store_secrets
   if [ "$KEEP" = 1 ] && [ "$CL_SPECS_CHANGED" = 1 ]; then
-    # The guard check changed the specs and the run stopped before it put them back: tent update would refuse the
-    # kept cluster. Without --keep the delete below does not look at the specs.
+    # The scale-down check changed the specs and the run stopped before it put them back: tent update would remove a
+    # client of the kept cluster. Without --keep the delete below does not look at the specs.
     cl_run specs-back replace -f "$CL_SPECS"
     if [ "$CL_RC" = 0 ]; then
       CL_SPECS_CHANGED=0

@@ -11,6 +11,7 @@ import (
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/english"
+	"github.com/ingvarch/tent/internal/model"
 	"github.com/ingvarch/tent/internal/nomadops"
 )
 
@@ -57,22 +58,20 @@ func askNomadError(stale []cloud.Instance, cause error) error {
 		"registered: %w", nodes, english.And(names), int(introLifetime.Minutes()), its, they, cause)
 }
 
-// unregistered returns the IDs of the stale machines that Nomad does not list as registered clients. It asks only
-// when a server that stays has joined: through those servers, with one call of Nodes. Without one it returns nil, and
-// those of the machines that stay are waited for.
-func (s *Service) unregistered(ctx context.Context, access nomadAccess, stale, servers []cloud.Instance,
-) (map[string]bool, error) {
-	joined := slices.DeleteFunc(slices.Clone(servers), func(in cloud.Instance) bool { return !in.Joined })
-	if len(stale) == 0 || len(joined) == 0 {
-		return nil, nil
-	}
-	api, err := s.nomadOver(joined, access)
-	if err != nil {
-		return nil, askNomadError(stale, err)
-	}
-	nodes, err := api.Nodes(ctx)
-	if err != nil {
-		return nil, askNomadError(stale, err)
+// couldNotAskNodes is the start of the warning of a read of Nomad's nodes that failed when no node had to be judged
+// and no node that joined could go: the plan then lists no purge of a node that a deleted machine left.
+const couldNotAskNodes = "tent could not ask Nomad whether a node of a deleted machine is left: "
+
+// joinedAmong returns the machines among servers that carry the joined label.
+func joinedAmong(servers []cloud.Instance) []cloud.Instance {
+	return slices.DeleteFunc(slices.Clone(servers), func(in cloud.Instance) bool { return !in.Joined })
+}
+
+// notRegistered returns the IDs of the stale machines that nodes do not list as registered clients. It returns nil
+// when no server that stays has joined: the stale machines that stay are waited for.
+func notRegistered(nodes []nomadops.Node, stale, servers []cloud.Instance) map[string]bool {
+	if len(joinedAmong(servers)) == 0 {
+		return nil
 	}
 	gone := map[string]bool{}
 	for _, in := range stale {
@@ -80,5 +79,42 @@ func (s *Service) unregistered(ctx context.Context, access nomadAccess, stale, s
 			gone[in.ID] = true
 		}
 	}
-	return gone, nil
+	return gone
+}
+
+// readNodes reads the client nodes that Nomad lists, with one call, when a plan needs them and no roll-style reading
+// has given them: to tell which stale clients registered, through the servers that stay and have joined, and a failure
+// then fails the plan; or, when the cluster can answer (the store holds the mark of the ACL bootstrap and a server
+// that joined and runs has a public address), to find the nodes that deleted machines left, through those servers. A
+// failure of that read comes back as a warning and no error, unless ctx ended. It returns whether it read.
+func (s *Service) readNodes(ctx context.Context, m *model.Cluster, access nomadAccess,
+	listed, stale, servers []cloud.Instance, marked bool,
+) (nodes []nomadops.Node, read bool, warning string, err error) {
+	if joined := joinedAmong(servers); len(stale) > 0 && len(joined) > 0 {
+		if nodes, err = s.askNodes(ctx, access, joined); err != nil {
+			return nil, false, "", askNomadError(stale, err)
+		}
+		return nodes, true, "", nil
+	}
+	machines := apiMachines(m, listed, nil, nil)
+	if !marked || len(machines) == 0 {
+		return nil, false, "", nil
+	}
+	if nodes, err = s.askNodes(ctx, access, machines); err != nil {
+		if ctx.Err() != nil {
+			return nil, false, "", err
+		}
+		return nil, false, couldNotAskNodes + err.Error(), nil
+	}
+	return nodes, true, "", nil
+}
+
+// askNodes reads the client nodes through the API over the machines.
+func (s *Service) askNodes(ctx context.Context, access nomadAccess, machines []cloud.Instance,
+) ([]nomadops.Node, error) {
+	api, err := s.nomadOver(machines, access)
+	if err != nil {
+		return nil, err
+	}
+	return api.Nodes(ctx)
 }

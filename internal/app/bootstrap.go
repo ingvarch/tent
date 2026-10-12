@@ -65,9 +65,9 @@ func planNomad(m *model.Cluster, changes []NodeChange, staying []cloud.Instance,
 }
 
 // needsNomad reports whether applying the plan calls Nomad: for the Nomad step, for a client's intro token or its
-// registration wait, or to ask whether a node that the plan deletes has joined.
+// registration wait, to ask whether a node that the plan deletes has joined, or to remove a node or purge one.
 func (u updateRun) needsNomad() bool {
-	return u.plan.Nomad != nil ||
+	return u.plan.Nomad != nil || len(u.removal.groups) > 0 ||
 		slices.ContainsFunc(u.plan.Nodes, func(c NodeChange) bool { return c.Action == NodeDelete || !isServerChange(c) })
 }
 
@@ -129,16 +129,23 @@ type applier struct {
 	// known are the servers that exist, by name: those that stay and those that this run made or waited for.
 	known []cloud.Instance
 	api   nomadops.API // over the known servers; nil until a step needs it
+	// gone are the machines that the apply deleted, by ID: the removals start with them as deleted ones.
+	gone []string
+	// removed is what the removals did.
+	removed RemovalCounts
 }
 
 // run carries out the node changes in the order of the plan: the creates and waits of the server and combined nodes,
-// the Nomad step, then the other changes, which are the clients' waits and creates and the deletes.
+// the Nomad step, then the other changes, which are the clients' waits and creates and the deletes of machines that
+// never joined, and last the removals of nodes that joined and the purges.
 func (a *applier) run(ctx context.Context) error {
 	var servers, rest []NodeChange
 	for _, c := range a.u.plan.Nodes {
-		if c.Action != NodeDelete && isServerChange(c) {
+		switch {
+		case isRemoval(c): // removals carries it out
+		case c.Action != NodeDelete && isServerChange(c):
 			servers = append(servers, c)
-		} else {
+		default:
 			rest = append(rest, c)
 		}
 	}
@@ -160,8 +167,13 @@ func (a *applier) run(ctx context.Context) error {
 		if err := apply(ctx, c); err != nil {
 			return err
 		}
+		if c.Action == NodeDelete {
+			a.gone = append(a.gone, c.ID)
+		}
 	}
-	return nil
+	var err error
+	a.removed, err = a.removals(ctx)
+	return err
 }
 
 // applyServer creates the server or combined node of c, or waits for it, and adds it to the known servers. The node

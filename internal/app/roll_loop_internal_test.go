@@ -1043,9 +1043,6 @@ func TestStopStopsTheMachineAndNotesItAsBeingStopped(t *testing.T) {
 	}
 }
 
-// updateCommand is the command that a removal tells the operator to run again.
-const updateCommand = "tent update cluster"
-
 // TestAgainNamesTheCommandOfTheRun tells the operator to run the command of the run again.
 func TestAgainNamesTheCommandOfTheRun(t *testing.T) {
 	t.Parallel()

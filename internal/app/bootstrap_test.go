@@ -354,14 +354,14 @@ func TestUpdateBuildsANomadCluster(t *testing.T) {
 			t.Errorf("the progress (-want +got):\n%s", diff)
 		}
 
-		// A second update changes nothing, calls Nomad not at all and only reads the cloud.
+		// A second update changes nothing, asks Nomad for its nodes once and only reads the cloud.
 		cloudCalls, nomadCalls := len(f.Calls()), len(w.Log())
 		plan = mustUpdate(t, svc)
 		if plan.HasChanges() || !plan.Applied {
 			t.Errorf("the second update has changes or was not applied (%t):\n%s", plan.Applied, planText(t, plan))
 		}
-		if n := len(w.Log()); n != nomadCalls {
-			t.Errorf("the second update made %d Nomad calls, want none", n-nomadCalls)
+		if diff := cmp.Diff([]string{"nomad Nodes (prod-servers-0)"}, nomadLines(w)[nomadCalls:]); diff != "" {
+			t.Errorf("the Nomad calls of the second update (-want +got):\n%s", diff)
 		}
 		for _, c := range f.Calls()[cloudCalls:] {
 			if !strings.HasPrefix(c.Name, "List") && c.Name != "AvailablePlans" {
@@ -605,7 +605,7 @@ func TestUpdateResumesAfter(t *testing.T) {
 		plan  []string
 		nomad *app.NomadStep
 		// bootstraps is how many Bootstrap calls the cut run and the next one make together, and nodes how many Nodes
-		// calls reach Nomad.
+		// calls reach Nomad: those of the registration waits and one for each plan of a cluster with the mark.
 		bootstraps, nodes int
 		// progress, unless nil, is the node and Nomad progress of the next run.
 		progress []string
@@ -613,33 +613,33 @@ func TestUpdateResumesAfter(t *testing.T) {
 		{name: "the first server", cut: "CreateInstance prod-servers-1", plan: []string{
 			"wait prod-servers-0", "create prod-servers-2", "create prod-servers-3", "create prod-workers-0",
 			"create prod-workers-1",
-		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 1, nodes: 2},
+		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 1, nodes: 3},
 		{name: "every server, before the leader", cut: leader, plan: []string{
 			"wait prod-servers-0", "wait prod-servers-1", "wait prod-servers-2", "create prod-workers-0",
 			"create prod-workers-1",
-		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 1, nodes: 2},
+		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 1, nodes: 3},
 		{name: "the health wait, before the mark", cut: "nomad Health (prod-servers-0)", plan: []string{
 			"wait prod-servers-0", "wait prod-servers-1", "wait prod-servers-2", "create prod-workers-0",
 			"create prod-workers-1",
-		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 2, nodes: 2},
+		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 2, nodes: 3},
 		{name: "the keyring wait, before the mark", cut: "nomad KeyringReady (prod-servers-0)", plan: []string{
 			"wait prod-servers-0", "wait prod-servers-1", "wait prod-servers-2", "create prod-workers-0",
 			"create prod-workers-1",
-		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 2, nodes: 2},
+		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 2, nodes: 3},
 		{name: "the health wait, before the first scrub", cut: "GetInstance <prod-servers-0>", n: 4, plan: []string{
 			"wait prod-servers-0", "wait prod-servers-1", "wait prod-servers-2", "create prod-workers-0",
 			"create prod-workers-1",
-		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 2, nodes: 2},
+		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 2, nodes: 3},
 		{name: "a scrub that lost its answer", cut: "UpdateInstance <prod-servers-0>", after: true, plan: []string{
 			"wait prod-servers-1", "wait prod-servers-2", "create prod-workers-0", "create prod-workers-1",
-		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 2, nodes: 2},
+		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 2, nodes: 3},
 		{name: "the last scrub, before the mark", cut: "UpdateInstance <prod-servers-2>", after: true, plan: []string{
 			"create prod-workers-0", "create prod-workers-1",
-		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 2, nodes: 2},
+		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 2, nodes: 3},
 		{name: "the mark, before the clients", cut: "nomad IntroToken prod-workers-0 default 30m0s (prod-servers-0)",
-			plan: []string{"create prod-workers-0", "create prod-workers-1"}, bootstraps: 1, nodes: 2},
+			plan: []string{"create prod-workers-0", "create prod-workers-1"}, bootstraps: 1, nodes: 6},
 		{name: "a client's create, before its registration", cut: "nomad Nodes (prod-servers-0)",
-			plan: []string{"wait prod-workers-0", "create prod-workers-1"}, bootstraps: 1, nodes: 2,
+			plan: []string{"wait prod-workers-0", "create prod-workers-1"}, bootstraps: 1, nodes: 6,
 			progress: slices.Concat(
 				[]string{"nomad started register prod-workers-0", "nomad done register prod-workers-0"},
 				nodeSteps("scrub", "prod-workers-0"),
@@ -648,11 +648,11 @@ func TestUpdateResumesAfter(t *testing.T) {
 				nodeSteps("scrub", "prod-workers-1"),
 			)},
 		{name: "a client's registration, before its scrub", cut: "GetInstance <prod-workers-0>", n: 4,
-			plan: []string{"wait prod-workers-0", "create prod-workers-1"}, bootstraps: 1, nodes: 3},
+			plan: []string{"wait prod-workers-0", "create prod-workers-1"}, bootstraps: 1, nodes: 7},
 		{name: "a client's scrub that lost its answer", cut: "UpdateInstance <prod-workers-0>", after: true,
-			plan: []string{"create prod-workers-1"}, bootstraps: 1, nodes: 2},
+			plan: []string{"create prod-workers-1"}, bootstraps: 1, nodes: 6},
 		{name: "a client's create that lost its answer", cut: "CreateInstance prod-workers-0", after: true,
-			plan: []string{"wait prod-workers-0", "create prod-workers-1"}, bootstraps: 1, nodes: 2,
+			plan: []string{"wait prod-workers-0", "create prod-workers-1"}, bootstraps: 1, nodes: 6,
 			progress: slices.Concat(
 				nodeSteps("wait", "prod-workers-0"),
 				[]string{"nomad started register prod-workers-0", "nomad done register prod-workers-0"},
@@ -832,6 +832,7 @@ func TestUpdateRepeatsAHealthWaitThatStopped(t *testing.T) {
 		mustUpdate(t, svc)
 
 		want := []string{
+			"nomad Nodes (prod-servers-0)", "nomad Nodes (prod-servers-0)",
 			"nomad Leader (prod-servers-0)", "nomad Health (prod-servers-0)", "nomad KeyringReady (prod-servers-0)",
 			"nomad Peers (prod-servers-0)",
 		}
@@ -1744,6 +1745,7 @@ func TestUpdatePlansTheNomadStep(t *testing.T) {
 			}
 			mustUpdate(t, svc)
 			want := []string{
+				"nomad Nodes (prod-servers-0)", "nomad Nodes (prod-servers-0)", "nomad Nodes (prod-servers-0)",
 				"nomad Leader (prod-servers-0)", "nomad Health (prod-servers-0)", "nomad KeyringReady (prod-servers-0)",
 				"nomad Peers (prod-servers-0)",
 			}

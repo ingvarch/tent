@@ -6,66 +6,87 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/english"
 	"github.com/ingvarch/tent/internal/nomadops"
 )
 
-// onlyUnjoined says why an update keeps the nodes that joined Nomad.
-const onlyUnjoined = "update deletes only nodes that never joined"
-
-// refuseJoinedDeletes fails when the node changes delete a machine that carries the joined label, among the machines
-// that the cloud listed. The error names each such machine, with its ID and the reason of its delete; for a duplicate
-// the reason names the machine that stays. It says what to do for each kind of delete; for a surplus node it also
-// names the rolling update that finishes a roll that stopped.
+// refuseJoinedDeletes fails when the node changes delete a machine that carries the joined label and is no removal,
+// among the machines that the cloud listed: a machine of a group that the specs lack whose role is not client or that
+// has no group label, and machines of one name that joined. A removal, which drains the node or makes the server
+// leave, is no such delete. The error names each such machine, with its ID and the reason of its delete; for a
+// duplicate the reason names the machine that stays. It gives the advice for each cause.
 func refuseJoinedDeletes(changes []NodeChange, listed []cloud.Instance) error {
-	var names, dups []string
-	kept := 0 // the machines whose delete is not that of a duplicate
-	surplus := false
+	var names, twins []string // twins are the names that machines of one name that joined share
+	var groups []string       // the groups that the specs lack and that have a node to delete
+	unlabelled := 0           // the machines to delete that have no group label
 	for _, c := range changes {
-		if c.Action != NodeDelete {
-			continue
-		}
-		if in, ok := instanceByID(listed, c.ID); !ok || !in.Joined {
+		in, ok := instanceByID(listed, c.ID)
+		if c.Action != NodeDelete || !ok || !in.Joined || isRemoval(c) {
 			continue
 		}
 		reason := c.Reason
-		if c.Reason == reasonDuplicate {
+		switch {
+		case c.Reason == reasonDuplicate:
 			reason += " of ID " + stayerOf(changes, listed, c.ID).ID
-			dups = append(dups, c.Name)
-		} else {
-			kept++
-			surplus = surplus || c.Reason == reasonSurplus
+			twins = append(twins, c.Name)
+		case in.Role == v1alpha1.RoleClient && in.Group != "":
+			twins = append(twins, c.Name)
+		case in.Group == "":
+			unlabelled++
+		default:
+			groups = append(groups, in.Group)
 		}
 		names = append(names, fmt.Sprintf("%s (ID %s, %s)", c.Name, c.ID, reason))
 	}
 	if len(names) == 0 {
 		return nil
 	}
-	var todo []string
-	keep := "keep this node in the specs"
-	if kept > 1 {
-		keep = "keep these nodes in the specs"
+	var causes []string
+	if keep := keepAdvice(groups, unlabelled); keep != "" {
+		causes = append(causes, "tent removes a whole node group only when its nodes are clients: "+keep)
 	}
-	if surplus {
-		keep = "run tent rolling-update cluster to finish a rolling update that stopped, " + keep
-	}
-	if kept > 0 {
-		todo = append(todo, keep)
-	}
-	switch len(dups) {
-	case 0:
-	case 1:
-		todo = append(todo, "remove one of the two machines called "+dups[0]+" from Nomad and delete it in the cloud")
-	default:
-		todo = append(todo, "of the machines that share a name, remove one from Nomad and delete it in the cloud")
+	if len(twins) > 0 {
+		causes = append(causes, "tent does not choose between machines of one name that joined: "+twinAdvice(twins))
 	}
 	nodes := "a node that joined"
 	if len(names) > 1 {
 		nodes = "nodes that joined"
 	}
-	return fmt.Errorf("update would delete %s Nomad: %s; %s: %s, or delete the whole cluster with tent delete cluster",
-		nodes, english.And(names), onlyUnjoined, strings.Join(todo, ", and "))
+	return fmt.Errorf("update would delete %s Nomad: %s; %s, or delete the whole cluster with tent delete cluster",
+		nodes, english.And(names), strings.Join(causes, "; "))
+}
+
+// keepAdvice says which node groups to keep in the specs: the groups, and the machines without a group label, of which
+// there are unlabelled. It is empty for none.
+func keepAdvice(groups []string, unlabelled int) string {
+	groups = slices.Compact(slices.Sorted(slices.Values(groups)))
+	var keep []string
+	switch len(groups) {
+	case 0:
+	case 1:
+		keep = append(keep, "keep node group "+groups[0]+" in the specs")
+	default:
+		keep = append(keep, "keep node groups "+english.And(groups)+" in the specs")
+	}
+	switch unlabelled {
+	case 0:
+	case 1:
+		keep = append(keep, "keep it in a node group of the specs")
+	default:
+		keep = append(keep, "keep them in a node group of the specs")
+	}
+	return strings.Join(keep, ", and ")
+}
+
+// twinAdvice says what to do about machines of the names, each of which more than one machine that joined has.
+func twinAdvice(names []string) string {
+	names = slices.Compact(slices.Sorted(slices.Values(names)))
+	if len(names) > 1 {
+		return "of the machines that share a name, remove one from Nomad and delete it in the cloud"
+	}
+	return "remove one of the two machines called " + names[0] + " from Nomad and delete it in the cloud"
 }
 
 // stayerOf returns the machine that stays in the place of the duplicate with the ID id: the listed machine of its
@@ -85,8 +106,8 @@ func stayerOf(changes []NodeChange, listed []cloud.Instance, id string) cloud.In
 }
 
 // applyDelete carries out the delete c of a node, unless its machine has joined Nomad. A machine that joined is
-// scrubbed and labelled, so that the next plan refuses its delete, and the step fails. When Nomad cannot be asked,
-// nothing is deleted.
+// scrubbed and labelled, so that the next plan removes it as a node that joined or refuses its delete, and the step
+// fails. When Nomad cannot be asked, nothing is deleted.
 func (a *applier) applyDelete(ctx context.Context, c NodeChange) error {
 	err := a.guardDelete(ctx, c)
 	if err != nil {
@@ -110,7 +131,8 @@ func (a *applier) guardDelete(ctx context.Context, c NodeChange) error {
 	if err := a.s.markJoined(ctx, a.u.nodeKit, in); err != nil {
 		return fmt.Errorf("delete node %s (%s): the node has joined Nomad (%s): %w", c.Name, c.ID, joinedAs, err)
 	}
-	return fmt.Errorf("delete node %s (%s): the node has joined Nomad (%s); %s", c.Name, c.ID, joinedAs, onlyUnjoined)
+	return fmt.Errorf("delete node %s (%s): the node has joined Nomad (%s); run %s again, which removes it as a node "+
+		"that joined or says why it cannot", c.Name, c.ID, joinedAs, updateCommand)
 }
 
 // hasJoined asks Nomad whether the machine in has joined, whatever its role: whether a client of its name at its

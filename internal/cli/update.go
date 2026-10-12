@@ -28,7 +28,15 @@ func newUpdateClusterCommand(opts *globalOptions) *cobra.Command {
 			"state store, and never replaces them. It starts Nomad on the nodes, bootstraps its ACL system and " +
 			"waits for the servers to be healthy and the clients to register. Once a node has joined its cluster, tent " +
 			"replaces its user data with a stub. A client that did not register within 31 minutes of its creation is " +
-			"deleted and created again. An update that would delete a node that joined fails. It lists the nodes that " +
+			"deleted and created again. A node group with more nodes than its size loses nodes: tent marks a node that " +
+			"joined ineligible, drains it within the group's drainTimeout, deletes its machine and purges its node " +
+			"from Nomad once Nomad lists it down; Nomad stops the allocations that find no other node at the " +
+			"drain's deadline. A server leaves one at a time: tent moves the leadership away when it leads, stops " +
+			"the machine, removes it from the Raft configuration and the gossip pool, and waits until the servers " +
+			"that stay are healthy; going to one server takes about a minute more and needs --allow-single-server. " +
+			"The client nodes of a node group that the specs no longer have are drained and removed the same way; " +
+			"a server group that the specs no longer have fails the update. A node that Nomad lists as down and " +
+			"that no machine has is purged. The names of new servers only grow. It lists the nodes that " +
 			"tent rolling-update cluster replaces, which are no change of the update. A development build of " +
 			"tent needs TENT_NODE_URL and TENT_NODE_SHA256 to find the tent-node that its nodes run. " +
 			"Without --yes it prints the plan and changes nothing. With --yes it prints the plan, applies it, " +
