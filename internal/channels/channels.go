@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -88,7 +89,7 @@ func (c *Channel) Allows(version string) error {
 	return &VersionError{Version: version, Problem: problem}
 }
 
-// VersionError is a Nomad version that a channel does not allow, and why.
+// VersionError is a Nomad version that a channel does not allow, or that a cluster may not move to, and why.
 type VersionError struct {
 	Version string // as given
 	Problem string // what is wrong with it, such as "is older than 2.0.0, the oldest Nomad that channel stable allows"
@@ -107,6 +108,49 @@ func (e *VersionError) Error() string {
 func isNomadRelease(version string) bool {
 	v := "v" + version
 	return semver.Canonical(v) == v && semver.Prerelease(v) == ""
+}
+
+// Compare orders two Nomad releases X.Y.Z as semver does: -1 if a is older than b, 0 if they are the same, +1 if a is
+// newer. It does not check that a and b are releases.
+func Compare(a, b string) int { return semver.Compare("v"+a, "v"+b) }
+
+// NextMinor returns the first release of the minor version after version's: 2.1.0 for 2.0.7. It returns "" for a
+// text that is no release X.Y.Z, and for a minor number too large to add one to.
+func NextMinor(version string) string {
+	if !isNomadRelease(version) {
+		return ""
+	}
+	major, minor, _ := strings.Cut(strings.TrimPrefix(semver.MajorMinor("v"+version), "v"), ".")
+	n, err := strconv.Atoi(minor)
+	if err != nil || n == math.MaxInt {
+		return ""
+	}
+	return major + "." + strconv.Itoa(n+1) + ".0"
+}
+
+// OlderThanMinimum reports whether version is a release X.Y.Z older than the oldest that the channel allows. A text
+// that is no release is not.
+func (c *Channel) OlderThanMinimum(version string) bool {
+	return isNomadRelease(version) && Compare(version, c.Nomad.Minimum) < 0
+}
+
+// CheckMove returns nil when a cluster on the Nomad version from may move to the version to: to is the same or older,
+// or newer by at most one minor version of the same major version. Otherwise it returns a *VersionError for to that
+// says why. A from or a to that is no release X.Y.Z is not compared: Allows refuses it.
+func CheckMove(from, to string) error {
+	if !isNomadRelease(from) || !isNomadRelease(to) || Compare(to, from) <= 0 {
+		return nil
+	}
+	var problem string
+	switch {
+	case semver.Major("v"+to) != semver.Major("v"+from):
+		problem = "is of another major version than " + from
+	case Compare(to, NextMinor(NextMinor(from))) >= 0:
+		problem = "is more than one minor version above " + from
+	default:
+		return nil
+	}
+	return &VersionError{Version: to, Problem: problem}
 }
 
 // Tested reports whether the channel lists the Nomad version as tested with this tent.
