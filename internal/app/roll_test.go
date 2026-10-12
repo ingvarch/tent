@@ -507,15 +507,20 @@ func unjoinedWorld(
 func TestRollingUpdateShowsTheWaitForANodeToJoin(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name string
-		edit func(f *vultrfake.Fake, w *nomadWorld)
+		name  string
+		edit  func(f *vultrfake.Fake, w *nomadWorld)
+		later bool // the clock is past the time that a client has to join
 	}{
-		{"its node is ready, so the run scrubs the machine", func(*vultrfake.Fake, *nomadWorld) {}},
-		{"its node is not listed yet", func(_ *vultrfake.Fake, w *nomadWorld) { w.DropNode("prod-workers-1") }},
+		{"its node is ready, so the run scrubs the machine", func(*vultrfake.Fake, *nomadWorld) {}, false},
+		{"its node is not listed yet", func(_ *vultrfake.Fake, w *nomadWorld) { w.DropNode("prod-workers-1") }, false},
+		{"its node is ready and its intro token has run out", func(*vultrfake.Fake, *nomadWorld) {}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				svc, f, w := unjoinedWorld(t, tc.edit)
+				if tc.later {
+					svc.Now = func() time.Time { return time.Now().Add(32 * time.Minute) }
+				}
 				u := watch(t, svc, f, w)
 
 				plan, err := rollingUpdate(svc, app.RollOptions{})
