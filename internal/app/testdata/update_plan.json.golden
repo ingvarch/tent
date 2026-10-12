@@ -85,6 +85,49 @@
       "name": "prod-workers-3",
       "id": "instance-8",
       "reason": "surplus"
+    },
+    {
+      "action": "delete",
+      "name": "prod-all-2",
+      "id": "instance-3",
+      "reason": "surplus",
+      "drain": "1h0m0s",
+      "server": true
+    },
+    {
+      "action": "delete",
+      "name": "prod-servers-4",
+      "id": "instance-11",
+      "reason": "surplus",
+      "server": true
+    },
+    {
+      "action": "delete",
+      "name": "prod-old-1",
+      "id": "instance-10",
+      "reason": "not in the spec",
+      "drain": "1h0m0s"
+    },
+    {
+      "action": "delete",
+      "name": "prod-workers-1",
+      "id": "instance-9",
+      "reason": "surplus",
+      "drain": "30m0s"
+    }
+  ],
+  "purges": [
+    {
+      "name": "prod-old-2",
+      "address": "10.64.0.7",
+      "id": "node-8",
+      "group": "old"
+    },
+    {
+      "name": "prod-workers-5",
+      "address": "10.64.0.9",
+      "id": "node-5",
+      "group": "workers"
     }
   ],
   "outdated": [

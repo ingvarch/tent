@@ -9,9 +9,16 @@
 - node prod-old-0 (ID instance-7, not in the spec)
 - node prod-workers-0 (ID instance-5, duplicate)
 - node prod-workers-3 (ID instance-8, surplus)
+- node prod-all-2 (ID instance-3, surplus, after a drain within 1h0m0s and after its server leaves the cluster)
+- node prod-servers-4 (ID instance-11, surplus, after its server leaves the cluster)
+- node prod-old-1 (ID instance-10, not in the spec, after a drain within 1h0m0s)
+- node prod-workers-1 (ID instance-9, surplus, after a drain within 30m0s)
+- Nomad node prod-old-2 (10.64.0.7, down, no machine)
+- Nomad node prod-workers-5 (10.64.0.9, down, no machine)
 
 Plan: 2 to create, 1 to update, 0 to replace, 1 to delete.
-Nodes: 2 to create, 1 to wait for, 3 to delete.
+Nodes: 2 to create, 1 to wait for, 7 to delete.
+Nomad nodes: 2 to purge.
 Nomad: bootstrap the ACL system and wait for 3 healthy servers.
 State: pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token, cluster.completed.yaml and nomad/bootstrapped will be written.
 Outdated: prod-servers-0 and prod-workers-2; tent rolling-update cluster replaces them.

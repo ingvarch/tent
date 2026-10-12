@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/cloud"
@@ -51,7 +52,7 @@ func (a NodeAction) MarshalText() ([]byte, error) { return []byte(a.String()), n
 // NodeChange is one change to the nodes of a cluster. A create and a wait hold what a create request needs, with the
 // hash of the group's node configuration, except a wait without an operation id, which calls no cloud and holds no
 // hash; a wait, a delete and a stop hold the ID of the machine, a wait its operation id, when it repeats a create, and
-// a delete the reason.
+// a delete the reason, and Drain and Server when its node joined.
 type NodeChange struct {
 	Action      NodeAction    `json:"action"`
 	Name        string        `json:"name"`
@@ -64,6 +65,12 @@ type NodeChange struct {
 	ID          string        `json:"id,omitempty"`
 	Op          string        `json:"op,omitempty"`
 	Reason      string        `json:"reason,omitempty"`
+	// Drain is the deadline of the drain that comes before the delete of a node that joined and runs a client, as Go
+	// writes a duration, such as 1h0m0s; it is empty for every other change.
+	Drain string `json:"drain,omitempty"`
+	// Server reports that the delete removes a node that joined and runs a server: the server leaves the Raft
+	// configuration and the gossip pool before its machine is deleted.
+	Server bool `json:"server,omitempty"`
 }
 
 // Reasons of node deletes.
@@ -74,18 +81,32 @@ const (
 	reasonNotRegistered = "not registered"
 )
 
+// defaultDrain is how long the drain of a node lasts when no spec says: the API's default drain timeout.
+const defaultDrain = time.Hour
+
 // shrinkView is what the node planner knows when it chooses the machines that a group loses: a reading of Nomad, if
-// read is set, the spec hash of each node group and the IDs of the machines to replace whatever their hash. The zero
-// view has none of them: the planner then takes the joined label at its word, and no machine is outdated.
+// read is set, the spec hash of each node group, the IDs of the machines to replace whatever their hash, and the drain
+// timeout of each node group. The zero view has none of them: the planner then takes the joined label at its word, no
+// machine is outdated, and a drain lasts defaultDrain.
 type shrinkView struct {
 	read   bool
 	nomad  rollout.Nomad
 	hash   func(group string) string
 	forced map[string]bool
+	drain  func(group string) time.Duration
 }
 
-// surplus returns the IDs of the machines that group g loses, as rollout.Surplus chooses them.
-func (v shrinkView) surplus(cluster string, g model.NodeGroup, members []cloud.Instance) map[string]bool {
+// drainOf returns how long the drain of a node of the group lasts.
+func (v shrinkView) drainOf(group string) time.Duration {
+	if v.drain == nil {
+		return defaultDrain
+	}
+	return v.drain(group)
+}
+
+// surplus returns the machines that group g loses, as rollout.Surplus chooses them: the IDs, each with its place in the
+// order in which the group loses them, counted from 0.
+func (v shrinkView) surplus(cluster string, g model.NodeGroup, members []cloud.Instance) map[string]int {
 	machines := rolloutMachines(members)
 	group := rollout.Group{Name: g.Name, Role: g.Role, Size: g.Size}
 	if v.hash != nil {
@@ -100,11 +121,11 @@ func (v shrinkView) surplus(cluster string, g model.NodeGroup, members []cloud.I
 		s.Nomad = nomadAsLabelled(machines)
 	}
 	lost := rollout.Surplus(s, group)
-	ids := make(map[string]bool, len(lost))
-	for _, m := range lost {
-		ids[m.ID] = true
+	order := make(map[string]int, len(lost))
+	for i, m := range lost {
+		order[m.ID] = i
 	}
-	return ids
+	return order
 }
 
 // raftPort is the port of a server's Raft address.
@@ -156,6 +177,12 @@ func nomadAsLabelled(machines []rollout.Machine) rollout.Nomad {
 //     that made it, with its id; otherwise the wait has no operation id and calls no cloud. A machine that joined is
 //     never waited for.
 //
+// A delete of a machine that joined, which the node planner knows by the joined label, comes with what the update does
+// before it: Drain for a node that runs a client, within the drain timeout of its group, or defaultDrain when m lacks
+// the group, and Server for a node that runs a server. It is a delete of a surplus machine of a group of m, or of a
+// joined client of a group that m lacks when no other machine of its name joined and its group label is set. Every
+// other delete of a machine that joined has neither; the guard refuses it.
+//
 // The unregistered machines are those that the caller says never registered, by ID. Only one that would stay under
 // its name is deleted with the reason not registered; it does not count toward its group and does not hold its name,
 // so that a create takes the name again. A machine of the set that would not stay is deleted as not in the spec or as
@@ -165,7 +192,9 @@ func nomadAsLabelled(machines []rollout.Machine) rollout.Nomad {
 // index. A server's seed holds the private addresses of the servers that exist, and a server that is not ready has
 // none until its wait returns, so the waits run before the creates. The waits of client nodes follow in the same
 // order, then the deletes of the unregistered machines by name, then ID, then the creates of client nodes in the same
-// order as before; the other deletes come last, by name, then ID.
+// order as before; the deletes of machines without Drain and Server come next, by name, then ID. The removals of
+// machines that joined come last: those of the server and combined groups by group, in the order in which each
+// group loses its machines, then those of the client groups by group, then name.
 //
 // It also returns the machines of the server and combined groups that stay, by name: the servers the cluster has.
 func planNodes(m *model.Cluster, instances []cloud.Instance, unregistered map[string]bool, next map[string]int,
@@ -182,16 +211,29 @@ func planNodes(m *model.Cluster, instances []cloud.Instance, unregistered map[st
 	}
 	members := make(map[string][]cloud.Instance, len(m.Groups))
 	var creates, waits, deletes, unregisteredDeletes []NodeChange
+	var removals []removal
+	var outside []cloud.Instance
 	for _, in := range owned {
 		switch {
 		case unregistered[in.ID] && stays[in.Name].ID == in.ID:
 			unregisteredDeletes = append(unregisteredDeletes, deleteNode(in, reasonNotRegistered))
 		case !inSpec(m, in):
-			deletes = append(deletes, deleteNode(in, reasonNotInSpec))
+			outside = append(outside, in)
 		case stays[in.Name].ID != in.ID:
 			deletes = append(deletes, deleteNode(in, reasonDuplicate))
 		default:
 			members[in.Group] = append(members[in.Group], in)
+		}
+	}
+	removedClients := removedClientNodes(outside)
+	for _, in := range outside {
+		if removedClients[in.ID] {
+			removals = append(removals, removal{
+				group: in.Group, role: v1alpha1.RoleClient,
+				change: removeNode(in, reasonNotInSpec, v1alpha1.RoleClient, defaultDrain),
+			})
+		} else {
+			deletes = append(deletes, deleteNode(in, reasonNotInSpec))
 		}
 	}
 	for _, g := range m.Groups {
@@ -199,10 +241,18 @@ func planNodes(m *model.Cluster, instances []cloud.Instance, unregistered map[st
 		if lost := view.surplus(m.Name, g, nodes); len(lost) > 0 {
 			var stay []cloud.Instance
 			for _, in := range nodes {
-				if lost[in.ID] {
-					deletes = append(deletes, deleteNode(in, reasonSurplus))
-				} else {
+				place, isLost := lost[in.ID]
+				switch {
+				case !isLost:
 					stay = append(stay, in)
+				case in.Joined:
+					r := removal{group: g.Name, role: g.Role, change: removeNode(in, reasonSurplus, g.Role, view.drainOf(g.Name))}
+					if g.Role.RunsServer() {
+						r.place = place
+					}
+					removals = append(removals, r)
+				default:
+					deletes = append(deletes, deleteNode(in, reasonSurplus))
 				}
 			}
 			nodes = stay
@@ -225,13 +275,82 @@ func planNodes(m *model.Cluster, instances []cloud.Instance, unregistered map[st
 	})
 	slices.SortFunc(unregisteredDeletes, compareNameID)
 	slices.SortFunc(deletes, compareNameID)
+	slices.SortFunc(removals, compareRemovals)
 	slices.SortFunc(servers, compareName)
 	// Both are sorted by rank, so the server and combined changes are a prefix of each.
 	waitsOfServers, createsOfServers := serverCount(waits), serverCount(creates)
 	return slices.Concat(
 		waits[:waitsOfServers], creates[:createsOfServers], waits[waitsOfServers:], unregisteredDeletes,
-		creates[createsOfServers:], deletes,
+		creates[createsOfServers:], deletes, removalChanges(removals),
 	), servers
+}
+
+// removal is the delete of a machine that joined, with the group and the role that decide its place in a plan. A
+// server or combined group also gives the place in which it loses the machine, counted from 0.
+type removal struct {
+	change NodeChange
+	group  string
+	role   v1alpha1.Role
+	place  int
+}
+
+// removedClientNodes returns the IDs of the machines among outside, which are those of the groups that the specs lack,
+// that a plan removes with a drain: a client that joined, with a group label, and that no other machine of its name
+// joined.
+func removedClientNodes(outside []cloud.Instance) map[string]bool {
+	joinedOf := make(map[string]int, len(outside))
+	for _, in := range outside {
+		if in.Joined {
+			joinedOf[in.Name]++
+		}
+	}
+	ids := make(map[string]bool, len(outside))
+	for _, in := range outside {
+		if in.Joined && in.Role == v1alpha1.RoleClient && in.Group != "" && joinedOf[in.Name] == 1 {
+			ids[in.ID] = true
+		}
+	}
+	return ids
+}
+
+// removeNode returns the delete of the machine in, which joined, for reason: with a drain of the given length when the
+// role runs a client, and with the leaving of the server when it runs a server.
+func removeNode(in cloud.Instance, reason string, role v1alpha1.Role, drain time.Duration) NodeChange {
+	c := deleteNode(in, reason)
+	if role.RunsClient() {
+		c.Drain = drain.String()
+	}
+	c.Server = role.RunsServer()
+	return c
+}
+
+// compareRemovals orders removals as a run carries them out: the server and combined groups before the client groups,
+// each by group name; the machines of a server or combined group in the order in which it loses them, those of a
+// client group by name. The names of the removals differ.
+func compareRemovals(a, b removal) int {
+	return cmp.Or(
+		cmp.Compare(removalRank(a.role), removalRank(b.role)),
+		strings.Compare(a.group, b.group),
+		cmp.Compare(a.place, b.place),
+		strings.Compare(a.change.Name, b.change.Name),
+	)
+}
+
+// removalRank is 0 for a role that runs a server and 1 for the other.
+func removalRank(role v1alpha1.Role) int {
+	if role.RunsServer() {
+		return 0
+	}
+	return 1
+}
+
+// removalChanges returns the changes of the removals.
+func removalChanges(removals []removal) []NodeChange {
+	changes := make([]NodeChange, len(removals))
+	for i, r := range removals {
+		changes[i] = r.change
+	}
+	return changes
 }
 
 // inSpec reports whether the group of the machine in is one of m's.
