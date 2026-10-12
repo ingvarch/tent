@@ -43,12 +43,12 @@ type serverView struct {
 	leaderRuns bool   // the leader's machine is listed and not halted
 }
 
-// broken returns what the view breaks of the invariants of a group of the given size: the group has at most one
-// machine beyond its size, the cluster has a leader whose machine runs, and the voters that run are a quorum.
-func (v serverView) broken(size int) []string {
+// broken returns what the view breaks of the invariants of a group that may have the given most machines: the group
+// has at most that many, the cluster has a leader whose machine runs, and the voters that run are a quorum.
+func (v serverView) broken(most int) []string {
 	var out []string
-	if v.machines > size+1 {
-		out = append(out, fmt.Sprintf("the server group has %d machines, want at most %d", v.machines, size+1))
+	if v.machines > most {
+		out = append(out, fmt.Sprintf("the server group has %d machines, want at most %d", v.machines, most))
 	}
 	if !v.leaderRuns {
 		out = append(out, fmt.Sprintf("the cluster has the leader %q, want one whose machine runs", v.leader))
@@ -108,6 +108,7 @@ type serverInvariants struct {
 	w     *nomadWorld
 	group string // the name of the node group
 	size  int    // the size of the group
+	most  int    // the most machines the group may have; zero stands for the size and one more
 	// combined makes the invariants hold what a roll keeps of the nodes of a combined group too: it halts a machine
 	// only once its node is ineligible and drained for it, or down; it marks or drains a node only while the other
 	// nodes of the group are ready, eligible and not draining; it purges a node only once the node is down and no
@@ -217,6 +218,14 @@ func (inv *serverInvariants) view() serverView {
 // runs reports whether the cloud has the machine id and it is not halted.
 func (inv *serverInvariants) runs(id string) bool { return hasInstance(inv.f, id) && !inv.f.Halted(id) }
 
+// limit returns the most machines that the group may have.
+func (inv *serverInvariants) limit() int {
+	if inv.most > 0 {
+		return inv.most
+	}
+	return inv.size + 1
+}
+
 // check fails the test for each invariant that the cluster breaks before the call. A call whose context has ended is
 // checked and not counted, since the fakes log no such call.
 func (inv *serverInvariants) check(ctx context.Context, call string) {
@@ -226,7 +235,7 @@ func (inv *serverInvariants) check(ctx context.Context, call string) {
 		inv.checked++
 		inv.mu.Unlock()
 	}
-	for _, msg := range inv.view().broken(inv.size) {
+	for _, msg := range inv.view().broken(inv.limit()) {
 		inv.tb.Errorf("before %s: %s", strings.TrimSpace(call), msg)
 	}
 }
@@ -293,10 +302,8 @@ func (inv *serverInvariants) checkHaltedNode(id string) {
 	if outside || !listed || n.Status == "down" {
 		return
 	}
-	if n.Eligible || n.Draining || n.LastDrain.Status != "complete" || n.LastDrain.Meta["tent_machine"] != id {
-		inv.tb.Errorf("halt of %s: its node reads %s, eligible %v, draining %v, last drain %q for %q; "+
-			"want a node that is down, or ineligible with a drain that is complete for the machine",
-			id, n.Status, n.Eligible, n.Draining, n.LastDrain.Status, n.LastDrain.Meta["tent_machine"])
+	if msg := undrained("halt", id, n); msg != "" {
+		inv.tb.Errorf("%s", msg)
 	}
 }
 
@@ -1126,7 +1133,7 @@ func TestServerViewBreaksTheInvariants(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if diff := cmp.Diff(tc.want, tc.view.broken(serverGroupSize)); diff != "" {
+			if diff := cmp.Diff(tc.want, tc.view.broken(serverGroupSize+1)); diff != "" {
 				t.Errorf("broken (-want +got):\n%s", diff)
 			}
 		})
@@ -1243,22 +1250,6 @@ func TestServerInvariantsTakeTheSizeOfTheGroup(t *testing.T) {
 				}
 			})
 		})
-	}
-}
-
-// TestServerViewCountsTheMachinesOfAGroupBySize shows that a group of one has two machines at most.
-func TestServerViewCountsTheMachinesOfAGroupBySize(t *testing.T) {
-	t.Parallel()
-	one := func(machines int) serverView {
-		return serverView{machines: machines, voters: []bool{true}, leader: "i-1", leaderRuns: true}
-	}
-
-	if got := one(2).broken(1); len(got) > 0 {
-		t.Errorf("two machines of a group of one break %q, want nothing", got)
-	}
-	got := one(3).broken(1)
-	if want := []string{"the server group has 3 machines, want at most 2"}; !slices.Equal(got, want) {
-		t.Errorf("three machines of a group of one break %q, want %q", got, want)
 	}
 }
 

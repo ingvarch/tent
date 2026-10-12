@@ -997,3 +997,170 @@ func TestInstancesConcurrentUse(t *testing.T) {
 		t.Errorf("%d distinct ids, %d addresses and %d MACs; want %d of each", len(ids), len(ips), len(macs), n)
 	}
 }
+
+// bootedInstances creates a booted instance of the cluster for each label and returns their IDs.
+func bootedInstances(t *testing.T, f *vultrfake.Fake, labels ...string) []string {
+	t.Helper()
+	ids := make([]string, len(labels))
+	for i, label := range labels {
+		ids[i] = bootedInstance(t, f, label)
+	}
+	return ids
+}
+
+// deleteInstance deletes the instance and fails the test on an error.
+func deleteInstance(t *testing.T, f *vultrfake.Fake, id string) {
+	t.Helper()
+	if err := f.DeleteInstance(t.Context(), id); err != nil {
+		t.Fatalf("DeleteInstance %s: %v", id, err)
+	}
+}
+
+// instancesNow returns the IDs that Instances shows, in order.
+func instancesNow(f *vultrfake.Fake) []string {
+	ids := []string{}
+	for _, in := range f.Instances() {
+		ids = append(ids, in.ID)
+	}
+	return ids
+}
+
+// listedIDs returns the IDs that ListInstances shows, in order.
+func listedIDs(t *testing.T, f *vultrfake.Fake) []string {
+	t.Helper()
+	list, err := f.ListInstances(t.Context(), "tent/cluster=prod")
+	if err != nil {
+		t.Fatalf("ListInstances: %v", err)
+	}
+	ids := []string{}
+	for _, in := range list {
+		ids = append(ids, in.ID)
+	}
+	return ids
+}
+
+func TestSetDeleteReadsKeepsADeletedInstanceListedForNReads(t *testing.T) {
+	f := newInfra(t)
+	ids := bootedInstances(t, f, "a", "b", "c")
+	f.SetDeleteReads(t, 2)
+	deleteInstance(t, f, ids[1])
+	if diff := cmp.Diff([]string{ids[0], ids[2]}, instancesNow(f)); diff != "" {
+		t.Errorf("Instances after the delete (-want +got):\n%s", diff)
+	}
+	// ListInstances and GetInstance both count; each shows the instance twice in all, in creation order.
+	if diff := cmp.Diff(ids, listedIDs(t, f)); diff != "" {
+		t.Errorf("first list (-want +got):\n%s", diff)
+	}
+	if got := stateOf(mustGetInstance(t, f, ids[1])); got != ready {
+		t.Errorf("GetInstance after the delete = %+v, want %+v", got, ready)
+	}
+	if diff := cmp.Diff([]string{ids[0], ids[2]}, listedIDs(t, f)); diff != "" {
+		t.Errorf("list after two reads (-want +got):\n%s", diff)
+	}
+	_, err := f.GetInstance(t.Context(), ids[1])
+	wantAPIError(t, err, vultr.ErrNotFound, "vultr: GET /v2/instances/"+ids[1]+": 404 Not Found: Invalid instance ID.")
+}
+
+func TestSetDeleteReadsCountsOnlyReadsThatShowTheInstance(t *testing.T) {
+	f := newInfra(t)
+	id := bootedInstance(t, f, "a")
+	other, err := f.CreateInstance(t.Context(), &govultr.InstanceCreateReq{
+		Region: "ams", Plan: "vc2-1c-1gb", OsID: 2284, Label: "x", Tags: []string{"tent/cluster=other"},
+	})
+	if err != nil {
+		t.Fatalf("CreateInstance: %v", err)
+	}
+	f.SetDeleteReads(t, 1)
+	deleteInstance(t, f, id)
+	if _, err := f.ListInstances(t.Context(), "tent/cluster=other"); err != nil {
+		t.Fatalf("ListInstances: %v", err)
+	}
+	mustGetInstance(t, f, other.ID)
+	if diff := cmp.Diff([]string{id}, listedIDs(t, f)); diff != "" {
+		t.Errorf("the one read that shows it (-want +got):\n%s", diff)
+	}
+	if got := listedIDs(t, f); len(got) != 0 {
+		t.Errorf("the list after the read = %v, want none", got)
+	}
+}
+
+func TestSetDeleteReadsLeavesTheOtherCallsOfADeletedInstanceGone(t *testing.T) {
+	f := newInfra(t)
+	id := bootedInstance(t, f, "a")
+	f.SetDeleteReads(t, 3)
+	deleteInstance(t, f, id)
+	ctx := t.Context()
+	const gone = "404 Not Found: Invalid instance ID."
+	wantAPIError(t, f.DeleteInstance(ctx, id), vultr.ErrNotFound, "vultr: DELETE /v2/instances/"+id+": "+gone)
+	wantAPIError(t, f.HaltInstance(ctx, id), vultr.ErrNotFound, "vultr: POST /v2/instances/"+id+"/halt: "+gone)
+	err := f.UpdateInstance(ctx, id, &govultr.InstanceUpdateReq{Label: "b"})
+	wantAPIError(t, err, vultr.ErrNotFound, "vultr: PATCH /v2/instances/"+id+": "+gone)
+	_, err = f.ListInstanceVPCs(ctx, id)
+	wantAPIError(t, err, vultr.ErrNotFound, "vultr: GET /v2/instances/"+id+"/vpcs: "+gone)
+	if f.Halted(id) {
+		t.Error("Halted of a deleted instance is true")
+	}
+	if got := len(listedIDs(t, f)); got != 1 {
+		t.Errorf("those calls used up the reads: the list has %d instances, want 1", got)
+	}
+}
+
+func TestSetDeleteReadsApplyToLaterDeletesOnly(t *testing.T) {
+	f := newInfra(t)
+	ids := bootedInstances(t, f, "early", "late")
+	deleteInstance(t, f, ids[0])
+	f.SetDeleteReads(t, 1)
+	deleteInstance(t, f, ids[1])
+	if diff := cmp.Diff([]string{ids[1]}, listedIDs(t, f)); diff != "" {
+		t.Errorf("list (-want +got):\n%s", diff)
+	}
+}
+
+func TestSetDeleteReadsFreesTheVPCAddressAtOnce(t *testing.T) {
+	f := newInfra(t)
+	id := bootedInstance(t, f, "a")
+	old := f.InstanceVPCs(id)
+	f.SetDeleteReads(t, 2)
+	deleteInstance(t, f, id)
+	if got := f.InstanceVPCs(id); got != nil {
+		t.Errorf("InstanceVPCs of the deleted instance = %v, want none", got)
+	}
+	next := f.InstanceVPCs(bootedInstance(t, f, "b"))
+	if len(old) != 1 || len(next) != 1 || old[0].IPAddress != next[0].IPAddress {
+		t.Errorf("the new instance has %v, want the address %v of the deleted one", next, old)
+	}
+}
+
+func TestSetDeleteReadsZeroKeepsTheDefault(t *testing.T) {
+	f := newInfra(t)
+	ids := bootedInstances(t, f, "a")
+	f.SetDeleteReads(t, 2)
+	f.SetDeleteReads(t, 0)
+	deleteInstance(t, f, ids[0])
+	if got := listedIDs(t, f); len(got) != 0 {
+		t.Errorf("list = %v, want none at once", got)
+	}
+}
+
+func TestSetDeleteReadsMisuse(t *testing.T) {
+	f := newInfra(t)
+	tb := &fatalTB{TB: t}
+	f.SetDeleteReads(tb, -1)
+	wantFatal(t, tb, "vultrfake: SetDeleteReads: n is -1, want 0 or more")
+	id := bootedInstance(t, f, "a")
+	deleteInstance(t, f, id)
+	if got := listedIDs(t, f); len(got) != 0 {
+		t.Errorf("list = %v, want none: the default stands", got)
+	}
+}
+
+func TestSetDeleteReadsKeepsASeededInstanceInItsPlace(t *testing.T) {
+	f := newInfra(t)
+	created := bootedInstance(t, f, "b")
+	seeded := f.AddInstance(t, govultr.Instance{Tags: []string{"tent/cluster=prod"}}).ID
+	f.SetDeleteReads(t, 1)
+	deleteInstance(t, f, seeded)
+	if diff := cmp.Diff([]string{created, seeded}, listedIDs(t, f)); diff != "" {
+		t.Errorf("list (-want +got):\n%s", diff)
+	}
+}

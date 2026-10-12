@@ -30,7 +30,7 @@ import (
 // The fake is simpler than Vultr in these ways:
 //   - ListInstanceVPCs lists nothing until the instance shows as active. Vultr listed the address 6–7 s after the
 //     create, long before the instance was active.
-//   - A deleted instance is gone from every call at once.
+//   - A deleted instance is gone from every call at once, unless SetDeleteReads says otherwise.
 //   - DeleteVPC deletes a VPC as soon as no instance is attached to it. Vultr refuses for 14–20 s more.
 //   - CreateVPC assigns no subnet when the request has none.
 //
@@ -66,10 +66,13 @@ type Fake struct {
 	calls     []Call
 	hook      Hook // wraps every call when set
 
-	activeAfter, okAfter int // the boot reads of new instances
-	haltReads            int // the reads that show an instance as running after its next halt
-	macs                 int // how many MACs were given out
-	mainIPs              int // how many main IPs were given out
+	activeAfter, okAfter int         // the boot reads of new instances
+	haltReads            int         // the reads that show an instance as running after its next halt
+	deleteReads          int         // the reads that show an instance after its next delete
+	deleted              []*instance // the deleted instances that reads still show, in the order of their deletes
+	created              int         // how many instances were created or seeded
+	macs                 int         // how many MACs were given out
+	mainIPs              int         // how many main IPs were given out
 }
 
 var _ vultr.API = (*Fake)(nil)
