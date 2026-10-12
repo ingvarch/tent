@@ -740,25 +740,39 @@ func TestUpdateClusterPrintsThePlanItApplies(t *testing.T) {
 	})
 }
 
-// TestUpdateClusterRefusesToDeleteAJoinedNode fails a scale down of workers that joined, with and without --yes and
-// with --exit-code, as an error with exit code 1, and changes nothing.
-func TestUpdateClusterRefusesToDeleteAJoinedNode(t *testing.T) {
+// TestUpdateClusterScalesDown prints the plan of a scale-down of workers that joined with the drain before the delete,
+// exits with 2 under --exit-code and changes nothing; with --yes it prints each step of the removal on stderr and the
+// summary on stdout, and leaves the node group at its size.
+func TestUpdateClusterScalesDown(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
+		_, nomad := followedNomad(f)
 		s.put(t, workersPath, strings.Replace(workersYAML, "size: 3", "size: 2", 1))
-		before := s.objects(t)
+		run := func(more ...string) result { return runWithNomad(t, onVultr(f), nomad, update(s, more...)...) }
 		calls := len(f.Calls())
-		const want = "Error: update would delete a node that joined Nomad: prod-workers-2 (ID instance-6, surplus); " +
-			"update deletes only nodes that never joined: run tent rolling-update cluster to finish a rolling update " +
-			"that stopped, keep this node in the specs, or delete the whole cluster with tent delete cluster\n"
+		const plan = "- node prod-workers-2 (ID instance-6, surplus, after a drain within 1h0m0s)\n" +
+			"\n" +
+			"Nodes: 0 to create, 0 to wait for, 1 to delete.\n" +
+			"State: cluster.completed.yaml will be written.\n"
 
-		for _, more := range [][]string{nil, {"--yes"}, {"--exit-code"}} {
-			wantError(t, runOn(t, f, update(s, more...)...), want)
-		}
-
+		wantResult(t, run(), 0, plan, applyHint)
+		wantResult(t, run("--exit-code"), 2, plan, applyHint)
 		wantNoWritesIn(t, f.Calls()[calls:])
 		wantInstances(t, f, nodeNames...)
-		s.want(t, before)
+
+		const steps = "marking node prod-workers-2 ineligible\n" +
+			"node prod-workers-2 is ineligible\n" +
+			"draining node prod-workers-2 within 1h0m0s\n" +
+			"node prod-workers-2 is draining\n" +
+			"deleting node prod-workers-2 (ID instance-6)\n" +
+			"deleted node prod-workers-2 (ID instance-6)\n" +
+			"purging node prod-workers-2 (10.64.0.8) from Nomad\n" +
+			"purged node prod-workers-2 (10.64.0.8) from Nomad\n"
+		const summary = "Nodes: 0 created, 0 waited for, 1 deleted. Removed: 1 drained, 0 stopped, 1 purged. " +
+			"Wrote cluster.completed.yaml.\n"
+
+		wantResult(t, run("--yes"), 0, plan+"\n"+summary, openAPIWarning+steps)
+		wantInstances(t, f, nodeNames[:5]...)
 	})
 }
 
@@ -1007,7 +1021,15 @@ func TestUpdateClusterHelp(t *testing.T) {
 		"TENT_NODE_URL and TENT_NODE_SHA256",
 		"Once a node has joined its cluster, tent replaces its user data with a stub.",
 		"A client that did not register within 31 minutes of its creation is deleted and created again.",
-		"An update that would delete a node that joined fails.",
+		"A node group with more nodes than its size loses nodes: tent marks a node that joined ineligible, drains it " +
+			"within the group's drainTimeout, deletes its machine and purges its node from Nomad once Nomad lists it " +
+			"down; Nomad stops the allocations that find no other node at the drain's deadline.",
+		"A server leaves one at a time: tent moves the leadership away when it leads, stops the machine, removes it " +
+			"from the Raft configuration and the gossip pool, and waits until the servers that stay are healthy; going " +
+			"to one server takes about a minute more and needs --allow-single-server.",
+		"The client nodes of a node group that the specs no longer have are drained and removed the same way; a " +
+			"server group that the specs no longer have fails the update.",
+		"A node that Nomad lists as down and that no machine has is purged. The names of new servers only grow.",
 		"It lists the nodes that tent rolling-update cluster replaces, which are no change of the update.",
 	} {
 		if got.code != 0 || !strings.Contains(got.out, want) {

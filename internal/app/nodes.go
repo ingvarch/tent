@@ -29,8 +29,8 @@ const (
 	NodeDelete
 	// NodeScrub replaces the user data of a node that has joined its cluster and labels its machine.
 	NodeScrub
-	// NodeStop powers off the machine of a server that a rolling update replaces. The server's peer leaves the Raft
-	// configuration after the stop, except when the server has no peer there.
+	// NodeStop powers off the machine of a server that a rolling update replaces or a scale-down removes. The server's
+	// peer leaves the Raft configuration after the stop, except when the server has no peer there.
 	NodeStop
 )
 

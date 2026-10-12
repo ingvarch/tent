@@ -21,6 +21,30 @@ import (
 // nodeDown is the status of a node that Nomad lists as down.
 const nodeDown = "down"
 
+// updateCommand is the command of an update, as an error tells the operator to run it again.
+const updateCommand = "tent update cluster"
+
+// planInput is what the plan of the node changes needs besides the cluster's model and its listed machines.
+type planInput struct {
+	access  nomadAccess
+	next    map[string]int                 // the lowest index of a new machine of each server and combined group
+	marked  bool                           // the store holds the mark of the ACL bootstrap
+	specs   map[string]*v1alpha1.NodeGroup // the specs of the node groups, by name
+	version string                         // the pinned Nomad version
+	builder func() (*nodeBuilder, error)   // makes the builder of the nodes' NodeConfig once
+}
+
+// nodePlan is the plan of the node changes of an update: the changes in the order they run, the server and combined
+// machines that stay, the nodes without a machine that it purges, what the apply carries out through the rollout
+// decisions, and the warning about a read of Nomad that failed, or "".
+type nodePlan struct {
+	changes []NodeChange
+	servers []cloud.Instance
+	purges  []NodePurge
+	removal removalPlan
+	warning string
+}
+
 // removalPlan is the part of an update's plan that the rollout decisions carry out.
 type removalPlan struct {
 	model *model.Cluster
@@ -260,4 +284,137 @@ func (in removalInput) stateOf(groups []rollout.Group, reading nomadReading) rol
 		Cluster: in.m.Name, Groups: groups, Machines: rolloutMachines(kept), Nomad: reading.state(),
 		Version: in.version, Forced: forcedMachines(in.listed, groups, false), Refresh: joinRefresh, Now: in.now,
 	}
+}
+
+// planNodeChanges plans the node changes of the cluster m for the machines listed, and reads Nomad as far as the plan
+// needs (see readForPlan). The nodes tell which stale clients never registered, and which nodes no machine has: the
+// plan purges those that read down. A plan that may remove a node that joined also asks the rollout decisions about
+// the removals, and fails when they refuse.
+func (s *Service) planNodeChanges(ctx context.Context, m *model.Cluster, listed []cloud.Instance, in planInput,
+) (nodePlan, error) {
+	changes, servers := planNodes(m, listed, nil, in.next, shrinkView{})
+	stale := staleClients(m.Name, listed, s.now())
+	seen, err := s.readForPlan(ctx, m, listed, changes, servers, stale, in)
+	if err != nil {
+		return nodePlan{}, err
+	}
+	var groups []rollout.Group
+	var view shrinkView
+	if seen.read {
+		if groups, view, err = planningView(m, listed, seen, in); err != nil {
+			return nodePlan{}, err
+		}
+	}
+	if gone := notRegistered(seen.nodes, stale, servers); len(gone) > 0 || seen.full {
+		changes, servers = planNodes(m, listed, gone, in.next, view)
+	}
+	plan := nodePlan{changes: changes, servers: servers, warning: seen.warning}
+	if groups == nil {
+		return plan, nil
+	}
+	input := removalInput{m: m, groups: groups, listed: listed, changes: changes, version: in.version, now: s.now()}
+	plan.removal, plan.purges, err = input.decide(seen.nomadReading)
+	return plan, err
+}
+
+// planReading is what a plan read of Nomad. When read is false it holds nothing. The nodes alone are read unless full
+// is set, which says the plan read what a roll observes.
+type planReading struct {
+	nomadReading
+	read, full bool
+	warning    string // why the plan lacks the nodes that a failed read would have given, or ""
+}
+
+// readForPlan reads Nomad for a plan whose node changes without any reading are changes. A plan that may remove a node
+// that joined (removesJoined) reads what a roll observes, and fails when it cannot; when no server runs to ask, it
+// goes on by the labels if no removal is among the changes. Any other plan reads the nodes alone, as readNodes says.
+func (s *Service) readForPlan(ctx context.Context, m *model.Cluster, listed []cloud.Instance, changes []NodeChange,
+	servers, stale []cloud.Instance, in planInput,
+) (planReading, error) {
+	if removesJoined(m, listed) {
+		reading, err := readForRemoval(ctx, m, listed, changes, func(servers []cloud.Instance) (nomadops.API, error) {
+			api, err := s.nomadOver(servers, in.access)
+			if err != nil { // not returned with api: a nil *Servers in an interface is not nil
+				return nil, err
+			}
+			return api, nil
+		})
+		switch {
+		case err == nil:
+			return planReading{nomadReading: reading, read: true, full: true}, nil
+		case !errors.Is(err, errNoServerToAsk) || slices.ContainsFunc(changes, isRemoval):
+			return planReading{}, err
+		}
+	}
+	nodes, read, warning, err := s.readNodes(ctx, m, in.access, listed, stale, servers, in.marked)
+	return planReading{nomadReading: nomadReading{nodes: nodes}, read: read, warning: warning}, err
+}
+
+// planningView returns the node groups of m as the decisions see them, and the view of the node planner that the
+// reading gives. The groups need the release files: when they cannot be read, a plan that reads what a roll observes
+// fails, and any other has no groups, so no purge. The view is the zero view unless the plan read what a roll
+// observes.
+func planningView(m *model.Cluster, listed []cloud.Instance, seen planReading, in planInput,
+) ([]rollout.Group, shrinkView, error) {
+	builder, err := in.builder()
+	switch {
+	case err != nil && seen.full:
+		return nil, shrinkView{}, err
+	case err != nil:
+		return nil, shrinkView{}, nil
+	}
+	groups, err := specGroups(m, in.specs, builder)
+	if err != nil || !seen.full {
+		return groups, shrinkView{}, err
+	}
+	return groups, shrinkView{
+		read: true, nomad: seen.state(), hash: builder.specHash, forced: forcedMachines(listed, groups, false),
+		drain: drainOf(groups),
+	}, nil
+}
+
+// specGroups returns the node groups of m as the decisions see them, with the settings of their specs and the spec
+// hashes of the builder b.
+func specGroups(m *model.Cluster, specs map[string]*v1alpha1.NodeGroup, b *nodeBuilder) ([]rollout.Group, error) {
+	names, err := selectGroups(m, nil)
+	if err != nil {
+		return nil, err
+	}
+	return rolloutGroups(m, specs, b, names)
+}
+
+// drainOf returns how long the drain of a node of a group of the specs lasts: the group's drain timeout. The planner
+// asks only for groups of the specs.
+func drainOf(groups []rollout.Group) func(group string) time.Duration {
+	timeouts := make(map[string]time.Duration, len(groups))
+	for _, g := range groups {
+		timeouts[g.Name] = g.DrainTimeout
+	}
+	return func(name string) time.Duration { return timeouts[name] }
+}
+
+// removals carries out the plan's removals of nodes that joined and its purges: the loop of a rolling update in the
+// mode Shrink, over a fresh list of the machines and the machines that the apply deleted before it. It does nothing
+// for a plan that removes and purges nothing, and returns what it did also when it fails.
+func (a *applier) removals(ctx context.Context) (RemovalCounts, error) {
+	plan := a.u.removal
+	if len(plan.groups) == 0 {
+		return RemovalCounts{}, nil
+	}
+	listed, err := a.u.nodes.List(ctx, a.u.cluster)
+	if err != nil {
+		return RemovalCounts{}, err
+	}
+	machines := apiMachines(plan.model, listed, nil, nil)
+	api, err := a.s.rollAPI(a.u.cluster, machines, a.u.nodeKit)
+	if err != nil {
+		return RemovalCounts{}, err
+	}
+	r := &rollRun{
+		s: a.s, kit: a.u.nodeKit, model: plan.model, groups: plan.groups, version: plan.version,
+		forced: forcedMachines(listed, plan.groups, false), listed: listed, api: api, apiAt: addressesOf(machines),
+		mode: rollout.Shrink, command: updateCommand, planned: plan.planned, gone: a.gone,
+	}
+	counts, err := r.run(ctx)
+	return RemovalCounts{Drained: counts.Drained, Stopped: counts.Stopped, Purged: counts.Purged}, err
 }

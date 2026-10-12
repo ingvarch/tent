@@ -1,0 +1,5 @@
+- node prod-workers-1 (ID instance-5, surplus, after a drain within 10m0s)
+- node prod-workers-2 (ID instance-6, surplus, after a drain within 10m0s)
+
+Nodes: 0 to create, 0 to wait for, 2 to delete.
+State: cluster.completed.yaml will be written.
