@@ -345,6 +345,34 @@ func TestRollLoopSendsNoStopOrTransferWhenAMachineWasHaltedDuringTheDrain(t *tes
 	}
 }
 
+// TestRollLoopFinishesWhenAnOldMachineIsHaltedWhileTheFirstVictimDrains halts an old machine from outside while the
+// first victim drains. The roll removes the halted machine, which brings the group back to its size with the victim's
+// node ineligible, and goes on: the roll drains and stops two old nodes, deletes three and ends with three new nodes,
+// and Nomad lists nothing of the old ones.
+func TestRollLoopFinishesWhenAnOldMachineIsHaltedWhileTheFirstVictimDrains(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, _, inv := combinedFlowWorld(t)
+		old := serverMachines(f, combinedGroup)
+		svc.OnProgress = func(p app.Progress) {
+			if progressLine(p) == "nomad started drained prod-all-1" {
+				inv.halt(instanceNamed(t, f, "prod-all-2"))
+			}
+		}
+
+		counts, err := roll(svc, app.RollOptions{})
+
+		wantRolled(t, counts, err, app.RollCounts{Created: 3, Drained: 2, Stopped: 2, Deleted: 3, Purged: 3})
+		inv.wantKept()
+		wantServersRolled(t, svc, f, combinedGroup, old, true)
+		wantRollEnded(t, svc, f, idsOf(old))
+		want := []string{"prod-all-3", "prod-all-4", "prod-all-5", "prod-workers-0", "prod-workers-1"}
+		if got := nodeNames(t, svc); !slices.Equal(got, want) {
+			t.Errorf("Nomad lists the nodes %v, want %v", got, want)
+		}
+	})
+}
+
 // TestRollLoopEndsAtOnceWhenAMachineWasHaltedBeforeTheRunResumedAtADrainedNode ends a run that resumes at a drained old
 // node, after a machine of the group was halted, with the refusal: nothing was written yet, so it does not wait.
 func TestRollLoopEndsAtOnceWhenAMachineWasHaltedBeforeTheRunResumedAtADrainedNode(t *testing.T) {

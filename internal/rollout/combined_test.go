@@ -579,3 +579,57 @@ func TestShrinkOfACombinedGroupGivesAnEligibleNodeWithItsDrainMetaANewDrain(t *t
 	checkServerStep(t, step, serverOutcome{Action: rollout.Drain, Machine: serverName(2), Node: nodeIDOf(2),
 		Deadline: time.Hour})
 }
+
+func TestCombinedRollCreatesWhileTheNodeOfAnOutdatedMachineLeaves(t *testing.T) {
+	// A group at its size with outdated node 2, in a roll; the others are up to date.
+	atSize := func(t *testing.T, build func(t *testing.T, s *rollout.State)) rollout.State {
+		s := combinedState(3)
+		s.Machines[2].SpecHash = oldHash
+		build(t, &s)
+		return s
+	}
+	create := outcome{Action: rollout.Create, Group: "servers", Machine: serverName(3), Zone: "ams"}
+	creates := []struct {
+		name  string
+		build func(t *testing.T, s *rollout.State)
+	}{
+		{"is ineligible with its drain complete", func(t *testing.T, s *rollout.State) { serverDrained(t, s, 2) }},
+		{"is ineligible with no drain", func(t *testing.T, s *rollout.State) {
+			nodeNamed(t, s, serverName(2)).Eligible = false
+		}},
+		{"is draining", func(t *testing.T, s *rollout.State) { nodeNamed(t, s, serverName(2)).Draining = true }},
+	}
+	for _, tt := range creates {
+		t.Run("the node of an outdated machine that "+tt.name+" does not hold back the create", func(t *testing.T) {
+			checkOutcome(t, nextRoll(t, atSize(t, tt.build)), create)
+		})
+	}
+	refusals := []struct {
+		name   string
+		build  func(t *testing.T, s *rollout.State)
+		want   string
+		target int
+	}{
+		{"an up to date node that is not eligible while node 2 leaves", func(t *testing.T, s *rollout.State) {
+			serverDrained(t, s, 2)
+			nodeNamed(t, s, serverName(1)).Eligible = false
+		}, "node group servers: node %s is not eligible" + restAdvice, 1},
+		{"an outdated machine that does not run", func(_ *testing.T, s *rollout.State) {
+			s.Machines[2].Ready = false
+		}, "node group servers: node %s is not running" + restAdvice, 2},
+		{"an outdated server that does not vote", func(t *testing.T, s *rollout.State) {
+			serverNode(t, s, 2).Voter = false
+		}, "node group servers: node %s is not a voting server" + restAdvice, 2},
+		{"an outdated node that is eligible and down", func(t *testing.T, s *rollout.State) {
+			nodeNamed(t, s, serverName(2)).Status = "down"
+		}, "node group servers: node %s is down in Nomad" + restAdvice, 2},
+		{"an outdated machine with no node", func(_ *testing.T, s *rollout.State) {
+			dropNode(s, serverName(2))
+		}, "node group servers: node %s has no node in Nomad" + restAdvice, 2},
+	}
+	for _, tt := range refusals {
+		t.Run("still refuses "+tt.name, func(t *testing.T) {
+			checkRefused(t, atSize(t, tt.build), fmt.Sprintf(tt.want, serverName(tt.target)))
+		})
+	}
+}

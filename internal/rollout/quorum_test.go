@@ -103,3 +103,36 @@ func TestACombinedRollRefusesWhenAVoterFailsDuringTheDrain(t *testing.T) {
 			failed)
 	}
 }
+
+func TestACombinedRollGoesOnWhenAnOldMachineFailsDuringTheDrainAndIsRemoved(t *testing.T) {
+	w := outdatedCombined(3)
+	w.downAfter = 1 // the halted machine's node reads down before the drain ends
+	failed := false
+	decide := func(s rollout.State, mode rollout.Mode) (rollout.Step, error) {
+		if !failed && slices.ContainsFunc(w.nodes, func(n simNode) bool { return n.Draining }) {
+			w.failServer("prod-control-1")
+			failed = true
+		}
+		return rollout.Next(s, mode)
+	}
+	res, err := w.run(rollout.Roll, decide, false)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	last := res.lines[len(res.lines)-1]
+	if !failed || res.refused || last != "done" {
+		t.Errorf("failed = %t, refused = %t, the run ended with %q, want a run that ends with done", failed,
+			res.refused, last)
+	}
+	if w.unplaced != 0 {
+		t.Errorf("%d allocations are unplaced, want 0", w.unplaced)
+	}
+	for _, m := range w.machines {
+		if m.SpecHash != newHash {
+			t.Errorf("machine %s is outdated at the end of the run", m.Name)
+		}
+	}
+	if len(w.machines) != 3 {
+		t.Errorf("the group has %d machines at the end of the run, want 3", len(w.machines))
+	}
+}

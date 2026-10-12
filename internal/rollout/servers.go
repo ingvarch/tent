@@ -75,7 +75,8 @@ func nextServer(s State, mode Mode, g Group) (Step, bool, error) {
 // started reports whether the removal of the machine has begun: it has joined, and it is stopped, or its server is
 // gone or no longer votes, or, in a combined group, its node is ineligible or draining. A running machine without a
 // private address counts as not started, so the checks at rest refuse it. So does a running server whose peer was
-// removed, once Nomad's leader has added it again and it votes: its removal starts again with the checks at rest.
+// removed, once Nomad's leader has added it again and it votes, unless its node is ineligible or draining: its removal
+// starts again with the checks at rest.
 func (sg *serverGroup) started(m Machine) bool {
 	if !m.Joined {
 		return false
@@ -118,7 +119,7 @@ func (sg *serverGroup) removeVictim() (Step, bool, error) {
 		return Step{}, false, nil
 	}
 	if !sg.started(v) {
-		if err := sg.checkAtRest(); err != nil {
+		if err := sg.checkAtRest(neverLeaving); err != nil {
 			return Step{}, false, err
 		}
 		if step, wait := sg.waitStable(v); wait {
@@ -267,13 +268,21 @@ func (sg *serverGroup) successor(v Machine) (Server, bool) {
 }
 
 // checkAtRest refuses unless autopilot reports every server healthy and every machine of the group runs and votes,
-// and, in a combined group, every node can take work.
-func (sg *serverGroup) checkAtRest() error {
+// and, in a combined group, every node can take work. The node of a machine for which leaving says true is not looked
+// at.
+func (sg *serverGroup) checkAtRest(leaving func(Machine) bool) error {
 	if err := sg.checkHealthy(); err != nil {
 		return err
 	}
-	return sg.checkMachines(sg.notAtRest)
+	return sg.checkMachines(func(m Machine) string { return sg.notAtRest(m, leaving(m)) })
 }
+
+// neverLeaving is the leaving argument of checkAtRest for a check that looks at every node.
+func neverLeaving(Machine) bool { return false }
+
+// leaving reports whether the machine is outdated and its removal has started, so its node may be draining or
+// ineligible without the group being unfit for a new node.
+func (sg *serverGroup) leaving(m Machine) bool { return outdated(sg.s, sg.g, m) && sg.started(m) }
 
 // checkServing refuses unless autopilot reports every server healthy, every machine of the group runs and votes and
 // the cluster can lose a voter, which a server needs before it stops or hands over its leadership. The nodes of a
@@ -328,9 +337,9 @@ func (sg *serverGroup) checkMachines(why func(Machine) string) error {
 }
 
 // notAtRest says why a machine does not run and vote, or, in a combined group, why its node cannot take work. It says
-// "" when none applies.
-func (sg *serverGroup) notAtRest(m Machine) string {
-	if why := sg.notServing(m); why != "" || sg.g.Role != v1alpha1.RoleCombined {
+// "" when none applies. The node is not looked at when leaving is true.
+func (sg *serverGroup) notAtRest(m Machine, leaving bool) string {
+	if why := sg.notServing(m); why != "" || sg.g.Role != v1alpha1.RoleCombined || leaving {
 		return why
 	}
 	n, hasNode := sg.nodes[m.ID]
@@ -391,13 +400,14 @@ func (sg *serverGroup) requireSize() (Step, bool, error) {
 	return Step{}, false, nil
 }
 
-// create creates a server in a roll while an outdated one is left, once the checks at rest pass. The group has exactly
-// its size then: a larger group has a victim.
+// create creates a server in a roll while an outdated one is left, once the checks at rest pass. The node of an
+// outdated machine whose removal has started is not looked at, so a roll goes on when the group is back at its size
+// with such a machine. The group has exactly its size then: a larger group has a victim.
 func (sg *serverGroup) create() (Step, bool, error) {
 	if sg.mode != Roll || len(upToDate(sg.s, sg.g, sg.ms)) == len(sg.ms) {
 		return Step{}, false, nil
 	}
-	if err := sg.checkAtRest(); err != nil {
+	if err := sg.checkAtRest(sg.leaving); err != nil {
 		return Step{}, false, err
 	}
 	if err := sg.requireTolerance(); err != nil {
