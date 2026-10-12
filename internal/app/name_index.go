@@ -85,6 +85,15 @@ func (n *nameIndexes) next(group string) int {
 	return 0
 }
 
+// nexts returns next of each group that n read, by group.
+func (n *nameIndexes) nexts() map[string]int {
+	next := make(map[string]int, len(n.groups))
+	for _, group := range n.groups {
+		next[group] = n.next(group)
+	}
+	return next
+}
+
 // raise stores index as the highest of the group when the store holds a lower one or none. Where the store has
 // conditional puts, the write replaces only the object as n read or last wrote it, and creates only an object that n
 // found missing. Callers hold the cluster's lock.

@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -82,6 +84,46 @@ func wantView(t *testing.T, f *vultrfake.Fake, want []string) {
 	if diff := cmp.Diff(want, cloudView(f)); diff != "" {
 		t.Errorf("the cloud (-want +got):\n%s", diff)
 	}
+}
+
+// instanceLine matches the line of an instance in cloudView: its hostname, then its other fields up to the tags.
+var instanceLine = regexp.MustCompile(`^instance (\S+) .* tags (\S*)`)
+
+// serverRanks returns view with the hostname of each server and combined instance replaced by <cluster>-<group>-<rank>,
+// where the rank is the place of the instance among the servers of its group by the index in its name. A cut before a
+// create moves the name of the server that is created after it, since the index that was set aside is not used again.
+func serverRanks(view []string) []string {
+	indexes := map[string][]int{} // by the hostname without its index
+	split := func(host string) (string, int, bool) {
+		i := strings.LastIndex(host, "-")
+		n, err := strconv.Atoi(host[i+1:])
+		return host[:i+1], n, i >= 0 && err == nil
+	}
+	isServer := func(line string) (string, int, bool) {
+		m := instanceLine.FindStringSubmatch(line)
+		if m == nil || !strings.Contains(","+m[2]+",", ","+cloud.LabelRole+"=server,") &&
+			!strings.Contains(","+m[2]+",", ","+cloud.LabelRole+"=combined,") {
+			return "", 0, false
+		}
+		return split(m[1])
+	}
+	for _, line := range view {
+		if prefix, n, ok := isServer(line); ok {
+			indexes[prefix] = append(indexes[prefix], n)
+		}
+	}
+	for _, ns := range indexes {
+		slices.Sort(ns)
+	}
+	out := slices.Clone(view)
+	for i, line := range view {
+		if prefix, n, ok := isServer(line); ok {
+			rank := slices.Index(indexes[prefix], n)
+			out[i] = strings.Replace(line, prefix+strconv.Itoa(n), prefix+strconv.Itoa(rank), 1)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // atCall returns a hook that hands the n-th call whose line, as callKey gives it, is key to act, and carries every
@@ -242,14 +284,16 @@ func wantSecretsKept(t *testing.T, s statestore.Store, kept map[string][]byte) {
 }
 
 // wantBuilt fails the test unless the build of the example cluster in the store s, on f and w, is whole after the runs
-// that a test cut: the cloud is as an uninterrupted build leaves it, with one instance per node, the mark of the
-// bootstrap is stored, Nomad's ACL system was bootstrapped by at most two calls, the secrets of kept are as they were
-// written, and the next plan has no changes.
+// that a test cut: the cloud is as an uninterrupted build leaves it, with one instance per node, the names of servers
+// compared by their rank in their group, the mark of the bootstrap is stored, Nomad's ACL system was bootstrapped by
+// at most two calls, the secrets of kept are as they were written, and the next plan has no changes.
 func wantBuilt(t *testing.T, svc *app.Service, f *vultrfake.Fake, w *nomadWorld, want []string,
 	kept map[string][]byte,
 ) {
 	t.Helper()
-	wantView(t, f, want)
+	if diff := cmp.Diff(serverRanks(want), serverRanks(cloudView(f))); diff != "" {
+		t.Errorf("the cloud, with the names of servers as their ranks (-want +got):\n%s", diff)
+	}
 	if !slices.Contains(list(t, svc.Store, ""), markPath) {
 		t.Errorf("the store holds no %s", markPath)
 	}

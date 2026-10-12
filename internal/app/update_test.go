@@ -225,6 +225,10 @@ func worker(index int) node { return wantNode("workers", v1alpha1.RoleClient, in
 // allNodes are the nodes of the test cluster in the order the update creates them.
 var allNodes = []node{server(0), server(1), server(2), worker(0), worker(1)}
 
+// nodesAfterRebuild are the nodes of the test cluster after every machine was deleted and update made them again: the
+// servers take the names above the ones they had.
+var nodesAfterRebuild = []node{server(3), server(4), server(5), worker(0), worker(1)}
+
 // allNames are the names of allNodes.
 var allNames = namesOf(allNodes)
 

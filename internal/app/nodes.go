@@ -81,8 +81,11 @@ const (
 //     unregistered machines before one that is, and among equals the oldest stays; the others are deleted as
 //     duplicates.
 //   - A group with more machines than its size loses the newest ones.
-//   - A group with fewer gets new machines named <cluster>-<group>-<index> with the lowest indexes whose names no
-//     listed machine has, each in the group's zone with the fewest machines, the zone listed first on a tie.
+//   - A group with fewer gets new machines named <cluster>-<group>-<index>, each in the group's zone with the fewest
+//     machines, the zone listed first on a tie. A client group takes the lowest indexes whose names no listed machine
+//     has. A server or combined group takes the indexes from the one above the highest index among the listed
+//     machines whose names have the group's pattern, whatever the plan does with them, and not below its entry in
+//     next, the lowest index that tent has not used for the group; without an entry that is 0.
 //   - A machine in a zone that its group no longer lists counts toward the group's size and stays, unless it is among
 //     the newest of a group that is too big. New machines go only into the listed zones.
 //   - A machine that stays and has not joined, of any role, is waited for, until its node joins and its user data is
@@ -102,7 +105,7 @@ const (
 // order as before; the other deletes come last, by name, then ID.
 //
 // It also returns the machines of the server and combined groups that stay, by name: the servers the cluster has.
-func planNodes(m *model.Cluster, instances []cloud.Instance, unregistered map[string]bool,
+func planNodes(m *model.Cluster, instances []cloud.Instance, unregistered map[string]bool, next map[string]int,
 ) (changes []NodeChange, servers []cloud.Instance) {
 	owned := slices.DeleteFunc(slices.Clone(instances), func(in cloud.Instance) bool { return in.Cluster != m.Name })
 	slices.SortStableFunc(owned, compareAge)
@@ -143,7 +146,7 @@ func planNodes(m *model.Cluster, instances []cloud.Instance, unregistered map[st
 		if g.Role.RunsServer() {
 			servers = append(servers, nodes...)
 		}
-		creates = append(creates, createNodes(m.Name, g, nodes, taken)...)
+		creates = append(creates, createNodes(m.Name, g, nodes, taken, next[g.Name], owned)...)
 	}
 	slices.SortStableFunc(creates, func(a, b NodeChange) int {
 		return cmp.Or(cmp.Compare(clientRank(a), clientRank(b)), strings.Compare(a.Group, b.Group))
@@ -200,15 +203,29 @@ func serverCount(changes []NodeChange) int {
 	return i
 }
 
-// createNodes returns the creates that bring group g from its nodes to its size, and marks their names taken.
-func createNodes(cluster string, g model.NodeGroup, nodes []cloud.Instance, taken map[string]bool) []NodeChange {
+// createNodes returns the creates that bring group g from its nodes to its size, and marks their names taken. A group
+// whose role runs a server names its creates one index after the other, from the lowest that is above the index of
+// every machine of the group that is listed, and not below next. Any other group takes the lowest free name.
+func createNodes(cluster string, g model.NodeGroup, nodes []cloud.Instance, taken map[string]bool, next int,
+	listed []cloud.Instance,
+) []NodeChange {
 	perZone := make(map[string]int, len(g.Zones))
 	for _, in := range nodes {
 		perZone[in.Zone]++
 	}
+	var index int
+	if g.Role.RunsServer() {
+		index = rollout.NextIndex(listedState(cluster, listed), rollout.Group{Name: g.Name, NextIndex: next})
+	}
 	var creates []NodeChange
 	for range g.Size - len(nodes) {
-		name := rollout.FreeName(cluster, g.Name, taken)
+		var name string
+		if g.Role.RunsServer() {
+			name = rollout.NodeName(cluster, g.Name, index)
+			index++
+		} else {
+			name = rollout.FreeName(cluster, g.Name, taken)
+		}
 		taken[name] = true
 		zone := rollout.LeastUsedZone(g.Zones, perZone)
 		perZone[zone]++
@@ -218,6 +235,15 @@ func createNodes(cluster string, g model.NodeGroup, nodes []cloud.Instance, take
 		})
 	}
 	return creates
+}
+
+// listedState returns the state of cluster that holds the names of the listed machines alone.
+func listedState(cluster string, listed []cloud.Instance) rollout.State {
+	s := rollout.State{Cluster: cluster, Machines: make([]rollout.Machine, len(listed))}
+	for i, in := range listed {
+		s.Machines[i] = rollout.Machine{Name: in.Name}
+	}
+	return s
 }
 
 // waitFor returns the wait for the machine in of group g, and whether there is one. It keeps the machine's name,
