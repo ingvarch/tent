@@ -526,30 +526,6 @@ func TestRollLoopListsTheMachinesAgainBeforeATransfer(t *testing.T) {
 	})
 }
 
-// TestRollLoopRefusesCombinedGroups ends the run at the first step of a combined group, with the advice about
-// --nodegroups when the specs have a client group, and writes nothing to the cloud or to Nomad.
-func TestRollLoopRefusesCombinedGroups(t *testing.T) {
-	t.Parallel()
-	synctest.Test(t, func(t *testing.T) {
-		svc, f, w := newRelease(t, keyedClusterYAML, combinedYAML, workersYAML)
-		mustUpdate(t, svc)
-		mustReplace(t, svc, keyedClusterYAML+serversExtraYAML)
-		mustUpdate(t, svc)
-		cloudCalls, nomadCalls := len(f.Calls()), len(w.Log())
-
-		counts, err := roll(svc, app.RollOptions{})
-
-		wantError(t, err, "node group all: tent cannot roll combined groups yet; select client groups with --nodegroups")
-		wantNoWrites(t, f.Calls()[cloudCalls:])
-		if got := nomadWrites(w, nomadCalls); len(got) > 0 {
-			t.Errorf("the roll wrote to Nomad: %q", got)
-		}
-		if counts != (app.RollCounts{}) {
-			t.Errorf("the roll did %+v, want nothing", counts)
-		}
-	})
-}
-
 // TestRollLoopEndsWhenTheCloudRefusesAStop ends the run with the cloud's error, names the machine, and takes no step
 // that follows the stop.
 func TestRollLoopEndsWhenTheCloudRefusesAStop(t *testing.T) {

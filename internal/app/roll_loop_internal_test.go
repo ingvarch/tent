@@ -778,8 +778,8 @@ func TestShowingSaysWhatNomadListsOfAServerWait(t *testing.T) {
 }
 
 // TestOpenWaitOfAServerGroupIsOverWhenTheReadingShowsItsEnd ends the wait for a stopped server when autopilot no longer
-// counts it a healthy voter, the wait for the servers of a server group when they are healthy and the group's voters
-// vote, and the wait for the window as soon as the decisions give another step.
+// counts it a healthy voter, the wait for the servers of a server or combined group when they are healthy and the
+// group's voters vote, and the wait for the window as soon as the decisions give another step.
 func TestOpenWaitOfAServerGroupIsOverWhenTheReadingShowsItsEnd(t *testing.T) {
 	t.Parallel()
 	victim := rollout.Machine{ID: "i-0", Name: "prod-servers-0", PrivateIP: netip.MustParseAddr("10.64.0.3")}
@@ -810,13 +810,15 @@ func TestOpenWaitOfAServerGroupIsOverWhenTheReadingShowsItsEnd(t *testing.T) {
 		{"the window", rollout.Step{Action: rollout.WaitStable, Group: "servers", Machine: victim},
 			servers(true, true, true), true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			r := &rollRun{rollLoop: newRollLoop(), groups: []rollout.Group{{Name: "servers", Role: v1alpha1.RoleServer}}}
-			if got := (openWait{step: tc.step}).over(r, tc.reading); got != tc.wantOver {
-				t.Errorf("over = %v, want %v", got, tc.wantOver)
-			}
-		})
+		for _, role := range []v1alpha1.Role{v1alpha1.RoleServer, v1alpha1.RoleCombined} {
+			t.Run(string(role)+" group: "+tc.name, func(t *testing.T) {
+				t.Parallel()
+				r := &rollRun{rollLoop: newRollLoop(), groups: []rollout.Group{{Name: "servers", Role: role}}}
+				if got := (openWait{step: tc.step}).over(r, tc.reading); got != tc.wantOver {
+					t.Errorf("over = %v, want %v", got, tc.wantOver)
+				}
+			})
+		}
 	}
 }
 
