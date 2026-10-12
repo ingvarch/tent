@@ -841,8 +841,8 @@ func TestAServerWithoutAVersionIsWaitedFor(t *testing.T) {
 	wait := func(t *testing.T, s rollout.State) {
 		t.Helper()
 		got := nextRoll(t, s)
-		if got.Action != rollout.WaitHealthy || got.Group != "workers" || got.Voters != 1 || got.Machine.Name != "" {
-			t.Errorf("step = %q (group %q, %d voters, machine %q), want a wait until 1 healthy server votes for "+
+		if got.Action != rollout.WaitHealthy || got.Group != "workers" || got.Voters != 2 || got.Machine.Name != "" {
+			t.Errorf("step = %q (group %q, %d voters, machine %q), want a wait until 2 healthy servers vote for "+
 				"workers that names no machine (the nonvoter does not count)", got, got.Group, got.Voters,
 				got.Machine.Name)
 		}
@@ -852,7 +852,9 @@ func TestAServerWithoutAVersionIsWaitedFor(t *testing.T) {
 		s.Nomad.Servers[0].Version = ""
 		second := s.Nomad.Servers[0]
 		second.ID, second.Name, second.Voter, second.Leader = "r-1", "prod-servers-1.global", false, false
-		s.Nomad.Servers = append(s.Nomad.Servers, second)
+		third := s.Nomad.Servers[0]
+		third.ID, third.Name, third.Leader = "r-2", "prod-servers-2.global", false
+		s.Nomad.Servers = append(s.Nomad.Servers, second, third)
 		return s
 	}
 	t.Run("before a node is created", func(t *testing.T) {

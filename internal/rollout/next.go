@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"slices"
 
-	"golang.org/x/mod/semver"
-
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/english"
 )
@@ -33,7 +31,7 @@ func Next(s State, mode Mode) (Step, error) {
 		return Step{}, fmt.Errorf("rollout: unknown mode %d", mode)
 	}
 	if mode == Roll {
-		if err := checkVersions(s); err != nil {
+		if _, err := CheckNewNode(s.Nomad, s.Version, false); err != nil {
 			return Step{}, err
 		}
 	}
@@ -157,47 +155,4 @@ func createdAs(role v1alpha1.Role) (created, advice string) {
 		return "without a role", advice
 	}
 	return fmt.Sprintf("with the role %q", role), advice
-}
-
-// checkVersions refuses a version that is not a version number, and a new node that would run an older Nomad than
-// a server or a node that is not down. A server that reports no version yet is skipped.
-func checkVersions(s State) error {
-	if err := checkVersion("a new node", s.Version); err != nil {
-		return err
-	}
-	for _, srv := range s.Nomad.Servers {
-		if srv.Version == "" {
-			continue
-		}
-		if err := checkNotNewer(s.Version, "server "+srv.Name, srv.Version); err != nil {
-			return err
-		}
-	}
-	for _, n := range s.Nomad.Nodes {
-		if n.Status == nodeDown {
-			continue
-		}
-		if err := checkNotNewer(s.Version, "node "+n.Name, n.Version); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func checkVersion(owner, version string) error {
-	if !semver.IsValid("v" + version) {
-		return refuse("the Nomad version of %s is %q, which is not a version number", owner, version)
-	}
-	return nil
-}
-
-func checkNotNewer(pinned, owner, version string) error {
-	if err := checkVersion(owner, version); err != nil {
-		return err
-	}
-	if semver.Compare("v"+version, "v"+pinned) > 0 {
-		return refuse("tent never moves a node to an older Nomad: the cluster is pinned to %s, and %s runs %s",
-			pinned, owner, version)
-	}
-	return nil
 }

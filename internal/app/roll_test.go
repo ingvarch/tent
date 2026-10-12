@@ -679,7 +679,7 @@ func TestRollingUpdateRefusesWhatTheDecisionsRefuse(t *testing.T) {
 			w.ChangeNode("prod-workers-0", func(n *nomadops.Node) { n.Version = "9.9.9" })
 			return svc, f, w
 		}, func(t *testing.T, svc *app.Service, _ *vultrfake.Fake) string {
-			return "tent never moves a node to an older Nomad: the cluster is pinned to " + pinned(t, svc) +
+			return "tent never moves a node to an older Nomad: the cluster's version is " + pinned(t, svc) +
 				", and node prod-workers-0 runs 9.9.9"
 		}},
 		{"a server that runs an older Nomad than a new node", func(

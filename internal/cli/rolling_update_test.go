@@ -446,7 +446,7 @@ func TestRollingUpdateClusterRefusesWhatTheDecisionsRefuse(t *testing.T) {
 		for _, more := range [][]string{nil, {"--yes", "--lock-timeout", "0"}} {
 			wantResult(t, runWithNomad(t, onVultr(f), nomad, roll(s, more...)...), 1,
 				upToDateServersLine+outdatedWorkersLine,
-				"Error: tent never moves a node to an older Nomad: the cluster is pinned to "+assetstest.NomadVersion+
+				"Error: tent never moves a node to an older Nomad: the cluster's version is "+assetstest.NomadVersion+
 					", and node prod-workers-0 runs 9.9.9\n")
 		}
 		wantNoWritesIn(t, f.Calls()[calls:])
