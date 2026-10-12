@@ -37,6 +37,8 @@ type instance struct {
 	activeAfter int // the reads after which it shows as active
 	okAfter     int // the reads after which it shows as ok
 	haltLeft    int // the reads that still show a halted instance as running
+	seq         int // the order of creation, which keeps a deleted instance in place in the list
+	deleteLeft  int // the reads that still show the instance after its delete
 }
 
 // view returns a copy of the instance as every call shows it now.
@@ -108,6 +110,24 @@ func (f *Fake) SetHaltReads(tb testing.TB, n int) {
 	f.haltReads = n
 }
 
+// SetDeleteReads sets how many reads still show an instance after its delete: it shows, as it was, at its next n reads
+// by ListInstances, when the list has it, and GetInstance, then is gone. Instances, Halted and the other calls that
+// name the instance tell the truth at once, and the VPC address of the instance is free at once. It applies to the
+// deletes after the call. With 0, the default, a deleted instance is gone from every call at once. A list of the
+// provider reads a listed instance's VPCs and, after their 404, the instance, so each of its lists takes two of the n
+// reads and shows the instance without a private address: n = 2 gives one such list, and n = 1 none. It fails the
+// test when n is negative.
+func (f *Fake) SetDeleteReads(tb testing.TB, n int) {
+	tb.Helper()
+	if n < 0 {
+		tb.Fatalf("vultrfake: SetDeleteReads: n is %d, want 0 or more", n)
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleteReads = n
+}
+
 // instance returns the instance with id, or nil. The caller holds the lock.
 func (f *Fake) instance(id string) *instance {
 	i := slices.IndexFunc(f.instances, func(in *instance) bool { return in.ID == id })
@@ -117,8 +137,37 @@ func (f *Fake) instance(id string) *instance {
 	return f.instances[i]
 }
 
-// ListInstances returns every instance that has the tag, in any case, in creation order. It counts no read. It fails
-// as the client does, without a call, when the tag is empty.
+// listable returns the instances that a list shows, the deleted ones that reads still show included, in creation
+// order. The caller holds the lock.
+func (f *Fake) listable() []*instance {
+	all := slices.Concat(f.instances, f.deleted)
+	slices.SortStableFunc(all, func(a, b *instance) int { return cmp.Compare(a.seq, b.seq) })
+	return all
+}
+
+// shown counts a read that showed in, if it is deleted, and forgets it after its last read. The caller holds the
+// lock.
+func (f *Fake) shown(in *instance) {
+	if in.deleteLeft == 0 {
+		return
+	}
+	if in.deleteLeft--; in.deleteLeft == 0 {
+		f.deleted = slices.DeleteFunc(f.deleted, func(d *instance) bool { return d == in })
+	}
+}
+
+// ghost returns the deleted instance with id that reads still show, or nil. The caller holds the lock.
+func (f *Fake) ghost(id string) *instance {
+	i := slices.IndexFunc(f.deleted, func(in *instance) bool { return in.ID == id })
+	if i < 0 {
+		return nil
+	}
+	return f.deleted[i]
+}
+
+// ListInstances returns every instance that has the tag, in any case, in creation order, and the deleted ones that
+// SetDeleteReads still shows. It counts no read of a live instance. It fails as the client does, without a call, when
+// the tag is empty.
 func (f *Fake) ListInstances(ctx context.Context, tag string) ([]govultr.Instance, error) {
 	if err := vultr.CheckTag(tag); err != nil {
 		return nil, err
@@ -126,9 +175,10 @@ func (f *Fake) ListInstances(ctx context.Context, tag string) ([]govultr.Instanc
 	var out []govultr.Instance
 	r := request{name: "ListInstances", arg: tag, method: http.MethodGet, path: "/v2/instances"}
 	err := f.run(ctx, r, func() error {
-		for _, in := range f.instances {
+		for _, in := range f.listable() {
 			if slices.ContainsFunc(in.Tags, func(t string) bool { return strings.EqualFold(t, tag) }) {
 				out = append(out, in.listed())
+				f.shown(in)
 			}
 		}
 		return nil
@@ -136,7 +186,8 @@ func (f *Fake) ListInstances(ctx context.Context, tag string) ([]govultr.Instanc
 	return result(out, err)
 }
 
-// GetInstance returns an instance, and counts a read.
+// GetInstance returns an instance, and counts a read. A deleted instance is returned as long as SetDeleteReads shows
+// it.
 func (f *Fake) GetInstance(ctx context.Context, id string) (*govultr.Instance, error) {
 	if err := vultr.CheckID("GET /v2/instances/{id}", "id", id); err != nil {
 		return nil, err
@@ -146,9 +197,13 @@ func (f *Fake) GetInstance(ctx context.Context, id string) (*govultr.Instance, e
 	err := f.run(ctx, r, func() error {
 		in := f.instance(id)
 		if in == nil {
+			in = f.ghost(id)
+		}
+		if in == nil {
 			return r.fail(http.StatusNotFound, noInstance)
 		}
 		v := in.read()
+		f.shown(in)
 		out = &v
 		return nil
 	})
@@ -177,7 +232,7 @@ func (f *Fake) CreateInstance(ctx context.Context, req *govultr.InstanceCreateRe
 				Hostname: in.Hostname, Tags: slices.Clone(in.Tags), FirewallGroupID: in.FirewallGroupID,
 				MainIP: f.newMainIP(), DateCreated: f.date(), Status: "active", PowerStatus: "running", ServerStatus: "ok",
 			},
-			req: &in, userData: in.UserData, activeAfter: f.activeAfter, okAfter: f.okAfter,
+			req: &in, userData: in.UserData, activeAfter: f.activeAfter, okAfter: f.okAfter, seq: f.newSeq(),
 		}
 		f.instances = append(f.instances, inst)
 		f.attach(inst, in.AttachVPC)
@@ -291,15 +346,28 @@ func cloneCreateReq(r govultr.InstanceCreateReq) govultr.InstanceCreateReq {
 	return r
 }
 
-// DeleteInstance destroys an instance at once, with its VPC attachments. No call shows it after that.
+// newSeq returns the next number of creation. The caller holds the lock.
+func (f *Fake) newSeq() int {
+	f.created++
+	return f.created
+}
+
+// DeleteInstance destroys an instance at once, with its VPC attachments. Only the reads that SetDeleteReads says show
+// it after that.
 func (f *Fake) DeleteInstance(ctx context.Context, id string) error {
 	if err := vultr.CheckID("DELETE /v2/instances/{id}", "id", id); err != nil {
 		return err
 	}
 	r := request{name: "DeleteInstance", arg: id, method: http.MethodDelete, path: "/v2/instances/" + id}
 	return f.run(ctx, r, func() error {
-		if !remove(&f.instances, id, func(in *instance) string { return in.ID }) {
+		in := f.instance(id)
+		if in == nil {
 			return r.fail(http.StatusNotFound, noInstance)
+		}
+		remove(&f.instances, id, func(in *instance) string { return in.ID })
+		if f.deleteReads > 0 {
+			in.deleteLeft = f.deleteReads
+			f.deleted = append(f.deleted, in)
 		}
 		return nil
 	})

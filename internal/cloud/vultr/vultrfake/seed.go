@@ -103,7 +103,7 @@ func (f *Fake) AddInstance(tb testing.TB, in govultr.Instance, vpcIDs ...string)
 	in.PowerStatus = cmp.Or(in.PowerStatus, "running")
 	in.ServerStatus = cmp.Or(in.ServerStatus, "ok")
 	in.Tags, in.Features = slices.Clone(in.Tags), slices.Clone(in.Features)
-	inst := &instance{Instance: in}
+	inst := &instance{Instance: in, seq: f.newSeq()}
 	f.instances = append(f.instances, inst)
 	f.attach(inst, vpcIDs)
 	return inst.view()
