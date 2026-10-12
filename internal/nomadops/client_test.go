@@ -388,8 +388,9 @@ func TestLeaderOfAClosedServer(t *testing.T) {
 	}
 }
 
-// blockingHandler returns a handler that tells got when it has a request and then answers nothing until the request
-// ends or the test does.
+// blockingHandler returns a handler that tells got when it has a request, holds the request until it ends or the test
+// does, and then drops the connection with no answer. A handler that returned would answer 200, and that answer can
+// reach a client between the notice of its close and the close of its socket.
 func blockingHandler(t *testing.T, got chan<- struct{}) http.HandlerFunc {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
@@ -401,6 +402,46 @@ func blockingHandler(t *testing.T, got chan<- struct{}) http.HandlerFunc {
 		case <-r.Context().Done():
 		case <-release:
 		}
+		panic(http.ErrAbortHandler)
+	}
+}
+
+// TestBlockingHandlerAnswersNothingWhenTheClientGoesAway sends the handler a request and then the notice that a client
+// sends first when it closes its connection: the server sends nothing back. An answer could reach a client between
+// that notice and the close of its socket, and the client would take it for the answer to a call that it gave up.
+func TestBlockingHandlerAnswersNothingWhenTheClientGoesAway(t *testing.T) {
+	p := newPKI(t, v1alpha1.RoleServer, region)
+	got := make(chan struct{})
+	srv := newNomadServer(t, p.server, p.ca.Bundle(), blockingHandler(t, got))
+	pair, err := tls.X509KeyPair(p.operator.Cert, p.operator.Key)
+	if err != nil {
+		t.Fatalf("the operator certificate: %v", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(p.ca.Bundle()) {
+		t.Fatal("the CA holds no certificate")
+	}
+	conn, err := tls.Dial("tcp", srv.addr(), &tls.Config{
+		Certificates: []tls.Certificate{pair}, RootCAs: pool, ServerName: "server." + region + ".nomad",
+	})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if _, err := io.WriteString(conn, "DELETE /v1/operator/raft/peer HTTP/1.1\r\nHost: nomad\r\n\r\n"); err != nil {
+		t.Fatalf("send the request: %v", err)
+	}
+	<-got
+	if err := conn.CloseWrite(); err != nil {
+		t.Fatalf("send the notice of the close: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("set the read deadline: %v", err)
+	}
+	// The read ends with an error that differs between systems when the server drops the connection; only what the
+	// server sent counts.
+	if answer, _ := io.ReadAll(conn); len(answer) > 0 {
+		t.Errorf("the handler answered %q, want nothing", answer)
 	}
 }
 
