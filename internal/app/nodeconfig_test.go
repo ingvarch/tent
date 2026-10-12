@@ -856,8 +856,8 @@ func TestResolveAssetsErrors(t *testing.T) {
 		want    string // the start of the error
 	}{
 		{
-			name: "no Nomad release", ch: stable, sites: assetstest.New(), nomad: "2.0.6", version: "v0.3.0",
-			arch: "amd64", want: "find Nomad 2.0.6: get " + strings.ReplaceAll(sums, "2.0.7", "2.0.6") + ": 404 Not Found",
+			name: "no Nomad release", ch: stable, sites: assetstest.New(), nomad: "2.0.99", version: "v0.3.0",
+			arch: "amd64", want: "find Nomad 2.0.99: get " + strings.ReplaceAll(sums, "2.0.7", "2.0.99") + ": 404 Not Found",
 		},
 		{
 			name: "HashiCorp's key expired", ch: stable, sites: assetstest.New(),
@@ -1199,7 +1199,7 @@ func TestNodeConfigOf(t *testing.T) {
 func TestNodeConfigOfErrors(t *testing.T) {
 	t.Parallel()
 	ca, gossip := testCA(t), pki.NewGossipKey()
-	const sums = "https://releases.hashicorp.com/nomad/2.0.6/nomad_2.0.6_SHA256SUMS"
+	const sums = "https://releases.hashicorp.com/nomad/2.0.99/nomad_2.0.99_SHA256SUMS"
 	for _, tc := range []struct {
 		name    string
 		edit    func(n *NewNode)
@@ -1214,8 +1214,8 @@ func TestNodeConfigOfErrors(t *testing.T) {
 		{"a group that the specs lack", func(n *NewNode) { n.Group = "nope" }, "node group nope: not in the specs", false},
 		// The version comes from the specs.
 		{
-			"a Nomad version without a release", func(n *NewNode) { n.Specs.Cluster.Spec.Nomad.Version = "2.0.6" },
-			"find Nomad 2.0.6: get " + sums + ": 404 Not Found", true,
+			"a Nomad version without a release", func(n *NewNode) { n.Specs.Cluster.Spec.Nomad.Version = "2.0.99" },
+			"find Nomad 2.0.99: get " + sums + ": 404 Not Found", true,
 		},
 		{"no gossip key", func(n *NewNode) { n.Gossip = nil }, "node group servers: nomad agent: no gossip key", true},
 		{
@@ -1344,12 +1344,13 @@ func TestNodeBuilderCacheKeepsVersionsApart(t *testing.T) {
 		t.Errorf("a builder for tent %s gives the tent-node of %s", otherTent.TentVersion, got)
 	}
 
-	// assetstest serves no Nomad 2.0.6, so the error shows a request where the cache has only 2.0.7.
-	const want = "find Nomad 2.0.6: get https://releases.hashicorp.com/nomad/2.0.6/nomad_2.0.6_SHA256SUMS: 404 Not Found"
-	in.Specs.Cluster.Spec.Nomad.Version = "2.0.6"
+	// assetstest serves no Nomad 2.0.99, so the error shows a request where the cache has only 2.0.7.
+	const want = "find Nomad 2.0.99: get https://releases.hashicorp.com/nomad/2.0.99/nomad_2.0.99_SHA256SUMS: " +
+		"404 Not Found"
+	in.Specs.Cluster.Spec.Nomad.Version = "2.0.99"
 	b, err = newNodeBuilder(t.Context(), in, cache)
 	if err == nil || !strings.HasPrefix(err.Error(), want) {
-		t.Errorf("newNodeBuilder() for Nomad 2.0.6 error = %v, want one that starts with %s", err, want)
+		t.Errorf("newNodeBuilder() for Nomad 2.0.99 error = %v, want one that starts with %s", err, want)
 	}
 	if b != nil {
 		t.Error("newNodeBuilder() returned a builder with the error")

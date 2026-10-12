@@ -28,14 +28,29 @@ func get(t *testing.T, s *assetstest.Sites, url string) (int, string) {
 	return resp.StatusCode, string(b)
 }
 
+// TestNomadFilesVerify proves that the embedded files of both versions are HashiCorp's: the signature verifies.
 func TestNomadFilesVerify(t *testing.T) {
 	opts := assets.Options{Client: &http.Client{Transport: assetstest.New()}, Now: assetstest.Now}
-	a, err := assets.Nomad(t.Context(), opts, assetstest.NomadVersion, "amd64")
-	if err != nil {
-		t.Fatalf("Nomad: %v", err)
+	for _, tc := range []struct{ version, sha256 string }{
+		{assetstest.NomadVersion, assetstest.NomadSHA256},
+		{assetstest.OlderNomadVersion, assetstest.OlderNomadSHA256},
+	} {
+		a, err := assets.Nomad(t.Context(), opts, tc.version, "amd64")
+		if err != nil {
+			t.Fatalf("Nomad %s: %v", tc.version, err)
+		}
+		if a.SHA256 != tc.sha256 {
+			t.Errorf("Nomad %s: sha256 = %s, want %s", tc.version, a.SHA256, tc.sha256)
+		}
 	}
-	if a.SHA256 != assetstest.NomadSHA256 {
-		t.Errorf("sha256 = %s, want %s", a.SHA256, assetstest.NomadSHA256)
+}
+
+func TestNomadVersionWithoutFilesIsNotFound(t *testing.T) {
+	const base = "https://releases.hashicorp.com/nomad/2.0.99/nomad_2.0.99_SHA256SUMS"
+	for _, url := range []string{base, base + ".sig"} {
+		if code, _ := get(t, assetstest.New(), url); code != http.StatusNotFound {
+			t.Errorf("%s: status = %d, want 404", url, code)
+		}
 	}
 }
 
