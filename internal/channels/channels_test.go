@@ -169,3 +169,116 @@ func TestAllows(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckMove(t *testing.T) {
+	const (
+		tooFar = " is more than one minor version above "
+		major  = " is of another major version than "
+	)
+	for _, tc := range []struct{ name, from, to, want string }{
+		{"the same version", "2.0.7", "2.0.7", ""},
+		{"a newer patch", "2.0.6", "2.0.7", ""},
+		{"a patch that skips versions", "2.0.1", "2.0.9", ""},
+		{"a double-digit patch", "2.0.9", "2.0.10", ""},
+		{"the next minor version", "2.0.7", "2.1.0", ""},
+		{"the next minor version, any patch", "2.0.6", "2.1.3", ""},
+		{"the next minor version past nine", "2.9.0", "2.10.0", ""},
+		{"two minor versions up", "2.0.7", "2.2.0", "2.2.0" + tooFar + "2.0.7"},
+		{"two minor versions up, from a later patch", "2.0.7", "2.2.9", "2.2.9" + tooFar + "2.0.7"},
+		{"the minor version after the next past nine", "2.9.0", "2.11.0", "2.11.0" + tooFar + "2.9.0"},
+		{"many minor versions up", "2.0.7", "2.13.0", "2.13.0" + tooFar + "2.0.7"},
+		{"an older patch", "2.0.7", "2.0.6", ""},
+		{"an older minor version", "2.3.0", "2.1.4", ""},
+		{"an older major version", "2.0.7", "1.11.3", ""},
+		{"a newer major version", "2.0.7", "3.0.0", "3.0.0" + major + "2.0.7"},
+		{"a newer major version, minor 0 after minor 0", "2.9.9", "3.0.0", "3.0.0" + major + "2.9.9"},
+		{"a far newer major version", "2.0.7", "10.0.0", "10.0.0" + major + "2.0.7"},
+		{"from is no release: empty", "", "2.2.0", ""},
+		{"from is no release: two numbers", "2.0", "2.2.0", ""},
+		{"from is no release: with a v", "v2.0.7", "2.2.0", ""},
+		{"from is no release: a prerelease", "2.0.7-rc.1", "2.2.0", ""},
+		{"from is no release: text", "banana", "2.2.0", ""},
+		{"to is no release: empty", "2.0.7", "", ""},
+		{"to is no release: two numbers", "2.0.7", "2.0", ""},
+		{"to is no release: with a v", "2.0.7", "v2.2.0", ""},
+		{"to is no release: a prerelease", "2.0.7", "2.2.0-rc.1", ""},
+		{"to is no release: text", "2.0.7", "banana", ""},
+		{"to is no release: build metadata", "2.0.7", "2.5.0+ent", ""},
+		{"to is no release: a prerelease of another major version", "2.0.7", "3.0.0-rc.1", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckMove(tc.from, tc.to)
+			if got, want := fmt.Sprint(err), cmp.Or(tc.want, "<nil>"); got != want {
+				t.Errorf("CheckMove(%q, %q) = %s, want %s", tc.from, tc.to, got, want)
+			}
+			if err == nil {
+				return
+			}
+			if v, ok := errors.AsType[*VersionError](err); !ok || v.Version != tc.to {
+				t.Errorf("CheckMove(%q, %q) = %#v, want a *VersionError of %q", tc.from, tc.to, err, tc.to)
+			}
+		})
+	}
+}
+
+func TestCompare(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want int
+	}{
+		{"2.0.6", "2.0.7", -1},
+		{"2.0.7", "2.0.7", 0},
+		{"2.0.8", "2.0.7", 1},
+		{"2.0.9", "2.0.10", -1},
+		{"2.0.10", "2.0.9", 1},
+		{"2.9.0", "2.10.0", -1},
+		{"1.11.3", "2.0.0", -1},
+		{"3.0.0", "2.99.99", 1},
+	} {
+		if got := Compare(tc.a, tc.b); got != tc.want {
+			t.Errorf("Compare(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+func TestNextMinor(t *testing.T) {
+	for _, tc := range []struct{ version, want string }{
+		{"2.0.7", "2.1.0"},
+		{"2.0.0", "2.1.0"},
+		{"2.9.3", "2.10.0"},
+		{"2.10.4", "2.11.0"},
+		{"1.11.3", "1.12.0"},
+		{"2.99999999999999999999.0", ""},
+		{"2.9223372036854775807.0", ""},
+		{"2.0", ""},
+		{"v2.0.7", ""},
+		{"2.0.7-rc.1", ""},
+		{"banana", ""},
+		{"", ""},
+	} {
+		if got := NextMinor(tc.version); got != tc.want {
+			t.Errorf("NextMinor(%q) = %q, want %q", tc.version, got, tc.want)
+		}
+	}
+}
+
+func TestOlderThanMinimum(t *testing.T) {
+	c := &Channel{Name: "stable", Nomad: Nomad{Minimum: "2.0.3", Recommended: "2.0.7", Tested: []string{"2.0.7"}}}
+	for version, want := range map[string]bool{
+		"2.0.2":      true,
+		"1.11.3":     true,
+		"2.0.3":      false,
+		"2.0.4":      false,
+		"2.1.0":      false,
+		"3.0.0":      false,
+		"2.0":        false,
+		"v2.0.2":     false,
+		"2.0.2-rc.1": false,
+		"banana":     false,
+		"":           false,
+	} {
+		if got := c.OlderThanMinimum(version); got != want {
+			t.Errorf("OlderThanMinimum(%q) = %t, want %t", version, got, want)
+		}
+	}
+}
