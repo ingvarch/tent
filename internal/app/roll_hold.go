@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ingvarch/tent/internal/cloud"
+	"github.com/ingvarch/tent/internal/model"
 	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/rollout"
 )
@@ -213,12 +214,17 @@ func (r *rollRun) endHold(err error) {
 // withStoppedAdvice returns err, and for reads that no server answered adds the advice to start the first machine
 // of a server or combined group that the last list shows joined and not running: the servers may have lost their
 // quorum with it.
-func (r *rollRun) withStoppedAdvice(err error) error {
+func (r *rollRun) withStoppedAdvice(err error) error { return stoppedAdvice(r.model, r.listed, err) }
+
+// stoppedAdvice returns err, and for reads that no server answered adds the advice to start the first machine of a
+// server or combined group of m that listed shows joined and not running: the servers may have lost their quorum
+// with it.
+func stoppedAdvice(m *model.Cluster, listed []cloud.Instance, err error) error {
 	if !errors.Is(err, nomadops.ErrNotReady) {
 		return err
 	}
-	stopped := slices.DeleteFunc(slices.Clone(r.listed), func(in cloud.Instance) bool {
-		return in.Ready || !in.Joined || !isServerMachine(r.model, in)
+	stopped := slices.DeleteFunc(slices.Clone(listed), func(in cloud.Instance) bool {
+		return in.Ready || !in.Joined || !isServerMachine(m, in)
 	})
 	if len(stopped) == 0 {
 		return err

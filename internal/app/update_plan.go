@@ -17,7 +17,9 @@ import (
 type UpdatePlan struct {
 	Infra *engine.Plan // the infrastructure's changes; nil stands for none
 	Nodes []NodeChange // the node changes in the order they run
-	Nomad *NomadStep   // what update does with Nomad; nil stands for nothing
+	// Purges are the nodes that the update purges from Nomad because no machine has them, by name, then ID.
+	Purges []NodePurge
+	Nomad  *NomadStep // what update does with Nomad; nil stands for nothing
 	// Secrets are the paths of the secrets that the store lacks and the update writes, such as pki/private/ca.key,
 	// relative to the cluster and in the order they are written.
 	Secrets []string
@@ -28,9 +30,28 @@ type UpdatePlan struct {
 	// change of the update. It is empty when none is outdated, and when the release files that tell the node groups'
 	// spec hashes could not be read.
 	Outdated []OutdatedNode
+	// Removed is what an applied update did to the nodes that it removed and to the nodes without a machine.
+	Removed RemovalCounts
 	// Applied reports that Update made every change of the plan; a plan without changes that Update was asked to
 	// apply counts as applied too.
 	Applied bool
+}
+
+// NodePurge is a node that Nomad lists as down and that no machine of the cluster has: a machine that was deleted
+// left it.
+type NodePurge struct {
+	Name    string `json:"name"`
+	Address string `json:"address"`
+	ID      string `json:"id"`    // Nomad's ID of the node
+	Group   string `json:"group"` // the node group in the node's name
+}
+
+// RemovalCounts count the distinct nodes that an applied update drained and purged and the distinct machines that it
+// stopped; the machines that it deleted are among the plan's node changes.
+type RemovalCounts struct {
+	Drained int `json:"drained"`
+	Stopped int `json:"stopped"`
+	Purged  int `json:"purged"`
 }
 
 // NomadStep is what an update does with Nomad once the servers run: bootstrap the ACL system, and wait until the
@@ -41,8 +62,9 @@ type NomadStep struct {
 }
 
 // HasChanges reports whether the plan changes the infrastructure, the nodes, Nomad, the secrets or the completed spec.
+// A purge of a node changes Nomad.
 func (p UpdatePlan) HasChanges() bool {
-	return p.infraChanges() || len(p.Nodes) > 0 || p.Nomad != nil || len(p.stateWrites()) > 0
+	return p.infraChanges() || len(p.Nodes) > 0 || len(p.Purges) > 0 || p.Nomad != nil || len(p.stateWrites()) > 0
 }
 
 // infraChanges reports whether the plan changes the infrastructure.
@@ -62,13 +84,13 @@ func (p UpdatePlan) stateWrites() []string {
 }
 
 // WriteText writes the plan for people: the lines of the infrastructure's changes as the engine writes them, a line
-// for each node change, then a blank line and a line of counts for each of the two parts that changes, a line for the
-// Nomad step, such as "Nomad: bootstrap the ACL system and wait for 3 healthy servers.", and last a line that names
-// the objects it writes to the state store in the order they are written, such as "State: secrets/gossip.key and
-// cluster.completed.yaml will be written.". A plan that changes only the state store is that line alone, and a plan
-// without changes is the line "No changes.". When machines are outdated, a last line names them, such as "Outdated:
-// prod-workers-0 and prod-workers-1; tent rolling-update cluster replaces them.". Operation ids and the secrets'
-// contents do not show.
+// for each node change and for each purge of a node, then a blank line and a line of counts for each of the three
+// parts that changes, a line for the Nomad step, such as "Nomad: bootstrap the ACL system and wait for 3 healthy
+// servers.", and last a line that names the objects it writes to the state store in the order they are written, such
+// as "State: secrets/gossip.key and cluster.completed.yaml will be written.". A plan that changes only the state store
+// is that line alone, and a plan without changes is the line "No changes.". When machines are outdated, a last line
+// names them, such as "Outdated: prod-workers-0 and prod-workers-1; tent rolling-update cluster replaces them.".
+// Operation ids and the secrets' contents do not show.
 func (p UpdatePlan) WriteText(w io.Writer) error {
 	var lines, counts strings.Builder
 	if p.infraChanges() {
@@ -81,6 +103,12 @@ func (p UpdatePlan) WriteText(w io.Writer) error {
 			lines.WriteString(c.line() + "\n")
 		}
 		counts.WriteString(nodeCounts(p.Nodes))
+	}
+	if len(p.Purges) > 0 {
+		for _, n := range p.Purges {
+			lines.WriteString(n.line() + "\n")
+		}
+		fmt.Fprintf(&counts, "Nomad nodes: %d to purge.\n", len(p.Purges))
 	}
 	var text string
 	if counts.Len() > 0 {
@@ -165,13 +193,40 @@ func (c NodeChange) line() string {
 	case NodeWait:
 		return fmt.Sprintf("~ node %s (ID %s, wait until it joins, scrub its user data)", c.Name, c.ID)
 	case NodeDelete:
-		if c.Reason == "" {
-			return fmt.Sprintf("- node %s (ID %s)", c.Name, c.ID)
-		}
-		return fmt.Sprintf("- node %s (ID %s, %s)", c.Name, c.ID, c.Reason)
+		return c.deleteLine()
 	default:
 		return fmt.Sprintf("%s node %s", c.Action, c.Name)
 	}
+}
+
+// deleteLine returns the delete's line in a text plan, with what comes before the delete of a node that joined, such
+// as "- node prod-workers-1 (ID instance-9, surplus, after a drain within 30m0s)".
+func (c NodeChange) deleteLine() string {
+	details := []string{"ID " + c.ID}
+	if c.Reason != "" {
+		details = append(details, c.Reason)
+	}
+	var before []string
+	if c.Drain != "" {
+		before = append(before, "after a drain within "+c.Drain)
+	}
+	if c.Server {
+		before = append(before, "after its server leaves the cluster")
+	}
+	if len(before) > 0 {
+		details = append(details, strings.Join(before, " and "))
+	}
+	return fmt.Sprintf("- node %s (%s)", c.Name, strings.Join(details, ", "))
+}
+
+// line returns the purge's line in a text plan, such as "- Nomad node prod-workers-5 (10.64.0.9, down, no machine)".
+// A node without an address has the line without it.
+func (n NodePurge) line() string {
+	details := "down, no machine"
+	if n.Address != "" {
+		details = n.Address + ", " + details
+	}
+	return fmt.Sprintf("- Nomad node %s (%s)", n.Name, details)
 }
 
 // nodeCounts returns the line that counts node changes by action.
@@ -191,9 +246,10 @@ func countNodes(changes []NodeChange) map[NodeAction]int {
 
 // WriteApplied writes what applying the plan did, on one line in the past tense: the infrastructure's changes, such
 // as "Applied: 3 created, 0 updated, 0 replaced, 0 deleted.", the node changes, such as "Nodes: 6 created, 0 waited
-// for, 0 deleted.", the Nomad step, such as "Nomad: bootstrapped the ACL system; 3 servers are healthy.", and the
-// objects it wrote to the state store, such as "Wrote secrets/gossip.key and cluster.completed.yaml.", each only when
-// that part changed. A plan without changes is the line "No changes.".
+// for, 0 deleted.", what the update removed, such as "Removed: 2 drained, 1 stopped, 2 purged.", the Nomad step, such
+// as "Nomad: bootstrapped the ACL system; 3 servers are healthy.", and the objects it wrote to the state store, such
+// as "Wrote secrets/gossip.key and cluster.completed.yaml.", each only when that part changed. A plan without changes
+// is the line "No changes.".
 func (p UpdatePlan) WriteApplied(w io.Writer) error {
 	var parts []string
 	if p.infraChanges() {
@@ -205,6 +261,10 @@ func (p UpdatePlan) WriteApplied(w io.Writer) error {
 		n := countNodes(p.Nodes)
 		parts = append(parts, fmt.Sprintf("Nodes: %d created, %d waited for, %d deleted.",
 			n[NodeCreate], n[NodeWait], n[NodeDelete]))
+	}
+	if p.Removed != (RemovalCounts{}) {
+		parts = append(parts, fmt.Sprintf("Removed: %d drained, %d stopped, %d purged.",
+			p.Removed.Drained, p.Removed.Stopped, p.Removed.Purged))
 	}
 	if p.Nomad != nil {
 		parts = append(parts, p.Nomad.appliedLine())
@@ -223,23 +283,31 @@ func writeSummary(w io.Writer, parts []string) error {
 	return writeText(w, "the plan", strings.Join(parts, " ")+"\n")
 }
 
-// MarshalJSON encodes the plan as {"applied": true, "infrastructure": <the engine's plan>, "nodes": [...],
-// "outdated": [{"name": "prod-workers-0", "id": "instance-4", "group": "workers", "reason": "spec hash"}], "nomad":
-// {"bootstrap": true, "servers": 3}, "secrets": ["pki/private/ca.key", ...], "completedSpec": true}, the node changes
-// in the order they run and the secrets in the order they are written. Nodes and outdated are [] when there are none,
-// infrastructure is null when the plan has no infrastructure plan, and applied, nomad, secrets and completedSpec are
-// left out when they are false, nil or empty. It leaves HTML characters such as < and & as they are, so the caller's
-// encoder decides whether to escape them.
+// MarshalJSON encodes the plan as {"applied": true, "infrastructure": <the engine's plan>, "nodes": [...], "purges":
+// [{"name": "prod-workers-5", "address": "10.64.0.9", "id": "node-5", "group": "workers"}], "removed": {"drained": 2,
+// "stopped": 1, "purged": 3}, "outdated": [{"name": "prod-workers-0", "id": "instance-4", "group": "workers",
+// "reason": "spec hash"}], "nomad": {"bootstrap": true, "servers": 3}, "secrets": ["pki/private/ca.key", ...],
+// "completedSpec": true}, the node changes in the order they run and the secrets in the order they are written. Nodes
+// and outdated are [] when there are none, infrastructure is null when the plan has no infrastructure plan, and
+// applied, purges, removed, nomad, secrets and completedSpec are left out when they are false, nil, empty or, for
+// removed, all zero. It leaves HTML characters such as < and & as they are, so the caller's encoder decides whether
+// to escape them.
 func (p UpdatePlan) MarshalJSON() ([]byte, error) {
+	var removed *RemovalCounts
+	if p.Removed != (RemovalCounts{}) {
+		removed = &p.Removed
+	}
 	return marshalJSON("the plan", struct {
 		Applied        bool           `json:"applied,omitempty"`
 		Infrastructure *engine.Plan   `json:"infrastructure"`
 		Nodes          []NodeChange   `json:"nodes"`
+		Purges         []NodePurge    `json:"purges,omitempty"`
+		Removed        *RemovalCounts `json:"removed,omitempty"`
 		Outdated       []OutdatedNode `json:"outdated"`
 		Nomad          *NomadStep     `json:"nomad,omitempty"`
 		Secrets        []string       `json:"secrets,omitempty"`
 		CompletedSpec  bool           `json:"completedSpec,omitempty"`
-	}{p.Applied, p.Infra, orEmpty(p.Nodes), orEmpty(p.Outdated), p.Nomad, p.Secrets, p.Completed})
+	}{p.Applied, p.Infra, orEmpty(p.Nodes), p.Purges, removed, orEmpty(p.Outdated), p.Nomad, p.Secrets, p.Completed})
 }
 
 // marshalJSON encodes v, which is what, as JSON on one line, and leaves HTML characters such as < and & as they are.

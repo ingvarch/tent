@@ -142,6 +142,37 @@ func wantDelete(in cloud.Instance, reason string) NodeChange {
 	return NodeChange{Action: NodeDelete, Name: in.Name, ID: in.ID, Reason: reason}
 }
 
+// TestDefaultDrainIsTheDefaultOfTheAPI keeps the drain of a node that no spec of the cluster describes at the default
+// drain timeout of the API.
+func TestDefaultDrainIsTheDefaultOfTheAPI(t *testing.T) {
+	t.Parallel()
+	want, err := time.ParseDuration(v1alpha1.DefaultDrainTimeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaultDrain != want {
+		t.Errorf("defaultDrain = %v, want %v", defaultDrain, want)
+	}
+}
+
+// wantRemoval is the delete of the joined instance in for reason with what comes before it: the drain, when it is not
+// empty, and the server's leaving.
+func wantRemoval(in cloud.Instance, reason, drain string, server bool) NodeChange {
+	c := wantDelete(in, reason)
+	c.Drain, c.Server = drain, server
+	return c
+}
+
+// wantRemovalOf is the removal of the joined instance in for reason as the zero view plans it: with the drain of
+// defaultDrain when the machine runs a client, and with the leaving of its server when it runs a server.
+func wantRemovalOf(in cloud.Instance, reason string) NodeChange {
+	drain := ""
+	if in.Role.RunsClient() {
+		drain = defaultDrain.String()
+	}
+	return wantRemoval(in, reason, drain, in.Role.RunsServer())
+}
+
 func TestPlanNodes(t *testing.T) {
 	t.Parallel()
 	apps := nodeGroup("apps", v1alpha1.RoleClient, 2) // a client group whose name sorts before servers
@@ -195,7 +226,7 @@ func TestPlanNodes(t *testing.T) {
 			instances: []cloud.Instance{
 				member(w2, 0, "i-1", minutes(3)), member(w2, 1, "i-2", minutes(1)), member(w2, 2, "i-3", minutes(2)),
 			},
-			want: []NodeChange{wantDelete(member(w2, 0, "i-1", minutes(3)), "surplus")},
+			want: []NodeChange{wantRemovalOf(member(w2, 0, "i-1", minutes(3)), "surplus")},
 		},
 		{
 			name:   "scale down takes a node without a creation time for the newest",
@@ -203,15 +234,15 @@ func TestPlanNodes(t *testing.T) {
 			instances: []cloud.Instance{
 				member(w2, 0, "i-1", time.Time{}), member(w2, 1, "i-2", minutes(5)), member(w2, 2, "i-3", minutes(1)),
 			},
-			want: []NodeChange{wantDelete(member(w2, 0, "i-1", time.Time{}), "surplus")},
+			want: []NodeChange{wantRemovalOf(member(w2, 0, "i-1", time.Time{}), "surplus")},
 		},
 		{
 			name:      "a group of size 0",
 			groups:    []model.NodeGroup{workers(0)},
 			instances: []cloud.Instance{member(w2, 1, "i-2", minutes(1)), member(w2, 0, "i-1", minutes(2))},
 			want: []NodeChange{
-				wantDelete(member(w2, 0, "i-1", minutes(2)), "surplus"),
-				wantDelete(member(w2, 1, "i-2", minutes(1)), "surplus"),
+				wantRemovalOf(member(w2, 0, "i-1", minutes(2)), "surplus"),
+				wantRemovalOf(member(w2, 1, "i-2", minutes(1)), "surplus"),
 			},
 		},
 		{
@@ -230,8 +261,8 @@ func TestPlanNodes(t *testing.T) {
 				member(old, 1, "i-8", minutes(1)), member(old, 0, "i-7", minutes(1)),
 			},
 			want: []NodeChange{
-				wantDelete(member(old, 0, "i-7", minutes(1)), "not in the spec"),
-				wantDelete(member(old, 1, "i-8", minutes(1)), "not in the spec"),
+				wantRemovalOf(member(old, 0, "i-7", minutes(1)), "not in the spec"),
+				wantRemovalOf(member(old, 1, "i-8", minutes(1)), "not in the spec"),
 			},
 		},
 		{
@@ -512,7 +543,7 @@ func TestPlanNodes(t *testing.T) {
 				wantWait(s3, notReady(member(s3, 1, "i-2", minutes(1)))), wantCreate(s3, 2, "ams"),
 				wantCreate(apps, 1, "ams"),
 				wantDelete(member(apps, 0, "i-5", minutes(2)), "duplicate"),
-				wantDelete(member(old, 0, "i-7", minutes(1)), "not in the spec"),
+				wantRemovalOf(member(old, 0, "i-7", minutes(1)), "not in the spec"),
 			},
 		},
 		{
@@ -544,7 +575,7 @@ func TestPlanNodes(t *testing.T) {
 				inZone(member(w2, 0, "i-1", minutes(1)), "hel1"),
 				inZone(member(w2, 1, "i-2", minutes(2)), "fsn1"),
 			},
-			want: []NodeChange{wantDelete(inZone(member(w2, 1, "i-2", minutes(2)), "fsn1"), "surplus")},
+			want: []NodeChange{wantRemovalOf(inZone(member(w2, 1, "i-2", minutes(2)), "fsn1"), "surplus")},
 		},
 		{
 			name:   "instances of another cluster are left alone",
@@ -651,7 +682,7 @@ func TestPlanNodesSurplusFollowsTheOrderOfTheDecisions(t *testing.T) {
 				stopped(member(s2, 0, "i-1", minutes(1))), member(s2, 1, "i-2", minutes(2)),
 				member(s2, 2, "i-3", minutes(3)),
 			},
-			want:        []NodeChange{wantDelete(stopped(member(s2, 0, "i-1", minutes(1))), "surplus")},
+			want:        []NodeChange{wantRemovalOf(stopped(member(s2, 0, "i-1", minutes(1))), "surplus")},
 			wantServers: []string{"i-2", "i-3"},
 		},
 		{
@@ -660,7 +691,7 @@ func TestPlanNodesSurplusFollowsTheOrderOfTheDecisions(t *testing.T) {
 			instances: []cloud.Instance{
 				stopped(member(w1, 0, "i-1", minutes(1))), member(w1, 1, "i-2", minutes(2)),
 			},
-			want: []NodeChange{wantDelete(stopped(member(w1, 0, "i-1", minutes(1))), "surplus")},
+			want: []NodeChange{wantRemovalOf(stopped(member(w1, 0, "i-1", minutes(1))), "surplus")},
 		},
 		{
 			name:   "of servers that have not joined the newest goes, with or without a private address",
@@ -691,7 +722,7 @@ func TestPlanNodesSurplusFollowsTheOrderOfTheDecisions(t *testing.T) {
 				stopped(member(c2, 0, "i-1", minutes(1))), member(c2, 1, "i-2", minutes(2)),
 				member(c2, 2, "i-3", minutes(3)),
 			},
-			want:        []NodeChange{wantDelete(stopped(member(c2, 0, "i-1", minutes(1))), "surplus")},
+			want:        []NodeChange{wantRemovalOf(stopped(member(c2, 0, "i-1", minutes(1))), "surplus")},
 			wantServers: []string{"i-2", "i-3"},
 		},
 		{
@@ -700,7 +731,7 @@ func TestPlanNodesSurplusFollowsTheOrderOfTheDecisions(t *testing.T) {
 			instances: []cloud.Instance{
 				noAddress(member(servers(1), 0, "i-1", minutes(1))), member(servers(1), 1, "i-2", minutes(2)),
 			},
-			want: []NodeChange{wantDelete(noAddress(member(servers(1), 0, "i-1", minutes(1))), "surplus")},
+			want: []NodeChange{wantRemovalOf(noAddress(member(servers(1), 0, "i-1", minutes(1))), "surplus")},
 		},
 		{
 			name:   "the zone with the most machines loses one before a newer machine elsewhere",
@@ -709,7 +740,7 @@ func TestPlanNodesSurplusFollowsTheOrderOfTheDecisions(t *testing.T) {
 				member(wide, 0, "i-1", minutes(1)), member(wide, 1, "i-2", minutes(2)),
 				inFra(member(wide, 2, "i-3", minutes(3))),
 			},
-			want: []NodeChange{wantDelete(member(wide, 1, "i-2", minutes(2)), "surplus")},
+			want: []NodeChange{wantRemovalOf(member(wide, 1, "i-2", minutes(2)), "surplus")},
 		},
 		{
 			name:   "a joined client without a private address is not chosen",
@@ -717,27 +748,27 @@ func TestPlanNodesSurplusFollowsTheOrderOfTheDecisions(t *testing.T) {
 			instances: []cloud.Instance{
 				member(w1, 0, "i-1", minutes(1)), noAddress(member(w1, 1, "i-2", minutes(2))),
 			},
-			want: []NodeChange{wantDelete(member(w1, 0, "i-1", minutes(1)), "surplus")},
+			want: []NodeChange{wantRemovalOf(member(w1, 0, "i-1", minutes(1)), "surplus")},
 		},
 		{
 			name:      "without a reading no machine is outdated, whatever its hash",
 			groups:    []model.NodeGroup{w1},
 			instances: []cloud.Instance{withHash(w1a, "x"), withHash(w1b, "")},
-			want:      []NodeChange{wantDelete(withHash(w1b, ""), "surplus")},
+			want:      []NodeChange{wantRemovalOf(withHash(w1b, ""), "surplus")},
 		},
 		{
 			name:      "an outdated machine goes first by the hash of its group",
 			groups:    []model.NodeGroup{w1},
 			instances: []cloud.Instance{withHash(w1a, "old"), withHash(w1b, "new")},
 			view:      shrinkView{hash: func(string) string { return "new" }},
-			want:      []NodeChange{wantDelete(withHash(w1a, "old"), "surplus")},
+			want:      []NodeChange{wantRemovalOf(withHash(w1a, "old"), "surplus")},
 		},
 		{
 			name:      "a machine to replace goes first",
 			groups:    []model.NodeGroup{w1},
 			instances: []cloud.Instance{withHash(w1a, "h"), withHash(w1b, "h")},
 			view:      shrinkView{hash: func(string) string { return "h" }, forced: map[string]bool{"i-1": true}},
-			want:      []NodeChange{wantDelete(withHash(w1a, "h"), "surplus")},
+			want:      []NodeChange{wantRemovalOf(withHash(w1a, "h"), "surplus")},
 		},
 		{
 			name:      "the reading of Nomad is used: the machine of an ineligible node goes first",
@@ -746,14 +777,14 @@ func TestPlanNodesSurplusFollowsTheOrderOfTheDecisions(t *testing.T) {
 			view: shrinkView{read: true, nomad: rollout.Nomad{
 				Nodes: []rollout.Node{readNode(w1a, false), readNode(w1b, true)},
 			}},
-			want: []NodeChange{wantDelete(w1a, "surplus")},
+			want: []NodeChange{wantRemovalOf(w1a, "surplus")},
 		},
 		{
 			name:      "the reading of Nomad is used: without nodes a stopped client goes no sooner than a running one",
 			groups:    []model.NodeGroup{w1},
 			instances: []cloud.Instance{stopped(w1a), w1b},
 			view:      shrinkView{read: true},
-			want:      []NodeChange{wantDelete(w1b, "surplus")},
+			want:      []NodeChange{wantRemovalOf(w1b, "surplus")},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -774,6 +805,206 @@ func TestPlanNodesSurplusFollowsTheOrderOfTheDecisions(t *testing.T) {
 				t.Errorf("the servers that stay (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// TestPlanNodesRemovalsOfJoinedNodes gives a delete of a machine that joined what comes before it: the drain, for a
+// client and a combined node, and the leaving of the server, for a server and a combined node. A machine of a group
+// that the specs lack gets it only when it is a client, no other machine of its name joined, and its group label
+// is set. A machine that never joined, a duplicate and any other machine that joined get none.
+func TestPlanNodesRemovalsOfJoinedNodes(t *testing.T) {
+	t.Parallel()
+	w1, s1, c1 := workers(1), servers(1), nodeGroup("nodes", v1alpha1.RoleCombined, 1)
+	old := nodeGroup("old", v1alpha1.RoleClient, 2) // a group that is no longer in the spec
+	oldServers := nodeGroup("db", v1alpha1.RoleServer, 2)
+	unlabelled := func(in cloud.Instance) cloud.Instance {
+		return changed(in, func(in *cloud.Instance) { in.Group = "" })
+	}
+	halfHour := func(group string) time.Duration {
+		if group == "workers" {
+			return 30 * time.Minute
+		}
+		return 2 * time.Hour
+	}
+	for _, tc := range []struct {
+		name      string
+		groups    []model.NodeGroup
+		instances []cloud.Instance
+		view      shrinkView
+		want      []NodeChange
+	}{
+		{
+			name:      "a joined client drains within the deadline of its group",
+			groups:    []model.NodeGroup{w1},
+			instances: []cloud.Instance{member(w1, 0, "i-1", minutes(1)), member(w1, 1, "i-2", minutes(2))},
+			view:      shrinkView{drain: halfHour},
+			want:      []NodeChange{wantRemoval(member(w1, 1, "i-2", minutes(2)), "surplus", "30m0s", false)},
+		},
+		{
+			name:      "without a deadline in the view a joined client drains for the default of the API",
+			groups:    []model.NodeGroup{w1},
+			instances: []cloud.Instance{member(w1, 0, "i-1", minutes(1)), member(w1, 1, "i-2", minutes(2))},
+			want:      []NodeChange{wantRemoval(member(w1, 1, "i-2", minutes(2)), "surplus", "1h0m0s", false)},
+		},
+		{
+			name:      "a joined server leaves the cluster and does not drain",
+			groups:    []model.NodeGroup{s1},
+			instances: []cloud.Instance{member(s1, 0, "i-1", minutes(1)), member(s1, 1, "i-2", minutes(2))},
+			view:      shrinkView{drain: halfHour},
+			want:      []NodeChange{wantRemoval(member(s1, 1, "i-2", minutes(2)), "surplus", "", true)},
+		},
+		{
+			name:      "a joined combined node drains and leaves the cluster",
+			groups:    []model.NodeGroup{c1},
+			instances: []cloud.Instance{member(c1, 0, "i-1", minutes(1)), member(c1, 1, "i-2", minutes(2))},
+			view:      shrinkView{drain: halfHour},
+			want:      []NodeChange{wantRemoval(member(c1, 1, "i-2", minutes(2)), "surplus", "2h0m0s", true)},
+		},
+		{
+			name:   "a client that never joined is deleted as before, and so is a server",
+			groups: []model.NodeGroup{w1, s1},
+			instances: []cloud.Instance{
+				member(w1, 0, "i-1", minutes(1)), unjoined(member(w1, 1, "i-2", minutes(2))),
+				member(s1, 0, "i-3", minutes(1)), unjoined(member(s1, 1, "i-4", minutes(2))),
+			},
+			want: []NodeChange{
+				wantDelete(unjoined(member(s1, 1, "i-4", minutes(2))), "surplus"),
+				wantDelete(unjoined(member(w1, 1, "i-2", minutes(2))), "surplus"),
+			},
+		},
+		{
+			name:      "a joined client of a group that the specs lack drains for the default of the API",
+			groups:    []model.NodeGroup{w1},
+			instances: []cloud.Instance{member(w1, 0, "i-1", minutes(1)), member(old, 0, "i-7", minutes(1))},
+			view:      shrinkView{drain: halfHour},
+			want:      []NodeChange{wantRemoval(member(old, 0, "i-7", minutes(1)), "not in the spec", "1h0m0s", false)},
+		},
+		{
+			name:   "of two machines of a removed group with one name, the one that joined drains",
+			groups: []model.NodeGroup{w1},
+			instances: []cloud.Instance{
+				member(w1, 0, "i-1", minutes(1)),
+				unjoined(member(old, 0, "i-7", minutes(1))), member(old, 0, "i-8", minutes(2)),
+			},
+			want: []NodeChange{
+				wantDelete(unjoined(member(old, 0, "i-7", minutes(1))), "not in the spec"),
+				wantRemoval(member(old, 0, "i-8", minutes(2)), "not in the spec", "1h0m0s", false),
+			},
+		},
+		{
+			name:   "two machines of a removed group with one name that both joined get no drain",
+			groups: []model.NodeGroup{w1},
+			instances: []cloud.Instance{
+				member(w1, 0, "i-1", minutes(1)), member(old, 0, "i-7", minutes(1)), member(old, 0, "i-8", minutes(2)),
+				member(old, 1, "i-9", minutes(3)),
+			},
+			want: []NodeChange{
+				wantDelete(member(old, 0, "i-7", minutes(1)), "not in the spec"),
+				wantDelete(member(old, 0, "i-8", minutes(2)), "not in the spec"),
+				wantRemoval(member(old, 1, "i-9", minutes(3)), "not in the spec", "1h0m0s", false),
+			},
+		},
+		{
+			name:   "a joined machine of a removed server group gets nothing, and neither does one without a role",
+			groups: []model.NodeGroup{w1},
+			instances: []cloud.Instance{
+				member(w1, 0, "i-1", minutes(1)), member(oldServers, 0, "i-7", minutes(1)),
+				labelled(member(old, 1, "i-8", minutes(1)), ""),
+			},
+			want: []NodeChange{
+				wantDelete(member(oldServers, 0, "i-7", minutes(1)), "not in the spec"),
+				wantDelete(labelled(member(old, 1, "i-8", minutes(1)), ""), "not in the spec"),
+			},
+		},
+		{
+			name:   "a joined client without a group label gets nothing",
+			groups: []model.NodeGroup{w1},
+			instances: []cloud.Instance{
+				member(w1, 0, "i-1", minutes(1)), unlabelled(member(old, 0, "i-7", minutes(1))),
+			},
+			want: []NodeChange{wantDelete(unlabelled(member(old, 0, "i-7", minutes(1))), "not in the spec")},
+		},
+		{
+			name:   "a joined duplicate gets nothing",
+			groups: []model.NodeGroup{w1},
+			instances: []cloud.Instance{
+				member(w1, 0, "i-1", minutes(1)), member(w1, 0, "i-2", minutes(2)),
+			},
+			want: []NodeChange{wantDelete(member(w1, 0, "i-2", minutes(2)), "duplicate")},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := &model.Cluster{Name: "prod", Groups: tc.groups}
+			got, _ := planNodes(m, slices.Clone(tc.instances), nil, nil, tc.view)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("the changes (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestPlanNodesTakesADrainingNodeBeforeOneThatNeverJoined reads Nomad's nodes for the surplus. A group of size 2 has a
+// joined machine, a joined one whose node drains and one that never joined: the one that drains goes, with a drain,
+// and the one that never joined stays and is waited for.
+func TestPlanNodesTakesADrainingNodeBeforeOneThatNeverJoined(t *testing.T) {
+	t.Parallel()
+	w2 := workers(2)
+	stays, drains := member(w2, 0, "i-1", minutes(1)), member(w2, 1, "i-2", minutes(2))
+	fresh := unjoined(member(w2, 2, "i-3", minutes(3)))
+	view := shrinkView{read: true, nomad: rollout.Nomad{Nodes: []rollout.Node{
+		{ID: "n-1", Name: stays.Name, Address: stays.PrivateIP, Status: "ready", Eligible: true},
+		{ID: "n-2", Name: drains.Name, Address: drains.PrivateIP, Status: "ready", Draining: true},
+	}}}
+	m := &model.Cluster{Name: "prod", Groups: []model.NodeGroup{w2}}
+	got, _ := planNodes(m, []cloud.Instance{stays, drains, fresh}, nil, nil, view)
+	want := []NodeChange{wantJoinWait(w2, fresh), wantRemoval(drains, "surplus", "1h0m0s", false)}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("the changes (-want +got):\n%s", diff)
+	}
+}
+
+// TestPlanNodesOrdersTheDeletes puts the deletes in the order of the run: the machines that never joined by name, then
+// the removals of the server and combined groups by group, in the order in which each group loses its servers, then
+// the removals of the client groups by group and name. The groups web and web-2 tell the order of the groups from the
+// order of the names: prod-web-2-0 sorts before prod-web-9.
+func TestPlanNodesOrdersTheDeletes(t *testing.T) {
+	t.Parallel()
+	s1, c1 := servers(1), nodeGroup("nodes", v1alpha1.RoleCombined, 1)
+	a1, w1 := nodeGroup("apps", v1alpha1.RoleClient, 1), workers(1)
+	web, web2 := nodeGroup("web", v1alpha1.RoleClient, 0), nodeGroup("web-2", v1alpha1.RoleClient, 0)
+	old := nodeGroup("old", v1alpha1.RoleClient, 1)
+	instances := []cloud.Instance{
+		member(s1, 0, "i-1", minutes(1)), member(s1, 1, "i-2", minutes(2)), member(s1, 2, "i-3", minutes(3)),
+		member(c1, 0, "i-4", minutes(1)), member(c1, 1, "i-5", minutes(2)),
+		member(a1, 0, "i-6", minutes(1)), member(a1, 1, "i-7", minutes(2)),
+		member(w1, 0, "i-8", minutes(1)), member(w1, 1, "i-9", minutes(2)), member(w1, 2, "i-10", minutes(3)),
+		unjoined(member(w1, 3, "i-13", minutes(4))),
+		unjoined(member(old, 0, "i-11", minutes(1))), member(old, 1, "i-12", minutes(2)),
+		member(web, 9, "i-14", minutes(1)), member(web2, 0, "i-15", minutes(1)),
+	}
+	want := []NodeChange{
+		wantDelete(unjoined(member(old, 0, "i-11", minutes(1))), "not in the spec"),
+		wantDelete(unjoined(member(w1, 3, "i-13", minutes(4))), "surplus"),
+		wantRemoval(member(c1, 1, "i-5", minutes(2)), "surplus", "1h0m0s", true),
+		wantRemoval(member(s1, 2, "i-3", minutes(3)), "surplus", "", true),
+		wantRemoval(member(s1, 1, "i-2", minutes(2)), "surplus", "", true),
+		wantRemoval(member(a1, 1, "i-7", minutes(2)), "surplus", "1h0m0s", false),
+		wantRemoval(member(old, 1, "i-12", minutes(2)), "not in the spec", "1h0m0s", false),
+		wantRemoval(member(web, 9, "i-14", minutes(1)), "not in the spec", "1h0m0s", false),
+		wantRemoval(member(web2, 0, "i-15", minutes(1)), "not in the spec", "1h0m0s", false),
+		wantRemoval(member(w1, 1, "i-9", minutes(2)), "surplus", "1h0m0s", false),
+		wantRemoval(member(w1, 2, "i-10", minutes(3)), "surplus", "1h0m0s", false),
+	}
+	m := &model.Cluster{Name: "prod", Groups: []model.NodeGroup{s1, c1, a1, w1}}
+	got, _ := planNodes(m, slices.Clone(instances), nil, nil, shrinkView{})
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("the changes (-want +got):\n%s", diff)
+	}
+	slices.Reverse(instances)
+	reversed, _ := planNodes(m, instances, nil, nil, shrinkView{})
+	if diff := cmp.Diff(want, reversed); diff != "" {
+		t.Errorf("the changes of the machines in reverse order (-in order +reversed):\n%s", diff)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"sigs.k8s.io/yaml"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/app"
@@ -146,6 +147,19 @@ func exampleNodes() []app.NodeChange {
 		{Action: app.NodeDelete, Name: "prod-old-0", ID: "instance-7", Reason: "not in the spec"},
 		{Action: app.NodeDelete, Name: "prod-workers-0", ID: "instance-5", Reason: "duplicate"},
 		{Action: app.NodeDelete, Name: "prod-workers-3", ID: "instance-8", Reason: "surplus"},
+		{Action: app.NodeDelete, Name: "prod-all-2", ID: "instance-3", Reason: "surplus", Drain: "1h0m0s", Server: true},
+		{Action: app.NodeDelete, Name: "prod-servers-4", ID: "instance-11", Reason: "surplus", Server: true},
+		{Action: app.NodeDelete, Name: "prod-old-1", ID: "instance-10", Reason: "not in the spec", Drain: "1h0m0s"},
+		{Action: app.NodeDelete, Name: "prod-workers-1", ID: "instance-9", Reason: "surplus", Drain: "30m0s"},
+	}
+}
+
+// examplePurges returns the nodes without a machine that a plan purges, by name: one of a group of the specs and one
+// of a group that the specs lack.
+func examplePurges() []app.NodePurge {
+	return []app.NodePurge{
+		{Name: "prod-old-2", Address: "10.64.0.7", ID: "node-8", Group: "old"},
+		{Name: "prod-workers-5", Address: "10.64.0.9", ID: "node-5", Group: "workers"},
 	}
 }
 
@@ -165,8 +179,9 @@ func someNodes() []app.NodeChange {
 func exampleUpdate(t *testing.T) app.UpdatePlan {
 	t.Helper()
 	return app.UpdatePlan{
-		Infra: exampleInfra(t), Nodes: exampleNodes(), Nomad: &app.NomadStep{Bootstrap: true, Servers: 3},
-		Secrets: secretNames, Completed: true, Outdated: someOutdated(),
+		Infra: exampleInfra(t), Nodes: exampleNodes(), Purges: examplePurges(),
+		Nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, Secrets: secretNames, Completed: true,
+		Outdated: someOutdated(),
 	}
 }
 
@@ -307,6 +322,62 @@ Nodes: 1 to create, 0 to wait for, 1 to delete.
 				"Nodes: 0 to create, 1 to wait for, 0 to delete.\n",
 		},
 		{
+			"a delete that drains a client first",
+			app.UpdatePlan{Nodes: []app.NodeChange{
+				{Action: app.NodeDelete, Name: "prod-workers-1", ID: "instance-9", Reason: "surplus", Drain: "30m0s"},
+			}},
+			"- node prod-workers-1 (ID instance-9, surplus, after a drain within 30m0s)\n\n" +
+				"Nodes: 0 to create, 0 to wait for, 1 to delete.\n",
+		},
+		{
+			"a delete that removes a server first",
+			app.UpdatePlan{Nodes: []app.NodeChange{
+				{Action: app.NodeDelete, Name: "prod-servers-4", ID: "instance-5", Reason: "surplus", Server: true},
+			}},
+			"- node prod-servers-4 (ID instance-5, surplus, after its server leaves the cluster)\n\n" +
+				"Nodes: 0 to create, 0 to wait for, 1 to delete.\n",
+		},
+		{
+			"a delete that drains a combined node and removes its server first",
+			app.UpdatePlan{Nodes: []app.NodeChange{{
+				Action: app.NodeDelete, Name: "prod-all-2", ID: "instance-3", Reason: "surplus", Drain: "1h0m0s",
+				Server: true,
+			}}},
+			"- node prod-all-2 (ID instance-3, surplus, after a drain within 1h0m0s and after its server leaves the " +
+				"cluster)\n\nNodes: 0 to create, 0 to wait for, 1 to delete.\n",
+		},
+		{
+			"a delete with no reason that drains",
+			app.UpdatePlan{Nodes: []app.NodeChange{
+				{Action: app.NodeDelete, Name: "prod-x-0", ID: "i-1", Drain: "1h0m0s"},
+			}},
+			"- node prod-x-0 (ID i-1, after a drain within 1h0m0s)\n\nNodes: 0 to create, 0 to wait for, 1 to delete.\n",
+		},
+		{
+			"a purge alone",
+			app.UpdatePlan{Purges: examplePurges()[1:]},
+			"- Nomad node prod-workers-5 (10.64.0.9, down, no machine)\n\nNomad nodes: 1 to purge.\n",
+		},
+		{
+			"two purges after the node changes",
+			app.UpdatePlan{Nodes: someNodes(), Purges: examplePurges()},
+			"+ node prod-workers-1 (client, vc2-4c-8gb, ams)\n- node prod-workers-3 (ID instance-8, surplus)\n" +
+				"- Nomad node prod-old-2 (10.64.0.7, down, no machine)\n" +
+				"- Nomad node prod-workers-5 (10.64.0.9, down, no machine)\n\n" +
+				"Nodes: 1 to create, 0 to wait for, 1 to delete.\nNomad nodes: 2 to purge.\n",
+		},
+		{
+			"a purge of a node with no address",
+			app.UpdatePlan{Purges: []app.NodePurge{{Name: "prod-workers-5", ID: "node-5", Group: "workers"}}},
+			"- Nomad node prod-workers-5 (down, no machine)\n\nNomad nodes: 1 to purge.\n",
+		},
+		{
+			"a purge and the Nomad step",
+			app.UpdatePlan{Purges: examplePurges()[1:], Nomad: &app.NomadStep{Servers: 3}},
+			"- Nomad node prod-workers-5 (10.64.0.9, down, no machine)\n\nNomad nodes: 1 to purge.\n" +
+				"Nomad: wait for 3 healthy servers.\n",
+		},
+		{
 			"an unknown action",
 			app.UpdatePlan{Nodes: []app.NodeChange{{Name: "prod-x-0", ID: "i-1"}}},
 			"NodeAction(0) node prod-x-0\n\nNodes: 0 to create, 0 to wait for, 0 to delete.\n",
@@ -337,6 +408,8 @@ func TestUpdatePlanHasChanges(t *testing.T) {
 		{"a secret", app.UpdatePlan{Infra: infraPlan(t, nil), Secrets: secretNames[3:]}, true},
 		{"the Nomad step", app.UpdatePlan{Infra: infraPlan(t, nil), Nomad: &app.NomadStep{Servers: 3}}, true},
 		{"the Nomad bootstrap", app.UpdatePlan{Nomad: &app.NomadStep{Bootstrap: true, Servers: 3}}, true},
+		{"a purge", app.UpdatePlan{Infra: infraPlan(t, nil), Purges: examplePurges()[:1]}, true},
+		{"what an applied update removed", app.UpdatePlan{Removed: app.RemovalCounts{Drained: 1}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.plan.HasChanges(); got != tc.want {
@@ -378,6 +451,118 @@ func TestUpdatePlanJSONWithoutInfrastructure(t *testing.T) {
 		if got := encodeJSON(t, tc.plan, ""); got != tc.want {
 			t.Errorf("JSON = %q, want %q", got, tc.want)
 		}
+	}
+}
+
+// TestUpdatePlanJSONOfRemovals shows the drain and the server of a delete, the purges and what an applied update
+// removed, each only when there is something to show.
+func TestUpdatePlanJSONOfRemovals(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		plan app.UpdatePlan
+		want string
+	}{
+		{
+			"a delete that drains and removes a server",
+			app.UpdatePlan{Nodes: []app.NodeChange{{
+				Action: app.NodeDelete, Name: "prod-all-2", ID: "instance-3", Reason: "surplus", Drain: "1h0m0s",
+				Server: true,
+			}}},
+			`{"infrastructure":null,"nodes":[{"action":"delete","name":"prod-all-2","id":"instance-3",` +
+				`"reason":"surplus","drain":"1h0m0s","server":true}],"outdated":[]}` + "\n",
+		},
+		{
+			"a purge",
+			app.UpdatePlan{Purges: examplePurges()[1:]},
+			`{"infrastructure":null,"nodes":[],"purges":[{"name":"prod-workers-5","address":"10.64.0.9",` +
+				`"id":"node-5","group":"workers"}],"outdated":[]}` + "\n",
+		},
+		{
+			"what an applied update removed",
+			app.UpdatePlan{Applied: true, Removed: app.RemovalCounts{Drained: 2, Stopped: 1, Purged: 3}},
+			`{"applied":true,"infrastructure":null,"nodes":[],"removed":{"drained":2,"stopped":1,"purged":3},` +
+				`"outdated":[]}` + "\n",
+		},
+		{
+			"a count of one kind alone",
+			app.UpdatePlan{Removed: app.RemovalCounts{Purged: 1}},
+			`{"infrastructure":null,"nodes":[],"removed":{"drained":0,"stopped":0,"purged":1},"outdated":[]}` + "\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := encodeJSON(t, tc.plan, ""); got != tc.want {
+				t.Errorf("JSON = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUpdatePlanYAMLOfRemovals prints a plan with a removal of each kind, a delete without a drain and a purge, and
+// what an applied update removed, as the command's -o yaml does, and compares the lines of the removals and the
+// purges.
+func TestUpdatePlanYAMLOfRemovals(t *testing.T) {
+	t.Parallel()
+	plan := app.UpdatePlan{
+		Applied: true,
+		Nodes: []app.NodeChange{
+			{Action: app.NodeDelete, Name: "prod-workers-1", ID: "instance-5", Reason: "surplus", Drain: "10m0s"},
+			{Action: app.NodeDelete, Name: "prod-servers-2", ID: "instance-3", Reason: "surplus", Server: true},
+			{
+				Action: app.NodeDelete, Name: "prod-all-2", ID: "instance-4", Reason: "surplus", Drain: "1h0m0s",
+				Server: true,
+			},
+			{Action: app.NodeDelete, Name: "prod-workers-2", ID: "instance-6", Reason: "not registered"},
+		},
+		Purges:  examplePurges(),
+		Removed: app.RemovalCounts{Drained: 2, Stopped: 2, Purged: 3},
+	}
+
+	got, err := yaml.Marshal(plan)
+
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	want := `applied: true
+infrastructure: null
+nodes:
+- action: delete
+  drain: 10m0s
+  id: instance-5
+  name: prod-workers-1
+  reason: surplus
+- action: delete
+  id: instance-3
+  name: prod-servers-2
+  reason: surplus
+  server: true
+- action: delete
+  drain: 1h0m0s
+  id: instance-4
+  name: prod-all-2
+  reason: surplus
+  server: true
+- action: delete
+  id: instance-6
+  name: prod-workers-2
+  reason: not registered
+outdated: []
+purges:
+- address: 10.64.0.7
+  group: old
+  id: node-8
+  name: prod-old-2
+- address: 10.64.0.9
+  group: workers
+  id: node-5
+  name: prod-workers-5
+removed:
+  drained: 2
+  purged: 3
+  stopped: 2
+`
+	if diff := cmp.Diff(want, string(got)); diff != "" {
+		t.Errorf("YAML (-want +got):\n%s", diff)
 	}
 }
 
@@ -465,7 +650,7 @@ func TestUpdatePlanWriteApplied(t *testing.T) {
 		{
 			"every part",
 			exampleUpdate(t),
-			"Applied: 2 created, 1 updated, 0 replaced, 1 deleted. Nodes: 2 created, 1 waited for, 3 deleted. " +
+			"Applied: 2 created, 1 updated, 0 replaced, 1 deleted. Nodes: 2 created, 1 waited for, 7 deleted. " +
 				"Nomad: bootstrapped the ACL system; 3 servers are healthy. " +
 				"Wrote pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key, secrets/acl-bootstrap-token, " +
 				"cluster.completed.yaml and nomad/bootstrapped.\n",
@@ -495,6 +680,30 @@ func TestUpdatePlanWriteApplied(t *testing.T) {
 			"the Nomad step for one server",
 			app.UpdatePlan{Nomad: &app.NomadStep{Servers: 1}},
 			"Nomad: 1 server is healthy.\n",
+		},
+		{
+			"what the update removed, after the nodes",
+			app.UpdatePlan{
+				Nodes: someNodes(), Removed: app.RemovalCounts{Drained: 2, Stopped: 1, Purged: 2},
+				Nomad: &app.NomadStep{Servers: 3},
+			},
+			"Nodes: 1 created, 0 waited for, 1 deleted. Removed: 2 drained, 1 stopped, 2 purged. " +
+				"Nomad: 3 servers are healthy.\n",
+		},
+		{
+			"a purge alone",
+			app.UpdatePlan{Removed: app.RemovalCounts{Purged: 1}},
+			"Removed: 0 drained, 0 stopped, 1 purged.\n",
+		},
+		{
+			"a stop alone",
+			app.UpdatePlan{Removed: app.RemovalCounts{Stopped: 1}},
+			"Removed: 0 drained, 1 stopped, 0 purged.\n",
+		},
+		{
+			"a drain alone",
+			app.UpdatePlan{Removed: app.RemovalCounts{Drained: 1}},
+			"Removed: 1 drained, 0 stopped, 0 purged.\n",
 		},
 		{"nothing", app.UpdatePlan{Infra: infraPlan(t, nil)}, "No changes.\n"},
 	} {
