@@ -138,16 +138,21 @@ func (v Validation) MarshalJSON() ([]byte, error) {
 // cluster is pinned to. It lists the cluster's machines in the cloud, and counts as a failure each change that an
 // update would make to the nodes, and each machine that stays and that the cloud does not report as running. It names
 // a missing server or combined machine as an update would, from the highest name index of its group in the store, and
-// fails with an error when that object holds no index. Then it checks Nomad and the certificates: see checkNomad. It
-// reads the store, the cloud and Nomad and writes nothing, takes no lock and reads who holds it: Lock is that holder.
+// fails with an error when that object holds no index. It asks Nomad before it plans the machines (askCluster), so
+// that it names the surplus machines as an update does, by what Nomad reports; when it cannot ask Nomad, it names them
+// by the joined labels, which it also does when an update would plan without a reading of Nomad. From the nodes that
+// Nomad lists it tells the clients that never registered, as an update does: such a machine is the failure
+// client-not-registered and does not stay, and the node that an update creates in its place is machine-missing. Then
+// it checks Nomad and the certificates: see checkNomad. It reads the store, the cloud and Nomad and writes nothing,
+// takes no lock and reads who holds it: Lock is that holder.
 // A lock whose lease cannot be read is a warning, not a failure. A service without a Nomad client fails with an error.
 //
 // The warnings are those that every change of the cluster gives, the one about a cluster that runs in a single failure
 // domain, those about certificates that end within 30 days, the one that names the machines that stay and that a
 // rolling update replaces, or says that tent could not tell which they are, and the one about a lock that cannot be
-// read. They are returned, and told to OnWarning. They never make the cluster invalid. Telling which machines are
-// outdated reads the release files that the nodes download, unless no machine stays or the store lacks the cluster's
-// secrets.
+// read. They are returned, and told to OnWarning. They never make the cluster invalid. The spec hashes, which choose
+// the surplus machines and tell which machines are outdated, come from the release files that the nodes download;
+// they are read unless the cloud lists no machine of the cluster or the store lacks the cluster's secrets.
 func (s *Service) ValidateCluster(ctx context.Context, cluster string) (_ Validation, err error) {
 	defer func() { err = stopped(ctx, err) }()
 	l, err := s.layout(ctx, cluster)
@@ -177,11 +182,17 @@ func (s *Service) ValidateCluster(ctx context.Context, cluster string) (_ Valida
 	if err != nil {
 		return Validation{}, err
 	}
-	set := planMachines(c.m, instances, names.nexts())
-	found, err := s.checkNomad(ctx, l, c, set, s.now())
+	answer, err := s.askCluster(ctx, l, c, instances)
 	if err != nil {
 		return Validation{}, err
 	}
+	builder, builderErr := s.hashBuilder(ctx, p, c, answer.secrets, instances)
+	if ctx.Err() != nil && builderErr != nil {
+		return Validation{}, builderErr
+	}
+	view, seen := answer.shrinkView(c.m, instances, builder), answer.clientsSeen(c.m.Name, instances, s.now())
+	set := planMachines(c.m, instances, names.nexts(), view, seen)
+	found := checkNomad(c, set, answer, s.now())
 	v := Validation{
 		Cluster: c.m.Name, NomadVersion: c.objs.Cluster.Spec.Nomad.Version, Failures: set.failures(c.m),
 		Warnings: warnings(c.objs.Cluster, c.objs.NodeGroups, c.ch), Lock: lease,
@@ -194,11 +205,7 @@ func (s *Service) ValidateCluster(ctx context.Context, cluster string) (_ Valida
 			": an outage there takes the whole cluster down")
 	}
 	v.Warnings = append(v.Warnings, found.warnings...)
-	outdated, err := s.outdatedFinding(ctx, p, c, set.stays, found.secrets)
-	if err != nil {
-		return Validation{}, err
-	}
-	if outdated != "" {
+	if outdated := outdatedFinding(c.m, builder, builderErr, set.stays); outdated != "" {
 		v.Warnings = append(v.Warnings, outdated)
 	}
 	if lockWarning != "" {
@@ -208,24 +215,31 @@ func (s *Service) ValidateCluster(ctx context.Context, cluster string) (_ Valida
 	return v, nil
 }
 
+// hashBuilder makes the builder that tells the spec hashes of the cluster's nodes, from the stored secrets. It returns
+// nil and no error when the store lacks some secret (secrets is nil) or the cloud lists no machine of the cluster. An
+// error is a fault of the release files, or the end of ctx.
+func (s *Service) hashBuilder(ctx context.Context, p cloud.Provider, c loadedCluster, secrets *clusterSecrets,
+	instances []cloud.Instance,
+) (*nodeBuilder, error) {
+	if secrets == nil || !slices.ContainsFunc(instances, func(in cloud.Instance) bool { return in.Cluster == c.m.Name }) {
+		return nil, nil
+	}
+	return s.planBuilder(ctx, p, c.m, c.objs, c.ch, *secrets, assetCache{})
+}
+
 // outdatedFinding returns the warning about the machines among stays that a rolling update replaces, "" for none, or
-// the warning that tent could not tell which they are when the release files that tell the spec hashes cannot be read.
-// A cluster whose secrets the store lacks (secrets is nil) has the failure nomad-not-set-up and no report. The only
-// error is the end of ctx.
-func (s *Service) outdatedFinding(ctx context.Context, p cloud.Provider, c loadedCluster, stays []cloud.Instance,
-	secrets *clusterSecrets,
-) (string, error) {
-	if len(stays) == 0 || secrets == nil {
-		return "", nil
-	}
-	builder, err := s.planBuilder(ctx, p, c.m, c.objs, c.ch, *secrets, assetCache{})
+// the warning that tent could not tell which they are when the release files that tell the spec hashes cannot be read
+// (builderErr). No machine staying, or no builder without an error, gives "".
+func outdatedFinding(m *model.Cluster, builder *nodeBuilder, builderErr error, stays []cloud.Instance) string {
 	switch {
-	case ctx.Err() != nil && err != nil:
-		return "", err
-	case err != nil:
-		return couldNotTellOutdated + err.Error(), nil
+	case len(stays) == 0:
+		return ""
+	case builderErr != nil:
+		return couldNotTellOutdated + builderErr.Error()
+	case builder == nil:
+		return ""
 	}
-	return outdatedWarning(outdatedNodes(c.m, builder, stays)), nil
+	return outdatedWarning(outdatedNodes(m, builder, stays))
 }
 
 // lockHolder returns the lease of the cluster's lock without taking it: nil when the lock is free, and the zero lease
@@ -253,13 +267,17 @@ type machineSet struct {
 }
 
 // planMachines plans the node changes for the machines instances of the cluster m, as an update does without any
-// machine that never registered, with the indexes next that tent remembers for the names of new servers.
-func planMachines(m *model.Cluster, instances []cloud.Instance, next map[string]int) machineSet {
-	changes, _ := planNodes(m, instances, nil, next, shrinkView{})
+// machine that never registered unless seen says which they are, with the indexes next that tent remembers for the
+// names of new servers, and with view for the choice of the machines that a group loses.
+func planMachines(m *model.Cluster, instances []cloud.Instance, next map[string]int, view shrinkView,
+	seen clientsSeen,
+) machineSet {
+	changes, servers := planNodes(m, instances, nil, next, shrinkView{})
+	changes, _, unregistered := seen.plan(m, instances, next, view, changes, servers)
 	set := machineSet{changes: changes}
 	set.owned = slices.DeleteFunc(slices.Clone(instances), func(in cloud.Instance) bool { return in.Cluster != m.Name })
 	slices.SortStableFunc(set.owned, compareAge)
-	set.keeps = keepers(m, set.owned, nil)
+	set.keeps = keepers(m, set.owned, unregistered)
 	gone := map[string]bool{}
 	for _, c := range changes {
 		if c.Action == NodeDelete {
@@ -339,6 +357,9 @@ func deleteFailure(m *model.Cluster, c NodeChange, in, keeper cloud.Instance) Fa
 	case reasonDuplicate:
 		f.Check = checkMachineDuplicate
 		f.Detail = id + " has the name of machine ID " + keeper.ID
+	case reasonNotRegistered:
+		f.Check = checkClientNotRegistered
+		f.Detail = noClientDetail(in)
 	default:
 		f.Check = checkMachineUnknown
 		f.Detail = id + " is of node group " + in.Group + ", which the specs do not have"

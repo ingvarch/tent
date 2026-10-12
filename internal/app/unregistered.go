@@ -82,6 +82,28 @@ func notRegistered(nodes []nomadops.Node, stale, servers []cloud.Instance) map[s
 	return gone
 }
 
+// clientsSeen is what a plan knows of the client nodes: the nodes that Nomad lists and the stale clients to judge by
+// them. The zero value is a plan that has not asked Nomad.
+type clientsSeen struct {
+	nodes []nomadops.Node
+	stale []cloud.Instance
+}
+
+// plan returns the node changes and the servers that stay once the nodes are known. changes and servers are the plan
+// made without the nodes. The plan is made again, with view and with the stale clients that the nodes do not list as
+// registered, when there are such clients or when view holds a reading; otherwise changes and servers come back as
+// they are. next and the machines are those of the first plan; view is the one that the reading of Nomad gives, the
+// zero view when it gives none. It also returns the IDs of those clients.
+func (c clientsSeen) plan(m *model.Cluster, listed []cloud.Instance, next map[string]int, view shrinkView,
+	changes []NodeChange, servers []cloud.Instance,
+) ([]NodeChange, []cloud.Instance, map[string]bool) {
+	gone := notRegistered(c.nodes, c.stale, servers)
+	if len(gone) > 0 || view.read {
+		changes, servers = planNodes(m, listed, gone, next, view)
+	}
+	return changes, servers, gone
+}
+
 // readNodes reads the client nodes that Nomad lists, with one call, when a plan needs them and no roll-style reading
 // has given them: to tell which stale clients registered, through the servers that stay and have joined, and a failure
 // then fails the plan; or, when the cluster can answer (the store holds the mark of the ACL bootstrap and a server

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/netip"
 	"os"
 	"slices"
@@ -458,7 +459,7 @@ func exampleValidation() app.Validation {
 				Check: "not-joined", Node: "prod-servers-2", ID: "instance-3",
 				Detail: "machine ID instance-3 has not joined Nomad: it carries no tent/joined label",
 			},
-			{Check: "nomad-not-set-up", Detail: "no server has a public address"},
+			{Check: "nomad-not-set-up", Detail: "no server runs and has a public address"},
 			{
 				Check: "nomad-no-leader",
 				Detail: "Nomad has no leader, or tent cannot reach it: no route; tent reaches the servers on port " +
@@ -881,40 +882,54 @@ func TestValidateClusterFailsWhenAnotherNomadCallFails(t *testing.T) {
 }
 
 // TestValidateClusterNeedsTheStoreToSetUpNomad fails with one failure of the cluster, and asks Nomad nothing, when
-// the store lacks a secret or the mark of the bootstrap, or no server has a public address.
+// the store lacks a secret or the mark of the bootstrap, or no server runs and has a public address.
 func TestValidateClusterNeedsTheStoreToSetUpNomad(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name   string
-		change func(*testing.T, *app.Service)
+		change func(*testing.T, *app.Service, *vultrfake.Fake)
 		want   string
+		beside []app.Failure
 	}{
-		{"no mark", func(t *testing.T, svc *app.Service) { deleteObject(t, svc, markPath) },
-			"Nomad is not bootstrapped yet: tent update cluster --yes bootstraps it"},
-		{"no gossip key", func(t *testing.T, svc *app.Service) { deleteObject(t, svc, gossipPath) },
-			"the state store lacks secrets/gossip.key"},
-		{"no secrets and no mark", func(t *testing.T, svc *app.Service) {
+		{"no mark", func(t *testing.T, svc *app.Service, _ *vultrfake.Fake) { deleteObject(t, svc, markPath) },
+			"Nomad is not bootstrapped yet: tent update cluster --yes bootstraps it", nil},
+		{"no gossip key", func(t *testing.T, svc *app.Service, _ *vultrfake.Fake) { deleteObject(t, svc, gossipPath) },
+			"the state store lacks secrets/gossip.key", nil},
+		{"no secrets and no mark", func(t *testing.T, svc *app.Service, _ *vultrfake.Fake) {
 			for _, p := range []string{caKeyPath, caBundlePath, gossipPath, aclPath, markPath} {
 				deleteObject(t, svc, p)
 			}
-		}, "the state store lacks pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key and secrets/acl-bootstrap-token"},
-		{"no public address", func(_ *testing.T, svc *app.Service) {
+		}, "the state store lacks pki/private/ca.key, pki/ca-bundle.pem, secrets/gossip.key and " +
+			"secrets/acl-bootstrap-token", nil},
+		{"no public address", func(_ *testing.T, svc *app.Service, _ *vultrfake.Fake) {
 			inner := svc.Providers
 			svc.Providers = func(name v1alpha1.Provider) (cloud.Provider, error) {
 				p, err := inner(name)
 				return withoutPublicAddresses{p}, err
 			}
-		}, "no server has a public address"},
+		}, "no server runs and has a public address", nil},
+		{"no server runs", func(t *testing.T, _ *app.Service, f *vultrfake.Fake) {
+			for _, id := range []string{"instance-1", "instance-2", "instance-3"} {
+				if err := f.HaltInstance(t.Context(), id); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}, "no server runs and has a public address", []app.Failure{
+			notRunning("prod-servers-0", "instance-1"),
+			notRunning("prod-servers-1", "instance-2"),
+			notRunning("prod-servers-2", "instance-3"),
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				svc, _, w, _ := builtWorld(t)
-				tc.change(t, svc)
+				svc, f, w, _ := builtWorld(t)
+				tc.change(t, svc, f)
 				before := len(w.Log())
 
 				v := mustValidate(t, svc)
 
-				wantFailures(t, v, app.Failure{Check: "nomad-not-set-up", Detail: tc.want})
+				wantFailures(t, v, append(tc.beside,
+					app.Failure{Check: "nomad-not-set-up", Detail: tc.want})...)
 				if got := nomadCallNames(w, before); len(got) != 0 {
 					t.Errorf("Nomad was asked %v", got)
 				}
@@ -1224,6 +1239,307 @@ func TestValidateClusterIsInterruptedWhileAskingNomad(t *testing.T) {
 		}
 		if diff := cmp.Diff(app.Validation{}, v); diff != "" {
 			t.Errorf("Validation (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// surplusOf returns the failure of the surplus machine id, of the node called name in a group of size machines.
+func surplusOf(group string, size int, name, id string) app.Failure {
+	return app.Failure{
+		Check: "machine-surplus", Node: name, ID: id,
+		Detail: "machine ID " + id + " is one more than the size of node group " + group + ", " + strconv.Itoa(size),
+	}
+}
+
+// surplusNodes returns the names of the machines that the validation names as surplus, in its order.
+func surplusNodes(v app.Validation) []string {
+	var names []string
+	for _, f := range v.Failures {
+		if f.Check == "machine-surplus" {
+			names = append(names, f.Node)
+		}
+	}
+	return names
+}
+
+// deletedNodes returns the names of the machines that the plan of an update without apply deletes, in its order.
+func deletedNodes(t *testing.T, svc *app.Service) []string {
+	t.Helper()
+	plan, err := svc.Update(t.Context(), "prod", false)
+	if err != nil {
+		t.Fatalf("Update without apply: %v", err)
+	}
+	var names []string
+	for _, c := range plan.Nodes {
+		if c.Action == app.NodeDelete {
+			names = append(names, c.Name)
+		}
+	}
+	return names
+}
+
+// TestValidateClusterNamesTheSurplusThatUpdateRemoves validates three workers whose specs ask for one, after a cut
+// scale-down marked prod-workers-0 ineligible. With Nomad's reading it names the machines that update deletes:
+// prod-workers-0, whose removal has started, and the newest. The third worker has no failure.
+func TestValidateClusterNamesTheSurplusThatUpdateRemoves(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, _, w := scaleWorld(t, 1)
+		w.ChangeNode("prod-workers-0", func(n *nomadops.Node) { n.Eligible = false })
+
+		v := mustValidate(t, svc)
+
+		wantFailures(t, v, surplusOf("workers", 1, "prod-workers-0", "instance-4"),
+			surplusOf("workers", 1, "prod-workers-2", "instance-6"))
+		if diff := cmp.Diff(deletedNodes(t, svc), surplusNodes(v)); diff != "" {
+			t.Errorf("the surplus machines differ from those that update deletes (-update +validate):\n%s", diff)
+		}
+	})
+}
+
+// TestValidateClusterNamesTheSurplusByTheLabelsWhenNomadCannotBeAsked validates the same cluster when Nomad has no
+// leader: the surplus machines are those that the joined labels give, the newest two, and the failure of Nomad stays.
+func TestValidateClusterNamesTheSurplusByTheLabelsWhenNomadCannotBeAsked(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, _, w := scaleWorld(t, 1)
+		w.ChangeNode("prod-workers-0", func(n *nomadops.Node) { n.Eligible = false })
+		w.NoLeader()
+
+		v := mustValidate(t, svc)
+
+		if diff := cmp.Diff([]string{"prod-workers-1", "prod-workers-2"}, surplusNodes(v)); diff != "" {
+			t.Errorf("the surplus machines (-want +got):\n%s", diff)
+		}
+		if !slices.ContainsFunc(v.Failures, func(f app.Failure) bool { return f.Check == "nomad-no-leader" }) {
+			t.Errorf("failures = %+v, want nomad-no-leader among them", v.Failures)
+		}
+	})
+}
+
+// TestValidateClusterNamesTheSurplusByTheLabelsWhenNoMachineJoined validates three workers for a size of one, none of
+// which carries the joined label, with prod-workers-0 labelled for replacement. Update plans without a reading of
+// Nomad, by the labels, and validate names the same machines although Nomad answers.
+func TestValidateClusterNamesTheSurplusByTheLabelsWhenNoMachineJoined(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, _ := scaleWorld(t, 1)
+		for _, in := range f.Instances() {
+			if strings.HasPrefix(in.Hostname, "prod-workers-") {
+				tags := slices.DeleteFunc(slices.Clone(in.Tags), func(tag string) bool {
+					return strings.HasPrefix(tag, cloud.LabelJoined+"=")
+				})
+				if in.Hostname == "prod-workers-0" {
+					tags = append(tags, cloud.LabelReplace+"=true")
+				}
+				f.SetInstanceTags(t, in.ID, tags...)
+			}
+		}
+
+		v := mustValidate(t, svc)
+
+		want := deletedNodes(t, svc)
+		if len(want) == 0 {
+			t.Fatal("the plan of update deletes no node")
+		}
+		if diff := cmp.Diff(want, surplusNodes(v)); diff != "" {
+			t.Errorf("the surplus machines differ from those that update deletes (-update +validate):\n%s", diff)
+		}
+	})
+}
+
+// TestValidateClusterNamesASurplusServerOnce validates three servers whose specs ask for one. The two newest servers
+// are the surplus machines, each with one row: the Raft peers at their addresses are no unknown servers.
+func TestValidateClusterNamesASurplusServerOnce(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, _, _ := newExample(t, exampleClusterYAML, exampleServersYAML, exampleWorkersYAML)
+		mustUpdate(t, svc)
+		svc.Validate.AllowSingleServer = true
+		mustReplace(t, svc, edit(t, exampleServersYAML, "size: 3", "size: 1"))
+
+		v := mustValidate(t, svc)
+
+		wantFailures(t, v, surplusOf("servers", 1, "prod-servers-1", "instance-2"),
+			surplusOf("servers", 1, "prod-servers-2", "instance-3"))
+	})
+}
+
+// TestValidateClusterNamesNoRowForANodeThatNoMachineHas validates a cluster whose worker machine was deleted and whose
+// node Nomad lists as down: the missing machine has a row and the node has none, and no warning names it.
+func TestValidateClusterNamesNoRowForANodeThatNoMachineHas(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, w, _ := builtWorld(t)
+		if err := f.DeleteInstance(t.Context(), "instance-5"); err != nil {
+			t.Fatal(err)
+		}
+		w.ChangeNode("prod-workers-1", func(n *nomadops.Node) { n.Status = "down" })
+
+		v := mustValidate(t, svc)
+
+		wantFailures(t, v, app.Failure{
+			Check: "machine-missing", Node: "prod-workers-1", Detail: "no machine: node group workers has 1 of its 2",
+		})
+		for _, warning := range v.Warnings {
+			if strings.Contains(warning, "prod-workers-1") {
+				t.Errorf("warning %q names the node that no machine has", warning)
+			}
+		}
+	})
+}
+
+// TestValidateClusterTakesAnOutdatedMachineAsSurplusAndDoesNotReportIt validates two workers whose specs ask for
+// one: the oldest has another spec hash than its group, or carries the replace label. It is the surplus machine, as
+// update takes it, and the warning about outdated machines does not name it.
+func TestValidateClusterTakesAnOutdatedMachineAsSurplusAndDoesNotReportIt(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, label, value string }{
+		{"a spec hash that is not the group's", cloud.LabelSpecHash, "0000000000000000"},
+		{"the replace label", cloud.LabelReplace, "true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				svc, f, _ := newExample(t, exampleClusterYAML, exampleServersYAML, scaleWorkers(t, 2))
+				mustUpdate(t, svc)
+				mustReplace(t, svc, scaleWorkers(t, 1))
+				retag(t, f, "instance-4", tc.label, tc.value)
+
+				v := mustValidate(t, svc)
+
+				if diff := cmp.Diff([]string{"prod-workers-0"}, surplusNodes(v)); diff != "" {
+					t.Errorf("the surplus machines (-want +got):\n%s", diff)
+				}
+				for _, warning := range v.Warnings {
+					if strings.Contains(warning, "outdated") {
+						t.Errorf("warning %q names an outdated machine, but the outdated one is the surplus", warning)
+					}
+				}
+			})
+		})
+	}
+}
+
+// TestValidateClusterNamesTheSurplusWithoutHashesWhenTheReleaseFilesCannotBeRead validates the cluster of the first
+// test of this group when the release files cannot be read: no machine is outdated, so the surplus machines are the
+// newest two, and the warning says that tent could not tell which nodes are outdated.
+func TestValidateClusterNamesTheSurplusWithoutHashesWhenTheReleaseFilesCannotBeRead(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, _ := scaleWorld(t, 1)
+		retag(t, f, "instance-4", cloud.LabelSpecHash, "0000000000000000")
+		svc.Assets.Client = &http.Client{Transport: brokenSites{}}
+
+		v := mustValidate(t, svc)
+
+		if diff := cmp.Diff([]string{"prod-workers-1", "prod-workers-2"}, surplusNodes(v)); diff != "" {
+			t.Errorf("the surplus machines (-want +got):\n%s", diff)
+		}
+		if n := withCount(v.Warnings, couldNotTell); n != 1 {
+			t.Errorf("warnings = %q, want one that starts with %q", v.Warnings, couldNotTell)
+		}
+	})
+}
+
+// addsForeignServer is a provider whose list has one more server machine, of another cluster, with a public address.
+type addsForeignServer struct{ cloud.Provider }
+
+func (p addsForeignServer) Nodes() cloud.Nodes { return foreignNodes{p.Provider.Nodes()} }
+
+type foreignNodes struct{ cloud.Nodes }
+
+func (n foreignNodes) List(ctx context.Context, cluster string) ([]cloud.Instance, error) {
+	instances, err := n.Nodes.List(ctx, cluster)
+	return append(instances, cloud.Instance{
+		ID: "instance-99", Name: "staging-servers-0", Cluster: "staging", Group: "servers", Role: v1alpha1.RoleServer,
+		PublicIP: netip.MustParseAddr("203.0.113.9"), Ready: true, Joined: true,
+	}), err
+}
+
+// TestValidateClusterAsksTheServersThatRunInTheCluster asks Nomad over the servers of the cluster that run, and not
+// over a halted one or a server of another cluster that the list holds.
+func TestValidateClusterAsksTheServersThatRunInTheCluster(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, w, _ := builtWorld(t)
+		inner := svc.Providers
+		svc.Providers = func(name v1alpha1.Provider) (cloud.Provider, error) {
+			p, err := inner(name)
+			return addsForeignServer{p}, err
+		}
+		if err := f.HaltInstance(t.Context(), "instance-1"); err != nil {
+			t.Fatal(err)
+		}
+		before := len(w.Configs())
+
+		mustValidate(t, svc)
+
+		var asked []string
+		for _, c := range w.Configs()[before:] {
+			asked = append(asked, c.Address)
+		}
+		want := apiAddresses(t, f, "prod-servers-1", "prod-servers-2")
+		if diff := cmp.Diff(want, asked); diff != "" {
+			t.Errorf("the servers that were asked (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// notRunning is the failure of a machine that the cloud reports as not running.
+func notRunning(node, id string) app.Failure {
+	return app.Failure{
+		Check: "machine-not-running", Node: node, ID: id,
+		Detail: "the cloud reports its machine (ID " + id + ") as not running",
+	}
+}
+
+// TestValidateNamesTheClientThatNeverRegisteredAsUpdateDoes puts a stale client that never registered beside a node
+// whose removal has started: validate reports the machine that update plans to delete as not registered, and the
+// node that is not eligible as not ready, and names no surplus machine.
+func TestValidateNamesTheClientThatNeverRegisteredAsUpdateDoes(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, w := unjoinedScaleWorld(t, 2)
+		sleepUntilAge(t, f, "instance-6", oldClient)
+		w.ChangeNode("prod-workers-1", func(n *nomadops.Node) { n.Eligible = false })
+
+		plan, err := svc.Update(t.Context(), "prod", false)
+		if err != nil {
+			t.Fatalf("Update without apply: %v", err)
+		}
+		v := mustValidate(t, svc)
+
+		wantNodeChanges(t, plan, deleteOf("prod-workers-2", "instance-6", "not registered"))
+		wantFailures(t, v, app.Failure{
+			Check: "client-not-registered", Node: "prod-workers-2", ID: "instance-6",
+			Detail: "Nomad lists no client of its name at 10.64.0.8",
+		}, app.Failure{
+			Check: "client-not-ready", Node: "prod-workers-1", ID: "instance-5",
+			Detail: "its Nomad client is ready but not eligible",
+		})
+	})
+}
+
+// TestValidateNamesTheReplacementOfAClientThatNeverRegistered leaves a stale client that never registered in a group
+// at its size: validate reports the machine that update deletes as not registered and the node that update creates
+// in its place as missing, and does not count the machine among the clients.
+func TestValidateNamesTheReplacementOfAClientThatNeverRegistered(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, _ := unjoinedScaleWorld(t, 3)
+		sleepUntilAge(t, f, "instance-6", oldClient)
+
+		v := mustValidate(t, svc)
+
+		wantFailures(t, v, app.Failure{
+			Check: "machine-missing", Node: "prod-workers-2", Detail: "no machine: node group workers has 2 of its 3",
+		}, app.Failure{
+			Check: "client-not-registered", Node: "prod-workers-2", ID: "instance-6",
+			Detail: "Nomad lists no client of its name at 10.64.0.8",
+		})
+		if v.Servers != 3 || v.Clients != 2 {
+			t.Errorf("%d servers and %d clients, want 3 and 2", v.Servers, v.Clients)
 		}
 	})
 }

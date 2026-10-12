@@ -42,7 +42,7 @@
     },
     {
       "check": "nomad-not-set-up",
-      "detail": "no server has a public address"
+      "detail": "no server runs and has a public address"
     },
     {
       "check": "nomad-no-leader",

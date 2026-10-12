@@ -12,6 +12,7 @@ import (
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/model"
+	"github.com/ingvarch/tent/internal/rollout"
 )
 
 // validateModel is the cluster prod with three servers and two workers.
@@ -262,13 +263,13 @@ func TestMachineFailures(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := planMachines(validateModel(), tc.instances, nil).failures(validateModel())
+			got := planMachines(validateModel(), tc.instances, nil, shrinkView{}, clientsSeen{}).failures(validateModel())
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("the failures (-want +got):\n%s", diff)
 			}
 			reversed := slices.Clone(tc.instances)
 			slices.Reverse(reversed)
-			again := planMachines(validateModel(), reversed, nil).failures(validateModel())
+			again := planMachines(validateModel(), reversed, nil, shrinkView{}, clientsSeen{}).failures(validateModel())
 			if diff := cmp.Diff(tc.want, again); diff != "" {
 				t.Errorf("the failures of the reversed list (-want +got):\n%s", diff)
 			}
@@ -287,7 +288,7 @@ func TestMachineCountsFollowTheNodeGroup(t *testing.T) {
 		[]cloud.Instance{machine(5, "prod-workers-1", "workers", v1alpha1.RoleClient), foreign()},
 	)
 
-	servers, clients := planMachines(m, instances, nil).counts(m)
+	servers, clients := planMachines(m, instances, nil, shrinkView{}, clientsSeen{}).counts(m)
 
 	if servers != 3 || clients != 2 {
 		t.Errorf("%d servers and %d clients, want 3 and 2", servers, clients)
@@ -301,9 +302,75 @@ func TestMachineCountsLeaveOutTheMachinesThatAnUpdateDeletes(t *testing.T) {
 		machine(6, "prod-workers-2", "workers", v1alpha1.RoleClient), // one more than the group's size
 		machine(9, "prod-servers-0", "servers", v1alpha1.RoleServer)) // a twin of instance-1
 
-	servers, clients := planMachines(m, instances, nil).counts(m)
+	servers, clients := planMachines(m, instances, nil, shrinkView{}, clientsSeen{}).counts(m)
 
 	if servers != 3 || clients != 2 {
 		t.Errorf("%d servers and %d clients, want 3 and 2", servers, clients)
+	}
+}
+
+// TestPlanMachinesChooseTheSurplusByTheView plans three workers for a group of two. By the labels the newest is the
+// surplus machine; with a reading in which the oldest worker's node is ineligible, and with the replace label on the
+// second, those are chosen in the order of the decisions.
+func TestPlanMachinesChooseTheSurplusByTheView(t *testing.T) {
+	t.Parallel()
+	m := validateModel()
+	m.Groups[1].Size = 1
+	instances := append(fullCluster(), machine(6, "prod-workers-2", "workers", v1alpha1.RoleClient))
+	nodes := make([]rollout.Node, 0, 3)
+	for _, in := range instances[3:] {
+		nodes = append(nodes, rollout.Node{
+			ID: in.ID, Name: in.Name, Address: in.PrivateIP, Status: "ready", Eligible: in.ID != "instance-4",
+		})
+	}
+	read := shrinkView{read: true, nomad: rollout.Nomad{Nodes: nodes}, forced: map[string]bool{"instance-5": true}}
+	for _, tc := range []struct {
+		name string
+		view shrinkView
+		want []string
+	}{
+		{"no reading", shrinkView{}, []string{"instance-5", "instance-6"}},
+		{"a reading", read, []string{"instance-4", "instance-5"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got []string
+			for _, c := range planMachines(m, instances, nil, tc.view, clientsSeen{}).changes {
+				if c.Action == NodeDelete {
+					got = append(got, c.ID)
+				}
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("the deleted machines (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestMachineFailuresNameTheKeeperOfAClientThatNeverRegistered lists a stale client that never registered beside a
+// younger machine of its name: the younger one keeps the name, as an update plans, and the failure of the older one
+// names it.
+func TestMachineFailuresNameTheKeeperOfAClientThatNeverRegistered(t *testing.T) {
+	t.Parallel()
+	m := validateModel()
+	old := machine(5, "prod-workers-1", "workers", v1alpha1.RoleClient)
+	young := machine(9, "prod-workers-1", "workers", v1alpha1.RoleClient)
+	old.Joined, young.Joined = false, false
+	instances := slices.Concat(fullCluster()[:4], []cloud.Instance{old, young})
+
+	got := planMachines(m, instances, nil, shrinkView{}, clientsSeen{stale: []cloud.Instance{old}}).failures(m)
+
+	want := []Failure{
+		{
+			Check: checkMachineDuplicate, Node: "prod-workers-1", ID: "instance-5",
+			Detail: "machine ID instance-5 has the name of machine ID instance-9",
+		},
+		{
+			Check: checkNotJoined, Node: "prod-workers-1", ID: "instance-9",
+			Detail: "machine ID instance-9 has not joined Nomad: it carries no tent/joined label",
+		},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("the failures (-want +got):\n%s", diff)
 	}
 }
