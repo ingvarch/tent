@@ -37,16 +37,54 @@ func Nomad(ctx context.Context, opts Options, version, arch string) (Asset, erro
 
 // nomadFor is Nomad for the operating system goos: nodes run linux, tests the system they run on.
 func nomadFor(ctx context.Context, opts Options, version, goos, arch string) (Asset, error) {
-	dir := releaseDir(opts.nomadURL, nomadReleases, version)
-	sumsURL := dir + "nomad_" + version + "_SHA256SUMS"
-	sigURL := sumsURL + ".sig"
-	sums, err := opts.get(ctx, sumsURL)
+	dir, sumsURL, sums, err := verifiedNomadSums(ctx, opts, version)
 	if err != nil {
 		return Asset{}, err
 	}
-	sig, err := opts.get(ctx, sigURL)
+	file := nomadZip(version, goos, arch)
+	sum, err := sumOf(sumsURL, sums, file)
 	if err != nil {
 		return Asset{}, err
+	}
+	return Asset{Name: nodeconfig.NomadAsset, Version: version, URLs: []string{dir + file}, SHA256: sum}, nil
+}
+
+// CheckNomad checks that Nomad version is a release that nodes of every arch in archs can download. It reads
+// nomad_<version>_SHA256SUMS and its detached signature, one request each, verifies them as Nomad does, and fails
+// unless the file lists the linux zip of each arch. Called without an arch, it checks the signature alone. It
+// downloads no zip.
+func CheckNomad(ctx context.Context, opts Options, version string, archs ...string) error {
+	_, sumsURL, sums, err := verifiedNomadSums(ctx, opts, version)
+	if err != nil {
+		return err
+	}
+	for _, arch := range archs {
+		if _, err := sumOf(sumsURL, sums, nomadZip(version, "linux", arch)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// nomadZip is the name of the Nomad release file for goos and arch.
+func nomadZip(version, goos, arch string) string {
+	return "nomad_" + version + "_" + goos + "_" + arch + ".zip"
+}
+
+// verifiedNomadSums reads nomad_<version>_SHA256SUMS and its signature, verifies them with HashiCorp's release key,
+// and returns the release directory's URL, the file's URL and its content.
+func verifiedNomadSums(ctx context.Context, opts Options, version string) (dir, sumsURL string, sums []byte,
+	err error) {
+	dir = releaseDir(opts.nomadURL, nomadReleases, version)
+	sumsURL = dir + "nomad_" + version + "_SHA256SUMS"
+	sigURL := sumsURL + ".sig"
+	sums, err = opts.get(ctx, sumsURL)
+	if err != nil {
+		return "", "", nil, err
+	}
+	sig, err := opts.get(ctx, sigURL)
+	if err != nil {
+		return "", "", nil, err
 	}
 	err = verify(cmp.Or(opts.nomadKey, hashicorpKey), sums, sig, opts.Now)
 	if errors.Is(err, pgperrors.ErrKeyExpired) && opts.nomadKey == "" {
@@ -54,14 +92,9 @@ func nomadFor(ctx context.Context, opts Options, version, goos, arch string) (As
 			"renewed key, is needed: %w", hashicorpKeyExpiry, err)
 	}
 	if err != nil {
-		return Asset{}, fmt.Errorf("verify %s with %s: %w", sumsURL, sigURL, err)
+		return "", "", nil, fmt.Errorf("verify %s with %s: %w", sumsURL, sigURL, err)
 	}
-	file := "nomad_" + version + "_" + goos + "_" + arch + ".zip"
-	sum, err := sumOf(sumsURL, sums, file)
-	if err != nil {
-		return Asset{}, err
-	}
-	return Asset{Name: nodeconfig.NomadAsset, Version: version, URLs: []string{dir + file}, SHA256: sum}, nil
+	return dir, sumsURL, sums, nil
 }
 
 // verify checks that sig is a detached signature of signed by the armored key, with one of signatureHashes, and that

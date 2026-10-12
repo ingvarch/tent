@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -217,6 +218,107 @@ func TestNomad(t *testing.T) {
 			}
 		})
 	}
+}
+
+// countingTransport counts the requests that go through it.
+type countingTransport struct {
+	next http.RoundTripper
+	n    atomic.Int32
+}
+
+func (c *countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.n.Add(1)
+	return c.next.RoundTrip(r)
+}
+
+func TestCheckNomad(t *testing.T) {
+	key, other := newKey(t, 0), newKey(t, 0)
+	const sumsPath, sigPath = "/2.0.7/nomad_2.0.7_SHA256SUMS", "/2.0.7/nomad_2.0.7_SHA256SUMS.sig"
+	good := map[string]string{sumsPath: testSums, sigPath: sign(t, key, testSums)}
+	opts := func(srv *httptest.Server) Options {
+		return Options{Client: srv.Client(), nomadURL: srv.URL, nomadKey: armored(t, key), Now: at(2 * time.Hour)}
+	}
+	both := []string{"amd64", "arm64"}
+	changedSums := strings.Replace(testSums, "2222", "2223", 1)
+
+	t.Run("both architectures after two requests", func(t *testing.T) {
+		srv := serve(t, good)
+		counter := &countingTransport{next: srv.Client().Transport}
+		o := opts(srv)
+		o.Client = &http.Client{Transport: counter}
+		if err := CheckNomad(t.Context(), o, "2.0.7", both...); err != nil {
+			t.Fatal(err)
+		}
+		if got := counter.n.Load(); got != 2 {
+			t.Errorf("requests = %d, want 2: the sums and the signature", got)
+		}
+	})
+	t.Run("no arch checks the signature alone", func(t *testing.T) {
+		withoutLinux := strings.Repeat("1", 64) + "  nomad_2.0.7_darwin_arm64.zip\n"
+		srv := serve(t, map[string]string{sumsPath: withoutLinux, sigPath: sign(t, key, withoutLinux)})
+		if err := CheckNomad(t.Context(), opts(srv), "2.0.7"); err != nil {
+			t.Fatal(err)
+		}
+		byOther := serve(t, map[string]string{sumsPath: withoutLinux, sigPath: sign(t, other, withoutLinux)})
+		wantErr(t, CheckNomad(t.Context(), opts(byOther), "2.0.7"), sumsPath, sigPath, "unknown entity")
+	})
+	t.Run("a line of one architecture is missing", func(t *testing.T) {
+		withoutARM := strings.Replace(testSums, strings.Repeat("3", 64)+"  nomad_2.0.7_linux_arm64.zip\n", "", 1)
+		srv := serve(t, map[string]string{sumsPath: withoutARM, sigPath: sign(t, key, withoutARM)})
+		err := CheckNomad(t.Context(), opts(srv), "2.0.7", both...)
+		wantErr(t, err, sumsPath, "no line for nomad_2.0.7_linux_arm64.zip")
+		if err := CheckNomad(t.Context(), opts(srv), "2.0.7", "amd64"); err != nil {
+			t.Errorf("amd64 alone: %v", err)
+		}
+	})
+	t.Run("a line of the first architecture is missing", func(t *testing.T) {
+		withoutAMD := strings.Replace(testSums, strings.Repeat("2", 64)+"  nomad_2.0.7_linux_amd64.zip\n", "", 1)
+		srv := serve(t, map[string]string{sumsPath: withoutAMD, sigPath: sign(t, key, withoutAMD)})
+		err := CheckNomad(t.Context(), opts(srv), "2.0.7", both...)
+		wantErr(t, err, sumsPath, "no line for nomad_2.0.7_linux_amd64.zip")
+	})
+	t.Run("a line that is no checksum", func(t *testing.T) {
+		bad := strings.Replace(testSums, strings.Repeat("2", 64), "short", 1)
+		srv := serve(t, map[string]string{sumsPath: bad, sigPath: sign(t, key, bad)})
+		wantErr(t, CheckNomad(t.Context(), opts(srv), "2.0.7", both...), sumsPath, "line 2")
+	})
+
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		cut   []string
+	}{
+		{"changed sums", map[string]string{sumsPath: changedSums, sigPath: good[sigPath]}, nil},
+		{"changed signature", map[string]string{sumsPath: testSums, sigPath: flipLast(good[sigPath])}, nil},
+		{"signed by another key", map[string]string{sumsPath: testSums, sigPath: sign(t, other, testSums)}, nil},
+		{"no sums", map[string]string{sigPath: good[sigPath]}, nil},
+		{"no signature", map[string]string{sumsPath: testSums}, nil},
+		{"sums cut", good, []string{sumsPath}},
+		{"signature cut", good, []string{sigPath}},
+	} {
+		t.Run(tc.name+" fails with the text of Nomad", func(t *testing.T) {
+			srv := serve(t, tc.files, tc.cut...)
+			_, want := Nomad(t.Context(), opts(srv), "2.0.7", "arm64")
+			if want == nil {
+				t.Fatal("Nomad accepted the files")
+			}
+			got := CheckNomad(t.Context(), opts(srv), "2.0.7", both...)
+			if got == nil || got.Error() != want.Error() {
+				t.Errorf("CheckNomad = %v, want the error of Nomad: %v", got, want)
+			}
+		})
+	}
+	t.Run("embedded key", func(t *testing.T) {
+		const url = "https://releases.hashicorp.com/nomad/2.0.7/nomad_2.0.7_SHA256SUMS"
+		sums, sig := assetstest.NomadSums()
+		client := &http.Client{Transport: sites{url: sums, url + ".sig": sig}}
+		on := func(date string) Options { return Options{Client: client, Now: day(t, date)} }
+		if err := CheckNomad(t.Context(), on("2026-09-28"), "2.0.7", both...); err != nil {
+			t.Fatal(err)
+		}
+		err := CheckNomad(t.Context(), on("2030-03-02"), "2.0.7", both...)
+		wantErr(t, err, url+".sig", "embedded in this tent expired on "+hashicorpKeyExpiry, "newer tent")
+	})
 }
 
 func TestNomadChecksTheKeyAtTheClock(t *testing.T) {
