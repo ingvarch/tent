@@ -26,7 +26,7 @@ import (
 //     one that no machine holds.
 //   - A drain makes the node ineligible and draining; after 2 ticks it completes with the machine ID of its meta in
 //     DrainedFor, and the allocations go to the first available node.
-//   - The node of a deleted machine stays ready for 2 ticks (a scenario may set more), then reads down.
+//   - The node of a deleted or stopped machine stays ready for 2 ticks (a scenario may set more), then reads down.
 //   - A purge removes a node.
 //
 // The servers are modelled in sim_servers_test.go.
@@ -38,7 +38,7 @@ const (
 	allocsOfNode    = 2
 	oldVersion      = "2.0.6"
 	curVersion      = "2.0.7"
-	// defaultDownAfter is how many ticks the node of a deleted machine stays ready unless a scenario sets it.
+	// defaultDownAfter is how many ticks the node of a deleted or stopped machine stays ready unless a scenario sets it.
 	defaultDownAfter = 2
 )
 
@@ -84,7 +84,7 @@ type world struct {
 	// reuseAddresses gives a new machine the lowest private address that no machine holds, as vultrfake does; without
 	// it an address is never given twice.
 	reuseAddresses bool
-	// downAfter is how many ticks the node of a deleted machine stays ready; 0 means defaultDownAfter.
+	// downAfter is how many ticks the node of a deleted or stopped machine stays ready; 0 means defaultDownAfter.
 	downAfter int
 	// named holds every name that a machine, a server or a member of the world has had, in all its runs; a new server
 	// or combined node may not take one of them.
@@ -358,7 +358,7 @@ func (w *world) tick() {
 	w.reconcile()
 	for i := range w.nodes {
 		n := &w.nodes[i]
-		if w.machineIndex(n.owner) < 0 {
+		if !w.up(n.owner) {
 			if n.deadTicks++; n.deadTicks >= cmp.Or(w.downAfter, defaultDownAfter) {
 				n.Status = "down"
 			}
@@ -405,11 +405,17 @@ func (w *world) apply(step rollout.Step) error {
 		if i < 0 {
 			return fmt.Errorf("%s: no such node", step)
 		}
+		if err := w.checkOtherNodes(step, i); err != nil {
+			return err
+		}
 		w.nodes[i].Eligible = false
 	case rollout.Drain:
 		i := w.nodeIndex(step.Node.ID)
 		if i < 0 {
 			return fmt.Errorf("%s: no such node", step)
+		}
+		if err := w.checkOtherNodes(step, i); err != nil {
+			return err
 		}
 		n := &w.nodes[i]
 		n.Eligible, n.Draining, n.drainTicks, n.drainMeta = false, true, 0, step.Machine.ID
@@ -485,10 +491,35 @@ func (w *world) delete(step rollout.Step) error {
 	if w.serverIndexByMachine(id) >= 0 {
 		return violated("%s: its server is still in the Raft configuration", step)
 	}
-	if j := w.nodeIndexByOwner(id); j >= 0 && w.nodes[j].Status == "ready" && w.nodes[j].allocs > 0 {
-		return violated("%s: its node is up and holds %d allocations", step, w.nodes[j].allocs)
+	if err := w.checkNodeEmpty(step, id); err != nil {
+		return err
 	}
 	w.machines = slices.Delete(w.machines, i, i+1)
+	return nil
+}
+
+// checkNodeEmpty is the invariant that a machine is stopped or deleted only when its node is down or holds no
+// allocation.
+func (w *world) checkNodeEmpty(step rollout.Step, machine string) error {
+	if j := w.nodeIndexByOwner(machine); j >= 0 && w.nodes[j].Status == "ready" && w.nodes[j].allocs > 0 {
+		return violated("%s: its node is up and holds %d allocations", step, w.nodes[j].allocs)
+	}
+	return nil
+}
+
+// checkOtherNodes is the invariant that the node i of a combined group is marked or drained only while every other
+// machine of its group has a node that can take work. A client group has no such rule: it drains within its
+// maxUnavailable.
+func (w *world) checkOtherNodes(step rollout.Step, i int) error {
+	owner := w.machineIndex(w.nodes[i].owner)
+	if owner < 0 || w.machines[owner].Role != v1alpha1.RoleCombined {
+		return nil
+	}
+	for _, m := range w.machines {
+		if m.Group == w.machines[owner].Group && m.ID != w.nodes[i].owner && !w.available(m) {
+			return violated("%s: %s cannot take the work of the node", step, m.Name)
+		}
+	}
 	return nil
 }
 
