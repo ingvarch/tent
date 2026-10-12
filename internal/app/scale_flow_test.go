@@ -515,7 +515,7 @@ func TestScaleFlowRefusesAtThePlan(t *testing.T) {
 			in := f.Instances()[3] // prod-workers-0, with its labels
 			in.ID, in.Hostname, in.Label, in.MainIP = "", "prod-workers-2", "prod-workers-2", "198.51.100.30"
 			f.AddInstance(t, in) // joined, and the cloud lists no private address for it
-		}, "update cannot remove prod-workers-1: node group workers: cannot go on: prod-workers-2 has no node in Nomad: " +
+		}, "update cannot remove prod-workers-2: node group workers: cannot go on: prod-workers-2 has no node in Nomad: " +
 			"the cloud reports no private address for it; with maxUnavailable 0 no surplus node can be removed"},
 		{"no server runs", scale(3, 1), func(t *testing.T, _ *app.Service, f *vultrfake.Fake) {
 			haltServers(t, f)
@@ -1308,4 +1308,158 @@ func TestScaleFlowRefusesAServerShrinkAtThePlan(t *testing.T) {
 				roleRefusal("servers", "prod-servers-0", "a server", "combined"))
 		})
 	})
+}
+
+// budgetWorkers is scaleWorkers with one node of the group allowed to be unavailable.
+func budgetWorkers(t *testing.T, size int) string {
+	t.Helper()
+	return scaleWorkers(t, size) + "    maxUnavailable: 1\n"
+}
+
+// budgetScaleWorld builds the example cluster with three workers and then asks for size workers with
+// maxUnavailable 1.
+func budgetScaleWorld(t *testing.T, size int) (*app.Service, *vultrfake.Fake, *nomadWorld) {
+	t.Helper()
+	svc, f, w := newExample(t, exampleClusterYAML, exampleServersYAML, budgetWorkers(t, 3))
+	w.SetDrainReads(drainReads)
+	mustUpdate(t, svc)
+	mustReplace(t, svc, budgetWorkers(t, size))
+	return svc, f, w
+}
+
+// wantOnlyWorkerZero fails the test unless the cloud lists the machine prod-workers-0 alone of the workers and
+// Nomad lists its node as ready and eligible, not draining.
+func wantOnlyWorkerZero(t *testing.T, svc *app.Service, f *vultrfake.Fake) {
+	t.Helper()
+	if diff := cmp.Diff([]string{"prod-workers-0"}, machinesOf(f, "workers")); diff != "" {
+		t.Errorf("the workers that the cloud lists (-want +got):\n%s", diff)
+	}
+	listed := false
+	for _, n := range nomadNodes(t, svc) {
+		if n.Name != "prod-workers-0" {
+			continue
+		}
+		listed = true
+		if n.Status != "ready" || !n.Eligible || n.Draining {
+			t.Errorf("the node of prod-workers-0 reads %s, eligible %v, draining %v, want ready, eligible, not draining",
+				n.Status, n.Eligible, n.Draining)
+		}
+	}
+	if !listed {
+		t.Errorf("Nomad lists no node of prod-workers-0")
+	}
+}
+
+// TestScaleFlowKeepsTheWorkerWhileTheCloudListsADeletedMachine scales the workers from 3 to 1 with one node allowed
+// to be unavailable while the cloud lists each deleted machine at its next two reads, without a private address.
+// The run ends in one go with prod-workers-0 alone, ready and eligible.
+func TestScaleFlowKeepsTheWorkerWhileTheCloudListsADeletedMachine(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, w := budgetScaleWorld(t, 1)
+		f.SetDeleteReads(t, 2)
+		watchShrink(t, f, w, "workers", 1)
+
+		plan, err := svc.Update(t.Context(), "prod", true)
+
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		wantScaledDown(t, svc, f, plan)
+		wantOnlyWorkerZero(t, svc, f)
+	})
+}
+
+// callNamesOf returns what a call to the cloud or to Nomad names the machine called name by: its name, its ID and
+// the ID of its node.
+func callNamesOf(f *vultrfake.Fake, name string) []string {
+	ids := []string{name}
+	for _, in := range f.Instances() {
+		if in.Hostname == name {
+			ids = append(ids, in.ID, nodeIDOf(in.ID))
+		}
+	}
+	return ids
+}
+
+// writesTo returns the writes to the cloud and to Nomad, from the call numbers vultr and nomad on, whose argument
+// holds one of ids.
+func writesTo(f *vultrfake.Fake, w *nomadWorld, ids []string, vultr, nomad int) []string {
+	names := func(arg string) bool {
+		return slices.ContainsFunc(ids, func(id string) bool { return strings.Contains(arg, id) })
+	}
+	var out []string
+	for _, c := range f.Calls()[vultr:] {
+		if !isRead(c.Name) && names(c.Arg) {
+			out = append(out, "Vultr "+c.Name+" "+c.Arg)
+		}
+	}
+	for _, c := range w.Log()[nomad:] {
+		if !isRead("nomad "+c.Name) && names(c.Arg) {
+			out = append(out, "Nomad "+c.Name+" "+c.Arg)
+		}
+	}
+	return out
+}
+
+// TestScaleFlowLeavesTheWorkerAloneWhenACutLeavesADeletedMachineListed scales the workers from 3 to 1, cuts the run
+// right after its first delete and plans again while the cloud still lists the deleted machine. The plan and the run
+// that follow list no change and send no write for prod-workers-0, whatever its node reads, and a later update ends
+// with prod-workers-0 alone.
+func TestScaleFlowLeavesTheWorkerAloneWhenACutLeavesADeletedMachineListed(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		reads int
+		down  bool
+	}{
+		{"listed for 2 reads", 2, false},
+		{"listed for 6 reads", 6, false},
+		{"listed for 6 reads, its node reads down", 6, true},
+		{"listed for 12 reads", 12, false},
+		{"listed for 12 reads, its node reads down", 12, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				svc, f, w := budgetScaleWorld(t, 1)
+				f.SetDeleteReads(t, tc.reads)
+				inv := watchShrink(t, f, w, "workers", 1)
+				scaleWatch{watch: inv.watch}.cutUpdate(t, svc, atVultr("DeleteInstance", 1), true)
+				if tc.down {
+					w.ChangeNode("prod-workers-0", func(n *nomadops.Node) { n.Status = "down" })
+				}
+				ids := callNamesOf(f, "prod-workers-0") // before the run: a deleted machine is no longer listed
+				vultr, nomad := len(f.Calls()), len(w.Log())
+
+				plan, err := svc.Update(t.Context(), "prod", false)
+				if err != nil {
+					t.Fatalf("Update without apply: %v", err)
+				}
+				wantNoChangeOf(t, plan, "prod-workers-0")
+				applied, err := svc.Update(t.Context(), "prod", true)
+				if err != nil {
+					t.Errorf("Update after the cut: %v", err)
+				}
+				wantNoChangeOf(t, applied, "prod-workers-0")
+				if got := writesTo(f, w, ids, vultr, nomad); len(got) > 0 {
+					t.Errorf("the plan and the run after the cut wrote for prod-workers-0: %v", got)
+				}
+
+				w.ChangeNode("prod-workers-0", func(n *nomadops.Node) { n.Status = "ready" })
+				mustUpdate(t, svc)
+				wantOnlyWorkerZero(t, svc, f)
+			})
+		})
+	}
+}
+
+// wantNoChangeOf fails the test when a node change of the plan names the machine called name.
+func wantNoChangeOf(t *testing.T, plan app.UpdatePlan, name string) {
+	t.Helper()
+	for _, c := range plan.Nodes {
+		if c.Name == name {
+			t.Errorf("the plan changes %s:\n%s", name, planText(t, plan))
+		}
+	}
 }

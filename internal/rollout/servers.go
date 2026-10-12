@@ -82,7 +82,7 @@ func nextServer(s State, mode Mode, g Group) (Step, bool, error) {
 // surplus lists the machines that a shrink takes from the group: those whose removal has started, then those that
 // have not joined, the outdated ones, those that autopilot does not count healthy and those that do not lead.
 func (sg *serverGroup) surplus() []Machine {
-	return sg.surplusBy(nil, not(sg.started), func(m Machine) bool { return m.Joined },
+	return sg.surplusBy(not(sg.started), func(m Machine) bool { return m.Joined },
 		func(m Machine) bool { return !outdated(sg.s, sg.g, m) },
 		func(m Machine) bool { return sg.servers[m.ID].Healthy }, func(m Machine) bool { return sg.servers[m.ID].Leader })
 }
