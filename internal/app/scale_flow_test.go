@@ -54,19 +54,7 @@ func builtScaleWorld(t *testing.T, built, size int) (*app.Service, *vultrfake.Fa
 func wantScaledDown(t *testing.T, svc *app.Service, f *vultrfake.Fake, plan app.UpdatePlan) {
 	t.Helper()
 	wantRemoved(t, plan, f)
-	wantConverged(t, svc)
-	wantValid(t, svc)
-	var listed, names []string
-	for _, in := range f.Instances() {
-		listed = append(listed, nodeIDOf(in.ID))
-		names = append(names, in.Hostname)
-	}
-	for _, n := range nomadNodes(t, svc) {
-		if !slices.Contains(listed, n.ID) {
-			t.Errorf("Nomad lists the node %s (%s) of a machine that is gone", n.Name, n.ID)
-		}
-	}
-	wantJoined(t, f, names...)
+	wantSettled(t, svc, f)
 }
 
 // wantValid fails the test unless validate cluster passes.
