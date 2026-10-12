@@ -1,6 +1,7 @@
 package rollout_test
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -497,6 +498,116 @@ func TestAReaddedOldNodeLosesItsPeerAgainAndIsNotDrainedAgain(t *testing.T) {
 			}
 			if rest.refused {
 				t.Errorf("the resumed run ended refused: %q", rest.lines)
+			}
+		})
+	}
+}
+
+// inSurplus fails the step of a shrink that marks, drains, deletes, stops, hands the leadership over from, or removes
+// the peer or the member of a machine that Surplus does not list for the machine's group in the state.
+func inSurplus(s rollout.State, step rollout.Step) error {
+	switch step.Action {
+	case rollout.MarkIneligible, rollout.Drain, rollout.Delete, rollout.Stop, rollout.TransferLeadership,
+		rollout.RemovePeer, rollout.ForceLeave:
+	default:
+		return nil
+	}
+	i := slices.IndexFunc(s.Groups, func(g rollout.Group) bool { return g.Name == step.Group })
+	if i < 0 {
+		return fmt.Errorf("%s: the state has no group %s", step, step.Group)
+	}
+	listed := slices.ContainsFunc(rollout.Surplus(s, s.Groups[i]), func(m rollout.Machine) bool {
+		return m.ID == step.Machine.ID
+	})
+	if !listed {
+		return fmt.Errorf("%s: machine %s is not among the machines that Surplus lists", step, step.Machine.Name)
+	}
+	return nil
+}
+
+// surplusChecked is decide with the check inSurplus on every step of a shrink.
+func surplusChecked(decide decider) decider {
+	return func(s rollout.State, mode rollout.Mode) (rollout.Step, error) {
+		step, err := decide(s, mode)
+		if err != nil || mode != rollout.Shrink {
+			return step, err
+		}
+		if err := inSurplus(s, step); err != nil {
+			return rollout.Step{}, err
+		}
+		return step, nil
+	}
+}
+
+func shrinkScenarios() []scenario {
+	return slices.DeleteFunc(slices.Clone(scenarios), func(sc scenario) bool { return sc.mode != rollout.Shrink })
+}
+
+// At every state of a shrink, each machine that a step of Next takes out is among the machines of Surplus.
+func TestNextTakesItsMachinesFromSurplus(t *testing.T) {
+	for _, sc := range shrinkScenarios() {
+		t.Run(sc.name, func(t *testing.T) {
+			if _, err := sc.build().run(sc.mode, surplusChecked(rollout.Next), false); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// A decider that takes another machine than the ones of Surplus fails the check.
+func TestADeciderThatTakesAnotherMachineThanSurplusFails(t *testing.T) {
+	other := func(s rollout.State, mode rollout.Mode) (rollout.Step, error) {
+		step, err := rollout.Next(s, mode)
+		if err != nil || step.Action != rollout.Stop {
+			return step, err
+		}
+		for _, m := range s.Machines {
+			if m.Group == step.Group && m.ID != step.Machine.ID && !slices.ContainsFunc(rollout.Surplus(s, s.Groups[0]),
+				func(x rollout.Machine) bool { return x.ID == m.ID }) {
+				step.Machine = m
+				return step, nil
+			}
+		}
+		return step, errors.New("no other machine to take")
+	}
+	_, err := shrinkServers(5, 3).run(rollout.Shrink, surplusChecked(other), false)
+	if err == nil || !strings.Contains(err.Error(), "is not among the machines that Surplus lists") {
+		t.Errorf("run = %v, want the error that the machine is not among the machines of Surplus", err)
+	}
+}
+
+// At the start of a shrink, Surplus lists the machines that the run deletes: in the order of the deletes for a server
+// group, whose deletes follow the order of its victims, and in any order for a client group, whose deletes follow the
+// drains.
+func TestSurplusAtTheStartIsWhatTheShrinkDeletes(t *testing.T) {
+	for _, sc := range shrinkScenarios() {
+		t.Run(sc.name, func(t *testing.T) {
+			w := sc.build()
+			start := w.observe()
+			deleted := map[string][]string{}
+			record := func(s rollout.State, mode rollout.Mode) (rollout.Step, error) {
+				step, err := rollout.Next(s, mode)
+				if err == nil && step.Action == rollout.Delete {
+					deleted[step.Group] = append(deleted[step.Group], step.Machine.Name)
+				}
+				return step, err
+			}
+			if _, err := w.run(sc.mode, record, false); err != nil {
+				t.Fatal(err)
+			}
+			for _, g := range start.Groups {
+				var want []string
+				for _, m := range rollout.Surplus(start, g) {
+					want = append(want, m.Name)
+				}
+				got := deleted[g.Name]
+				if !g.Role.RunsServer() {
+					slices.Sort(want)
+					slices.Sort(got)
+				}
+				if diff := cmp.Diff(want, got); diff != "" {
+					t.Errorf("group %s: the run deletes other machines than Surplus lists (-surplus +deleted):\n%s", g.Name, diff)
+				}
 			}
 		})
 	}

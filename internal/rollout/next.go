@@ -48,7 +48,7 @@ func Next(s State, mode Mode) (Step, error) {
 			return Step{}, fmt.Errorf("rollout: unknown role %q", g.Role)
 		}
 	}
-	if err := checkDuplicates(s, groups); err != nil {
+	if err := checkDuplicates(s, groups, mode); err != nil {
 		return Step{}, err
 	}
 	if err := checkRoles(s, groups); err != nil {
@@ -90,8 +90,13 @@ func machinesOf(s State, g Group) []Machine {
 	return ms
 }
 
-// checkDuplicates refuses a group that lists two machines of one name.
-func checkDuplicates(s State, groups []Group) error {
+// checkDuplicates refuses a group that lists two machines of one name. A roll tells the user to run update first; a
+// shrink is update itself, which deals with such machines before it asks for a step, so it asks to run it again.
+func checkDuplicates(s State, groups []Group, mode Mode) error {
+	advice := "first"
+	if mode == Shrink {
+		advice = "again"
+	}
 	for _, g := range groups {
 		ms := machinesOf(s, g)
 		for i := 0; i < len(ms); {
@@ -104,8 +109,8 @@ func checkDuplicates(s State, groups []Group) error {
 				for _, m := range ms[i:j] {
 					ids = append(ids, m.ID)
 				}
-				return refuse("node group %s: machines %s share the name %s; run tent update cluster first",
-					g.Name, english.And(ids), ms[i].Name)
+				return refuse("node group %s: machines %s share the name %s; run tent update cluster %s",
+					g.Name, english.And(ids), ms[i].Name, advice)
 			}
 			i = j
 		}

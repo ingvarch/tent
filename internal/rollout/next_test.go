@@ -291,16 +291,22 @@ func TestNextRefusesAGroupThatListsAMachineOfAnotherRole(t *testing.T) {
 			slices.Reverse(s.Machines)
 		}, "node group servers: node prod-servers-1 was created as a combined node and the group is now server" +
 			roleChanged},
-		{"duplicate names come first", func(t *testing.T, s *rollout.State) {
+	}
+	duplicates := func(advice string) refusalCase {
+		return refusalCase{"duplicate names come first", func(t *testing.T, s *rollout.State) {
 			machineOf(t, s, serverName(1)).Role = v1alpha1.RoleClient
 			twin := *machineOf(t, s, serverName(2))
 			twin.ID = "m-9"
 			s.Machines = append(s.Machines, twin)
-		}, "node group servers: machines m-3 and m-9 share the name prod-servers-2; run tent update cluster first"},
+		}, "node group servers: machines m-3 and m-9 share the name prod-servers-2; run tent update cluster " + advice}
 	}
 	base := func() rollout.State { return serversState(3) }
-	t.Run("roll", func(t *testing.T) { runRefusalCasesIn(t, rollout.Roll, base, tests) })
-	t.Run("shrink", func(t *testing.T) { runRefusalCasesIn(t, rollout.Shrink, base, tests) })
+	t.Run("roll", func(t *testing.T) {
+		runRefusalCasesIn(t, rollout.Roll, base, append(tests, duplicates("first")))
+	})
+	t.Run("shrink", func(t *testing.T) {
+		runRefusalCasesIn(t, rollout.Shrink, base, append(tests, duplicates("again")))
+	})
 }
 
 func TestNextRefusesAnotherRoleInAnyGroupBeforeActing(t *testing.T) {

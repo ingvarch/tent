@@ -31,9 +31,10 @@ type serverGroup struct {
 	voters  int               // how many servers of the Raft configuration vote
 }
 
-// nextServer returns the first step of the group that applies, and false when the group is done.
-func nextServer(s State, mode Mode, g Group) (Step, bool, error) {
-	sg := serverGroup{
+// newServerGroup reads the group's servers, members and nodes from the state. In a shrink it also lists the machines
+// that the group loses.
+func newServerGroup(s State, mode Mode, g Group) *serverGroup {
+	sg := &serverGroup{
 		groupView: newGroupView(s, mode, g), servers: map[string]Server{}, members: map[string]Member{},
 		nodes: map[string]Node{},
 	}
@@ -60,16 +61,30 @@ func nextServer(s State, mode Mode, g Group) (Step, bool, error) {
 			sg.voters++
 		}
 	}
-	rules := []func() (Step, bool, error){
-		func() (Step, bool, error) { return sg.settleUnjoined(sg.started) }, sg.removeVictim,
-		sg.settleOrphans, sg.requireSize, sg.create,
+	if mode == Shrink {
+		sg.lose = sg.surplus()
 	}
+	return sg
+}
+
+// nextServer returns the first step of the group that applies, and false when the group is done.
+func nextServer(s State, mode Mode, g Group) (Step, bool, error) {
+	sg := newServerGroup(s, mode, g)
+	rules := []func() (Step, bool, error){sg.settleUnjoined, sg.removeVictim, sg.settleOrphans, sg.requireSize, sg.create}
 	for _, rule := range rules {
 		if step, found, err := rule(); err != nil || found {
 			return step, found, err
 		}
 	}
 	return Step{}, false, nil
+}
+
+// surplus lists the machines that a shrink takes from the group: those whose removal has started, then those that
+// have not joined, the outdated ones, those that autopilot does not count healthy and those that do not lead.
+func (sg *serverGroup) surplus() []Machine {
+	return sg.surplusBy(nil, not(sg.started), func(m Machine) bool { return m.Joined },
+		func(m Machine) bool { return !outdated(sg.s, sg.g, m) },
+		func(m Machine) bool { return sg.servers[m.ID].Healthy }, func(m Machine) bool { return sg.servers[m.ID].Leader })
 }
 
 // started reports whether the removal of the machine has begun: it has joined, and it is stopped, or its server is
@@ -90,22 +105,29 @@ func (sg *serverGroup) started(m Machine) bool {
 		hasNode && (!n.Eligible || n.Draining)
 }
 
-// victim returns the machine to remove while the group has more machines than its size: one whose removal has
-// started, else the first by the order of victims. A roll takes outdated machines only, a shrink any.
+// victim returns the machine to remove while the group has more machines than its size. A shrink takes the first one
+// that the group loses. A roll takes an outdated one: one whose removal has started, else the first by the order of
+// victims.
 func (sg *serverGroup) victim() (Machine, bool) {
+	if sg.mode == Shrink {
+		if len(sg.lose) == 0 {
+			return Machine{}, false
+		}
+		return sg.lose[0], true
+	}
 	if len(sg.ms) <= sg.g.Size {
 		return Machine{}, false
 	}
 	var candidates []Machine
 	for _, m := range sg.ms {
-		if sg.mode == Shrink || outdated(sg.s, sg.g, m) {
+		if outdated(sg.s, sg.g, m) {
 			candidates = append(candidates, m)
 		}
 	}
 	if len(candidates) == 0 {
 		return Machine{}, false
 	}
-	sg.victimOrder(candidates, sg.started,
+	sortVictims(candidates, sg.ms, false, not(sg.started),
 		func(m Machine) bool { return sg.servers[m.ID].Healthy },
 		func(m Machine) bool { return sg.servers[m.ID].Leader },
 	)
@@ -253,18 +275,26 @@ func (sg *serverGroup) withServer() int {
 
 // successor returns the server that takes the leadership from the victim: the server of the group's other machines
 // that autopilot counts healthy and that comes first by name; the checks before have shown that they all vote. In a
-// roll it must be up to date too.
+// roll it must be up to date too; in a shrink it must be a machine that the group keeps.
 func (sg *serverGroup) successor(v Machine) (Server, bool) {
 	var best Server
 	var found bool
 	for _, m := range sg.ms {
 		srv := sg.servers[m.ID]
-		if m.ID != v.ID && srv.Healthy && (sg.mode == Shrink || !outdated(sg.s, sg.g, m)) &&
-			(!found || srv.Name < best.Name) {
+		if m.ID != v.ID && srv.Healthy && sg.mayLead(m) && (!found || srv.Name < best.Name) {
 			best, found = srv, true
 		}
 	}
 	return best, found
+}
+
+// mayLead reports whether the machine may take the leadership from a victim: a shrink keeps it, a roll finds it up to
+// date.
+func (sg *serverGroup) mayLead(m Machine) bool {
+	if sg.mode == Shrink {
+		return !slices.ContainsFunc(sg.lose, func(l Machine) bool { return l.ID == m.ID })
+	}
+	return !outdated(sg.s, sg.g, m)
 }
 
 // checkAtRest refuses unless autopilot reports every server healthy and every machine of the group runs and votes,
