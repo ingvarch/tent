@@ -45,6 +45,20 @@ func TestNomadFilesVerify(t *testing.T) {
 	}
 }
 
+// TestCheckNomadOnTheServedVersions checks that both served versions pass for both architectures and that a version
+// without files fails.
+func TestCheckNomadOnTheServedVersions(t *testing.T) {
+	opts := assets.Options{Client: &http.Client{Transport: assetstest.New()}, Now: assetstest.Now}
+	for _, version := range []string{assetstest.NomadVersion, assetstest.OlderNomadVersion} {
+		if err := assets.CheckNomad(t.Context(), opts, version, "amd64", "arm64"); err != nil {
+			t.Errorf("CheckNomad %s: %v", version, err)
+		}
+	}
+	if err := assets.CheckNomad(t.Context(), opts, "2.0.99", "amd64", "arm64"); err == nil {
+		t.Error("CheckNomad 2.0.99 = nil, want an error")
+	}
+}
+
 func TestNomadVersionWithoutFilesIsNotFound(t *testing.T) {
 	const base = "https://releases.hashicorp.com/nomad/2.0.99/nomad_2.0.99_SHA256SUMS"
 	for _, url := range []string{base, base + ".sig"} {
