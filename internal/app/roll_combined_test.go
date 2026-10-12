@@ -20,6 +20,9 @@ import (
 const (
 	// combinedGroup is the name of the combined node group of the test cluster.
 	combinedGroup = "all"
+	// drainReads is how many reads of the nodes show a drain of the combined worlds under way; the next read shows it
+	// complete.
+	drainReads = 3
 	// combinedDrainTimeout is the drainTimeout of the combined group.
 	combinedDrainTimeout = 30 * time.Minute
 	// combinedDrainYAML is the combined group of the test cluster with its drainTimeout.
@@ -34,7 +37,7 @@ func combinedRollWorld(t *testing.T, setups ...func(*nomadWorld)) (*app.Service,
 	t.Helper()
 	svc, f, w := newRelease(t, keyedClusterYAML, combinedDrainYAML, workersYAML)
 	w.ServersOverTime()
-	w.SetDrainReads(3)
+	w.SetDrainReads(drainReads)
 	for _, setup := range setups {
 		setup(w)
 	}
@@ -206,33 +209,13 @@ func TestRollLoopReplacesACombinedNodeStepByStep(t *testing.T) {
 		if !slices.Equal(halted, []string{old}) || !slices.Equal(deleted, []string{old}) {
 			t.Errorf("the roll halted %v and deleted %v, want only %s", halted, deleted, old)
 		}
-		if reads := drainReadsBeforeStop(t, f, w); reads < 3 {
-			t.Errorf("the roll read the nodes %d times between the drain and the stop, want at least 3", reads)
+		if reads := nodeReadsBeforeTheNodeLeaves(t, f, w, old); reads < drainReads+2 {
+			t.Errorf("the roll read the nodes %d times from the Drain to the stop, want at least %d: the %d that show the "+
+				"drain under way, the one that shows it complete and the one with the list before the stop", reads,
+				drainReads+2, drainReads)
 		}
 		inv.wantKept()
 	})
-}
-
-// drainReadsBeforeStop returns how many times the roll read the nodes after its first Drain and before the first
-// HaltInstance that followed it.
-func drainReadsBeforeStop(t *testing.T, f *vultrfake.Fake, w *nomadWorld) int {
-	t.Helper()
-	log := w.Log()
-	drain := slices.IndexFunc(log, func(c nomadCall) bool { return c.Name == "Drain" })
-	if drain < 0 {
-		t.Fatal("the roll sent no Drain")
-	}
-	halt := slices.IndexFunc(f.Calls()[log[drain].Cloud:], func(c vultrfake.Call) bool { return c.Name == "HaltInstance" })
-	if halt < 0 {
-		t.Fatal("the roll halted no machine after its Drain")
-	}
-	reads := 0
-	for _, c := range log[drain:] {
-		if c.Name == "Nodes" && c.Cloud <= log[drain].Cloud+halt {
-			reads++
-		}
-	}
-	return reads
 }
 
 // TestRollLoopSendsNoDrainWhileAnotherCombinedNodeCannotTakeWork ends a run that resumes at a node that was marked

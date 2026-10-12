@@ -108,14 +108,16 @@ func cutServersRun(t *testing.T, svc *app.Service, f *vultrfake.Fake, w *nomadWo
 	wantLockFree(t, svc.Store)
 }
 
-// wantServersCutDone fails the test unless the roll ended as a roll of three servers does, with the machines of old
-// replaced, CreateInstance called creates times in all, and the invariants kept at every call.
+// wantServersCutDone fails the test unless the roll of the three machines of the group called group ended as a roll of
+// three servers does, with the machines of old replaced, CreateInstance called creates times in all, and the invariants
+// kept at every call.
 func wantServersCutDone(
-	t *testing.T, svc *app.Service, f *vultrfake.Fake, inv *serverInvariants, old []serverMachine, creates int,
+	t *testing.T, svc *app.Service, f *vultrfake.Fake, inv *serverInvariants, group string, old []serverMachine,
+	creates int,
 ) {
 	t.Helper()
 	wantRollEnded(t, svc, f, idsOf(old))
-	wantServersRolled(t, svc, f, serversGroup, old, true)
+	wantServersRolled(t, svc, f, group, old, true)
 	if got := countCalls(f, "CreateInstance"); got != creates {
 		t.Errorf("CreateInstance was called %d times in all, want %d", got, creates)
 	}
@@ -140,7 +142,7 @@ func TestServersRollFinishesAfterACutAtAnyWrite(t *testing.T) {
 			t.Fatalf("the run after the cut failed: %v", err)
 		}
 
-		wantServersCutDone(t, svc, f, inv, old, creates)
+		wantServersCutDone(t, svc, f, inv, serversGroup, old, creates)
 	})
 }
 
@@ -247,7 +249,7 @@ func TestServersRollFinishesAfterALostAnswerOfEachWrite(t *testing.T) {
 						t.Fatalf("the run after the lost answer failed: %v", err)
 					}
 				}
-				wantServersCutDone(t, svc, f, inv, old, creates)
+				wantServersCutDone(t, svc, f, inv, serversGroup, old, creates)
 			})
 		})
 	}
@@ -386,7 +388,7 @@ func TestServersRollGoesOnAfterADeadlineEndedTheRun(t *testing.T) {
 					t.Fatalf("the next run failed: %v", err)
 				}
 
-				wantServersCutDone(t, svc, f, inv, old, creates)
+				wantServersCutDone(t, svc, f, inv, serversGroup, old, creates)
 			})
 		})
 	}
