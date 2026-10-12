@@ -252,7 +252,7 @@ func TestNextAcceptsAServerThatReportsNoVersion(t *testing.T) {
 
 const (
 	roleChangedHead = "; tent does not replace or remove the nodes of a group whose role changed; "
-	roleChanged     = roleChangedHead + "give the group the role its nodes were created with"
+	roleChanged     = roleChangedHead + "a node group keeps its role, and a cluster moves by creating a new one"
 	// roleUnreadable ends the refusal for a machine whose role label is missing or not a role tent knows.
 	roleUnreadable = roleChangedHead + "give the machine the label tent/role with the role that it runs"
 )

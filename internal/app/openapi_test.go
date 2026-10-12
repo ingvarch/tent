@@ -147,13 +147,14 @@ func TestCombinedWarning(t *testing.T) {
 	})
 	t.Run("replace", func(t *testing.T) {
 		svc := newCombined(t)
-		mustCreate(t, svc, narrow, edit(t, combinedYAML, "role: combined", "role: server"))
-		wantTold("a create without a combined group", 0)
-		if _, err := svc.Replace(t.Context(), decode(t, combinedYAML), false); err != nil {
+		mustCreate(t, svc, narrow, combinedYAML)
+		got = nil
+		bigger := edit(t, combinedYAML, "size: 3", "size: 5")
+		if _, err := svc.Replace(t.Context(), decode(t, bigger), false); err != nil {
 			t.Fatalf("Replace without apply: %v", err)
 		}
 		wantTold("a replace without apply", 0)
-		mustReplace(t, svc, combinedYAML)
+		mustReplace(t, svc, bigger)
 		wantTold("a replace of a node group", 1)
 	})
 	t.Run("save", func(t *testing.T) {

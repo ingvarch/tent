@@ -427,6 +427,21 @@ func TestEditKeepsTheCloud(t *testing.T) {
 	e.wantNoFile(t)
 }
 
+// TestEditKeepsTheRole opens the editor again when the edit changes a node group's role, and changes nothing when the
+// operator reverts it.
+func TestEditKeepsTheRole(t *testing.T) {
+	s := withCluster(t)
+	e := newFakeEditor(t, "", editStep{Old: "role: server", New: "role: combined"},
+		editStep{Old: "role: combined", New: "role: server"})
+	wantOK(t, runEdit(t, "", "edit", "nodegroup", "servers", "--name", "prod", "--yes", "--state", s.url),
+		"edit cancelled; nothing changed\n")
+	s.want(t, prodObjects)
+	e.wantRuns(t, serversYAML, fixErrorsHeader+
+		"# NodeGroup servers: spec.role: cannot change from server to combined; a node group keeps its role\n"+
+		replaced(t, serversYAML, "role: server", "role: combined"))
+	e.wantNoFile(t)
+}
+
 func TestEditAnswers(t *testing.T) {
 	for _, tc := range []struct {
 		answer string

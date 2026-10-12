@@ -553,7 +553,8 @@ func isGroup(l statestore.Layout, p string) bool {
 
 // validate checks the cluster that results from storing the input: the stored objects that the input does not
 // replace, and the input. A Cluster that replaces a stored one keeps its provider and region, and the stored one must
-// decode to show them. It returns the warnings about the resulting cluster.
+// decode to show them. A node group of a stored cluster keeps its role: without cluster.yaml tent has made no machine.
+// It returns the warnings about the resulting cluster.
 func (s *Service) validate(st map[string]entry, in input) ([]string, error) {
 	replaced := make(map[string]bool, len(in.docs))
 	for _, d := range in.docs {
@@ -564,8 +565,9 @@ func (s *Service) validate(st map[string]entry, in input) ([]string, error) {
 		return nil, err
 	}
 	var moves v1alpha1.Errors
+	e, hasCluster := st[in.layout.ClusterSpec()]
 	if in.cluster != nil {
-		if e, ok := st[in.layout.ClusterSpec()]; ok {
+		if hasCluster {
 			stored, err := decodeCluster(in.layout.ClusterSpec(), e.data)
 			if err != nil {
 				return nil, err
@@ -573,6 +575,9 @@ func (s *Service) validate(st map[string]entry, in input) ([]string, error) {
 			moves = cloudMoves(stored, in.cluster)
 		}
 		objs.Cluster = in.cluster
+	}
+	if hasCluster {
+		moves = append(moves, roleMoves(in, st)...)
 	}
 	objs.NodeGroups = append(objs.NodeGroups, in.groups...)
 	warnings, err := check(objs, s.Validate, s.channel)
@@ -594,6 +599,33 @@ func cloudMoves(stored, c *v1alpha1.Cluster) v1alpha1.Errors {
 			errs = append(errs, v1alpha1.FieldError{
 				Object: clusterObject(c), Path: f.path,
 				Detail: "cannot change from " + f.was + " to " + f.now + "; a cluster moves by creating a new one",
+			})
+		}
+	}
+	return errs
+}
+
+// roleMoves returns a problem for each node group of the input whose role differs from that of the stored group it
+// replaces: the machines of a group keep the role they were made with, and tent would no longer roll them right. A
+// group that the store does not hold passes. An empty role is not compared: a new one fails validation, and a stored
+// one names no role. A stored group that does not decode passes too: its role is unknown, and replacing it is how it
+// is repaired.
+func roleMoves(in input, st map[string]entry) v1alpha1.Errors {
+	var errs v1alpha1.Errors
+	docs := in.docs[len(in.docs)-len(in.groups):] // the node groups' docs, in the order of in.groups
+	for i, g := range in.groups {
+		e, ok := st[docs[i].path]
+		if !ok {
+			continue
+		}
+		stored, err := decodeGroup(docs[i].path, e.data)
+		if err != nil {
+			continue
+		}
+		if was, now := stored.Spec.Role, g.Spec.Role; was != "" && now != "" && was != now {
+			errs = append(errs, v1alpha1.FieldError{
+				Object: v1alpha1.KindNodeGroup + " " + g.Metadata.Name, Path: "spec.role",
+				Detail: "cannot change from " + string(was) + " to " + string(now) + "; a node group keeps its role",
 			})
 		}
 	}

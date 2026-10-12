@@ -65,6 +65,15 @@ func TestReplaceKeepsTheCloud(t *testing.T) {
 	s.want(t, prodObjects)
 }
 
+// TestReplaceKeepsTheRole refuses a node group of another role than the stored one.
+func TestReplaceKeepsTheRole(t *testing.T) {
+	s := withCluster(t)
+	combined := replaced(t, serversYAML, "role: server", "role: combined")
+	wantError(t, runIn(t, combined, "replace", "-f", "-", "--state", s.url), "Error: invalid spec:\n"+
+		"  NodeGroup servers: spec.role: cannot change from server to combined; a node group keeps its role\n")
+	s.want(t, prodObjects)
+}
+
 func TestSpecFileFlagHelp(t *testing.T) {
 	for _, name := range []string{"create", "replace"} {
 		got := runIn(t, "", name, "--help")
