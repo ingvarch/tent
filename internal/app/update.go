@@ -196,7 +196,9 @@ func (s NodeStep) String() string {
 // Nomad than the version of the new node or of the new pin, when the new pin is more than one minor version above, or
 // of another major version than, the oldest release that a server or a node that is not down runs, when a version
 // that Nomad reports is no version number, and when the read fails. A server that reports no version is not compared.
-// A cluster that cannot answer is not checked.
+// A cluster that cannot answer is not checked. When that reading shows a server on an older Nomad than the version of
+// the specs, or a server that reports no version, and the plan boots a client, the plan stands and Update tells
+// OnWarning once, after its first plan, that the client waits for the servers: the apply stops before it.
 // The Nomad step is part of the plan until the store holds the mark of the ACL bootstrap, and also, with the mark, when
 // no server or combined machine of the cluster is left: the servers that come are a new Nomad, so it bootstraps again.
 // After the bootstrap it is part of the plan when the plan creates or waits for a server or combined node. Without
@@ -217,19 +219,22 @@ func (s NodeStep) String() string {
 // register, checks that its server votes at its private address, and replaces its user data with a stub and labels its
 // machine as joined, and last writes the mark;
 // then the waits for client nodes, the deletes of the clients that never registered and the creates of the missing
-// clients, each client booting with an intro token, registering, and then being scrubbed and labelled as a server is,
-// before the next is made; a wait for a client without an operation id asks for no token and calls no cloud until the
-// scrub; then the other node deletes, which are those of machines that never joined. Each delete of a machine with a
-// private address follows Nomad's answer that it has not joined, as a client of its name and private address that is
-// not down or as a server of the Raft configuration, else the machine is scrubbed and labelled and the update fails; a
-// machine without a private address counts as not joined, and its delete asks Nomad nothing. Then come the removals of
-// the nodes that joined and the purges, which the loop of a rolling update carries out in the mode that removes surplus
-// nodes, over a fresh list of the machines, one node at a time as the decisions order; the plan's Removed counts the
-// nodes it drained and purged and the machines it stopped, also when the loop fails. Last come the infrastructure's
-// deletes, so that a firewall group goes only once its nodes are gone. Nodes are created one at a time. A create, a
-// wait and each wait of the Nomad step may take 10 minutes, and a scrub 5. The first step that fails stops the update,
-// and running it again finishes the job. It returns the plan it applied, made under the lock, with the error; the plan
-// says Applied once every step has succeeded, or at once when it has no changes.
+// clients; before the first change that boots a client, the update reads the Raft configuration and autopilot's report
+// and stops, with what it did before standing, when that client would run a newer Nomad than a server runs, when a
+// server reports no version yet, or when Nomad cannot be asked; each client boots with an intro token, registers, and
+// is then scrubbed and labelled as a server is, before the next is made; a wait for a client without an operation id
+// asks for no token and calls no cloud until the scrub; then the other node deletes, which are those of machines that
+// never joined. Each delete of a machine with a private address follows Nomad's answer that it has not joined, as a
+// client of its name and private address that is not down or as a server of the Raft configuration, else the machine is
+// scrubbed and labelled and the update fails; a machine without a private address counts as not joined, and its delete
+// asks Nomad nothing. Then come the removals of the nodes that joined and the purges, which the loop of a rolling
+// update carries out in the mode that removes surplus nodes, over a fresh list of the machines, one node at a time as
+// the decisions order; the plan's Removed counts the nodes it drained and purged and the machines it stopped, also when
+// the loop fails. Last come the infrastructure's deletes, so that a firewall group goes only once its nodes are gone.
+// Nodes are created one at a time. A create, a wait and each wait of the Nomad step may take 10 minutes, and a scrub 5.
+// The first step that fails stops the update, and running it again finishes the job. It returns the plan it applied,
+// made under the lock, with the error; the plan says Applied once every step has succeeded, or at once when it has no
+// changes.
 func (s *Service) Update(ctx context.Context, cluster string, apply bool) (_ UpdatePlan, err error) {
 	defer func() { err = stopped(ctx, err) }()
 	l, err := s.layout(ctx, cluster)
@@ -283,6 +288,7 @@ func (s *Service) beginUpdate(u updateRun) error {
 type updateRun struct {
 	plan UpdatePlan
 	nodeKit
+	version   string // the Nomad version of the cluster's specs: that of the nodes the run boots
 	layout    statestore.Layout
 	completed []byte           // the completed spec
 	warnings  []string         // about the cluster
@@ -290,7 +296,7 @@ type updateRun struct {
 	listed    []cloud.Instance // every machine the cloud listed, for the machine that a wait names by ID
 	removal   removalPlan      // what the apply carries out through the rollout decisions
 	// readWarnings say what the plan could not read: the release files that tell the outdated machines, or the nodes
-	// that deleted machines left. Update tells them once, after its first plan.
+	// that deleted machines left; and which client waits for the servers. Update tells them once, after its first plan.
 	readWarnings []string
 	// staleMark is set when the store holds the mark of a bootstrap that the servers of the plan do not stand behind.
 	staleMark bool
@@ -381,8 +387,9 @@ func (s *Service) planUpdate(ctx context.Context, l statestore.Layout, cache ass
 	plan.Secrets, plan.Completed = relativePaths(l, secrets.writes), !bytes.Equal(stored, completed)
 	plan.Nomad = planNomad(m, plan.Nodes, found.servers, marked)
 	u := updateRun{
-		plan: plan, layout: l, completed: completed, warnings: s.updateWarnings(objs.Cluster, objs.NodeGroups, ch),
-		servers: found.servers, listed: found.listed, removal: found.removal,
+		plan: plan, version: objs.Cluster.Spec.Nomad.Version, layout: l, completed: completed,
+		warnings: s.updateWarnings(objs.Cluster, objs.NodeGroups, ch), servers: found.servers, listed: found.listed,
+		removal:   found.removal,
 		staleMark: marked && plan.Nomad != nil && plan.Nomad.Bootstrap,
 		nodeKit: nodeKit{
 			cluster: m.Name, region: objs.Cluster.Spec.Nomad.Region, nodes: p.Nodes(), secrets: secrets, names: names,
@@ -403,8 +410,12 @@ func (s *Service) planUpdate(ctx context.Context, l statestore.Layout, cache ass
 		u.readWarnings = append(u.readWarnings, couldNotTellOutdated+err.Error())
 		return u, nil
 	}
-	if err := s.checkVersions(ctx, c, in, plan, found); err != nil {
+	waits, err := s.checkVersions(ctx, c, in, plan, found)
+	if err != nil {
 		return updateRun{}, err
+	}
+	if waits != "" {
+		u.readWarnings = append(u.readWarnings, waits)
 	}
 	u.builder = builder
 	if changes {

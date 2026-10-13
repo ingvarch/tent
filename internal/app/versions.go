@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/ingvarch/tent/internal/channels"
 	"github.com/ingvarch/tent/internal/rollout"
@@ -127,33 +128,103 @@ func checkPinMove(cluster, from, to string, nomad rollout.Nomad) error {
 // plan that writes another version into the completed spec than the stored one needs the rules of checkPinMove. It
 // reads what the plan read already (found), else what a roll observes. A cluster that cannot answer, because the store
 // holds no mark of its bootstrap or no server runs with a public address, gets no check. A read that fails ends the
-// plan.
+// plan. The warning that it returns is empty unless the plan boots a client that clientAhead says waits for the
+// servers.
 func (s *Service) checkVersions(ctx context.Context, c loadedCluster, in planInput, plan UpdatePlan, found machines,
-) error {
+) (warning string, err error) {
 	to := c.objs.Cluster.Spec.Nomad.Version
 	boot := slices.IndexFunc(plan.Nodes, bootsMachine)
 	moves := to != c.pinned
 	if !in.marked || boot < 0 && !moves {
-		return nil
+		return "", nil
 	}
 	reading := found.reading
 	if reading == nil {
 		read, err := readForRemoval(ctx, c.m, found.listed, plan.Nodes, s.nomadAsker(in.access))
 		switch {
 		case errors.Is(err, errNoServerToAsk):
-			return nil
+			return "", nil
 		case err != nil:
 			what := pinPhrase(c.m.Name, c.pinned, to)
 			if boot >= 0 {
 				what = createPhrase(plan.Nodes[boot])
 			}
-			return fmt.Errorf("%s, and tent could not ask Nomad which versions run: %w", what, err)
+			return "", fmt.Errorf("%s, and tent could not ask Nomad which versions run: %w", what, err)
 		}
 		reading = &read
 	}
 	nomad := reading.state()
 	if err := checkNewNodes(plan.Nodes, to, nomad); err != nil {
-		return err
+		return "", err
 	}
-	return checkPinMove(c.m.Name, c.pinned, to, nomad)
+	if err := checkPinMove(c.m.Name, c.pinned, to, nomad); err != nil {
+		return "", err
+	}
+	if node, why := clientAhead(plan.Nodes, to, nomad); why != nil {
+		return waitWarning(node, why), nil
+	}
+	return "", nil
+}
+
+// errServerWithoutVersion is why a client waits for the servers when one of them reports no Nomad version yet.
+var errServerWithoutVersion = errors.New("a server reports no Nomad version yet")
+
+// clientAhead returns the first client that the changes boot and why it waits: the refusal of rollout.CheckNewNode
+// when a server reports an older Nomad than version, or a server or a node that is not down a newer one, and
+// errServerWithoutVersion when a server reports no version. It returns "" and nil when no client has to wait. A
+// server or combined node is never held back.
+func clientAhead(changes []NodeChange, version string, nomad rollout.Nomad) (node string, why error) {
+	i := slices.IndexFunc(changes, func(c NodeChange) bool { return bootsMachine(c) && !isServerChange(c) })
+	if i < 0 {
+		return "", nil
+	}
+	unknown, err := rollout.CheckNewNode(nomad, version, true)
+	if err == nil && unknown {
+		err = errServerWithoutVersion
+	}
+	if err != nil {
+		return changes[i].Name, err
+	}
+	return "", nil
+}
+
+// aheadAdvice splits why, the refusal that clientAhead returns, into its reason and the commands that follow it; the
+// advice is "" when no command helps.
+func aheadAdvice(why error) (reason, advice string) {
+	if errors.Is(why, errServerWithoutVersion) {
+		return why.Error(), "run tent update cluster again"
+	}
+	if reason, ok := strings.CutSuffix(why.Error(), "; roll the servers first"); ok {
+		return reason, "run tent rolling-update cluster, then tent update cluster again"
+	}
+	return why.Error(), ""
+}
+
+// waitWarning tells that the plan creates the client node, which waits for the servers, and that the apply stops
+// before it.
+func waitWarning(node string, why error) string {
+	reason, advice := aheadAdvice(why)
+	msg := fmt.Sprintf("node %s waits for the servers: %s; this update stops before it", node, reason)
+	if advice != "" {
+		msg += ": " + advice
+	}
+	return msg
+}
+
+// stopsBefore starts the error of an apply that stops before the client node.
+func stopsBefore(node string) string { return "update stops before node " + node }
+
+// cannotAsk is the error of an apply that stops before the client node because Nomad did not answer with err.
+func cannotAsk(node string, err error) error {
+	return fmt.Errorf("%s: tent could not ask Nomad which versions its servers run: %w", stopsBefore(node), err)
+}
+
+// stopError is the error of an apply that stops before the client node because of why.
+func stopError(node string, why error) error {
+	reason, advice := aheadAdvice(why)
+	msg := stopsBefore(node) + ": " + reason
+	if advice != "" {
+		msg += "; " + advice
+	}
+	return errors.New(msg)
 }

@@ -304,6 +304,7 @@ func TestUpdateBuildsANomadCluster(t *testing.T) {
 			"nomad Leader (prod-servers-0)",
 			bootstrapLine(t, svc, "prod-servers-0"),
 			"nomad Health (prod-servers-0)", "nomad KeyringReady (prod-servers-0)", "nomad Peers (prod-servers-0)",
+			"nomad Peers (prod-servers-0)", "nomad Health (prod-servers-0)",
 			introLine("prod-workers-0", "prod-servers-0"), "nomad Nodes (prod-servers-0)",
 			introLine("prod-workers-1", "prod-servers-0"), "nomad Nodes (prod-servers-0)",
 		}
@@ -315,15 +316,15 @@ func TestUpdateBuildsANomadCluster(t *testing.T) {
 			"GetInstance <prod-servers-1>", "UpdateInstance <prod-servers-1>",
 			"GetInstance <prod-servers-2>", "UpdateInstance <prod-servers-2>",
 		}
-		if diff := cmp.Diff(wantScrubCalls, cloudCallsBetween(f, w, 4, 5)); diff != "" {
+		if diff := cmp.Diff(wantScrubCalls, cloudCallsBetween(f, w, 4, 7)); diff != "" {
 			t.Errorf("the cloud calls between Peers and the first intro token (-want +got):\n%s", diff)
 		}
 		if diff := cmp.Diff([]string{"GetInstance <prod-workers-0>", "UpdateInstance <prod-workers-0>"},
-			cloudCallsBetween(f, w, 6, 7)); diff != "" {
+			cloudCallsBetween(f, w, 8, 9)); diff != "" {
 			t.Errorf("the cloud calls after the first client registered (-want +got):\n%s", diff)
 		}
 		if diff := cmp.Diff([]string{"GetInstance <prod-workers-1>", "UpdateInstance <prod-workers-1>"},
-			cloudCallsAfter(f, w, 8)); diff != "" {
+			cloudCallsAfter(f, w, 10)); diff != "" {
 			t.Errorf("the cloud calls after the last client registered (-want +got):\n%s", diff)
 		}
 		if first := w.Log()[0]; countOf(f.Calls()[:first.Cloud], "CreateInstance") != 3 {
@@ -580,8 +581,8 @@ func TestUpdateMovesToTheNextServer(t *testing.T) {
 		wantCalls := []string{
 			"nomad Leader (prod-servers-0)", "nomad Leader (prod-servers-1)",
 			bootstrapLine(t, svc, "prod-servers-1"), "nomad Health (prod-servers-1)",
-			"nomad KeyringReady (prod-servers-1)", "nomad Peers (prod-servers-1)",
-			introLine("prod-workers-0", "prod-servers-1"), "nomad Nodes (prod-servers-1)",
+			"nomad KeyringReady (prod-servers-1)", "nomad Peers (prod-servers-1)", "nomad Peers (prod-servers-1)",
+			"nomad Health (prod-servers-1)", introLine("prod-workers-0", "prod-servers-1"), "nomad Nodes (prod-servers-1)",
 			introLine("prod-workers-1", "prod-servers-1"), "nomad Nodes (prod-servers-1)",
 		}
 		if diff := cmp.Diff(wantCalls, nomadLines(w)); diff != "" {
@@ -744,8 +745,8 @@ func TestUpdateStoresNoMarkBeforeTheServersAreHealthy(t *testing.T) {
 
 		want := []string{
 			"nomad Leader (prod-servers-0)", bootstrapLine(t, svc, "prod-servers-0"), "nomad Health (prod-servers-0)",
-			"nomad KeyringReady (prod-servers-0)", "nomad Peers (prod-servers-0)",
-			introLine("prod-workers-0", "prod-servers-0"), "nomad Nodes (prod-servers-0)",
+			"nomad KeyringReady (prod-servers-0)", "nomad Peers (prod-servers-0)", "nomad Peers (prod-servers-0)",
+			"nomad Health (prod-servers-0)", introLine("prod-workers-0", "prod-servers-0"), "nomad Nodes (prod-servers-0)",
 			introLine("prod-workers-1", "prod-servers-0"), "nomad Nodes (prod-servers-0)",
 		}
 		if diff := cmp.Diff(want, nomadLines(w)[before:]); diff != "" {
@@ -774,8 +775,9 @@ func TestUpdateWaitsForTheKeyringBeforeTheScrubAndTheFirstIntroToken(t *testing.
 		want := []string{
 			"nomad Leader (prod-servers-0)", bootstrapLine(t, svc, "prod-servers-0"), "nomad Health (prod-servers-0)",
 			"nomad KeyringReady (prod-servers-0)", "nomad KeyringReady (prod-servers-0)",
-			"nomad KeyringReady (prod-servers-0)", "nomad Peers (prod-servers-0)",
-			introLine("prod-workers-0", "prod-servers-0"), "nomad Nodes (prod-servers-0)",
+			"nomad KeyringReady (prod-servers-0)", "nomad Peers (prod-servers-0)", "nomad Peers (prod-servers-0)",
+			"nomad Health (prod-servers-0)", introLine("prod-workers-0", "prod-servers-0"),
+			"nomad Nodes (prod-servers-0)",
 			introLine("prod-workers-1", "prod-servers-0"), "nomad Nodes (prod-servers-0)",
 		}
 		if diff := cmp.Diff(want, nomadLines(w)); diff != "" {

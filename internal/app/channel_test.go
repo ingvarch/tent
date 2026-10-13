@@ -274,7 +274,8 @@ func TestUpdatePinsTheNomadVersion(t *testing.T) {
 func TestUpdateTakesTheUsersVersion(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _ := newUpdate(t)
+		svc, f := newUpdate(t)
+		withNomad(svc, f).NodeVersions()
 		svc.Channels = stableChannel("2.0.0", "2.0.6", "2.0.6")
 		mustUpdate(t, svc)
 
@@ -297,7 +298,8 @@ func TestUpdateTakesTheUsersVersion(t *testing.T) {
 func TestUpdatePinsAnOlderCompletedSpec(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _ := newUpdate(t)
+		svc, f := newUpdate(t)
+		withNomad(svc, f).NodeVersions()
 		svc.Channels = stableChannel("2.0.0", "2.0.6", "2.0.6")
 		mustUpdate(t, svc)
 		put(t, svc.Store, completedPath, completedSpec(t, svc, ""))
@@ -322,6 +324,7 @@ func TestUpdateRefusesAPinOutsideTheChannel(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		svc, f := newUpdate(t)
+		withNomad(svc, f).NodeVersions()
 		svc.Channels = stableChannel("2.0.0", "2.0.6", "2.0.6")
 		mustUpdate(t, svc)
 		svc.Channels = stableChannel("2.0.7", "2.0.7", "2.0.7")

@@ -74,6 +74,8 @@ GetInstance <prod-servers-1>
 UpdateInstance <prod-servers-1>
 GetInstance <prod-servers-2>
 UpdateInstance <prod-servers-2>
+nomad Peers (prod-servers-0)
+nomad Health (prod-servers-0)
 nomad IntroToken prod-workers-0 default 30m0s (prod-servers-0)
 ListInstances tent/op=<op8>
 ListSSHKeys

@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"testing/synctest"
 
 	"github.com/google/go-cmp/cmp"
 
 	"github.com/ingvarch/tent/internal/app"
+	"github.com/ingvarch/tent/internal/cloud/vultr/vultrfake"
 	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/nomadops/nomadfake"
 )
@@ -351,5 +353,393 @@ func TestUpdateHoldsAVersionWithoutAStoredPinAgainstNomad(t *testing.T) {
 		wantUpdateRefused(t, b, "update would set the Nomad version of cluster prod to 2.0.6: tent never moves a node "+
 			"to an older Nomad: the cluster's version is 2.0.6, and server prod-servers-0.global runs 2.0.7; "+
 			"set spec.nomad.version to 2.0.7 or newer")
+	})
+}
+
+// aheadStop is the error of an apply that stops before the client node called node, beside servers on Nomad 2.0.6.
+func aheadStop(node string) string {
+	return "update stops before node " + node + ": a new node would run Nomad 2.0.7, newer than the 2.0.6 of server " +
+		"prod-servers-0.global; run tent rolling-update cluster, then tent update cluster again"
+}
+
+// aheadWarning is the warning of a plan that creates the client node called node, beside servers on Nomad 2.0.6.
+func aheadWarning(node string) string {
+	return "node " + node + " waits for the servers: a new node would run Nomad 2.0.7, newer than the 2.0.6 of " +
+		"server prod-servers-0.global; this update stops before it: run tent rolling-update cluster, then tent " +
+		"update cluster again"
+}
+
+// waitWarnings makes svc keep the warnings that say a client waits for the servers, and returns the pointer to them.
+func waitWarnings(svc *app.Service) *[]string {
+	var warned []string
+	svc.OnWarning = func(msg string) {
+		if strings.Contains(msg, " waits for the servers: ") {
+			warned = append(warned, msg)
+		}
+	}
+	return &warned
+}
+
+// wantAllOn fails the test unless every server and every node of the world reports Nomad v and every group has its
+// machines, and the three commands have nothing left to do.
+func wantAllOn(t *testing.T, b liveWorld, v string) {
+	t.Helper()
+	for name, got := range b.serverVersions(t) {
+		if got != v {
+			t.Errorf("server %s reports Nomad %s, want %s", name, got, v)
+		}
+	}
+	for name, got := range b.listedVersions(t) {
+		if got != v {
+			t.Errorf("node %s reports Nomad %s, want %s", name, got, v)
+		}
+	}
+	wantConverged(t, b.w.svc)
+	plan, err := b.w.svc.RollingUpdate(t.Context(), "prod", app.RollOptions{})
+	if err != nil || plan.Next != nil {
+		t.Errorf("RollingUpdate without apply = %+v, %v; want no next step", plan, err)
+	}
+}
+
+// TestUpdateStopsBeforeAClientBesideAnOlderServer follows the first sequence of the design: a server machine and a
+// worker machine are lost after an upgrade was applied. The plan creates both and warns once that the worker waits;
+// the apply creates the server, joins it, and stops before the worker. The roll then ends the upgrade, and one more
+// update has no change.
+func TestUpdateStopsBeforeAClientBesideAnOlderServer(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b := upgradedWorld(t)
+		svc := b.w.svc
+		for _, name := range []string{"prod-servers-2", "prod-workers-1"} {
+			if err := b.f.DeleteInstance(t.Context(), instanceNamed(t, b.f, name)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		warned := waitWarnings(svc)
+
+		plan, err := svc.Update(t.Context(), "prod", false)
+
+		if err != nil {
+			t.Fatalf("Update without apply: %v", err)
+		}
+		if got := plan.Nodes; len(got) != 2 || got[0].Name != "prod-servers-3" || got[1].Name != "prod-workers-1" {
+			t.Fatalf("the plan is:\n%s\nwant the creates of prod-servers-3 and prod-workers-1", planText(t, plan))
+		}
+		if diff := cmp.Diff([]string{aheadWarning("prod-workers-1")}, *warned); diff != "" {
+			t.Errorf("the warnings of the plan (-want +got):\n%s", diff)
+		}
+
+		*warned = nil
+		_, err = svc.Update(t.Context(), "prod", true)
+
+		wantError(t, err, aheadStop("prod-workers-1"))
+		if diff := cmp.Diff([]string{aheadWarning("prod-workers-1")}, *warned); diff != "" {
+			t.Errorf("the warnings of the apply (-want +got):\n%s", diff)
+		}
+		wantJoined(t, b.f, "prod-servers-0", "prod-servers-1", "prod-servers-3", "prod-workers-0")
+		if got := machinesOf(b.f, "workers"); !slices.Equal(got, []string{"prod-workers-0"}) {
+			t.Errorf("the workers are %v, want prod-workers-0 alone", got)
+		}
+
+		if _, err := svc.RollingUpdate(t.Context(), "prod", app.RollOptions{Apply: true}); err != nil {
+			t.Fatalf("RollingUpdate: %v", err)
+		}
+		wantAllOn(t, b, newerNomad)
+	})
+}
+
+// TestUpdateStopsBeforeTheCreateOfAClientThatNeverRegistered follows the second sequence of the design: a worker that
+// never registered is older than 31 minutes when the upgrade is written. The apply writes the completed spec and
+// deletes that machine, then stops before the create that replaces it. The roll then ends the upgrade.
+func TestUpdateStopsBeforeTheCreateOfAClientThatNeverRegistered(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, w := newRelease(t)
+		w.NodeVersions()
+		svc.Channels = stableChannel("2.0.0", olderNomad, olderNomad)
+		stopAtWorker1(t, svc, f, w)
+		sleepUntilAge(t, f, "instance-5", oldClient)
+		svc.Channels = stableChannel("2.0.0", newerNomad, olderNomad, newerNomad)
+		mustReplace(t, svc, withVersion(t, keyedClusterYAML, newerNomad))
+		warned := waitWarnings(svc)
+
+		plan, err := svc.Update(t.Context(), "prod", true)
+
+		wantError(t, err, aheadStop("prod-workers-1"))
+		if !plan.Completed || len(plan.Nodes) != 2 || plan.Nodes[0].Action != app.NodeDelete {
+			t.Errorf("the plan is:\n%s\nwant the completed spec, the delete of prod-workers-1 and its create",
+				planText(t, plan))
+		}
+		if diff := cmp.Diff([]string{aheadWarning("prod-workers-1")}, *warned); diff != "" {
+			t.Errorf("the warnings (-want +got):\n%s", diff)
+		}
+		wantPinned(t, svc, newerNomad)
+		if got := machinesOf(f, "workers"); !slices.Equal(got, []string{"prod-workers-0"}) {
+			t.Errorf("the workers are %v, want prod-workers-0 alone: the delete stands and the create does not", got)
+		}
+
+		b := liveWorld{f: f, w: w}
+		b.api, err = svc.Nomad(nomadops.Config{Address: "198.51.100.1:4646"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := svc.RollingUpdate(t.Context(), "prod", app.RollOptions{Apply: true}); err != nil {
+			t.Fatalf("RollingUpdate: %v", err)
+		}
+		wantAllOn(t, b, newerNomad)
+	})
+}
+
+// TestUpdateStopsBeforeANewWorkerOfAnUpgradeAndALargerGroup writes an upgrade and a larger worker group in one update:
+// the completed spec is written, the run stops before the first new worker and creates none, and the roll fills the
+// group on the new version.
+func TestUpdateStopsBeforeANewWorkerOfAnUpgradeAndALargerGroup(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b := olderWorld(t)
+		svc := b.w.svc
+		svc.Channels = stableChannel("2.0.0", newerNomad, olderNomad, newerNomad)
+		mustReplace(t, svc, withVersion(t, keyedClusterYAML, newerNomad), edit(t, workersYAML, "size: 2", "size: 4"))
+		creates := countCalls(b.f, "CreateInstance")
+
+		plan, err := svc.Update(t.Context(), "prod", true)
+
+		wantError(t, err, aheadStop("prod-workers-2"))
+		if !plan.Completed {
+			t.Errorf("the plan does not write the completed spec: %s", planText(t, plan))
+		}
+		wantPinned(t, svc, newerNomad)
+		if n := countCalls(b.f, "CreateInstance"); n != creates {
+			t.Errorf("the update sent %d create requests, want none", n-creates)
+		}
+
+		if _, err := svc.RollingUpdate(t.Context(), "prod", app.RollOptions{Apply: true}); err != nil {
+			t.Fatalf("RollingUpdate: %v", err)
+		}
+		if got := machinesOf(b.f, "workers"); len(got) != 4 {
+			t.Errorf("the workers are %v, want four", got)
+		}
+		wantAllOn(t, b, newerNomad)
+	})
+}
+
+// TestUpdateCreatesServersOfAnUpgradeThatIsNotRolled grows the server group from 3 to 5 in an upgrade that was not
+// rolled: update creates two servers on the new version, which join the three old ones, and the roll then replaces the
+// three old servers.
+func TestUpdateCreatesServersOfAnUpgradeThatIsNotRolled(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b := olderWorld(t)
+		b.moveToNewer(t, 5, 2)
+		want := map[string]string{
+			"prod-servers-0": olderNomad, "prod-servers-1": olderNomad, "prod-servers-2": olderNomad,
+			"prod-servers-3": newerNomad, "prod-servers-4": newerNomad,
+		}
+		if diff := cmp.Diff(want, b.serverVersions(t)); diff != "" {
+			t.Errorf("the versions of the servers after the update (-want +got):\n%s", diff)
+		}
+
+		if _, err := b.w.svc.RollingUpdate(t.Context(), "prod", app.RollOptions{Apply: true}); err != nil {
+			t.Fatalf("RollingUpdate: %v", err)
+		}
+		wantAllOn(t, b, newerNomad)
+	})
+}
+
+// TestUpdateStopsBeforeAClientWhenAServerReportsNoVersion stops the apply, after a plan that stands and warns, while
+// a server reports no Nomad version yet. The next update creates the client.
+func TestUpdateStopsBeforeAClientWhenAServerReportsNoVersion(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b := olderWorld(t)
+		svc := b.w.svc
+		b.w.ChangeServer("prod-servers-1", func(h *nomadops.ServerHealth) { h.Version = "" })
+		mustReplace(t, svc, biggerWorkers(t)...)
+		const reason = "a server reports no Nomad version yet"
+		warned := waitWarnings(svc)
+
+		_, err := svc.Update(t.Context(), "prod", true)
+
+		wantError(t, err, "update stops before node prod-workers-2: "+reason+"; run tent update cluster again")
+		want := "node prod-workers-2 waits for the servers: " + reason +
+			"; this update stops before it: run tent update cluster again"
+		if diff := cmp.Diff([]string{want}, *warned); diff != "" {
+			t.Errorf("the warnings (-want +got):\n%s", diff)
+		}
+		if got := machinesOf(b.f, "workers"); len(got) != 2 {
+			t.Errorf("the workers are %v, want the two that stood", got)
+		}
+
+		b.w.ChangeServer("prod-servers-1", func(h *nomadops.ServerHealth) { h.Version = olderNomad })
+		mustUpdate(t, svc)
+		wantConverged(t, svc)
+	})
+}
+
+// TestUpdateStopsBeforeAClientWhenNomadCannotBeAsked fails the read of the servers' versions in the apply, after the
+// plans have read them, and the making of the client of Nomad: the run stops before the client with the cause,
+// nothing is created, and the next update works.
+func TestUpdateStopsBeforeAClientWhenNomadCannotBeAsked(t *testing.T) {
+	t.Parallel()
+	const stops = "update stops before node prod-workers-2: tent could not ask Nomad which versions its servers run: "
+	for _, tc := range []struct {
+		name string
+		fail func(*testing.T, *nomadWorld)
+		want string
+	}{
+		{"Peers", func(t *testing.T, w *nomadWorld) { w.Fail(t, "Peers", errBoom) }, stops + "boom"},
+		{"Health", func(t *testing.T, w *nomadWorld) { w.Fail(t, "Health", errBoom) }, stops + "boom"},
+		{"the client", func(_ *testing.T, w *nomadWorld) {
+			w.svc.Nomad = func(nomadops.Config) (nomadops.API, error) { return nil, errBoom }
+		}, stops + "reach server prod-servers-0: boom"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				b := olderWorld(t)
+				svc := b.w.svc
+				nomad := svc.Nomad
+				mustReplace(t, svc, biggerWorkers(t)...)
+				svc.OnUpdatePlan = func(app.UpdatePlan) error {
+					tc.fail(t, b.w)
+					return nil
+				}
+				creates := countCalls(b.f, "CreateInstance")
+
+				_, err := svc.Update(t.Context(), "prod", true)
+
+				wantError(t, err, tc.want)
+				if !errors.Is(err, errBoom) {
+					t.Errorf("Update = %v, want an error that matches %v", err, errBoom)
+				}
+				if n := countCalls(b.f, "CreateInstance"); n != creates {
+					t.Errorf("the update sent %d create requests, want none", n-creates)
+				}
+				svc.OnUpdatePlan, svc.Nomad = nil, nomad
+				mustUpdate(t, svc)
+				wantConverged(t, svc)
+			})
+		})
+	}
+}
+
+// applyNomadCalls returns the names of the Nomad calls that the apply of svc.Update makes, which come after the two
+// plans of an applied update.
+func applyNomadCalls(t *testing.T, w *nomadWorld) []string {
+	t.Helper()
+	var from int
+	w.svc.OnUpdatePlan = func(app.UpdatePlan) error {
+		from = len(w.Log())
+		return nil
+	}
+	if _, err := w.svc.Update(t.Context(), "prod", true); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	return nomadNames(w, from)
+}
+
+// TestUpdateReadsTheServersVersionsOnceBeforeTheFirstClient reads the Raft configuration and autopilot's report once
+// in a run that boots two clients, before the first of them, and makes no such read in a run that boots no client.
+func TestUpdateReadsTheServersVersionsOnceBeforeTheFirstClient(t *testing.T) {
+	t.Parallel()
+	t.Run("two clients", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			b := olderWorld(t)
+			mustReplace(t, b.w.svc, edit(t, workersYAML, "size: 2", "size: 4"))
+			warned := waitWarnings(b.w.svc)
+
+			calls := applyNomadCalls(t, b.w)
+
+			if len(calls) < 2 || calls[0] != "Peers" || calls[1] != "Health" {
+				t.Errorf("the Nomad calls of the apply are %v, want Peers and Health first", calls)
+			}
+			for _, name := range []string{"Peers", "Health"} {
+				if n := count(calls, name); n != 1 {
+					t.Errorf("the apply made %d %s calls, want 1: %v", n, name, calls)
+				}
+			}
+			if len(*warned) != 0 {
+				t.Errorf("a plan beside servers of its version warned: %q", *warned)
+			}
+		})
+	})
+	t.Run("no client", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			b := olderWorld(t)
+			mustReplace(t, b.w.svc, edit(t, serversYAML, "size: 3", "size: 5"))
+
+			calls := applyNomadCalls(t, b.w)
+
+			if n := count(calls, "Peers"); n != 1 {
+				t.Errorf("the apply made %d Peers calls, want the one of the Nomad step: %v", n, calls)
+			}
+		})
+	})
+}
+
+// TestUpdateWaitsForAClientThatExistsBesideOlderServers waits for a client whose machine exists and labels it, in an
+// upgrade that is not rolled: the run boots no client, so it does not read the servers' versions and does not stop.
+func TestUpdateWaitsForAClientThatExistsBesideOlderServers(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, f, w := newRelease(t)
+		w.NodeVersions()
+		svc.Channels = stableChannel("2.0.0", olderNomad, olderNomad)
+		w.Withhold("prod-workers-1")
+		if _, err := svc.Update(t.Context(), "prod", true); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("the build: %v, want a deadline", err)
+		}
+		svc.Channels = stableChannel("2.0.0", newerNomad, olderNomad, newerNomad)
+		specsAtVersion(t, svc, newerNomad)
+		w.Release("prod-workers-1")
+
+		calls := applyNomadCalls(t, w)
+
+		if slices.Contains(calls, "Peers") || slices.Contains(calls, "Health") {
+			t.Errorf("the Nomad calls of the apply are %v, want no read of the servers' versions", calls)
+		}
+		wantJoined(t, f, allNames...)
+		wantPinned(t, svc, newerNomad)
+	})
+}
+
+// TestUpdateStopsBeforeTheWaitThatRepeatsTheCreateOfAClient cuts the create of a third worker after its request and
+// then moves the specs to the newer Nomad: the next apply stops before the wait that repeats that create, the machine
+// stays without the joined label, and the roll ends the upgrade with three workers.
+func TestUpdateStopsBeforeTheWaitThatRepeatsTheCreateOfAClient(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b := olderWorld(t)
+		svc := b.w.svc
+		mustReplace(t, svc, biggerWorkers(t)...)
+		b.f.SetHook(func(ctx context.Context, c vultrfake.Call, next func(context.Context) error) error {
+			if c.Name != "CreateInstance" {
+				return next(ctx)
+			}
+			_ = next(ctx)
+			return errCutRun
+		})
+		if _, err := svc.Update(t.Context(), "prod", true); !errors.Is(err, errCutRun) {
+			t.Fatalf("the update returned %v, want an error that matches %v", err, errCutRun)
+		}
+		b.f.SetHook(nil)
+		svc.Channels = stableChannel("2.0.0", newerNomad, olderNomad, newerNomad)
+		specsAtVersion(t, svc, newerNomad)
+
+		plan, err := svc.Update(t.Context(), "prod", true)
+
+		wantError(t, err, aheadStop("prod-workers-2"))
+		if got := plan.Nodes; len(got) != 1 || got[0].Action != app.NodeWait || got[0].Op == "" {
+			t.Fatalf("the plan is:\n%s\nwant the wait that repeats the create of prod-workers-2", planText(t, plan))
+		}
+		wantJoined(t, b.f, "prod-servers-0", "prod-servers-1", "prod-servers-2", "prod-workers-0", "prod-workers-1")
+
+		if _, err := svc.RollingUpdate(t.Context(), "prod", app.RollOptions{Apply: true}); err != nil {
+			t.Fatalf("RollingUpdate: %v", err)
+		}
+		if got := machinesOf(b.f, "workers"); len(got) != 3 {
+			t.Errorf("the workers are %v, want three", got)
+		}
+		wantAllOn(t, b, newerNomad)
 	})
 }
