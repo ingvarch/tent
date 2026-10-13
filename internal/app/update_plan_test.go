@@ -44,7 +44,7 @@ func checkGolden(t *testing.T, name, got string) {
 }
 
 // planText returns what p.WriteText writes.
-func planText(t *testing.T, p app.UpdatePlan) string {
+func planText(t *testing.T, p interface{ WriteText(io.Writer) error }) string {
 	t.Helper()
 	var b strings.Builder
 	if err := p.WriteText(&b); err != nil {

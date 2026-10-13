@@ -1,0 +1,2 @@
+cluster prod: upgrade Nomad from 2.0.6 to 2.0.7, which channel stable recommends.
+After the upgrade: tent update cluster, then tent rolling-update cluster.
