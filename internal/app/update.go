@@ -478,14 +478,8 @@ func (s *Service) updateWarnings(c *v1alpha1.Cluster, groups []*v1alpha1.NodeGro
 
 // bootstrapped reports whether the store holds the mark of the cluster's ACL bootstrap.
 func (s *Service) bootstrapped(ctx context.Context, l statestore.Layout) (bool, error) {
-	_, _, err := s.Store.Get(ctx, l.NomadBootstrapped())
-	switch {
-	case errors.Is(err, statestore.ErrNotFound):
-		return false, nil
-	case err != nil:
-		return false, err
-	}
-	return true, nil
+	_, marked, err := s.bootstrapMark(ctx, l)
+	return marked, err
 }
 
 // readCompleted returns the cluster's stored completed spec, or nil when the store lacks it.

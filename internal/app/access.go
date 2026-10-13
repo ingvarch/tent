@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/pki"
@@ -47,43 +48,15 @@ func (s *Service) OperatorAccess(ctx context.Context, cluster, purpose string, t
 	if err != nil {
 		return Access{}, err
 	}
-	objs, err := s.get(ctx, l, true)
+	built, err := s.loadBuilt(ctx, l)
 	if err != nil {
 		return Access{}, err
 	}
-	secrets, err := s.storedSecrets(ctx, l)
-	if _, missing := errors.AsType[*missingSecretsError](err); missing {
-		return Access{}, fmt.Errorf("%s: %w; run tent update cluster --yes first", clusterLabel(cluster), err)
-	}
+	servers, machines, err := s.reach(ctx, built)
 	if err != nil {
 		return Access{}, err
 	}
-	marked, err := s.bootstrapped(ctx, l)
-	if err != nil {
-		return Access{}, err
-	}
-	if !marked {
-		return Access{}, fmt.Errorf("%s: Nomad is not bootstrapped yet (%s is missing); run tent update cluster --yes first",
-			clusterLabel(cluster), l.NomadBootstrapped())
-	}
-	p, err := s.provider(objs.Cluster.Spec.Cloud.Provider)
-	if err != nil {
-		return Access{}, err
-	}
-	instances, err := p.Nodes().List(ctx, cluster)
-	if err != nil {
-		return Access{}, err
-	}
-	machines := slices.DeleteFunc(slices.Clone(instances), func(in cloud.Instance) bool { return !in.Role.RunsServer() })
-	if len(machines) == 0 {
-		return Access{}, fmt.Errorf("%s has no server machine; run tent update cluster --yes first", clusterLabel(cluster))
-	}
-	slices.SortFunc(machines, compareName)
-	region := objs.Cluster.Spec.Nomad.Region
-	servers, err := s.nomadOver(machines, nomadAccess{cluster: cluster, region: region, secrets: secrets})
-	if err != nil {
-		return Access{}, err
-	}
+	secrets, region := built.secrets, built.region
 	now := s.now()
 	cert, err := secrets.ca.IssueOperator(region, ttl, now)
 	if err != nil {
@@ -105,6 +78,80 @@ func (s *Service) OperatorAccess(ctx context.Context, cluster, purpose string, t
 		Cert: cert.Cert, Key: cert.Key, Token: token.Secret, Accessor: token.Accessor,
 		Until: earlier(token.Expires, certificateEnd(secrets.ca, now, ttl)).UTC(),
 	}, nil
+}
+
+// builtCluster is what tent reads from the state store before it calls the Nomad API of a cluster that update built.
+type builtCluster struct {
+	layout   statestore.Layout
+	provider v1alpha1.Provider
+	region   string // the Nomad region
+	secrets  clusterSecrets
+	mark     []byte // the content of the bootstrap mark
+}
+
+// loadBuilt reads the cluster's specs, its secrets and its bootstrap mark, once each. It fails for a cluster that
+// update has not built: one whose store lacks a secret or the mark.
+func (s *Service) loadBuilt(ctx context.Context, l statestore.Layout) (builtCluster, error) {
+	objs, err := s.get(ctx, l, true)
+	if err != nil {
+		return builtCluster{}, err
+	}
+	secrets, err := s.storedSecrets(ctx, l)
+	if _, missing := errors.AsType[*missingSecretsError](err); missing {
+		return builtCluster{}, fmt.Errorf("%s: %w; run tent update cluster --yes first", clusterLabel(l.Cluster()), err)
+	}
+	if err != nil {
+		return builtCluster{}, err
+	}
+	mark, marked, err := s.bootstrapMark(ctx, l)
+	if err != nil {
+		return builtCluster{}, err
+	}
+	if !marked {
+		return builtCluster{}, fmt.Errorf(
+			"%s: Nomad is not bootstrapped yet (%s is missing); run tent update cluster --yes first",
+			clusterLabel(l.Cluster()), l.NomadBootstrapped())
+	}
+	return builtCluster{
+		layout: l, provider: objs.Cluster.Spec.Cloud.Provider, region: objs.Cluster.Spec.Nomad.Region,
+		secrets: secrets, mark: mark,
+	}, nil
+}
+
+// reach lists the cluster's machines once and returns the API over its server and combined machines that have a
+// public address, with all its server and combined machines by name. It fails when the cluster has no such machine.
+func (s *Service) reach(ctx context.Context, c builtCluster) (*nomadops.Servers, []cloud.Instance, error) {
+	p, err := s.provider(c.provider)
+	if err != nil {
+		return nil, nil, err
+	}
+	instances, err := p.Nodes().List(ctx, c.layout.Cluster())
+	if err != nil {
+		return nil, nil, err
+	}
+	machines := slices.DeleteFunc(slices.Clone(instances), func(in cloud.Instance) bool { return !in.Role.RunsServer() })
+	if len(machines) == 0 {
+		return nil, nil, fmt.Errorf("%s has no server machine; run tent update cluster --yes first",
+			clusterLabel(c.layout.Cluster()))
+	}
+	slices.SortFunc(machines, compareName)
+	servers, err := s.nomadOver(machines, nomadAccess{cluster: c.layout.Cluster(), region: c.region, secrets: c.secrets})
+	if err != nil {
+		return nil, nil, err
+	}
+	return servers, machines, nil
+}
+
+// bootstrapMark returns the content of the cluster's bootstrap mark, and false when the store holds none.
+func (s *Service) bootstrapMark(ctx context.Context, l statestore.Layout) ([]byte, bool, error) {
+	data, _, err := s.Store.Get(ctx, l.NomadBootstrapped())
+	switch {
+	case errors.Is(err, statestore.ErrNotFound):
+		return nil, false, nil
+	case err != nil:
+		return nil, false, err
+	}
+	return data, true, nil
 }
 
 // answeringFirst returns the API addresses of the machines that have a public address: first, then the others in the
