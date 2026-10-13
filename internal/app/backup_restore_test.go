@@ -27,6 +27,10 @@ import (
 // rebuildWay is the way out that the refusals of a restore name.
 const rebuildWay = "delete the server machines in the cloud and run tent update cluster --yes"
 
+// lostHint is what the refusal of a restore with no earlier backup adds.
+const lostHint = "; after a loss, tent update cluster builds new servers only when no server machine is left, so " +
+	"delete the remaining ones in the cloud first"
+
 // rebuilt is a test cluster whose servers were built again after a backup: the backup is of the earlier servers.
 type rebuilt struct {
 	svc     *app.Service
@@ -78,10 +82,10 @@ func utc(t time.Time) string { return t.UTC().Format("2006-01-02 15:04:05 MST") 
 // planText is the text of a plan for the backup of r that sends it for the first time.
 func (r rebuilt) planText(nodes string) string {
 	return fmt.Sprintf("Restore backup %s (taken %s) into cluster prod.\n"+
-		"The servers that run now were bootstrapped on %s; the backup is of earlier servers.\n"+
+		"The backup is of servers bootstrapped on %s; the servers that run now were bootstrapped on %s.\n"+
 		"They run no job and list %s.\n"+
 		"Nomad's jobs, nodes, ACL tokens, variables and keyring become those of the backup.\n",
-		r.backup.Name, utc(r.backup.Time), utc(r.mark), nodes)
+		r.backup.Name, utc(r.backup.Time), utc(r.earlier), utc(r.mark), nodes)
 }
 
 // record returns the record of a restore of the backup named backup into the servers bootstrapped at mark, as tent
@@ -444,9 +448,9 @@ const tookAccessor = "00000000-0000-4000-8000-0000000000aa"
 // resumeText is the third line of the plan of a resumed restore, with the lines around it.
 func (r rebuilt) resumeText(state string) string {
 	return fmt.Sprintf("Restore backup %s (taken %s) into cluster prod.\n"+
-		"The servers that run now were bootstrapped on %s; the backup is of earlier servers.\n%s\n"+
+		"The backup is of servers bootstrapped on %s; the servers that run now were bootstrapped on %s.\n%s\n"+
 		"Nomad's jobs, nodes, ACL tokens, variables and keyring become those of the backup.\n",
-		r.backup.Name, utc(r.backup.Time), utc(r.mark), state)
+		r.backup.Name, utc(r.backup.Time), utc(r.earlier), utc(r.mark), state)
 }
 
 // TestBackupRestoreResumesARestoreThatNomadTook finds a record of this backup without a time whose accessor is not the
@@ -834,7 +838,7 @@ func TestBackupRestoreRefusesWhatTheStoreDoesNotAllow(t *testing.T) {
 		}},
 		{"only current backups", nil, app.Latest, func(_ app.StoredBackup, mark time.Time) string {
 			return fmt.Sprintf("every backup of cluster prod is of the servers that it runs now, which tent bootstrapped on "+
-				"%s; tent restores a backup only into servers that tent update cluster built again after it", utc(mark))
+				"%s; tent restores a backup only into servers that tent update cluster built again after it"+lostHint, utc(mark))
 		}},
 		{"no backup", func(t *testing.T, svc *app.Service, b app.StoredBackup) { deleteObject(t, svc, b.Path) }, app.Latest,
 			func(app.StoredBackup, time.Time) string { return "cluster prod has no backups" }},
@@ -894,6 +898,55 @@ func TestBackupRestoreLatestSkipsTheServersThatRun(t *testing.T) {
 
 		if plan.Backup != r.backup.Backup {
 			t.Errorf("restored %+v, want the earlier backup %+v", plan.Backup, r.backup.Backup)
+		}
+		if diff := cmp.Diff([]string{firstSnapshot}, r.restoredCopies()); diff != "" {
+			t.Errorf("restored snapshots (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// deleteAllServers deletes every server machine that the fake lists now, whatever its ID.
+func deleteAllServers(t *testing.T, f *vultrfake.Fake) {
+	t.Helper()
+	for _, in := range f.Instances() {
+		if strings.Contains(in.Label, "-servers-") {
+			if err := f.DeleteInstance(t.Context(), in.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+// TestBackupRestoreLatestRefusesBackupsOfTwoRebuilds loses the servers twice: a backup of the empty servers of the
+// first rebuild sits between the backup of the workload and the second rebuild. latest does not take the newer of the
+// two earlier backups: it refuses and names both, the oldest bootstrap first, and sends nothing to Nomad. --from with
+// the backup of the workload restores it.
+func TestBackupRestoreLatestRefusesBackupsOfTwoRebuilds(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		r := rebuiltWorld(t)
+		time.Sleep(time.Minute)
+		empty := mustBackup(t, r.svc)
+		deleteAllServers(t, r.f)
+		time.Sleep(time.Hour)
+		mustUpdate(t, r.svc)
+		third := markOf(t, r.svc.Store)
+		before := len(r.w.Log())
+
+		_, err := r.restore(app.Latest)
+
+		wantError(t, err, fmt.Sprintf("cluster prod has earlier backups of 2 sets of servers: %s of the servers "+
+			"bootstrapped on %s and %s of the servers bootstrapped on %s; name one with --from",
+			r.backup.Name, utc(r.earlier), empty.Name, utc(r.mark)))
+		if n := len(r.w.Log()) - before; n != 0 {
+			t.Errorf("%d calls of Nomad, want none", n)
+		}
+
+		plan := r.mustRestore(t, r.backup.Name)
+
+		if plan.Backup != r.backup.Backup || !plan.Applied || !plan.Bootstrapped.Equal(third) {
+			t.Errorf("plan = %+v, want the backup of the workload %+v applied into the servers bootstrapped at %v",
+				plan, r.backup.Backup, third)
 		}
 		if diff := cmp.Diff([]string{firstSnapshot}, r.restoredCopies()); diff != "" {
 			t.Errorf("restored snapshots (-want +got):\n%s", diff)
@@ -1223,7 +1276,7 @@ func TestBackupRestoreDecidesAgainUnderTheLock(t *testing.T) {
 			put(t, r.svc.Store, markPath, []byte(r.earlier.Format(time.RFC3339)+"\n"))
 		}, func(r rebuilt) string {
 			return fmt.Sprintf("every backup of cluster prod is of the servers that it runs now, which tent bootstrapped "+
-				"on %s; tent restores a backup only into servers that tent update cluster built again after it",
+				"on %s; tent restores a backup only into servers that tent update cluster built again after it"+lostHint,
 				utc(r.earlier))
 		}, false, nil},
 		{"a job was registered", func(_ *testing.T, r rebuilt) {

@@ -128,12 +128,18 @@ func onlyBackup(t *testing.T, s state, snap string) statestore.Backup {
 
 // restoreText is the plan of a restore of b into the servers bootstrapped at mark, which list nodes nodes and run no
 // job.
-func restoreText(b statestore.Backup, mark time.Time, nodes int) string {
+func restoreText(t *testing.T, b statestore.Backup, mark time.Time, nodes int) string {
+	t.Helper()
+	bootstrapped, err := time.Parse("20060102T150405Z", b.Bootstrap)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return fmt.Sprintf("Restore backup %s (taken %s) into cluster prod.\n"+
-		"The servers that run now were bootstrapped on %s; the backup is of earlier servers.\n"+
+		"The backup is of servers bootstrapped on %s; the servers that run now were bootstrapped on %s.\n"+
 		"They run no job and list %d nodes.\n"+
 		"Nomad's jobs, nodes, ACL tokens, variables and keyring become those of the backup.\n",
-		b.Name, b.Time.UTC().Format(backupTime), mark.UTC().Format(backupTime), nodes)
+		b.Name, b.Time.UTC().Format(backupTime), bootstrapped.Format(backupTime),
+		mark.UTC().Format(backupTime), nodes)
 }
 
 // builtBackups builds the test cluster in the bubble and returns its store, its Vultr fake and the time of its mark.
@@ -248,7 +254,7 @@ func TestBackupCommandsTakeNameOrFlag(t *testing.T) {
 		if list.code != 0 || !strings.Contains(list.out, earlier.Name) {
 			t.Errorf("list: exit code %d, stdout %q, stderr %q", list.code, list.out, list.errOut)
 		}
-		wantResult(t, restore.result, 0, restoreText(earlier, mark, 3), restoreHint)
+		wantResult(t, restore.result, 0, restoreText(t, earlier, mark, 3), restoreHint)
 	})
 }
 
@@ -262,9 +268,9 @@ func TestBackupListPrintsTheTable(t *testing.T) {
 		"earlier")
 
 	wantOK(t, runIn(t, "", backupArgs(s, "list")...),
-		"NAME               TAKEN                     SERVERS\n"+
-			"20261008T030000Z   2026-10-08 03:00:00 UTC   earlier\n"+
-			"20261010T090000Z   2026-10-10 09:00:00 UTC   current\n")
+		"NAME               TAKEN                     BOOTSTRAPPED              SERVERS\n"+
+			"20261008T030000Z   2026-10-08 03:00:00 UTC   2026-10-01 10:00:00 UTC   earlier\n"+
+			"20261010T090000Z   2026-10-10 09:00:00 UTC   2026-10-05 08:00:00 UTC   current\n")
 }
 
 // TestBackupListPrintsTheBackupsAsData with -o json and -o yaml.
@@ -275,8 +281,10 @@ func TestBackupListPrintsTheBackupsAsData(t *testing.T) {
 	earlier := putBackup(t, s, time.Date(2026, 10, 8, 3, 0, 0, 0, time.UTC),
 		time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC), "earlier")
 	want := []map[string]string{
-		{"name": earlier.Name, "time": "2026-10-08T03:00:00Z", "path": earlier.Path, "servers": "earlier"},
-		{"name": current.Name, "time": "2026-10-10T09:00:00Z", "path": current.Path, "servers": "current"},
+		{"name": earlier.Name, "time": "2026-10-08T03:00:00Z", "path": earlier.Path,
+			"bootstrap": "20261001T100000Z", "servers": "earlier"},
+		{"name": current.Name, "time": "2026-10-10T09:00:00Z", "path": current.Path,
+			"bootstrap": "20261005T080000Z", "servers": "current"},
 	}
 	for _, format := range []string{"json", "yaml"} {
 		t.Run(format, func(t *testing.T) {
@@ -299,7 +307,7 @@ func TestBackupListWithoutBackups(t *testing.T) {
 	s := withCluster(t)
 	const none = "cluster prod has no backups\n"
 	for _, tc := range []struct{ format, out string }{
-		{"table", "NAME   TAKEN   SERVERS\n"}, {"json", "[]\n"}, {"yaml", "[]\n"},
+		{"table", "NAME   TAKEN   BOOTSTRAPPED   SERVERS\n"}, {"json", "[]\n"}, {"yaml", "[]\n"},
 	} {
 		t.Run(tc.format, func(t *testing.T) {
 			wantResult(t, runIn(t, "", backupArgs(s, "list", "-o", tc.format)...), 0, tc.out, none)
@@ -324,7 +332,7 @@ func TestBackupRestorePrintsThePlan(t *testing.T) {
 
 		got := runBackup(t, f, backupArgs(s, "restore")...)
 
-		wantResult(t, got.result, 0, restoreText(earlier, mark, 3), restoreHint)
+		wantResult(t, got.result, 0, restoreText(t, earlier, mark, 3), restoreHint)
 		s.want(t, before)
 		if restored := got.nomad.Restored(); len(restored) != 0 {
 			t.Errorf("Nomad restored %d snapshots, want none", len(restored))
@@ -363,9 +371,9 @@ func TestBackupRestoreTakesTheBackupOfFrom(t *testing.T) {
 		latest := runBackup(t, f, backupArgs(s, "restore", "--from", "latest")...)
 		byDefault := runBackup(t, f, backupArgs(s, "restore")...)
 
-		wantResult(t, named.result, 0, restoreText(older, mark, 3), restoreHint)
-		wantResult(t, latest.result, 0, restoreText(newer, mark, 3), restoreHint)
-		wantResult(t, byDefault.result, 0, restoreText(newer, mark, 3), restoreHint)
+		wantResult(t, named.result, 0, restoreText(t, older, mark, 3), restoreHint)
+		wantResult(t, latest.result, 0, restoreText(t, newer, mark, 3), restoreHint)
+		wantResult(t, byDefault.result, 0, restoreText(t, newer, mark, 3), restoreHint)
 	})
 }
 
@@ -400,6 +408,10 @@ func TestBackupRestoreRefuses(t *testing.T) {
 		{"every backup is current", func(t *testing.T, s state, mark time.Time) {
 			putBackup(t, s, mark.Add(time.Hour), mark, firstSnapshot)
 		}, nil, "Error: every backup of cluster prod is of the servers that it runs now, "},
+		{"earlier backups of two bootstraps", func(t *testing.T, s state, mark time.Time) {
+			earlierBackup(t, s, mark)
+			putBackup(t, s, mark.Add(-12*time.Hour), mark.Add(-24*time.Hour), firstSnapshot)
+		}, nil, "Error: cluster prod has earlier backups of 2 sets of servers: "},
 		{"a job runs", func(t *testing.T, s state, mark time.Time) { earlierBackup(t, s, mark) }, jobs,
 			"Error: cluster prod runs 1 job that was registered after its servers were built again on "},
 		{"no backups", func(*testing.T, state, time.Time) {}, nil, "Error: cluster prod has no backups\n"},
@@ -484,7 +496,7 @@ func TestBackupRestoreResumes(t *testing.T) {
 		plan := runBackup(t, f, backupArgs(s, "restore")...)
 		done := runBackup(t, f, backupArgs(s, "restore", "--yes")...)
 
-		resumed := strings.Replace(restoreText(earlier, mark, 3), "They run no job and list 3 nodes.\n",
+		resumed := strings.Replace(restoreText(t, earlier, mark, 3), "They run no job and list 3 nodes.\n",
 			"A restore of this backup was started and Nomad did not take the backup: tent sends it again. They run no "+
 				"job and list 3 nodes.\n", 1)
 		wantResult(t, plan.result, 0, resumed, restoreHint)
@@ -578,7 +590,7 @@ func TestBackupListTakesNoLock(t *testing.T) {
 		holdLock(t, s)
 
 		wantResult(t, runIn(t, "", backupArgs(s, "list", "--lock-timeout", "0")...), 0,
-			"NAME   TAKEN   SERVERS\n", "cluster prod has no backups\n")
+			"NAME   TAKEN   BOOTSTRAPPED   SERVERS\n", "cluster prod has no backups\n")
 	})
 }
 
@@ -642,8 +654,9 @@ func TestBackupHelp(t *testing.T) {
 		}},
 		{[]string{"backup", "list", "--help"}, []string{
 			"Usage:\n  tent backup list [NAME] [flags]\n",
-			"List the backups of the cluster named by NAME or --name, oldest first. SERVERS says whether a backup " +
-				"is of the servers that run now (current) or of servers that tent has replaced since (earlier); " +
+			"List the backups of the cluster named by NAME or --name, oldest first. BOOTSTRAPPED is when the servers " +
+				"that the backup is of were bootstrapped. SERVERS says whether a backup is of the servers that run " +
+				"now (current) or of servers that tent has replaced since (earlier); " +
 				"tent backup restore takes only an earlier one. The command reads only the state store.",
 		}},
 		{[]string{"backup", "restore", "--help"}, []string{
@@ -653,7 +666,8 @@ func TestBackupHelp(t *testing.T) {
 				"update cluster --yes, which builds new servers and bootstraps them with the stored secret, and " +
 				"then this command. tent restores only a backup of earlier servers, only while the new servers " +
 				"run no job, and one backup into servers that it built again; --from names it as tent backup " +
-				"list shows it, and latest, the default, takes the newest. Without --yes the command prints what " +
+				"list shows it, and latest, the default, takes the newest and refuses when the earlier backups " +
+				"are of more than one set of servers. Without --yes the command prints what " +
 				"it would restore. With --yes it takes the cluster's lock, remembers the restore, sends the " +
 				"backup to Nomad and checks that the stored ACL bootstrap secret still works; a run that stops " +
 				"is finished by running the command again, and a finished one changes nothing more. Afterwards " +

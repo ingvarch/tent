@@ -58,9 +58,10 @@ func newBackupListCommand(opts *globalOptions) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list [NAME]",
 		Short: "List the backups of a cluster",
-		Long: "List the backups of the cluster named by NAME or --name, oldest first. SERVERS says whether a backup " +
-			"is of the servers that run now (current) or of servers that tent has replaced since (earlier); tent " +
-			"backup restore takes only an earlier one. The command reads only the state store.",
+		Long: "List the backups of the cluster named by NAME or --name, oldest first. BOOTSTRAPPED is when the servers " +
+			"that the backup is of were bootstrapped. SERVERS says whether a backup is of the servers that run now " +
+			"(current) or of servers that tent has replaced since (earlier); tent backup restore takes only an " +
+			"earlier one. The command reads only the state store.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name, err := opts.clusterArg(args)
@@ -86,9 +87,9 @@ func newBackupListCommand(opts *globalOptions) *cobra.Command {
 					if b.Earlier {
 						servers = "earlier"
 					}
-					rows[i] = []string{b.Name, b.Time.Format(noticeTime), servers}
+					rows[i] = []string{b.Name, b.Time.Format(noticeTime), b.Bootstrapped().Format(noticeTime), servers}
 				}
-				return writeTable(w, []string{"NAME", "TAKEN", "SERVERS"}, rows)
+				return writeTable(w, []string{"NAME", "TAKEN", "BOOTSTRAPPED", "SERVERS"}, rows)
 			})
 		},
 	}
@@ -105,7 +106,8 @@ func newBackupRestoreCommand(opts *globalOptions) *cobra.Command {
 			"cluster --yes, which builds new servers and bootstraps them with the stored secret, and then this " +
 			"command. tent restores only a backup of earlier servers, only while the new servers run no job, and " +
 			"one backup into servers that it built again; --from names it as tent backup list shows it, and " +
-			"latest, the default, takes the newest. Without --yes the command prints what it would restore. With " +
+			"latest, the default, takes the newest and refuses when the earlier backups are of more than one set " +
+			"of servers. Without --yes the command prints what it would restore. With " +
 			"--yes it takes the cluster's lock, remembers the restore, sends the backup to Nomad and checks that " +
 			"the stored ACL bootstrap secret still works; a run that stops is finished by running the command " +
 			"again, and a finished one changes nothing more. Afterwards Nomad holds the jobs, nodes, ACL tokens, " +

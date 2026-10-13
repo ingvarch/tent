@@ -34,6 +34,13 @@ func TestPickBackup(t *testing.T) {
 	old2 := testBackup(t, day(25), earlierMark)
 	current := testBackup(t, restoreMark.Add(time.Hour), restoreMark)
 	twin := testBackup(t, day(25), earlierMark.Add(-time.Hour))
+	otherMark := earlierMark.Add(-72 * time.Hour)
+	other := testBackup(t, day(26), otherMark)
+	otherOld := testBackup(t, day(24), otherMark)
+	thirdMark := otherMark.Add(-24 * time.Hour)
+	third := testBackup(t, day(23), thirdMark)
+	const lostHint = "; after a loss, tent update cluster builds new servers only when no server machine is left, so " +
+		"delete the remaining ones in the cloud first"
 	const nowText = "which tent bootstrapped on 2026-10-01 10:00:00 UTC; tent restores a backup only into servers " +
 		"that tent update cluster built again after it"
 	tests := []struct {
@@ -56,6 +63,28 @@ func TestPickBackup(t *testing.T) {
 			},
 			from: Latest, want: old2,
 		},
+		{
+			name: "latest refuses earlier backups of two bootstraps and names the newest of each", from: Latest,
+			backups: []statestore.Backup{old1, otherOld, current, other, old2}, wantText: "cluster prod has earlier backups " +
+				"of 2 sets of servers: " + other.Name + " of the servers bootstrapped on 2026-09-25 10:00:00 UTC and " +
+				old2.Name + " of the servers bootstrapped on 2026-09-28 10:00:00 UTC; name one with --from",
+		},
+		{
+			name: "latest lists three bootstraps oldest bootstrap first", from: Latest,
+			backups: []statestore.Backup{third, old1, other}, wantText: "cluster prod has earlier backups of 3 sets of " +
+				"servers: " + third.Name + " of the servers bootstrapped on 2026-09-24 10:00:00 UTC, " + other.Name +
+				" of the servers bootstrapped on 2026-09-25 10:00:00 UTC and " + old1.Name +
+				" of the servers bootstrapped on 2026-09-28 10:00:00 UTC; name one with --from",
+		},
+		{
+			name: "latest takes the newest of one earlier bootstrap beside a current one", from: Latest,
+			backups: []statestore.Backup{old1, current, old2, testBackup(t, restoreMark.Add(2*time.Hour), restoreMark)},
+			want:    old2,
+		},
+		{
+			name: "a name settles the choice between bootstraps", from: other.Name,
+			backups: []statestore.Backup{other, old2}, want: other,
+		},
 		{name: "a name takes that backup", backups: []statestore.Backup{old1, old2, current}, from: old1.Name, want: old1},
 		{
 			name: "no backup at all", backups: nil, from: Latest,
@@ -67,7 +96,7 @@ func TestPickBackup(t *testing.T) {
 		},
 		{
 			name: "latest with current backups only", backups: []statestore.Backup{current}, from: Latest,
-			wantText: "every backup of cluster prod is of the servers that it runs now, " + nowText,
+			wantText: "every backup of cluster prod is of the servers that it runs now, " + nowText + lostHint,
 		},
 		{
 			name: "a name of a current backup", backups: []statestore.Backup{old1, current}, from: current.Name,
