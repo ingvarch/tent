@@ -14,6 +14,10 @@ ListInstanceVPCs <prod-servers-2>
 ListInstanceVPCs <prod-workers-0>
 ListInstanceVPCs <prod-workers-1>
 nomad Nodes (prod-servers-0)
+nomad Peers (prod-servers-0)
+nomad Health (prod-servers-0)
+nomad Members (prod-servers-0)
+nomad Nodes (prod-servers-0)
 AvailablePlans ams
 ListPlans
 ListOS
@@ -29,6 +33,10 @@ ListInstanceVPCs <prod-servers-1>
 ListInstanceVPCs <prod-servers-2>
 ListInstanceVPCs <prod-workers-0>
 ListInstanceVPCs <prod-workers-1>
+nomad Nodes (prod-servers-0)
+nomad Peers (prod-servers-0)
+nomad Health (prod-servers-0)
+nomad Members (prod-servers-0)
 nomad Nodes (prod-servers-0)
 nomad Nodes (prod-servers-0)
 nomad Peers (prod-servers-0)

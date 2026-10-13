@@ -36,12 +36,14 @@ type planInput struct {
 
 // nodePlan is the plan of the node changes of an update: the changes in the order they run, the server and combined
 // machines that stay, the nodes without a machine that it purges, what the apply carries out through the rollout
-// decisions, and the warning about a read of Nomad that failed, or "".
+// decisions, what it read of Nomad when that was what a roll observes, and the warning about a read of Nomad that
+// failed, or "".
 type nodePlan struct {
 	changes []NodeChange
 	servers []cloud.Instance
 	purges  []NodePurge
 	removal removalPlan
+	reading *nomadReading
 	warning string
 }
 
@@ -307,6 +309,9 @@ func (s *Service) planNodeChanges(ctx context.Context, m *model.Cluster, listed 
 	}
 	changes, servers, _ = clientsSeen{seen.nodes, stale}.plan(m, listed, in.next, view, changes, servers)
 	plan := nodePlan{changes: changes, servers: servers, warning: seen.warning}
+	if seen.full {
+		plan.reading = &seen.nomadReading
+	}
 	if groups == nil {
 		return plan, nil
 	}
@@ -330,13 +335,7 @@ func (s *Service) readForPlan(ctx context.Context, m *model.Cluster, listed []cl
 	servers, stale []cloud.Instance, in planInput,
 ) (planReading, error) {
 	if removesJoined(m, listed) {
-		reading, err := readForRemoval(ctx, m, listed, changes, func(servers []cloud.Instance) (nomadops.API, error) {
-			api, err := s.nomadOver(servers, in.access)
-			if err != nil { // not returned with api: a nil *Servers in an interface is not nil
-				return nil, err
-			}
-			return api, nil
-		})
+		reading, err := readForRemoval(ctx, m, listed, changes, s.nomadAsker(in.access))
 		switch {
 		case err == nil:
 			return planReading{nomadReading: reading, read: true, full: true}, nil
@@ -346,6 +345,17 @@ func (s *Service) readForPlan(ctx context.Context, m *model.Cluster, listed []cl
 	}
 	nodes, read, warning, err := s.readNodes(ctx, m, in.access, listed, stale, servers, in.marked)
 	return planReading{nomadReading: nomadReading{nodes: nodes}, read: read, warning: warning}, err
+}
+
+// nomadAsker returns the function that makes the Nomad API over the servers with the access.
+func (s *Service) nomadAsker(access nomadAccess) func(servers []cloud.Instance) (nomadops.API, error) {
+	return func(servers []cloud.Instance) (nomadops.API, error) {
+		api, err := s.nomadOver(servers, access)
+		if err != nil { // not returned with api: a nil *Servers in an interface is not nil
+			return nil, err
+		}
+		return api, nil
+	}
 }
 
 // planningView returns the node groups of m as the decisions see them, and the view of the node planner that the
