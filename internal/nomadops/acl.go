@@ -35,19 +35,40 @@ func (c *Client) Bootstrap(ctx context.Context, bootstrapSecret secret.Secret) e
 	if !alreadyDone(err) {
 		return err
 	}
+	self, err := c.self(ctx, string(bootstrapSecret))
+	if err == nil && self.Type != "management" || errors.Is(err, ErrDenied) {
+		return &callError{method: http.MethodPut, path: bootstrapPath, cause: ErrBootstrapMismatch}
+	}
+	return err
+}
+
+// self reads the ACL token whose secret is token, or the client's own token when token is empty.
+func (c *Client) self(ctx context.Context, token string) (*api.ACLToken, error) {
 	var self *api.ACLToken
-	err = c.call(ctx, http.MethodGet, selfPath, func(ctx context.Context) error {
+	err := c.call(ctx, http.MethodGet, selfPath, func(ctx context.Context) error {
 		q := query(ctx)
-		q.AuthToken = string(bootstrapSecret)
+		q.AuthToken = token
 		var err error
 		self, _, err = c.api.ACLTokens().Self(q)
 		return err
 	})
-	var e *callError
-	if err == nil && self.Type != "management" || errors.As(err, &e) && e.status == http.StatusForbidden {
-		return &callError{method: http.MethodPut, path: bootstrapPath, cause: ErrBootstrapMismatch}
+	return self, err
+}
+
+// errNoAccessor is why TokenAccessor fails after an answer without an accessor.
+var errNoAccessor = errors.New("the answer holds no accessor")
+
+// TokenAccessor returns the accessor ID of the ACL token that the client sends. It fails with an error that matches
+// ErrDenied when the secret is the secret of no token of the cluster.
+func (c *Client) TokenAccessor(ctx context.Context) (string, error) {
+	self, err := c.self(ctx, "")
+	switch {
+	case err != nil:
+		return "", err
+	case self.AccessorID == "":
+		return "", &callError{method: http.MethodGet, path: selfPath, cause: errNoAccessor}
 	}
-	return err
+	return self.AccessorID, nil
 }
 
 // MaxIntroTTL is the longest TTL of an introduction token: the default max_identity_ttl of Nomad servers, which cut a

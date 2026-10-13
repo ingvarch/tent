@@ -573,6 +573,17 @@ func (c *worldClient) Bootstrap(ctx context.Context, s secret.Secret) error {
 	})
 }
 
+func (c *worldClient) TokenAccessor(ctx context.Context) (v string, err error) {
+	err = c.do(ctx, nomadfake.Call{Name: "TokenAccessor"}, func(ctx context.Context) (err error) {
+		v, err = c.inner.TokenAccessor(ctx)
+		return
+	})
+	if err != nil {
+		return "", err
+	}
+	return v, nil
+}
+
 func (c *worldClient) IntroToken(ctx context.Context, req nomadops.IntroRequest) (v secret.Secret, err error) {
 	arg := req.NodeName + " " + req.NodePool + " " + req.TTL.String()
 	err = c.do(ctx, nomadfake.Call{Name: "IntroToken", Arg: arg}, func(ctx context.Context) (err error) {
@@ -793,10 +804,10 @@ func (w *nomadWorld) shapeHealth(h nomadops.Health) nomadops.Health {
 	return h
 }
 
-// TestWorldClientPassesTheWritesThroughItsHook checks that MarkIneligible, Drain, Purge, TransferLeadership,
-// RemovePeer, Members, Jobs, ForceLeave, SaveSnapshot and RestoreSnapshot of a client of the world go through the
-// world's hook with the Call that the Nomad fake logs, reach the fake when the hook calls next, and return the hook's
-// error, without reaching the fake, when it does not.
+// TestWorldClientPassesTheWritesThroughItsHook checks that TokenAccessor, MarkIneligible, Drain, Purge,
+// TransferLeadership, RemovePeer, Members, Jobs, ForceLeave, SaveSnapshot and RestoreSnapshot of a client of the world
+// go through the world's hook with the Call that the Nomad fake logs, reach the fake when the hook calls next, and
+// return the hook's error, without reaching the fake, when it does not.
 func TestWorldClientPassesTheWritesThroughItsHook(t *testing.T) {
 	t.Parallel()
 	svc, _, w := newRelease(t)
@@ -817,6 +828,10 @@ func TestWorldClientPassesTheWritesThroughItsHook(t *testing.T) {
 	}
 	req := nomadops.DrainRequest{Deadline: time.Hour, Meta: map[string]string{"tent_machine": "m-1"}}
 	calls := map[string]func() error{
+		"TokenAccessor": func() error {
+			_, err := api.TokenAccessor(t.Context())
+			return err
+		},
 		"MarkIneligible":     func() error { return api.MarkIneligible(t.Context(), "n-1") },
 		"Drain":              func() error { return api.Drain(t.Context(), "n-1", req) },
 		"Purge":              func() error { return api.Purge(t.Context(), "n-1") },
@@ -838,6 +853,7 @@ func TestWorldClientPassesTheWritesThroughItsHook(t *testing.T) {
 		"RestoreSnapshot": func() error { return api.RestoreSnapshot(t.Context(), secret.Secret("nomadfake snapshot 1")) },
 	}
 	wantCalls := []nomadfake.Call{
+		{Name: "TokenAccessor", Server: server},
 		{Name: "MarkIneligible", Server: server, Arg: "n-1"},
 		{Name: "Drain", Server: server, Arg: "n-1 1h0m0s tent_machine=m-1"},
 		{Name: "Purge", Server: server, Arg: "n-1"},
@@ -849,8 +865,8 @@ func TestWorldClientPassesTheWritesThroughItsHook(t *testing.T) {
 		{Name: "SaveSnapshot", Server: server},
 		{Name: "RestoreSnapshot", Server: server, Arg: "[secret, 20 bytes]"},
 	}
-	names := []string{"MarkIneligible", "Drain", "Purge", "TransferLeadership", "RemovePeer", "Members", "Jobs",
-		"ForceLeave", "SaveSnapshot", "RestoreSnapshot"}
+	names := []string{"TokenAccessor", "MarkIneligible", "Drain", "Purge", "TransferLeadership", "RemovePeer",
+		"Members", "Jobs", "ForceLeave", "SaveSnapshot", "RestoreSnapshot"}
 	logged := func() []nomadfake.Call {
 		var out []nomadfake.Call
 		for _, c := range w.Log() {

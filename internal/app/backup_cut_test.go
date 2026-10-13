@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ingvarch/tent/internal/app"
+	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/nomadops/nomadfake"
 	"github.com/ingvarch/tent/internal/statestore"
 )
@@ -248,4 +249,56 @@ func TestBackupRestoreIsCut(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestBackupRestoreResumesAfterNomadTookTheBackup cuts a run right after Nomad took the backup, and registers the
+// backup's jobs: the next run sees that the bootstrap token has another accessor, reads no job, sends the backup again
+// and ends with the time.
+func TestBackupRestoreResumesAfterNomadTookTheBackup(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		r := rebuiltWorld(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		r.w.SetHook(func(ctx context.Context, c nomadfake.Call, next func(context.Context) error) error {
+			err := next(ctx)
+			if c.Name == "RestoreSnapshot" {
+				cancel()
+			}
+			return err
+		})
+		if _, err := r.svc.BackupRestore(ctx, "prod", app.Latest, true); !errors.Is(err, context.Canceled) {
+			t.Fatalf("the first run: %v, want it cut", err)
+		}
+		r.w.SetHook(nil)
+		if got := accessorOf(t, r.svc, r.w); got == r.accessor {
+			t.Fatalf("the accessor is %q after the restore, want the backup's", got)
+		}
+		r.w.SetJobs([]nomadops.Job{{Namespace: "default", ID: "from-the-backup"}})
+		before := len(r.w.Log())
+
+		plan := r.mustRestore(t, app.Latest)
+
+		if !plan.Applied || !plan.Resumes || !plan.Taken {
+			t.Errorf("plan = %+v, want Applied, Resumes and Taken", plan)
+		}
+		for _, name := range nomadCallNames(r.w, before) {
+			if name == "Jobs" {
+				t.Error("the run read the jobs, want none")
+			}
+		}
+		if got := len(r.restoredCopies()); got != 2 {
+			t.Errorf("Nomad took %d snapshots, want the cut run's and the resumed run's", got)
+		}
+		var rec struct {
+			Accessor string     `json:"accessor"`
+			Restored *time.Time `json:"restored"`
+		}
+		if err := json.Unmarshal(get(t, r.svc.Store, restoredPath), &rec); err != nil || rec.Restored == nil {
+			t.Errorf("the record %q has no time: %v", get(t, r.svc.Store, restoredPath), err)
+		}
+		if rec.Accessor != r.accessor {
+			t.Errorf("the record's accessor is %q, want the one before the restore, %q", rec.Accessor, r.accessor)
+		}
+	})
 }
