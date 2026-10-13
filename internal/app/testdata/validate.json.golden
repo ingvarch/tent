@@ -90,7 +90,7 @@
       "check": "nomad-version",
       "node": "prod-workers-0",
       "id": "instance-4",
-      "detail": "its client runs Nomad 2.0.6; the cluster is pinned to 2.0.7"
+      "detail": "its client runs Nomad 2.0.6; the cluster's version is 2.0.7"
     },
     {
       "check": "certificate-expired",

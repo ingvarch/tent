@@ -337,14 +337,14 @@ func TestVersionFailures(t *testing.T) {
 		nodes  []nomadops.Node
 		want   []Failure
 	}{
-		{"every version is the pinned one", healthOf(servers, "2.0.7"), nodes, nil},
+		{"every version is the cluster's version", healthOf(servers, "2.0.7"), nodes, nil},
 		{
 			"a server of another version",
 			changeReport(healthOf(servers, "2.0.7"), servers[1], func(sv *nomadops.ServerHealth) { sv.Version = "2.0.6" }),
 			nodes,
 			[]Failure{{
 				Check: "nomad-version", Node: "prod-servers-1", ID: "instance-2",
-				Detail: "its server runs Nomad 2.0.6; the cluster is pinned to 2.0.7",
+				Detail: "its server runs Nomad 2.0.6; the cluster's version is 2.0.7",
 			}},
 		},
 		{
@@ -352,7 +352,7 @@ func TestVersionFailures(t *testing.T) {
 			[]nomadops.Node{nodes[0], node(clients[1], "ready", "2.0.6")},
 			[]Failure{{
 				Check: "nomad-version", Node: "prod-workers-1", ID: "instance-5",
-				Detail: "its client runs Nomad 2.0.6; the cluster is pinned to 2.0.7",
+				Detail: "its client runs Nomad 2.0.6; the cluster's version is 2.0.7",
 			}},
 		},
 		{
@@ -361,11 +361,11 @@ func TestVersionFailures(t *testing.T) {
 			[]Failure{
 				{
 					Check: "nomad-version", Node: "prod-servers-0", ID: "instance-1",
-					Detail: "its server runs Nomad 2.0.6; the cluster is pinned to 2.0.7",
+					Detail: "its server runs Nomad 2.0.6; the cluster's version is 2.0.7",
 				},
 				{
 					Check: "nomad-version", Node: "prod-servers-2", ID: "instance-3",
-					Detail: "its server runs Nomad 2.0.6; the cluster is pinned to 2.0.7",
+					Detail: "its server runs Nomad 2.0.6; the cluster's version is 2.0.7",
 				},
 			},
 		},

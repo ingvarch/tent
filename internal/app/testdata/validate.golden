@@ -14,7 +14,7 @@ prod-servers-2  Serf reports its server as left
 prod-servers-2  autopilot reports its server unhealthy
 prod-workers-1  Nomad lists no client of its name at 10.64.0.7
 prod-workers-0  its Nomad client is down
-prod-workers-0  its client runs Nomad 2.0.6; the cluster is pinned to 2.0.7
+prod-workers-0  its client runs Nomad 2.0.6; the cluster's version is 2.0.7
 prod-servers-0  its node certificate ended about 2027-10-05
 
 cluster prod is not valid: 17 failures

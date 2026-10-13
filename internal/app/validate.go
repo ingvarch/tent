@@ -56,7 +56,8 @@ type Failure struct {
 
 // Validation is what a check of a cluster found: its failures, the warnings about it and who holds its lock. Servers
 // and Clients count the machines that stay under the specs by the role of their node group, a combined machine as
-// both, and NomadVersion is the Nomad version that the cluster is pinned to.
+// both, and NomadVersion is the cluster's version: the Nomad version of its specs, else the one it is pinned to, else
+// the one that its channel recommends.
 type Validation struct {
 	Cluster      string
 	Servers      int
@@ -148,10 +149,11 @@ func (v Validation) MarshalJSON() ([]byte, error) {
 // A lock whose lease cannot be read is a warning, not a failure. A service without a Nomad client fails with an error.
 //
 // The warnings are those that every change of the cluster gives, the one about a cluster that runs in a single failure
-// domain, those about certificates that end within 30 days, the one that names the machines that stay and that a
-// rolling update replaces, or says that tent could not tell which they are, and the one about a lock that cannot be
-// read. They are returned, and told to OnWarning. They never make the cluster invalid. The spec hashes, which choose
-// the surplus machines and tell which machines are outdated, come from the release files that the nodes download;
+// domain, those about certificates that end within 30 days, the one that says tent update cluster has not applied
+// the specs of the cluster yet, the one that names the machines that stay and that a rolling update replaces, or says
+// that tent could not tell which they are, and the one about a lock that cannot be read, in that order. They are
+// returned, and told to OnWarning. They never make the cluster invalid. The spec hashes, which choose the surplus
+// machines and tell which machines are outdated, come from the release files that the nodes download;
 // they are read unless the cloud lists no machine of the cluster or the store lacks the cluster's secrets.
 func (s *Service) ValidateCluster(ctx context.Context, cluster string) (_ Validation, err error) {
 	defer func() { err = stopped(ctx, err) }()
@@ -205,6 +207,11 @@ func (s *Service) ValidateCluster(ctx context.Context, cluster string) (_ Valida
 			": an outage there takes the whole cluster down")
 	}
 	v.Warnings = append(v.Warnings, found.warnings...)
+	if applied, err := c.specsApplied(); err != nil {
+		return Validation{}, err
+	} else if !applied {
+		v.Warnings = append(v.Warnings, "tent update cluster has not applied the specs of "+clusterLabel(c.m.Name)+" yet")
+	}
 	if outdated := outdatedFinding(c.m, builder, builderErr, set.stays); outdated != "" {
 		v.Warnings = append(v.Warnings, outdated)
 	}

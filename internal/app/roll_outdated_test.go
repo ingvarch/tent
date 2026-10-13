@@ -296,7 +296,7 @@ func TestValidateWarnsAboutTheOutdatedNodes(t *testing.T) {
 
 		v := mustValidate(t, svc)
 
-		want := "2 nodes are outdated: prod-workers-0 and prod-workers-1; tent rolling-update cluster replaces them"
+		want := outdatedWarning
 		if !v.Valid() || !slices.Contains(v.Warnings, want) || !slices.Contains(*warnings, want) {
 			t.Errorf("valid %t, warnings %q, told %q, want a valid cluster and the warning %q", v.Valid(), v.Warnings,
 				*warnings, want)

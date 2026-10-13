@@ -121,6 +121,100 @@ func TestValidateClusterTellsThePinnedNomadVersion(t *testing.T) {
 	})
 }
 
+// unappliedWarning is validate's warning about specs of the test cluster that no update has applied, and
+// outdatedWarning the one about its two workers once their spec hash has changed.
+const (
+	unappliedWarning = "tent update cluster has not applied the specs of cluster prod yet"
+	outdatedWarning  = "2 nodes are outdated: prod-workers-0 and prod-workers-1; tent rolling-update cluster replaces them"
+)
+
+// TestValidateClusterWarnsAboutSpecsThatUpdateHasNotApplied warns, and stays valid, once the specs differ from the
+// completed spec in the store, and does not warn when they are applied.
+func TestValidateClusterWarnsAboutSpecsThatUpdateHasNotApplied(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, _, _ := builtCluster(t)
+		var told []string
+		svc.OnWarning = func(w string) { told = append(told, w) }
+
+		if v := mustValidate(t, svc); slices.Contains(v.Warnings, unappliedWarning) {
+			t.Errorf("warnings %q hold the warning about unapplied specs for an applied cluster", v.Warnings)
+		}
+
+		mustReplace(t, svc, workersMetaYAML)
+		told = nil
+		v := mustValidate(t, svc)
+
+		wantFailures(t, v)
+		want := []string{openAPIWarning, oneZoneWarning, unappliedWarning, outdatedWarning}
+		if diff := cmp.Diff(want, v.Warnings); diff != "" {
+			t.Errorf("warnings (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(want, told); diff != "" {
+			t.Errorf("OnWarning was told (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// TestValidateClusterWarnsBeforeTheFirstUpdate warns about the specs of a cluster that no update has reached: its
+// store holds no completed spec.
+func TestValidateClusterWarnsBeforeTheFirstUpdate(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, f := newUpdate(t)
+		withNomad(svc, f)
+
+		v := mustValidate(t, svc)
+
+		want := []string{openAPIWarning, oneZoneWarning, unappliedWarning}
+		if diff := cmp.Diff(want, v.Warnings); diff != "" {
+			t.Errorf("warnings (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// TestValidateClusterTellsTheLockWarningAfterTheUnappliedOne puts the warning about a lock that cannot be read last.
+func TestValidateClusterTellsTheLockWarningAfterTheUnappliedOne(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, _, _ := builtCluster(t)
+		mustReplace(t, svc, workersMetaYAML)
+		svc.Store = unwrapped{svc.Store}
+		put(t, svc.Store, lockPath, []byte("not a lease"))
+
+		v := mustValidate(t, svc)
+
+		wantFailures(t, v)
+		const prefix = "tent could not read the lock of cluster prod: "
+		if len(v.Warnings) != 5 || !strings.HasPrefix(v.Warnings[4], prefix) {
+			t.Fatalf("warnings = %q, want four and then one that starts with %q", v.Warnings, prefix)
+		}
+		want := []string{openAPIWarning, oneZoneWarning, unappliedWarning, outdatedWarning}
+		if diff := cmp.Diff(want, v.Warnings[:4]); diff != "" {
+			t.Errorf("warnings (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// TestValidateClusterOrdersTheUnappliedWarning puts the warning about unapplied specs after the warnings about the
+// zone and the certificates and before the one about outdated nodes.
+func TestValidateClusterOrdersTheUnappliedWarning(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, _, _ := builtCluster(t)
+		time.Sleep(339*24*time.Hour + 12*time.Hour) // the bubble's clock starts at 2000-01-01, a leap year
+		mustReplace(t, svc, workersMetaYAML)
+
+		v := mustValidate(t, svc)
+
+		wantFailures(t, v)
+		want := append(append([]string{openAPIWarning, oneZoneWarning}, endingSoon()...), unappliedWarning, outdatedWarning)
+		if diff := cmp.Diff(want, v.Warnings); diff != "" {
+			t.Errorf("warnings (-want +got):\n%s", diff)
+		}
+	})
+}
+
 // TestValidateClusterWarnsAboutACombinedGroup tells the warning about a combined group after the one about the
 // open API, and counts a combined node as a server and as a client.
 func TestValidateClusterWarnsAboutACombinedGroup(t *testing.T) {
@@ -493,7 +587,7 @@ func exampleValidation() app.Validation {
 			},
 			{
 				Check: "nomad-version", Node: "prod-workers-0", ID: "instance-4",
-				Detail: "its client runs Nomad 2.0.6; the cluster is pinned to 2.0.7",
+				Detail: "its client runs Nomad 2.0.6; the cluster's version is 2.0.7",
 			},
 			{
 				Check: "certificate-expired", Node: "prod-servers-0", ID: "instance-1",
@@ -811,11 +905,11 @@ func TestValidateClusterFindsWhatDiffersInNomad(t *testing.T) {
 				return []app.Failure{
 					{
 						Check: "nomad-version", Node: "prod-servers-1", ID: "instance-2",
-						Detail: "its server runs Nomad 2.0.1; the cluster is pinned to " + pinned,
+						Detail: "its server runs Nomad 2.0.1; the cluster's version is " + pinned,
 					},
 					{
 						Check: "nomad-version", Node: "prod-workers-0", ID: "instance-4",
-						Detail: "its client runs Nomad 2.0.2; the cluster is pinned to " + pinned,
+						Detail: "its client runs Nomad 2.0.2; the cluster's version is " + pinned,
 					},
 				}
 			},
@@ -1047,6 +1141,16 @@ func TestValidateClusterPassesAClusterOfOneNode(t *testing.T) {
 // certNodes are the names of the machines of the test cluster, in the order of their IDs instance-1 to instance-5.
 var certNodes = []string{"prod-servers-0", "prod-servers-1", "prod-servers-2", "prod-workers-0", "prod-workers-1"}
 
+// endingSoon returns the warnings about the node certificates of the test cluster 26 days before they end.
+func endingSoon() []string {
+	var ws []string
+	for _, name := range certNodes {
+		ws = append(ws, "the certificate of node "+name+" ends about 2001-01-01, in 26 days; node certificates "+
+			"last one year, and a node gets a new one when it is replaced")
+	}
+	return ws
+}
+
 // expiredCertificates returns the failures of the certificates of the test cluster a long time after an update made
 // it: the CA's, then each node's.
 func expiredCertificates() []app.Failure {
@@ -1073,11 +1177,7 @@ func TestValidateClusterWarnsAboutCertificatesThatEndSoon(t *testing.T) {
 		v := mustValidate(t, svc)
 
 		wantFailures(t, v)
-		want := []string{openAPIWarning, oneZoneWarning}
-		for _, name := range certNodes {
-			want = append(want, "the certificate of node "+name+" ends about 2001-01-01, in 26 days; node certificates "+
-				"last one year, and a node gets a new one when it is replaced")
-		}
+		want := append([]string{openAPIWarning, oneZoneWarning}, endingSoon()...)
 		if diff := cmp.Diff(want, v.Warnings); diff != "" {
 			t.Errorf("warnings (-want +got):\n%s", diff)
 		}
