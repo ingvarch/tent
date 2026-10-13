@@ -47,6 +47,63 @@ func (b StoredBackup) MarshalJSON() ([]byte, error) {
 	}{b.Cluster, b.Name, b.Time.UTC().Format(time.RFC3339), b.Path, b.Size})
 }
 
+// ListedBackup is a backup in the list of a cluster's backups.
+type ListedBackup struct {
+	statestore.Backup
+	// Earlier reports that the backup is of servers that tent has replaced since, or that the cluster has no
+	// bootstrap mark: a restore takes only such a backup.
+	Earlier bool
+}
+
+// MarshalJSON encodes it as {"name": "20261009T230207Z", "time": "2026-10-09T23:02:07Z", "path": "...", "servers":
+// "earlier"}; servers is "current" for a backup of the servers that run now.
+func (b ListedBackup) MarshalJSON() ([]byte, error) {
+	servers := "current"
+	if b.Earlier {
+		servers = "earlier"
+	}
+	return marshalJSON("the backup", struct {
+		Name    string `json:"name"`
+		Time    string `json:"time"`
+		Path    string `json:"path"`
+		Servers string `json:"servers"`
+	}{b.Name, b.Time.UTC().Format(time.RFC3339), b.Path, servers})
+}
+
+// Backups returns the backups of the cluster in the state store, oldest first; a cluster without any gets an empty
+// list. It reads only the state store, so it works while the cluster's servers are gone.
+func (s *Service) Backups(ctx context.Context, cluster string) (_ []ListedBackup, err error) {
+	defer func() { err = stopped(ctx, err) }()
+	l, err := s.layout(ctx, cluster)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.get(ctx, l, false); err != nil {
+		return nil, err
+	}
+	var current string
+	mark, marked, err := s.bootstrapMark(ctx, l)
+	if err != nil {
+		return nil, err
+	}
+	if marked {
+		t, err := markTime(l, mark)
+		if err != nil {
+			return nil, err
+		}
+		current = statestore.BackupName(t)
+	}
+	backups, err := statestore.Backups(ctx, s.Store, l)
+	if err != nil {
+		return nil, err
+	}
+	listed := make([]ListedBackup, 0, len(backups))
+	for _, b := range backups {
+		listed = append(listed, ListedBackup{Backup: b, Earlier: b.Bootstrap != current})
+	}
+	return listed, nil
+}
+
 // BackupCreate takes a snapshot of the cluster's Nomad state and stores it in the state store, under the cluster's
 // lock. The cluster must be built: its store holds its secrets and the mark of the Nomad bootstrap. A snapshot that
 // Nomad cannot take yet is asked for again for up to 5 minutes, with a warning. tent never replaces a backup: one of
