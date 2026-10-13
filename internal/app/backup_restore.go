@@ -1,13 +1,17 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"time"
 
 	"github.com/ingvarch/tent/internal/english"
 	"github.com/ingvarch/tent/internal/nomadops"
+	"github.com/ingvarch/tent/internal/secret"
 	"github.com/ingvarch/tent/internal/statestore"
 )
 
@@ -139,10 +143,8 @@ func refuseJobs(cluster string, jobs []nomadops.Job, mark time.Time, started str
 	if len(jobs) == 0 {
 		return nil
 	}
-	count := fmt.Sprintf("%d job", len(jobs))
-	were := "was"
+	count, were := quantity(len(jobs), "job"), "was"
 	if len(jobs) != 1 {
-		count += "s"
 		were = "were"
 	}
 	if started != "" {
@@ -153,4 +155,248 @@ func refuseJobs(cluster string, jobs []nomadops.Job, mark time.Time, started str
 	return fmt.Errorf("cluster %s runs %s that %s registered after its servers were built again on %s; "+
 		"a restore replaces them with the backup's. tent restores a backup only into servers that run no job: "+
 		"purge the jobs first, or %s", cluster, count, were, mark.UTC().Format(restoreTimeLayout), rebuildWay)
+}
+
+// RestorePlan is what a restore of a backup does.
+type RestorePlan struct {
+	Cluster      string
+	Backup       statestore.Backup
+	Bootstrapped time.Time // when the servers that run now were bootstrapped, in UTC
+	// Nodes is how many nodes Nomad lists now. A node that the backup does not know must register again after the
+	// restore.
+	Nodes int
+	// Resumes reports that a restore of this backup was started and has not ended: tent sends the backup again.
+	Resumes bool
+	// Restored reports that these servers were restored from this backup already, so nothing is left to do.
+	Restored bool
+	// Applied reports that BackupRestore restored the backup.
+	Applied bool
+}
+
+// WriteText writes the plan for people: what the restore does and how many nodes Nomad lists. A plan with Restored is
+// the line "cluster prod is already restored from backup 20261008T030000Z".
+func (p RestorePlan) WriteText(w io.Writer) error {
+	if p.Restored {
+		return writeText(w, "the plan", fmt.Sprintf("%s is already restored from backup %s\n",
+			clusterLabel(p.Cluster), p.Backup.Name))
+	}
+	nodes := "list " + quantity(p.Nodes, "node")
+	state := "They run no job and " + nodes + "."
+	if p.Resumes {
+		state = "A restore of this backup was started and has not ended: tent sends the backup again. The servers " +
+			nodes + "."
+	}
+	return writeText(w, "the plan", fmt.Sprintf("Restore backup %s (taken %s) into %s.\n"+
+		"The servers that run now were bootstrapped on %s; the backup is of earlier servers.\n%s\n"+
+		"Nomad's jobs, nodes, ACL tokens, variables and keyring become those of the backup.\n",
+		p.Backup.Name, p.Backup.Time.UTC().Format(restoreTimeLayout), clusterLabel(p.Cluster),
+		p.Bootstrapped.UTC().Format(restoreTimeLayout), state))
+}
+
+// WriteApplied writes the line "Restored: backup 20261008T030000Z into cluster prod.".
+func (p RestorePlan) WriteApplied(w io.Writer) error {
+	line := fmt.Sprintf("Restored: backup %s into %s.\n", p.Backup.Name, clusterLabel(p.Cluster))
+	return writeText(w, "the result", line)
+}
+
+// MarshalJSON encodes the plan as {"cluster": "prod", "backup": {"name": "...", "time": "...", "path": "..."},
+// "bootstrapped": "2026-10-10T08:00:00Z", "nodes": 2, "resumes": true, "restored": true, "applied": true}; resumes,
+// restored and applied are left out when false, and nodes is left out of a plan with restored, which asks no Nomad.
+func (p RestorePlan) MarshalJSON() ([]byte, error) {
+	type backup struct {
+		Name string `json:"name"`
+		Time string `json:"time"`
+		Path string `json:"path"`
+	}
+	out := struct {
+		Cluster      string `json:"cluster"`
+		Backup       backup `json:"backup"`
+		Bootstrapped string `json:"bootstrapped"`
+		Nodes        *int   `json:"nodes,omitempty"`
+		Resumes      bool   `json:"resumes,omitempty"`
+		Restored     bool   `json:"restored,omitempty"`
+		Applied      bool   `json:"applied,omitempty"`
+	}{
+		Cluster:      p.Cluster,
+		Backup:       backup{p.Backup.Name, p.Backup.Time.UTC().Format(time.RFC3339), p.Backup.Path},
+		Bootstrapped: p.Bootstrapped.UTC().Format(time.RFC3339),
+		Resumes:      p.Resumes, Restored: p.Restored, Applied: p.Applied,
+	}
+	if !p.Restored {
+		out.Nodes = &p.Nodes
+	}
+	return marshalJSON("the plan", out)
+}
+
+// restoreRun is what the plan of a restore found, and the API that it asks Nomad through.
+type restoreRun struct {
+	plan  RestorePlan
+	built builtCluster
+	state restoreState
+	api   *nomadops.Servers
+}
+
+// BackupRestore plans the restore of the backup that from names, or of the newest backup of earlier servers when from
+// is Latest, into the cluster's Nomad and, with apply, carries it out under the cluster's lock. It restores only into
+// servers that tent built again after the backup, only while Nomad lists no job, and only one backup into the servers
+// of one bootstrap. A restore that was cut is finished by running the command again. The plan is made once without the
+// lock and again under it. A backup is a secret: it holds the ACL tokens and the keyring of Nomad.
+func (s *Service) BackupRestore(ctx context.Context, cluster, from string, apply bool) (_ RestorePlan, err error) {
+	defer func() { err = stopped(ctx, err) }()
+	l, err := s.layout(ctx, cluster)
+	if err != nil {
+		return RestorePlan{}, err
+	}
+	run, err := s.planRestore(ctx, l, from)
+	if err != nil || !apply || run.plan.Restored {
+		return run.plan, err
+	}
+	err = s.locked(ctx, l, "backup restore", func(ctx context.Context) error {
+		var err error
+		if run, err = s.planRestore(ctx, l, from); err != nil || run.plan.Restored {
+			return err
+		}
+		run.plan, err = s.restore(ctx, l, run)
+		return err
+	})
+	return run.plan, err
+}
+
+// planRestore reads the cluster and decides which backup the restore takes, and whether the servers may take it. A
+// plan with Restored asks no cloud and no Nomad.
+func (s *Service) planRestore(ctx context.Context, l statestore.Layout, from string) (restoreRun, error) {
+	built, err := s.loadBuilt(ctx, l)
+	if err != nil {
+		return restoreRun{}, err
+	}
+	mark, err := markTime(l, built.mark)
+	if err != nil {
+		return restoreRun{}, err
+	}
+	backups, err := statestore.Backups(ctx, s.Store, l)
+	if err != nil {
+		return restoreRun{}, err
+	}
+	backup, err := pickBackup(l.Cluster(), backups, from, mark)
+	if err != nil {
+		return restoreRun{}, err
+	}
+	rec, err := s.storedRestore(ctx, l)
+	if err != nil {
+		return restoreRun{}, err
+	}
+	state, err := recorded(l.Cluster(), rec, mark, backup)
+	run := restoreRun{
+		plan:  RestorePlan{Cluster: l.Cluster(), Backup: backup, Bootstrapped: mark.UTC(), Restored: state == restoreDone},
+		built: built, state: state,
+	}
+	if err != nil || run.plan.Restored {
+		return run, err
+	}
+	servers, _, err := s.reach(ctx, built)
+	if err != nil {
+		return run, err
+	}
+	nodes, err := checkReach(ctx, servers)
+	if err != nil {
+		return run, err
+	}
+	run.api, run.plan.Nodes = servers, len(nodes)
+	if state == restoreCut {
+		run.plan.Resumes = true
+		return run, nil
+	}
+	jobs, err := servers.Jobs(ctx)
+	if err != nil {
+		return run, fmt.Errorf("list the jobs: %w", err)
+	}
+	return run, refuseJobs(l.Cluster(), jobs, mark, startedBackup(rec, mark))
+}
+
+// startedBackup returns the backup that rec names for the servers bootstrapped at mark, or "" when rec is not of
+// these servers. For a restoreNew run it is the backup of a restore that was started and has not ended.
+func startedBackup(rec *restoreRecord, mark time.Time) string {
+	if rec == nil || rec.Bootstrap != statestore.BackupName(mark) {
+		return ""
+	}
+	return rec.Backup
+}
+
+// storedRestore returns the record of a restore of the cluster, or nil when the store holds none.
+func (s *Service) storedRestore(ctx context.Context, l statestore.Layout) (*restoreRecord, error) {
+	data, _, err := s.Store.Get(ctx, l.NomadRestored())
+	switch {
+	case errors.Is(err, statestore.ErrNotFound):
+		return nil, nil
+	case err != nil:
+		return nil, err
+	}
+	rec, err := decodeRestoreRecord(l.NomadRestored(), data)
+	if err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// restore sends the backup to Nomad and checks that tent's own access survived. The caller holds the lock. It writes
+// the record before it sends the backup, without a time, so that a run that is cut after Nomad took the backup sends
+// it again although the backup's jobs are there. It writes the time once the check has passed.
+func (s *Service) restore(ctx context.Context, l statestore.Layout, run restoreRun) (RestorePlan, error) {
+	plan, cluster := run.plan, l.Cluster()
+	data, _, err := s.Store.Get(ctx, plan.Backup.Path)
+	if err != nil {
+		return plan, fmt.Errorf("read backup %s: %w", plan.Backup.Name, err)
+	}
+	snap := secret.Secret(data)
+	if nomadops.CheckSnapshot(snap) != nil {
+		return plan, fmt.Errorf("backup %s of %s holds no snapshot", plan.Backup.Name, clusterLabel(cluster))
+	}
+	if err := statestore.RaiseVersion(ctx, s.Store, l, s.Version); err != nil {
+		return plan, err
+	}
+	rec := restoreRecord{Backup: plan.Backup.Name, Bootstrap: statestore.BackupName(plan.Bootstrapped)}
+	if run.state == restoreNew {
+		if err := s.putRecord(ctx, l, rec); err != nil {
+			return plan, err
+		}
+	}
+	if err := run.api.RestoreSnapshot(ctx, snap); err != nil {
+		return plan, fmt.Errorf("restore backup %s: %w; run the command again", plan.Backup.Name, err)
+	}
+	switch err := run.api.Bootstrap(ctx, run.built.secrets.bootstrap); {
+	case errors.Is(err, nomadops.ErrBootstrapMismatch):
+		return plan, fmt.Errorf("the restore replaced the ACL tokens of %s, and the ACL bootstrap secret of the state "+
+			"store is none of them: tent can no longer call the cluster. The object %s is no backup that tent took of "+
+			"this cluster. Delete the server machines in the cloud, run tent update cluster --yes, and restore another "+
+			"backup", clusterLabel(cluster), plan.Backup.Path)
+	case err != nil:
+		return plan, fmt.Errorf("check tent's access after the restore: %w; run the command again", err)
+	}
+	restored := s.now()
+	rec.Restored = &restored
+	if err := s.putRecord(ctx, l, rec); err != nil {
+		return plan, fmt.Errorf("%w; run the command again", err)
+	}
+	plan.Applied = true
+	return plan, nil
+}
+
+// putRecord writes the record of a restore, replacing the one that is there.
+func (s *Service) putRecord(ctx context.Context, l statestore.Layout, rec restoreRecord) error {
+	data, err := rec.encode()
+	if err != nil {
+		return err
+	}
+	if _, err := s.Store.Put(ctx, l.NomadRestored(), data, statestore.PutOptions{}); err != nil {
+		return fmt.Errorf("write %s: %w", l.NomadRestored(), err)
+	}
+	return nil
+}
+
+// quantity returns n and the noun, which takes an s unless n is 1, such as "1 job" and "12 jobs".
+func quantity(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
