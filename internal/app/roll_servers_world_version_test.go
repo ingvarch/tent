@@ -96,13 +96,14 @@ func (b liveWorld) nodeUserDataFor(t *testing.T, name, version string) string {
 }
 
 // TestWorldNodeVersionsKeepsOldMachinesAndGivesNewOnesTheirVersion checks that, once the specs ask for 2.0.7, the
-// servers and nodes that were created on 2.0.6 still report 2.0.6, and a client that update creates reports 2.0.7 in
-// the node list.
+// servers and nodes that were created on 2.0.6 still report 2.0.6, the servers that update creates report 2.0.7 in
+// autopilot's report, and a client whose create request asks for 2.0.7 reports it in the node list.
 func TestWorldNodeVersionsKeepsOldMachinesAndGivesNewOnesTheirVersion(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		b := olderWorld(t)
-		b.moveToNewer(t, 5, 3)
+		b.moveToNewer(t, 5, 2)
+		b.createNode(t, "prod-workers-2", "client", b.nodeUserDataFor(t, "prod-workers-2", newerNomad))
 
 		wantNodes := map[string]string{
 			"prod-workers-0": olderNomad, "prod-workers-1": olderNomad, "prod-workers-2": newerNomad,
@@ -162,6 +163,9 @@ func TestWorldNodeVersionsKeepsTheVersionOfTheFirstCreate(t *testing.T) {
 		b.f.SetHook(nil)
 		creates, sent := countCalls(b.f, "CreateInstance"), len(b.f.Calls())
 
+		for _, name := range serverNames {
+			reportsNewer(b.w, name) // the servers were rolled meanwhile: update boots no client beside older servers
+		}
 		b.moveToNewer(t, 3, 3)
 		byOp := func(c vultrfake.Call) bool {
 			return c.Name == "ListInstances" && strings.HasPrefix(c.Arg, cloud.LabelOp+"=")
@@ -259,19 +263,17 @@ func TestWorldNodeVersionsLetsATestChangeTheAnswer(t *testing.T) {
 func TestWorldReportsTheWorldsVersionWithoutNodeVersions(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		b := newLiveWorldWith(t, func(w *nomadWorld) {
-			w.svc.Channels = stableChannel("2.0.0", olderNomad, olderNomad)
-			w.SetVersion("2.0.5")
-		})
-		b.createNode(t, "prod-servers-3", "server", b.nodeUserDataFor(t, "prod-servers-3", newerNomad))
+		b := newLiveWorld(t)
+		b.createNode(t, "prod-servers-3", "server", b.nodeUserDataFor(t, "prod-servers-3", olderNomad))
+		world := stableNomad()
 
 		wantServers := map[string]string{
-			"prod-servers-0": "2.0.5", "prod-servers-1": "2.0.5", "prod-servers-2": "2.0.5", "prod-servers-3": "2.0.5",
+			"prod-servers-0": world, "prod-servers-1": world, "prod-servers-2": world, "prod-servers-3": world,
 		}
 		if diff := cmp.Diff(wantServers, b.serverVersions(t)); diff != "" {
 			t.Errorf("the versions of the servers (-want +got):\n%s", diff)
 		}
-		wantNodes := map[string]string{"prod-workers-0": "2.0.5", "prod-workers-1": "2.0.5"}
+		wantNodes := map[string]string{"prod-workers-0": world, "prod-workers-1": world}
 		if diff := cmp.Diff(wantNodes, b.listedVersions(t)); diff != "" {
 			t.Errorf("the versions of the nodes (-want +got):\n%s", diff)
 		}

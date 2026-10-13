@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/channels"
 	"github.com/ingvarch/tent/internal/rollout"
 )
@@ -219,5 +220,121 @@ func TestExtremePassesOverReportsThatAreNoVersion(t *testing.T) {
 	}
 	if got, ok := extreme(versionsOn([]string{"", "soon"}), channels.Compare); ok {
 		t.Errorf("extreme = %+v, true; want false when no report is a version number", got)
+	}
+}
+
+var (
+	createServer3 = NodeChange{Action: NodeCreate, Name: "prod-servers-3", Group: "servers", Role: v1alpha1.RoleServer}
+	createCombo3  = NodeChange{Action: NodeCreate, Name: "prod-combo-3", Group: "combo", Role: v1alpha1.RoleCombined}
+	// a client change as the planner makes it carries its role
+	createClient2 = NodeChange{Action: NodeCreate, Name: "prod-workers-2", Group: "workers", Role: v1alpha1.RoleClient}
+	createClient3 = NodeChange{Action: NodeCreate, Name: "prod-workers-3", Group: "workers", Role: v1alpha1.RoleClient}
+	repeatClient2 = NodeChange{
+		Action: NodeWait, Name: "prod-workers-2", ID: "7", Op: "op-2", Group: "workers", Role: v1alpha1.RoleClient,
+	}
+	waitClient1 = NodeChange{
+		Action: NodeWait, Name: "prod-workers-1", ID: "6", Group: "workers", Role: v1alpha1.RoleClient,
+	}
+)
+
+// TestClientAhead checks which client of a plan waits for the servers, and why.
+func TestClientAhead(t *testing.T) {
+	t.Parallel()
+	const behind = "a new node would run Nomad 2.0.7, newer than the 2.0.6 of server prod-servers-1.global; " +
+		"roll the servers first"
+	tests := []struct {
+		name     string
+		changes  []NodeChange
+		version  string
+		nomad    rollout.Nomad
+		wantNode string
+		wantWhy  string // "" for no error
+	}{
+		{"a client beside an older server", []NodeChange{createClient2}, "2.0.7",
+			versionsOn([]string{"2.0.7", "2.0.6"}), "prod-workers-2", behind},
+		{"a repeated create beside an older server", []NodeChange{repeatClient2}, "2.0.7",
+			versionsOn([]string{"2.0.7", "2.0.6"}), "prod-workers-2", behind},
+		{"a client beside servers of its version", []NodeChange{createClient2}, "2.0.7",
+			versionsOn([]string{"2.0.7", "2.0.7"}), "", ""},
+		{"a client beside newer servers", []NodeChange{createClient2}, "2.0.6",
+			versionsOn([]string{"2.0.7"}), "prod-workers-2",
+			"tent never moves a node to an older Nomad: the cluster's version is 2.0.6, and server " +
+				"prod-servers-0.global runs 2.0.7"},
+		{"a client beside a server without a version", []NodeChange{createClient2}, "2.0.7",
+			versionsOn([]string{"2.0.7", ""}), "prod-workers-2", "a server reports no Nomad version yet"},
+		{"an older server wins over a server without a version", []NodeChange{createClient2}, "2.0.7",
+			versionsOn([]string{"", "2.0.6"}), "prod-workers-2", behind},
+		{"a server change does not wait", []NodeChange{createServer3}, "2.0.7",
+			versionsOn([]string{"2.0.6", "2.0.6"}), "", ""},
+		{"a combined change does not wait", []NodeChange{createCombo3}, "2.0.7",
+			versionsOn([]string{"2.0.6", "2.0.6"}), "", ""},
+		{"a wait without an operation id boots nothing", []NodeChange{waitClient1}, "2.0.7",
+			versionsOn([]string{"2.0.6", "2.0.6"}), "", ""},
+		{"a delete boots nothing", []NodeChange{
+			{Action: NodeDelete, Name: "prod-workers-0", ID: "5", Group: "workers", Role: v1alpha1.RoleClient},
+		}, "2.0.7", versionsOn([]string{"2.0.6"}), "", ""},
+		{"the first of two clients is named", []NodeChange{createServer3, waitClient1, createClient2, createClient3},
+			"2.0.7", versionsOn([]string{"2.0.7", "2.0.6"}), "prod-workers-2", behind},
+		{"no change", nil, "2.0.7", versionsOn([]string{"2.0.6"}), "", ""},
+		{"no servers are reported", []NodeChange{createClient2}, "2.0.7", rollout.Nomad{}, "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			node, why := clientAhead(tt.changes, tt.version, tt.nomad)
+			if node != tt.wantNode {
+				t.Errorf("clientAhead node = %q, want %q", node, tt.wantNode)
+			}
+			if tt.wantWhy == "" {
+				if why != nil {
+					t.Fatalf("clientAhead why = %v, want nil", why)
+				}
+				return
+			}
+			if why == nil || why.Error() != tt.wantWhy {
+				t.Fatalf("clientAhead why = %v, want %q", why, tt.wantWhy)
+			}
+		})
+	}
+}
+
+// TestAheadTexts checks the warning of a plan and the error of an apply for a client that waits for the servers.
+func TestAheadTexts(t *testing.T) {
+	t.Parallel()
+	_, behind := clientAhead([]NodeChange{createClient2}, "2.0.7", versionsOn([]string{"2.0.6"}))
+	_, unknown := clientAhead([]NodeChange{createClient2}, "2.0.7", versionsOn([]string{""}))
+	_, newer := clientAhead([]NodeChange{createClient2}, "2.0.6", versionsOn([]string{"2.0.7"}))
+	tests := []struct {
+		name          string
+		why           error
+		warning, stop string
+	}{
+		{"an older server", behind,
+			"node prod-workers-2 waits for the servers: a new node would run Nomad 2.0.7, newer than the 2.0.6 of " +
+				"server prod-servers-0.global; this update stops before it: run tent rolling-update cluster, then " +
+				"tent update cluster again",
+			"update stops before node prod-workers-2: a new node would run Nomad 2.0.7, newer than the 2.0.6 of " +
+				"server prod-servers-0.global; run tent rolling-update cluster, then tent update cluster again"},
+		{"a server without a version", unknown,
+			"node prod-workers-2 waits for the servers: a server reports no Nomad version yet; this update stops " +
+				"before it: run tent update cluster again",
+			"update stops before node prod-workers-2: a server reports no Nomad version yet; " +
+				"run tent update cluster again"},
+		{"a newer server", newer,
+			"node prod-workers-2 waits for the servers: tent never moves a node to an older Nomad: the cluster's " +
+				"version is 2.0.6, and server prod-servers-0.global runs 2.0.7; this update stops before it",
+			"update stops before node prod-workers-2: tent never moves a node to an older Nomad: the cluster's " +
+				"version is 2.0.6, and server prod-servers-0.global runs 2.0.7"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := waitWarning("prod-workers-2", tt.why); got != tt.warning {
+				t.Errorf("waitWarning = %q\nwant %q", got, tt.warning)
+			}
+			if got := stopError("prod-workers-2", tt.why); got.Error() != tt.stop {
+				t.Errorf("stopError = %q\nwant %q", got, tt.stop)
+			}
+		})
 	}
 }

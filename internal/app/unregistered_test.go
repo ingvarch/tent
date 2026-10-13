@@ -140,12 +140,13 @@ func TestUpdateReplacesAClientThatNeverRegistered(t *testing.T) {
 		applied := mustUpdate(t, svc)
 
 		wantNodeChanges(t, applied, replaceWorker1()...)
-		wantNomad := slices.Concat(planReads, planReads, []string{"Nodes", "Peers", "IntroToken", "Nodes"})
+		wantNomad := slices.Concat(planReads, planReads, []string{"Nodes", "Peers"}, []string{"Peers", "Health"},
+			[]string{"IntroToken", "Nodes"})
 		if diff := cmp.Diff(wantNomad, nomadNames(w, before)); diff != "" {
-			t.Errorf("the Nomad calls of the apply: two plans, the check of the delete, the token and the registration "+
-				"(-want +got):\n%s", diff)
+			t.Errorf("the Nomad calls of the apply: two plans, the check of the delete, the versions of the "+
+				"servers, the token and the registration (-want +got):\n%s", diff)
 		}
-		if got := w.Log()[before+2*len(planReads)+2]; got.Arg != "prod-workers-1 default 30m0s" {
+		if got := w.Log()[before+2*len(planReads)+4]; got.Arg != "prod-workers-1 default 30m0s" {
 			t.Errorf("the intro token was asked for %q, want prod-workers-1 default 30m0s", got.Arg)
 		}
 		wantWrites := []string{"DeleteInstance <prod-workers-1>", "CreateInstance prod-workers-1",
