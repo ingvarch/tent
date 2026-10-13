@@ -38,6 +38,9 @@ pitches a tent anywhere; tent pitches a Nomad cluster on any cloud.
   cluster, an open `access.api` and a single failure domain are warnings.
 - **Safe re-runs.** A run that stops halfway can run again. tent adopts what it created by the markers on each
   object and never creates a second machine for one node.
+- **Backups of Nomad's state.** `tent backup create` stores a snapshot of the jobs, tokens and variables in the state
+  store, `tent backup list` shows them, and `tent backup restore --yes` puts one back into servers that `tent update
+  cluster` built again after a loss.
 - **Full teardown** with `tent delete cluster --yes`: every object with the cluster's markers, then its state.
 - **An end-to-end suite on Vultr** (`make e2e`): it builds a cluster on Ubuntu 24.04 and one on 26.04, runs a job
   with a service, checks that containers cannot reach the metadata service and that the servers refuse a node
@@ -47,8 +50,8 @@ pitches a tent anywhere; tent pitches a Nomad cluster on any cloud.
 
 - **Run day-2 operations with Nomad semantics** (M3).
   - Rolling updates drain clients and replace servers without losing Raft quorum.
-  - Upgrades, scaling (before M3 `update` refuses to delete a node that joined, since it cannot drain a node or check
-    the Raft quorum) and backups.
+  - Upgrades and scaling (before M3 `update` refuses to delete a node that joined, since it cannot drain a node or
+    check the Raft quorum).
 - **More providers:** Hetzner Cloud (M4), then AWS (M6).
 
 ## Quick start

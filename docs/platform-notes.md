@@ -94,6 +94,10 @@ give. ⏳ Re-check them against the version tent runs.
   unknown token into that error (`nomad/auth/auth.go`, `TestACLEndpoint_WhoAmI` in `nomad/acl_endpoint_test.go`). A
   secret of an identity without an ACL token, such as a node's secret, gets 404 `ACL token not found`
   (`aclTokenSelf` in `command/agent/acl_endpoint.go`).
+  - **On 2.0.7** (2026-10-09 and 2026-10-10, [1.2](#12-features-tent-relies-on)): after a restore with another cluster's
+    secret, `token/self` with the old secret answered 403. A repeated `PUT /v1/acl/bootstrap` with the secret in the
+    body and as `X-Nomad-Token`, as tent sends it, answered 400 `ACL bootstrap already done` for a valid secret and for
+    a UUID that is no token alike, and `token/self` then answered 200 (`management`) and 403.
 
 **Autopilot and Raft:**
 - `GET /v1/operator/autopilot/health` (`operator:read`) returns `Healthy`, `FailureTolerance`, `Leader`, `Voters`
@@ -272,15 +276,105 @@ Nomad forwarded it to the leader, which did what it does when asked directly.
     variable written before the save stayed, and the bootstrap token worked.
   - **`c4` was gone from `GET /v1/nodes` at the first poll.** Its agent got `node not found`, registered again with its
     node identity and got `rpc error: Permission denied`, and was not listed again in the 75 s watched, with its valid
-    introduction token still on disk. `c4` registered after the rotation, so its node identity was probably signed by
-    the key that the restore removed (an inference). The allocation of `after` kept running on its client while the
-    servers no longer knew the job.
+    introduction token still on disk. The run of 2026-10-09 below shows that a client that registered after the
+    snapshot was refused without a keyring rotation too, so a rotation is not needed for the refusal. The allocation of
+    `after` kept running on its client while the servers no longer knew the job.
   - **Restores that Nomad refuses** (through a follower): 14 bytes of text: 500 `failed to restore from snapshot:
     failed to decompress snapshot: gzip: invalid header`. The first 5000 bytes of a snapshot: 500 `failed to restore
     from snapshot: failed to read snapshot file: failed to read or write snapshot data: unexpected EOF`. The leader and
     the Raft configuration stayed as they were.
-- **Not settled:** the removal of the leader's own peer, a restore into a cluster that was rebuilt from the same state
-  store, the size of a snapshot of a large cluster, `prune=false`, and tokens narrower than management.
+- **Not settled:** the removal of the leader's own peer, `prune=false`, and tokens narrower than management for the
+  other calls. The runs of 2026-10-09 and 2026-10-10 below settled the restore into servers that were built again, the
+  size of a snapshot and the tokens of the snapshot calls.
+
+**Snapshots for tent's backups** (v2.0.7, local on macOS darwin/arm64, `nomad` revision `9dcbdc5e`, run on 2026-10-09
+from 22:50 to 23:18 UTC, and on 2026-10-10 for the job list and the repeated bootstrap). Every agent had ACLs on and
+TLS on HTTP and RPC with `verify_server_hostname` and `verify_https_client`. Servers had gossip encryption,
+`client_introduction { enforcement = "strict" }`, `autopilot { cleanup_dead_servers = true }` and `leave_on_terminate =
+false`. Clients ran `raw_exec` only. The ACL bootstrap used `PUT /v1/acl/bootstrap {"BootstrapSecret": <UUID>}`, as tent
+does, and calls came from Python scripts with the operator certificate. Cluster A had three servers and three clients;
+cluster B had servers with empty data directories at A's server addresses, with A's CA, gossip key, region and bootstrap
+secret, started after A's servers were killed; C had its own gossip key and bootstrap secret; D had region `eu` and its
+own CA. The backups of `tent backup` rest on them
+([ADR-0042](adr/0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md)).
+- **The save** (`GET /v1/operator/snapshot`, three servers, two nodes, two jobs, one variable). 200,
+  `Content-Type: application/x-gzip`, `Transfer-Encoding: chunked`, no `Content-Length`, no `Content-Encoding`, and a
+  `Digest: sha-256=` header that matched the bytes. 10638 to 11242 bytes in 0.02 to 0.18 s; 16855 bytes with four jobs,
+  three nodes and two keyring keys. The leader and a follower both answered, and `?stale=true` answered on both.
+  - **ACL:** no token 403; `namespace "default" { policy = "read" }` 403; `operator { policy = "read" }` 403;
+    `operator { policy = "write" }` 200; `operator { capabilities = ["snapshot-save"] }` 200. A restore with the
+    `operator` write token: 403, so a restore needs a management token.
+  - **Content:** a gzip tar of `meta.json` (the Raft index and term, and the Raft servers with their IDs and
+    addresses), `state.bin` and `SHA256SUMS`. `state.bin` held in clear the secret of the bootstrap token, of a client
+    token and of a management token with a TTL, the job IDs, the node names and IDs, the policy name, the variable's
+    path and the keyring key's ID with the words `WrappedKeys` and `KeyEncryptionKey`. It did not hold the variable's
+    value in clear, nor the gossip key.
+- **Size.** Jobs of one group with `count = 0`: 250 more jobs added 56 KB, 500 added 92 KB, 1000 added 163 KB and 2000
+  added 305 KB (`state.bin` 9.6 MB), so 144 to 157 bytes of snapshot and about 4.7 KB of state for each job. The read
+  took 0.09 to 1.75 s. 40 completed allocations of a batch job added 593 bytes of snapshot and 6.2 KB of state each.
+  The restore of the 306 KB snapshot took 0.15 s.
+- **A snapshot after the servers change.** A fourth server joined B at 23:09:11. From 1.1 s after its start every read
+  answered 500 `Raft error when taking snapshot: cannot take snapshot now, wait until the configuration entry at 132
+  has been applied (have applied 131)`, and after its promotion at 22.4 s the same with entry 133. At 59 s the Raft
+  index moved to 134 by a write of the cluster's own, and the read answered 200 from then on.
+- **No leader.** With three of B's four servers killed, the save answered 500 `No cluster leader` after 5 s, with
+  `?stale=true` 200 with 17011 bytes in 0.03 s, and the restore 500 `No cluster leader` after 5 s.
+- **A restore into the running cluster A** (after a snapshot of two nodes and four allocations: two jobs purged, a job
+  `after`, tokens and variables added, a client `c3` added with an intro token and no keyring rotation, `c2` killed and
+  purged once it read `down`). `PUT /v1/operator/snapshot` through a follower with a management token made after the
+  snapshot: 200, empty body, 0.48 s. The leader and the three peers stayed, and every `StableSince` read the second of
+  the restore.
+  - Jobs, nodes, allocations and variables read as in the snapshot. The bootstrap token and the tokens made before the
+    snapshot worked. Both tokens made after it answered 403, the one that made the call included.
+  - `c3`, which the snapshot does not know, was gone from `GET /v1/nodes`. Its agent logged `re-registering node` and
+    got `Permission denied` from `Node.Register` at every try from 22:53:23 to 22:55:00, with no introduction line in
+    the servers' logs. After a restart of its agent it registered within a second and stopped the allocation that the
+    servers did not know.
+  - `c2`, dead and purged, was back as `ready` with its two allocations `running`. It read `down` 5 min 1 s after the
+    restore, and the servers then placed both allocations on `c1`.
+  - The job `after` was gone from the servers, but its task ran on `c1` for 5 minutes. A job that was purged after the
+    snapshot read `running` with its allocation `running`, and no process of it ran there 7 minutes later.
+- **A restore into new servers** (A's snapshot, A's three servers killed, B's servers bootstrapped with the same
+  secret, which answered 200 with a new accessor). `PUT /v1/operator/snapshot` through a follower with the bootstrap
+  secret: 200, 0.19 s. The leader and B's three peers stayed.
+  - The keyring held A's two keys and no longer B's key, and both variables decrypted. **The bootstrap secret worked,
+    now with A's accessor;** A's other tokens worked, and a management token made in B answered 403. A second
+    `PUT /v1/acl/bootstrap` answered 400 `ACL bootstrap already done (reset index: 8)`. A snapshot and an intro token
+    right after the restore answered 200.
+  - Before the restore, `c1` and `c3` got `Permission denied` from `Node.UpdateStatus` and `Node.Register` at every
+    try, and their tasks kept running. After it they logged `node registration complete` 5.7 s and 6.6 s later,
+    without a restart, and their four tasks had the same PIDs 5 min 44 s after the restore.
+  - `c4`, which registered with B before the restore, was gone from the nodes. Its client stopped its task at the
+    restore and got `Permission denied` at every try. After a restart of its agent it registered within a second,
+    although the keyring no longer listed the key that signed its intro token. In cluster C the same kind of client
+    was refused for the 50 s watched after a restart of the server and then of its agent, so B's servers probably
+    still held the old key in memory (an inference from the two runs).
+  - Nomad 1.11.3's `Node.Register` (read as a hint, not 2.0.7's source) returns `Permission denied` before any
+    introduction check when the node's identity does not authenticate, which fits the refusals without a server log
+    line.
+  - A silent node after a restore into new servers was watched for 30 s and read `ready`. That it reads `down` after
+    5 minutes there, as in the running cluster, is an inference.
+- **Another bootstrap secret** (cluster C). The restore of A's snapshot with C's secret: 200. After it C's secret
+  answered 403 on `GET /v1/acl/token/self` and `GET /v1/nodes`, A's secret answered 200 as the management token, and
+  `PUT /v1/acl/bootstrap` with C's secret answered 400 `ACL bootstrap already done (reset index: 8)`. C had another
+  gossip key: the restore does not need it.
+- **Another region, CA and gossip key** (cluster D, region `eu`). The restore of A's snapshot: 200. `GET /v1/regions`
+  answered `["eu"]`, the jobs kept `Region: global`, the variables decrypted, and a new job and an intro token were
+  accepted. Nomad checks none of the three; in tent's flow all three come from the same state store.
+- **Repeats.** The restore of A's snapshot into B twice more: 200 in 0.13 and 0.20 s, the same jobs and nodes, the four
+  peers stayed.
+- **A combined node under `enforcement = "warn"`.** Its client had registered; the restore dropped it.
+  `Node.Register` answered `Permission denied` twice, and 21 s after the restore the server logged `node registration
+  without introduction token: enforcement_level=warn` and the node was `ready` again, without a restart.
+- **The job list** (2026-10-10). `GET /v1/jobs?namespace=*` with the management token: 200 `[]` on a new cluster. With a
+  job in `default` and one in a second namespace it listed both, each with `Namespace` and `ID`; `GET /v1/jobs` listed
+  the one of `default` only. A stopped job stayed listed, with `Stop` true, until it was purged. Without a token and
+  with an unknown one: 403 `Permission denied`.
+- **A repeated bootstrap as tent sends it** (2026-10-10). `PUT /v1/acl/bootstrap` on a bootstrapped server, with the
+  secret in the body and as `X-Nomad-Token`: 400 `ACL bootstrap already done (reset index: 8)` for the valid secret,
+  and the same 400 for a UUID that is no token. `GET /v1/acl/token/self` then answered 200 (`management`) and 403.
+- **Not measured:** a snapshot of one Nomad version restored into another, the longest time that Nomad refuses a
+  snapshot after the servers change, a combined cluster of three, and the s3 backend with a real restore.
 
 **Servers in a roll** (v2.0.7, local on macOS darwin/arm64, `nomad` revision `9dcbdc5e`; every agent on 127.0.0.1 with
 ACL, mTLS and gossip encryption, `leave_on_terminate = false` and `cleanup_dead_servers = true`; every request used the
@@ -2551,6 +2645,30 @@ in the specs `tent update cluster` exited 0 in 6 s with `- node spk-awhnve-worke
 within 1h0m0s)` and five instances listed, and `tent update cluster --yes` exited 0 in 38 s and left four. With the
 saved specs back, `update --exit-code` exited 2 in 4 s with `+ node spk-awhnve-workers-1 (client, vc2-1c-1gb, ams)`,
 and `update --yes` exited 0 in 125 s and left five. `tent delete cluster --yes` exited 0 after 21 s and left nothing.
+
+**M3.8 backup check (2026-10-13, 22:06 to 22:22 UTC: passed)**, a fish script run by the maintainer's session (not a
+`hack/` spike run), tent at `5d8c2f2`, cluster `e2e-m38backup`, region `ams`, plan `vc2-1c-1gb`, ubuntu-24.04: one
+server and one worker, at most 3 machines at once. A job of one allocation and one Nomad variable ran on it.
+- **The cluster** was built in 4.5 min. The backups `N0` and `N1` of the running cluster were 9,678 and 9,673 bytes,
+  each taken in under 3 s. `backup restore` with `latest` and two current backups was refused with `every backup of
+  cluster e2e-m38backup is of the servers that it runs now`.
+- **The loss.** The server machine was deleted through the Vultr API. `update --yes --allow-single-server` built a new
+  server in 1 min 40 s, and **Vultr gave it the same private address**, 10.64.0.3. A backup of the empty new Nomad was
+  2,927 bytes.
+- **Before the restore** the new server listed 0 nodes: the old worker could not register with it under strict client
+  introduction. A job that the run registered on the new server made the restore refuse (`runs 1 job that was
+  registered after its servers were built again on ...`). After its purge the plan named `N1` and `0 nodes`, and
+  `restore --yes` took 4 s.
+- **After the restore** the job and the variable were back, and the management token that `export nomad` had made
+  before the loss worked again. **The old worker's node read `ready` at every poll for 7 minutes,** and `validate
+  cluster` was valid at once (1 server, 1 client): with the server at its old private address the worker reached the
+  restored server, and Nomad knew its node from the backup. No forced roll was needed in this run.
+- **The repeats.** `restore --yes` again printed `already restored` and exited 0. `--from N0 --yes` was refused with
+  exit 1, since the servers were restored from `N1` already. `delete cluster` listed the three backups and
+  `nomad/restored`, deleted them with the cloud objects, and no instance was left.
+- **The first run** (18:57 to 21:50 UTC) failed on a fault of the script: `nomad job run` waits for its deployment, and
+  with no node in the rebuilt cluster it waited until the maintainer's session stopped it. The script now uses
+  `-detach`, and that cluster was deleted.
 
 **Still open:**
 - A halt whose call gets no answer, and how late Vultr may carry one out.

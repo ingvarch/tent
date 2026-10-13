@@ -25,6 +25,9 @@
   the Nomad pin reads what a roll observes, and when no server answers and the plan has an infrastructure change
   other than a delete, the apply makes that check after those changes and before the completed spec; the pin moves
   only after its release files verify)
+  and by
+  [ADR-0042](0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md) (the time in the bootstrap
+  mark is read: a backup's path holds it, and a restore tells servers that were built again by it)
 - **Date:** 2026-10-05
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),
