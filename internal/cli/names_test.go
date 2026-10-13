@@ -19,6 +19,7 @@ func TestNamesOutsideTheRuleAreRefused(t *testing.T) {
 		{"delete", "cluster", "PROD", "--yes"},
 		{"state", "unlock", "PROD", "--force"},
 		{"rolling-update", "cluster", "PROD", "--yes"},
+		{"upgrade", "cluster", "PROD", "--yes"},
 	} {
 		wantError(t, runIn(t, "", append(args, "--state", s.url)...), invalid)
 		s.want(t, prodObjects)
@@ -59,7 +60,7 @@ func TestMistypedSubcommands(t *testing.T) {
 
 // TestGroupCommandsShowHelp without a subcommand.
 func TestGroupCommandsShowHelp(t *testing.T) {
-	for _, name := range []string{"state", "delete", "create", "rolling-update"} {
+	for _, name := range []string{"state", "delete", "create", "rolling-update", "upgrade"} {
 		got := runIn(t, "", name)
 		if want := "Usage:\n  tent " + name + " [flags]\n  tent " + name + " [command]\n"; got.code != 0 ||
 			got.errOut != "" || !strings.Contains(got.out, want) {
@@ -78,6 +79,7 @@ func TestNameAndNameFlag(t *testing.T) {
 		{"delete", "cluster", "prod", "--yes"},
 		{"state", "unlock", "prod"},
 		{"rolling-update", "cluster", "prod", "--yes"},
+		{"upgrade", "cluster", "prod", "--yes"},
 		{"create", "cluster", "prod", "--provider", "vultr", "--region", "ams", "--machine-type", "x", "--dry-run"},
 	} {
 		wantError(t, runIn(t, "", append(args, "--name", "dev", "--state", s.url)...), differ)
@@ -92,7 +94,8 @@ func TestNameAndNameFlag(t *testing.T) {
 func TestNoNameSaysHowToGiveOne(t *testing.T) {
 	path := configFile(t)
 	const how = "Error: no cluster name: give NAME or set --name, TENT_CLUSTER or \"cluster\" in "
-	for _, args := range [][]string{{"get"}, {"delete", "cluster"}, {"state", "unlock"}, {"rolling-update", "cluster"}} {
+	for _, args := range [][]string{{"get"}, {"delete", "cluster"}, {"state", "unlock"}, {"rolling-update", "cluster"},
+		{"upgrade", "cluster"}} {
 		wantError(t, runIn(t, "", append(args, "--state", newState(t).url)...), how+path+"\n")
 	}
 	// nodegroups takes no cluster NAME.
