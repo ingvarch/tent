@@ -1,0 +1,2 @@
+cluster prod: spec.nomad.version is now 2.0.7; the cluster was on Nomad 2.0.6.
+Next: tent update cluster, then tent rolling-update cluster.

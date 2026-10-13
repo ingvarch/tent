@@ -1,0 +1,9 @@
+{
+  "cluster": "prod",
+  "channel": "stable",
+  "recommended": "2.0.7",
+  "pinned": "2.0.6",
+  "current": "2.0.6",
+  "target": "2.0.7",
+  "applied": true
+}
