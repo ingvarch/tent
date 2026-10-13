@@ -1,7 +1,7 @@
 // Package nomadfake is an in-memory Nomad cluster for tests. Its clients implement nomadops.API with the types and
 // error classes of nomadops, so code that drives Nomad runs on it as on the real client. A test sets the cluster's
-// leader, nodes, peers, members and health, and makes chosen calls fail or lose their answer after the fake carried
-// them out.
+// leader, nodes, jobs, peers, members and health, and makes chosen calls fail or lose their answer after the fake
+// carried them out.
 package nomadfake
 
 import (
@@ -36,7 +36,7 @@ import (
 //
 // The fake is simpler than Nomad in these ways:
 //   - It checks no ACL token: each call succeeds whatever token its client holds. Tokens tells which tokens the
-//     clients got. Only before the bootstrap does a call fail: Nodes, Health, Peers, KeyringReady, IntroToken,
+//     clients got. Only before the bootstrap does a call fail: Nodes, Jobs, Health, Peers, KeyringReady, IntroToken,
 //     CreateToken, MarkIneligible, Drain, Purge, TransferLeadership, RemovePeer, Members, ForceLeave, SaveSnapshot
 //     and RestoreSnapshot fail for good, as Nomad's 403, until a Bootstrap succeeds; Leader and Bootstrap work. Peers
 //     fails so, since Nomad answers the Raft configuration to a management token alone.
@@ -51,9 +51,10 @@ import (
 //     over time otherwise: one fails, joins or leaves only when a test says so with SetMembers. Nomad's servers
 //     answer these two calls from their own gossip pool even while the cluster has no leader; the fake fails them
 //     then, like every call. It has one pool, so every client sees the same members.
+//   - Jobs lists what SetJobs set, and no job changes over time or by any other call.
 //   - A snapshot is the bytes "nomadfake snapshot <n>", and holds nothing of the cluster: RestoreSnapshot records the
-//     snapshot for Restored and changes no node, peer, member, health or leader, though Nomad's restore changes the
-//     keyring, the ACL tokens, the jobs and the nodes that registered after the snapshot.
+//     snapshot for Restored and changes no node, job, peer, member, health or leader, though Nomad's restore changes
+//     the keyring, the ACL tokens, the jobs and the nodes that registered after the snapshot.
 //   - Its keyring has an active key as soon as the ACL system is bootstrapped, unless SetKeyringDelay holds it back;
 //     meanwhile KeyringReady is false and IntroToken fails as Nomad's 500 does.
 //
@@ -64,6 +65,7 @@ type Fake struct {
 	leader       string
 	bootstrapped secret.Secret // the secret of the management token, once the ACL system is bootstrapped
 	nodes        []fakeNode
+	jobs         []nomadops.Job
 	drainReads   int // how many reads of the nodes a new drain stays under way for
 	health       nomadops.Health
 	peers        []nomadops.Peer
@@ -77,8 +79,8 @@ type Fake struct {
 	calls        []Call
 }
 
-// New returns a cluster without a leader, nodes or peers, with the zero Health, and with an ACL system that nobody
-// has bootstrapped.
+// New returns a cluster without a leader, nodes, jobs or peers, with the zero Health, and with an ACL system that
+// nobody has bootstrapped.
 func New() *Fake { return &Fake{} }
 
 // Format prints the fake as nomadfake.Fake, whatever the verb: fmt would print the secrets that its fields hold.
@@ -101,13 +103,14 @@ func (f *Fake) SetLeader(addr string) {
 	f.leader = addr
 }
 
-// NewCluster makes the cluster a new one, as New returns it: without a leader, nodes, peers or bootstrap, and with the
-// zero Health, a keyring that is ready at once and drains that complete at the first read. The log of calls, the
-// clients' tokens, the issued tokens, the count of saved snapshots, the restored snapshots and the faults stay.
+// NewCluster makes the cluster a new one, as New returns it: without a leader, nodes, jobs, peers or bootstrap, and
+// with the zero Health, a keyring that is ready at once and drains that complete at the first read. The log of calls,
+// the clients' tokens, the issued tokens, the count of saved snapshots, the restored snapshots and the faults stay.
 func (f *Fake) NewCluster() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.leader, f.bootstrapped, f.nodes, f.peers, f.members, f.health = "", nil, nil, nil, nil, nomadops.Health{}
+	f.leader, f.bootstrapped, f.nodes, f.jobs, f.peers, f.members = "", nil, nil, nil, nil, nil
+	f.health = nomadops.Health{}
 	f.keyringReads, f.drainReads = 0, 0
 }
 
@@ -165,6 +168,13 @@ func (f *Fake) SetHealth(h nomadops.Health) {
 	defer f.mu.Unlock()
 	h.Servers = slices.Clone(h.Servers)
 	f.health = h
+}
+
+// SetJobs makes a copy of jobs the jobs that the cluster lists, in that order.
+func (f *Fake) SetJobs(jobs []nomadops.Job) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.jobs = slices.Clone(jobs)
 }
 
 // SetPeers makes a copy of peers the servers of the Raft configuration. It does not change the Health or the leader's
@@ -408,6 +418,18 @@ func (c client) Nodes(ctx context.Context) ([]nomadops.Node, error) {
 		return nil
 	})
 	return result(nodes, err)
+}
+
+func (c client) Jobs(ctx context.Context) ([]nomadops.Job, error) {
+	var jobs []nomadops.Job
+	err := c.f.call(ctx, c.server, "Jobs", "", func() error {
+		if c.f.bootstrapped == nil {
+			return errDenied
+		}
+		jobs = append(make([]nomadops.Job, 0, len(c.f.jobs)), c.f.jobs...)
+		return nil
+	})
+	return result(jobs, err)
 }
 
 func (c client) Health(ctx context.Context) (nomadops.Health, error) {

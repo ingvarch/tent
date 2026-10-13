@@ -132,6 +132,11 @@ func (s *Servers) Nodes(ctx context.Context) ([]Node, error) {
 	return try(ctx, s, func(a API) ([]Node, error) { return a.Nodes(ctx) })
 }
 
+// Jobs returns the jobs of every namespace.
+func (s *Servers) Jobs(ctx context.Context) ([]Job, error) {
+	return try(ctx, s, func(a API) ([]Job, error) { return a.Jobs(ctx) })
+}
+
 // Health returns autopilot's view of the servers.
 func (s *Servers) Health(ctx context.Context) (Health, error) {
 	return try(ctx, s, func(a API) (Health, error) { return a.Health(ctx) })

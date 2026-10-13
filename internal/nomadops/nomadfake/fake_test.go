@@ -156,6 +156,10 @@ var apiCalls = []apiCall{
 		_, err := a.Nodes(ctx)
 		return err
 	}, nil},
+	{"Jobs", func(ctx context.Context, a nomadops.API) error {
+		_, err := a.Jobs(ctx)
+		return err
+	}, nil},
 	{"Health", func(ctx context.Context, a nomadops.API) error {
 		_, err := a.Health(ctx)
 		return err
@@ -271,12 +275,12 @@ func argOf(name string) string {
 	return ""
 }
 
-// TestACLCallsNeedTheBootstrap checks that, before the ACL system is bootstrapped, Nodes, Health, Peers, KeyringReady,
-// IntroToken, CreateToken, MarkIneligible, Drain, Purge, TransferLeadership, RemovePeer, Members, ForceLeave,
-// SaveSnapshot and RestoreSnapshot fail for good as Nomad's 403 does, while Leader and Bootstrap work; and that they
-// work after the bootstrap.
+// TestACLCallsNeedTheBootstrap checks that, before the ACL system is bootstrapped, Nodes, Jobs, Health, Peers,
+// KeyringReady, IntroToken, CreateToken, MarkIneligible, Drain, Purge, TransferLeadership, RemovePeer, Members,
+// ForceLeave, SaveSnapshot and RestoreSnapshot fail for good as Nomad's 403 does, while Leader and Bootstrap work; and
+// that they work after the bootstrap.
 func TestACLCallsNeedTheBootstrap(t *testing.T) {
-	for _, name := range []string{"IntroToken", "CreateToken", "Nodes", "Health", "Peers", "KeyringReady",
+	for _, name := range []string{"IntroToken", "CreateToken", "Nodes", "Jobs", "Health", "Peers", "KeyringReady",
 		"MarkIneligible", "Drain", "Purge", "TransferLeadership", "RemovePeer", "Members", "ForceLeave", "SaveSnapshot",
 		"RestoreSnapshot"} {
 		t.Run(name, func(t *testing.T) {
@@ -333,6 +337,7 @@ func clusterState(t *testing.T, f *nomadfake.Fake, a nomadops.API) string {
 func TestNewCluster(t *testing.T) {
 	f, a := newBootstrappedAPI(t)
 	f.Register(nomadops.Node{Name: "prod-workers-0", Status: "ready", Eligible: true})
+	f.SetJobs([]nomadops.Job{{Namespace: "default", ID: "web"}})
 	f.SetHealth(nomadops.Health{Healthy: true, Voters: 3})
 	f.SetPeers([]nomadops.Peer{{Name: "prod-servers-0.eu", Voter: true}})
 	f.SetMembers([]nomadops.Member{{Name: "prod-servers-0.eu", Status: "alive"}})
@@ -354,6 +359,9 @@ func TestNewCluster(t *testing.T) {
 	if nodes, err := a.Nodes(t.Context()); err != nil || len(nodes) != 0 {
 		t.Errorf("Nodes() = %v, %v; want none", nodes, err)
 	}
+	if jobs, err := a.Jobs(t.Context()); err != nil || len(jobs) != 0 {
+		t.Errorf("Jobs() = %v, %v; want none", jobs, err)
+	}
 	if h, err := a.Health(t.Context()); err != nil || !cmp.Equal(h, nomadops.Health{}, equateAddrs) {
 		t.Errorf("Health() = %+v, %v; want the zero Health", h, err)
 	}
@@ -363,7 +371,7 @@ func TestNewCluster(t *testing.T) {
 	if members, err := a.Members(t.Context()); err != nil || len(members) != 0 {
 		t.Errorf("Members() = %v, %v; want none", members, err)
 	}
-	if got, want := len(f.Calls()), 9; got != want {
+	if got, want := len(f.Calls()), 10; got != want {
 		t.Errorf("%d calls logged, want %d", got, want)
 	}
 	if got := len(f.Tokens()); got != 1 {
@@ -773,6 +781,34 @@ func TestIntroTokenRefusesABadRequest(t *testing.T) {
 		}
 	}
 	wantCalls(t, f)
+}
+
+// TestJobs checks that a new fake lists no jobs, that SetJobs and Jobs copy, in the order of the list, and that Calls
+// shows each read without an argument.
+func TestJobs(t *testing.T) {
+	f, a := newBootstrappedAPI(t)
+	ctx := t.Context()
+	got, err := a.Jobs(ctx)
+	if err != nil || got == nil || len(got) != 0 {
+		t.Errorf("Jobs() of a new fake = %#v, %v; want an empty list, as the client gives", got, err)
+	}
+	given := []nomadops.Job{{Namespace: "dev", ID: "batch"}, {Namespace: "default", ID: "web"}}
+	f.SetJobs(given)
+	given[0].ID = "changed"
+	want := []nomadops.Job{{Namespace: "dev", ID: "batch"}, {Namespace: "default", ID: "web"}}
+	got, err = a.Jobs(ctx)
+	if err != nil {
+		t.Fatalf("Jobs: %v", err)
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Jobs() (-want +got):\n%s", diff)
+	}
+	got[0].ID = "changed"
+	if got, _ := a.Jobs(ctx); got[0].ID != "batch" {
+		t.Errorf("changing a returned list changed the fake: %+v", got)
+	}
+	jobsCall := nomadfake.Call{Name: "Jobs"}
+	wantCalls(t, f, bootstrapCall, jobsCall, jobsCall, jobsCall)
 }
 
 func TestNodes(t *testing.T) {

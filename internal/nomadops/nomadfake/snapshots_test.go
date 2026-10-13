@@ -157,13 +157,15 @@ func TestRestoreSnapshotRefusesAnEmptySnapshotBeforeAnyCall(t *testing.T) {
 	}
 }
 
-// TestRestoreSnapshotChangesNothingElse checks that a restore leaves the nodes, peers, members, health and leader as
-// they are, and that a lost answer of a restore still records it: the cluster took it.
+// TestRestoreSnapshotChangesNothingElse checks that a restore leaves the nodes, jobs, peers, members, health and leader
+// as they are, and that a lost answer of a restore still records it: the cluster took it.
 func TestRestoreSnapshotChangesNothingElse(t *testing.T) {
 	f, a := newBootstrappedAPI(t)
 	registerTableNode(f)
 	setTablePeers(f)
 	setTableMembers(f)
+	jobs := []nomadops.Job{{Namespace: "dev", ID: "batch"}}
+	f.SetJobs(jobs)
 	health := nomadops.Health{Healthy: true, Voters: 3}
 	f.SetHealth(health)
 	snap := save(t, a)
@@ -176,6 +178,9 @@ func TestRestoreSnapshotChangesNothingElse(t *testing.T) {
 	}
 	if nodes, err := a.Nodes(t.Context()); err != nil || len(nodes) != 1 || !cmp.Equal(nodes[0], tableNode, equateAddrs) {
 		t.Errorf("Nodes() = %+v, %v; want the node as it was", nodes, err)
+	}
+	if got, err := a.Jobs(t.Context()); err != nil || !cmp.Equal(got, jobs) {
+		t.Errorf("Jobs() = %+v, %v; want the jobs as they were", got, err)
 	}
 	if peers, err := a.Peers(t.Context()); err != nil || !cmp.Equal(peers, tablePeers, equateAddrs) {
 		t.Errorf("Peers() = %+v, %v; want the peers as they were", peers, err)

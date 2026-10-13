@@ -609,6 +609,17 @@ func (c *worldClient) Nodes(ctx context.Context) (v []nomadops.Node, err error) 
 	return c.w.shapeNodes(v), nil
 }
 
+func (c *worldClient) Jobs(ctx context.Context) (v []nomadops.Job, err error) {
+	err = c.do(ctx, nomadfake.Call{Name: "Jobs"}, func(ctx context.Context) (err error) {
+		v, err = c.inner.Jobs(ctx)
+		return
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
 func (c *worldClient) Peers(ctx context.Context) (v []nomadops.Peer, err error) {
 	err = c.do(ctx, nomadfake.Call{Name: "Peers"}, func(ctx context.Context) (err error) {
 		v, err = c.inner.Peers(ctx)
@@ -782,9 +793,10 @@ func (w *nomadWorld) shapeHealth(h nomadops.Health) nomadops.Health {
 	return h
 }
 
-// TestWorldClientPassesTheWritesThroughItsHook checks that MarkIneligible, Drain, Purge, TransferLeadership and
-// RemovePeer of a client of the world go through the world's hook with the Call that the Nomad fake logs, reach the
-// fake when the hook calls next, and return the hook's error, without reaching the fake, when it does not.
+// TestWorldClientPassesTheWritesThroughItsHook checks that MarkIneligible, Drain, Purge, TransferLeadership,
+// RemovePeer, Members, Jobs, ForceLeave, SaveSnapshot and RestoreSnapshot of a client of the world go through the
+// world's hook with the Call that the Nomad fake logs, reach the fake when the hook calls next, and return the hook's
+// error, without reaching the fake, when it does not.
 func TestWorldClientPassesTheWritesThroughItsHook(t *testing.T) {
 	t.Parallel()
 	svc, _, w := newRelease(t)
@@ -814,6 +826,10 @@ func TestWorldClientPassesTheWritesThroughItsHook(t *testing.T) {
 			_, err := api.Members(t.Context())
 			return err
 		},
+		"Jobs": func() error {
+			_, err := api.Jobs(t.Context())
+			return err
+		},
 		"ForceLeave": func() error { return api.ForceLeave(t.Context(), "s1.global") },
 		"SaveSnapshot": func() error {
 			_, err := api.SaveSnapshot(t.Context())
@@ -828,12 +844,13 @@ func TestWorldClientPassesTheWritesThroughItsHook(t *testing.T) {
 		{Name: "TransferLeadership", Server: server, Arg: "raft-1"},
 		{Name: "RemovePeer", Server: server, Arg: "raft-1"},
 		{Name: "Members", Server: server},
+		{Name: "Jobs", Server: server},
 		{Name: "ForceLeave", Server: server, Arg: "s1.global"},
 		{Name: "SaveSnapshot", Server: server},
 		{Name: "RestoreSnapshot", Server: server, Arg: "[secret, 20 bytes]"},
 	}
-	names := []string{"MarkIneligible", "Drain", "Purge", "TransferLeadership", "RemovePeer", "Members", "ForceLeave",
-		"SaveSnapshot", "RestoreSnapshot"}
+	names := []string{"MarkIneligible", "Drain", "Purge", "TransferLeadership", "RemovePeer", "Members", "Jobs",
+		"ForceLeave", "SaveSnapshot", "RestoreSnapshot"}
 	logged := func() []nomadfake.Call {
 		var out []nomadfake.Call
 		for _, c := range w.Log() {
