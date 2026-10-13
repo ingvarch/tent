@@ -22,6 +22,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/hashicorp/hcl"
 )
 
 const (
@@ -412,5 +414,68 @@ func mustWrite(t *testing.T, path, text string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func TestNomadAtReachesAnotherServerWithTheSameTokenAndClient(t *testing.T) {
+	ca := newTestCA(t, "ca")
+	var tokenAtOther string
+	first := startNomad(t, ca, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"Name":"first"}`)
+	})
+	other := startNomad(t, ca, func(w http.ResponseWriter, r *http.Request) {
+		tokenAtOther = r.Header.Get("X-Nomad-Token")
+		_, _ = io.WriteString(w, `{"Name":"other"}`)
+	})
+	n, err := newNomad(first)
+	if err != nil {
+		t.Fatalf("newNomad: %v", err)
+	}
+	m := n.at(other.Address)
+	if m.client != n.client || m.token != n.token {
+		t.Errorf("at made another client or token: client shared %v, token shared %v",
+			m.client == n.client, m.token == n.token)
+	}
+	for _, c := range []struct {
+		api  *nomadAPI
+		want string
+	}{{m, "other"}, {n, "first"}} {
+		var out struct{ Name string }
+		if err := c.api.get(t.Context(), "/v1/status/leader", &out); err != nil {
+			t.Fatalf("get through %s: %v", c.want, err)
+		}
+		if out.Name != c.want {
+			t.Errorf("a get answered by %q, want %q", out.Name, c.want)
+		}
+	}
+	if tokenAtOther != testToken {
+		t.Errorf("the token at the other server = %q, want the token of the original", tokenAtOther)
+	}
+}
+
+func TestPairJobFileHoldsTwoAllocationsAndTheMigrateSettings(t *testing.T) {
+	data, err := os.ReadFile("testdata/web-pair.nomad.hcl")
+	if err != nil {
+		t.Fatalf("read the job file: %v", err)
+	}
+	var doc map[string]any
+	if err := hcl.Decode(&doc, string(data)); err != nil {
+		t.Fatalf("decode the job file: %v", err)
+	}
+	group := block(t, doc, "job", webJob, "group", "web")
+	if group["count"] != 2 {
+		t.Errorf("count = %v, want 2", group["count"])
+	}
+	migrate := block(t, group, "migrate")
+	want := map[string]any{
+		"max_parallel": 1, "health_check": "checks", "min_healthy_time": "10s", "healthy_deadline": "5m",
+	}
+	for key, value := range want {
+		if migrate[key] != value {
+			t.Errorf("migrate %s = %v, want %v", key, migrate[key], value)
+		}
+	}
+	if svc := block(t, group, "service"); svc["name"] != webService || svc["provider"] != "nomad" {
+		t.Errorf("service = %v, want name %q and provider nomad", svc, webService)
 	}
 }

@@ -64,6 +64,14 @@ func newNomad(x exportInfo) (*nomadAPI, error) {
 	}, nil
 }
 
+// at returns a client for the server at address, in the form "https://<ip>:4646". It shares the token and the HTTP
+// client, which pins the TLS server name, so it works for any server of the cluster.
+func (n *nomadAPI) at(address string) *nomadAPI {
+	other := *n
+	other.base = address
+	return &other
+}
+
 // get reads path (with its query) and decodes the JSON answer into out.
 func (n *nomadAPI) get(ctx context.Context, path string, out any) error {
 	return n.do(ctx, http.MethodGet, path, nil, out)

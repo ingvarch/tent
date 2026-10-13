@@ -1,6 +1,8 @@
 package e2e
 
 import (
+	"context"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -104,21 +106,27 @@ func TestValidateArgsAcceptTheSingleServer(t *testing.T) {
 }
 
 func TestDeleteInCleanup(t *testing.T) {
+	deadline := fmt.Errorf("tent delete: %w", context.DeadlineExceeded)
 	cases := []struct {
 		name                   string
 		ran, done, interrupted bool
+		err                    error
 		want                   bool
 	}{
-		{"no delete ran", false, false, false, true},
-		{"delete exited 0", true, true, false, false},
-		{"delete failed on its own", true, false, false, false},
-		{"a signal ended the delete", true, false, true, true},
-		{"a signal after the delete exited 0", true, true, true, false},
+		{"no delete ran", false, false, false, nil, true},
+		{"delete exited 0", true, true, false, nil, false},
+		{"delete failed on its own", true, false, false, nil, false},
+		{"delete failed and its context was canceled", true, false, false, context.Canceled, false},
+		{"a signal ended the delete", true, false, true, nil, true},
+		{"the step's deadline ended the delete", true, false, false, deadline, true},
+		{"a signal after the delete exited 0", true, true, true, nil, false},
+		{"the deadline after the delete exited 0", true, true, false, deadline, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := deleteInCleanup(tc.ran, tc.done, tc.interrupted); got != tc.want {
-				t.Fatalf("deleteInCleanup(%v, %v, %v) = %v, want %v", tc.ran, tc.done, tc.interrupted, got, tc.want)
+			if got := deleteInCleanup(tc.ran, tc.done, tc.interrupted, tc.err); got != tc.want {
+				t.Fatalf("deleteInCleanup(%v, %v, %v, %v) = %v, want %v",
+					tc.ran, tc.done, tc.interrupted, tc.err, got, tc.want)
 			}
 		})
 	}

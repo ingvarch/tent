@@ -1,6 +1,8 @@
 package e2e
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -66,8 +68,9 @@ func validateArgs(cluster string) []string {
 	return []string{"validate", "cluster", cluster, "--wait", validateWait, "--allow-single-server"}
 }
 
-// deleteInCleanup tells whether the cleanup deletes the cluster: when no delete ran, or when a signal ended the
-// delete before it finished. A delete that failed on its own is not repeated.
-func deleteInCleanup(ran, done, interrupted bool) bool {
-	return !done && (!ran || interrupted)
+// deleteInCleanup tells whether the cleanup deletes the cluster: when no delete ran, or when the delete did not
+// finish because a signal or the deadline of its context ended it (deleteErr is that context's error). A delete that
+// failed on its own is not repeated.
+func deleteInCleanup(ran, done, interrupted bool, deleteErr error) bool {
+	return !done && (!ran || interrupted || errors.Is(deleteErr, context.DeadlineExceeded))
 }
