@@ -17,7 +17,9 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
+	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/app"
+	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/cloud/vultr/vultrfake"
 	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/nomadops/nomadfake"
@@ -628,5 +630,140 @@ func TestBackupCreateShowsNoSnapshotBytes(t *testing.T) {
 		secrettest.CheckHidden(t, outputs, map[string][]byte{
 			"the first snapshot": []byte(firstSnapshot), "the second snapshot": []byte("nomadfake snapshot 2"),
 		}, "")
+	})
+}
+
+// putBackup puts a backup object, of the servers bootstrapped at bootstrapped and taken at taken, into the test
+// cluster's store, and returns the backup.
+func putBackup(t *testing.T, s statestore.Store, taken, bootstrapped time.Time) statestore.Backup {
+	t.Helper()
+	b := backupOf(t, taken, bootstrapped)
+	put(t, s, b.Path, []byte("snapshot "+b.Name))
+	return b
+}
+
+// withoutOutsideCalls makes a call of the cloud or of Nomad fail the test, and returns the log of the store's writes.
+func withoutOutsideCalls(t *testing.T, svc *app.Service) *writeLog {
+	t.Helper()
+	svc.Providers = func(p v1alpha1.Provider) (cloud.Provider, error) {
+		t.Errorf("a call for the cloud provider %s", p)
+		return nil, errors.New("no cloud in this test")
+	}
+	svc.Nomad = func(nomadops.Config) (nomadops.API, error) {
+		t.Error("a call for a Nomad client")
+		return nil, errors.New("no Nomad in this test")
+	}
+	rec := &writeLog{Store: svc.Store}
+	svc.Store = rec
+	return rec
+}
+
+// TestBackupsListsOldestFirst lists three backups oldest first: a backup of the servers that run now is not earlier,
+// while one of any other bootstrap is. A call of the cloud or of Nomad fails the test, and Backups writes nothing, not
+// even the lock.
+func TestBackupsListsOldestFirst(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, _, _, _ := builtWorld(t)
+		mark := markOf(t, svc.Store)
+		old := mark.Add(-48 * time.Hour)
+		base := mark.Add(-24 * time.Hour)
+		third := putBackup(t, svc.Store, base.Add(2*time.Hour), mark)
+		first := putBackup(t, svc.Store, base, old)
+		second := putBackup(t, svc.Store, base.Add(time.Hour), old)
+		rec := withoutOutsideCalls(t, svc)
+
+		got, err := svc.Backups(t.Context(), "prod")
+
+		if err != nil {
+			t.Fatalf("Backups: %v", err)
+		}
+		want := []app.ListedBackup{{Backup: first, Earlier: true}, {Backup: second, Earlier: true}, {Backup: third}}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("backups (-want +got):\n%s", diff)
+		}
+		if len(rec.writes) != 0 {
+			t.Errorf("writes %v, want none", rec.writes)
+		}
+	})
+}
+
+// TestBackupsWithoutAMarkAreAllEarlier lists the backups of a cluster whose bootstrap mark is gone: each is earlier,
+// also one whose path names the time that the mark held.
+func TestBackupsWithoutAMarkAreAllEarlier(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, _, _, _ := builtWorld(t)
+		mark := markOf(t, svc.Store)
+		b := putBackup(t, svc.Store, mark.Add(time.Hour), mark)
+		deleteObject(t, svc, markPath)
+
+		got, err := svc.Backups(t.Context(), "prod")
+
+		if err != nil {
+			t.Fatalf("Backups: %v", err)
+		}
+		if diff := cmp.Diff([]app.ListedBackup{{Backup: b, Earlier: true}}, got); diff != "" {
+			t.Errorf("backups (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// TestBackupsRefuseWhatTheStoreDoesNotHold fails for a cluster that is not in the store and for a mark that holds no
+// time, which wraps the parse error and names the mark's path.
+func TestBackupsRefuseWhatTheStoreDoesNotHold(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, _, _, _ := builtWorld(t)
+
+		_, err := svc.Backups(t.Context(), "stage")
+
+		if err == nil || !strings.HasPrefix(err.Error(), "cluster stage not found in ") {
+			t.Errorf("unknown cluster: error = %v, want it to start with %q", err, "cluster stage not found in ")
+		}
+		put(t, svc.Store, markPath, []byte("soon\n"))
+
+		_, err = svc.Backups(t.Context(), "prod")
+
+		if err == nil || !strings.HasPrefix(err.Error(), markPath+" does not hold a time: ") {
+			t.Fatalf("bad mark: error = %v, want it to start with %q", err, markPath+" does not hold a time: ")
+		}
+		if _, ok := errors.AsType[*time.ParseError](err); !ok {
+			t.Errorf("error %v does not wrap the parse error", err)
+		}
+	})
+}
+
+// TestListedBackupJSON encodes a backup of earlier servers and one of the servers that run now, and a list without
+// backups, which is [] and not null.
+func TestListedBackupJSON(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		svc, _, _, _ := builtWorld(t)
+		empty, err := svc.Backups(t.Context(), "prod")
+		if err != nil {
+			t.Fatalf("Backups: %v", err)
+		}
+		if got, err := json.Marshal(empty); err != nil || string(got) != "[]" {
+			t.Errorf("an empty list encodes as %s, %v; want []", got, err)
+		}
+		taken, bootstrapped := time.Date(2026, 10, 9, 23, 2, 7, 0, time.UTC), time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+		list := []app.ListedBackup{
+			{Backup: backupOf(t, taken, bootstrapped), Earlier: true},
+			{Backup: backupOf(t, taken, bootstrapped)},
+		}
+
+		got, err := json.Marshal(list)
+
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		const want = `[{"name":"20261009T230207Z","time":"2026-10-09T23:02:07Z",` +
+			`"path":"prod/backups/20261001T100000Z/20261009T230207Z.snap","servers":"earlier"},` +
+			`{"name":"20261009T230207Z","time":"2026-10-09T23:02:07Z",` +
+			`"path":"prod/backups/20261001T100000Z/20261009T230207Z.snap","servers":"current"}]`
+		if string(got) != want {
+			t.Errorf("JSON = %s\nwant   %s", got, want)
+		}
 	})
 }
