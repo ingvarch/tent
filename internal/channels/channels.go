@@ -114,6 +114,16 @@ func isNomadRelease(version string) bool {
 // newer. It does not check that a and b are releases.
 func Compare(a, b string) int { return semver.Compare("v"+a, "v"+b) }
 
+// Release returns the release X.Y.Z of version, without its pre-release and build metadata, and "" for a text that is
+// no version number.
+func Release(version string) string {
+	v := "v" + version
+	if !semver.IsValid(v) {
+		return ""
+	}
+	return strings.TrimPrefix(strings.TrimSuffix(semver.Canonical(v), semver.Prerelease(v)), "v")
+}
+
 // NextMinor returns the first release of the minor version after version's: 2.1.0 for 2.0.7. It returns "" for a
 // text that is no release X.Y.Z, and for a minor number too large to add one to.
 func NextMinor(version string) string {

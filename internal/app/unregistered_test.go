@@ -16,6 +16,7 @@ import (
 
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/app"
+	"github.com/ingvarch/tent/internal/assets/assetstest"
 	"github.com/ingvarch/tent/internal/cloud/vultr"
 	"github.com/ingvarch/tent/internal/cloud/vultr/vultrfake"
 	"github.com/ingvarch/tent/internal/nomadops"
@@ -126,7 +127,8 @@ func TestUpdateReplacesAClientThatNeverRegistered(t *testing.T) {
 			t.Fatalf("Update without apply: %v", err)
 		}
 		wantNodeChanges(t, plan, replaceWorker1()...)
-		if diff := cmp.Diff([]string{"Nodes"}, nomadNames(w, before)); diff != "" {
+		planReads := []string{"Nodes", "Peers", "Health", "Members", "Nodes"} // the node read, then the versions
+		if diff := cmp.Diff(planReads, nomadNames(w, before)); diff != "" {
 			t.Errorf("the Nomad calls of a plan after 31 minutes (-want +got):\n%s", diff)
 		}
 		if plan.Nomad != nil {
@@ -138,12 +140,12 @@ func TestUpdateReplacesAClientThatNeverRegistered(t *testing.T) {
 		applied := mustUpdate(t, svc)
 
 		wantNodeChanges(t, applied, replaceWorker1()...)
-		wantNomad := []string{"Nodes", "Nodes", "Nodes", "Peers", "IntroToken", "Nodes"}
+		wantNomad := slices.Concat(planReads, planReads, []string{"Nodes", "Peers", "IntroToken", "Nodes"})
 		if diff := cmp.Diff(wantNomad, nomadNames(w, before)); diff != "" {
 			t.Errorf("the Nomad calls of the apply: two plans, the check of the delete, the token and the registration "+
 				"(-want +got):\n%s", diff)
 		}
-		if got := w.Log()[before+4]; got.Arg != "prod-workers-1 default 30m0s" {
+		if got := w.Log()[before+2*len(planReads)+2]; got.Arg != "prod-workers-1 default 30m0s" {
 			t.Errorf("the intro token was asked for %q, want prod-workers-1 default 30m0s", got.Arg)
 		}
 		wantWrites := []string{"DeleteInstance <prod-workers-1>", "CreateInstance prod-workers-1",
@@ -256,6 +258,7 @@ func TestUpdateAsksWhichNodeRegistered(t *testing.T) {
 		{"a ready node at another address", func(netip.Addr) nomadops.Node {
 			return nomadops.Node{
 				Name: "prod-workers-1", Status: "ready", Eligible: true, Address: netip.MustParseAddr("10.64.0.99"),
+				Version: assetstest.NomadVersion,
 			}
 		}},
 	} {
@@ -359,7 +362,8 @@ func TestUpdateAsksOnlyTheJoinedServers(t *testing.T) {
 		for _, c := range w.Configs()[before:] {
 			addresses = append(addresses, c.Address)
 		}
-		if diff := cmp.Diff([]string{"198.18.0.1:4646"}, addresses); diff != "" {
+		// one client for the nodes, one for the versions
+		if diff := cmp.Diff([]string{"198.18.0.1:4646", "198.18.0.1:4646"}, addresses); diff != "" {
 			t.Errorf("the servers the plan asked (-want +got):\n%s", diff)
 		}
 	})
@@ -380,7 +384,7 @@ func TestUpdateMeasuresTheAgeByTheServiceClock(t *testing.T) {
 			t.Fatalf("Update without apply: %v", err)
 		}
 		wantNodeChanges(t, plan, replaceWorker1()...)
-		if diff := cmp.Diff([]string{"Nodes"}, nomadNames(w, before)); diff != "" {
+		if diff := cmp.Diff([]string{"Nodes", "Peers", "Health", "Members", "Nodes"}, nomadNames(w, before)); diff != "" {
 			t.Errorf("the Nomad calls of the plan (-want +got):\n%s", diff)
 		}
 	})
@@ -444,7 +448,7 @@ func TestUpdateStopsWhenTheClientRegisteredMeanwhile(t *testing.T) {
 		answers := 0
 		w.SetHook(func(ctx context.Context, c nomadfake.Call, next func(context.Context) error) error {
 			if c.Name == "Nodes" {
-				if answers++; answers == 3 { // the first two answers belong to the plans, the third to the check
+				if answers++; answers == 5 { // each of the two plans takes two answers, the fifth belongs to the check
 					w.Register(nomadops.Node{
 						Name: "prod-workers-1", Status: "ready", Eligible: true, Address: privateOf(t, f, "instance-5"),
 					})

@@ -241,6 +241,23 @@ func TestCompare(t *testing.T) {
 	}
 }
 
+func TestRelease(t *testing.T) {
+	for _, tc := range []struct{ version, want string }{
+		{"2.0.7", "2.0.7"},
+		{"2.0.7-rc1", "2.0.7"},
+		{"2.0.7+ent", "2.0.7"},
+		{"2.0.7-rc1+ent", "2.0.7"},
+		{"2.0", "2.0.0"},
+		{"", ""},
+		{"banana", ""},
+		{"v2.0.7", ""},
+	} {
+		if got := Release(tc.version); got != tc.want {
+			t.Errorf("Release(%q) = %q, want %q", tc.version, got, tc.want)
+		}
+	}
+}
+
 func TestNextMinor(t *testing.T) {
 	for _, tc := range []struct{ version, want string }{
 		{"2.0.7", "2.1.0"},

@@ -605,7 +605,8 @@ func TestUpdateResumesAfter(t *testing.T) {
 		plan  []string
 		nomad *app.NomadStep
 		// bootstraps is how many Bootstrap calls the cut run and the next one make together, and nodes how many Nodes
-		// calls reach Nomad: those of the registration waits and one for each plan of a cluster with the mark.
+		// calls reach Nomad: those of the registration waits, one for each plan of a cluster with the mark, and one more
+		// for each such plan that boots a node.
 		bootstraps, nodes int
 		// progress, unless nil, is the node and Nomad progress of the next run.
 		progress []string
@@ -637,9 +638,9 @@ func TestUpdateResumesAfter(t *testing.T) {
 			"create prod-workers-0", "create prod-workers-1",
 		}, nomad: &app.NomadStep{Bootstrap: true, Servers: 3}, bootstraps: 2, nodes: 3},
 		{name: "the mark, before the clients", cut: "nomad IntroToken prod-workers-0 default 30m0s (prod-servers-0)",
-			plan: []string{"create prod-workers-0", "create prod-workers-1"}, bootstraps: 1, nodes: 6},
+			plan: []string{"create prod-workers-0", "create prod-workers-1"}, bootstraps: 1, nodes: 9},
 		{name: "a client's create, before its registration", cut: "nomad Nodes (prod-servers-0)",
-			plan: []string{"wait prod-workers-0", "create prod-workers-1"}, bootstraps: 1, nodes: 6,
+			plan: []string{"wait prod-workers-0", "create prod-workers-1"}, bootstraps: 1, nodes: 9,
 			progress: slices.Concat(
 				[]string{"nomad started register prod-workers-0", "nomad done register prod-workers-0"},
 				nodeSteps("scrub", "prod-workers-0"),
@@ -648,11 +649,11 @@ func TestUpdateResumesAfter(t *testing.T) {
 				nodeSteps("scrub", "prod-workers-1"),
 			)},
 		{name: "a client's registration, before its scrub", cut: "GetInstance <prod-workers-0>", n: 4,
-			plan: []string{"wait prod-workers-0", "create prod-workers-1"}, bootstraps: 1, nodes: 7},
+			plan: []string{"wait prod-workers-0", "create prod-workers-1"}, bootstraps: 1, nodes: 10},
 		{name: "a client's scrub that lost its answer", cut: "UpdateInstance <prod-workers-0>", after: true,
-			plan: []string{"create prod-workers-1"}, bootstraps: 1, nodes: 6},
+			plan: []string{"create prod-workers-1"}, bootstraps: 1, nodes: 9},
 		{name: "a client's create that lost its answer", cut: "CreateInstance prod-workers-0", after: true,
-			plan: []string{"wait prod-workers-0", "create prod-workers-1"}, bootstraps: 1, nodes: 6,
+			plan: []string{"wait prod-workers-0", "create prod-workers-1"}, bootstraps: 1, nodes: 9,
 			progress: slices.Concat(
 				nodeSteps("wait", "prod-workers-0"),
 				[]string{"nomad started register prod-workers-0", "nomad done register prod-workers-0"},
@@ -808,10 +809,12 @@ func TestUpdateRepeatsAHealthWaitThatStopped(t *testing.T) {
 		if err := f.DeleteInstance(t.Context(), "instance-3"); err != nil {
 			t.Fatal(err)
 		}
-		w.Fail(t, "Health", errBoom)
+		w.SetHook(atNomadCall(w, "nomad Health (prod-servers-0)", 3, // after the two plans' reads
+			func(context.Context, nomadfake.Call, func(context.Context) error) error { return errBoom }))
 		if _, err := svc.Update(t.Context(), "prod", true); !errors.Is(err, errBoom) {
 			t.Fatalf("Update = %v, want an error that matches %v", err, errBoom)
 		}
+		w.SetHook(nil)
 		wantJoined(t, f, "prod-servers-0", "prod-servers-1", "prod-workers-0", "prod-workers-1")
 		plan, err := svc.Update(t.Context(), "prod", false)
 		if err != nil {
@@ -1463,7 +1466,8 @@ func TestUpdateWaitsForTheMachinesOwnNode(t *testing.T) {
 }
 
 // TestUpdateNeedsANomadClient fails an update that needs Nomad when the service has none, before it changes anything:
-// the first build, and a built cluster that gets only a client, which needs the intro token.
+// the first build, and a built cluster that gets only a client, which needs the versions that Nomad reports at the
+// plan.
 func TestUpdateNeedsANomadClient(t *testing.T) {
 	t.Parallel()
 	t.Run("a first build", func(t *testing.T) {
@@ -1492,9 +1496,10 @@ func TestUpdateNeedsANomadClient(t *testing.T) {
 
 			_, err := svc.Update(t.Context(), "prod", true)
 
-			wantError(t, err, "no Nomad client is set up")
-			if diff := cmp.Diff([]string{lockPath, lockPath}, rec.writes); diff != "" {
-				t.Errorf("writes to the store (-want +got):\n%s", diff)
+			wantError(t, err, "update would create node prod-workers-2, and tent could not ask Nomad which versions "+
+				"run: no Nomad client is set up")
+			if len(rec.writes) != 0 {
+				t.Errorf("the update wrote to the store: %v", rec.writes)
 			}
 			if n := countOf(f.Calls(), "CreateInstance"); n != 5 {
 				t.Errorf("%d instances were created, want the 5 of the first build", n)
@@ -1511,9 +1516,8 @@ func TestUpdateNeedsANomadClientForAWait(t *testing.T) {
 		svc, f, _ := newRelease(t)
 		mustUpdate(t, svc)
 		unmark(t, f, "instance-4")
-		if err := svc.Store.Delete(t.Context(), completedPath); err != nil { // so that the apply writes before the nodes
-			t.Fatal(err)
-		}
+		// the stored completed spec differs, so that the apply writes before the nodes
+		put(t, svc.Store, completedPath, append(get(t, svc.Store, completedPath), "# stale\n"...))
 		svc.Nomad = nil
 		rec := &writeLog{Store: svc.Store}
 		svc.Store = rec
@@ -1744,11 +1748,14 @@ func TestUpdatePlansTheNomadStep(t *testing.T) {
 				t.Errorf("the plan's Nomad step is %+v, want %+v", plan.Nomad, want)
 			}
 			mustUpdate(t, svc)
-			want := []string{
-				"nomad Nodes (prod-servers-0)", "nomad Nodes (prod-servers-0)", "nomad Nodes (prod-servers-0)",
+			plans := []string{ // the plan without apply and the two of the update, each with its reading of the versions
+				"nomad Nodes (prod-servers-0)", "nomad Peers (prod-servers-0)", "nomad Health (prod-servers-0)",
+				"nomad Members (prod-servers-0)", "nomad Nodes (prod-servers-0)",
+			}
+			want := slices.Concat(plans, plans, plans, []string{
 				"nomad Leader (prod-servers-0)", "nomad Health (prod-servers-0)", "nomad KeyringReady (prod-servers-0)",
 				"nomad Peers (prod-servers-0)",
-			}
+			})
 			if diff := cmp.Diff(want, nomadLines(w)[before:]); diff != "" {
 				t.Errorf("the Nomad calls of the update (-want +got):\n%s", diff)
 			}

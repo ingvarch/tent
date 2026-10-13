@@ -650,7 +650,8 @@ func TestCommandsThatLoadTheSpecsRefuseAVersionTooFarAboveThePin(t *testing.T) {
 }
 
 // TestCommandsThatLoadTheSpecsLoadAVersionOlderThanThePin loads the specs for update, validate and rolling-update when
-// the spec sets an older Nomad version than the pin: a version in the spec wins over the pin.
+// the spec sets an older Nomad version than the pin: a version in the spec wins over the pin. The plan of update then
+// holds it against the 2.0.7 that the servers report.
 func TestCommandsThatLoadTheSpecsLoadAVersionOlderThanThePin(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
@@ -658,13 +659,12 @@ func TestCommandsThatLoadTheSpecsLoadAVersionOlderThanThePin(t *testing.T) {
 		svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.6", "2.0.7")
 		mustUpdate(t, svc)
 		mustReplace(t, svc, withVersion(t, keyedClusterYAML, "2.0.6"))
-		if _, err := svc.Update(t.Context(), "prod", false); err != nil {
-			t.Errorf("Update over a pin of 2.0.7 with 2.0.6 in the spec: %v", err)
-		}
+		_, err := svc.Update(t.Context(), "prod", false)
+		wantError(t, err, lowering("server prod-servers-0.global"))
 		if _, err := svc.ValidateCluster(t.Context(), "prod"); err != nil {
 			t.Errorf("ValidateCluster over a pin of 2.0.7 with 2.0.6 in the spec: %v", err)
 		}
-		_, err := svc.RollingUpdate(t.Context(), "prod", app.RollOptions{})
+		_, err = svc.RollingUpdate(t.Context(), "prod", app.RollOptions{})
 		wantError(t, err, "the specs of cluster prod changed since the last tent update cluster; run it first")
 	})
 }

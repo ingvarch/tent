@@ -188,6 +188,15 @@ func (s NodeStep) String() string {
 // the decisions refuse. A plan that deletes a machine that carries the joined label and is no such removal fails the
 // same way, and names each machine: one of a node group that the specs lack whose role is not client or that has no
 // group label, and machines of one name that joined.
+// A plan that creates a node or waits for one with an operation id, or that writes another Nomad version into the
+// completed spec than the stored one, of a cluster whose store holds the mark of the ACL bootstrap and that has a
+// server which joined, runs and has a public address, holds the Nomad version of the specs against what Nomad
+// reports. It uses the reading of a removal when the plan made one, and else reads what a rolling update observes. It
+// fails, with and without apply, before it changes anything, when a server or a node that is not down runs a newer
+// Nomad than the version of the new node or of the new pin, when the new pin is more than one minor version above, or
+// of another major version than, the oldest release that a server or a node that is not down runs, when a version
+// that Nomad reports is no version number, and when the read fails. A server that reports no version is not compared.
+// A cluster that cannot answer is not checked.
 // The Nomad step is part of the plan until the store holds the mark of the ACL bootstrap, and also, with the mark, when
 // no server or combined machine of the cluster is left: the servers that come are a new Nomad, so it bootstraps again.
 // After the bootstrap it is part of the plan when the plan creates or waits for a server or combined node. Without
@@ -394,6 +403,9 @@ func (s *Service) planUpdate(ctx context.Context, l statestore.Layout, cache ass
 		u.readWarnings = append(u.readWarnings, couldNotTellOutdated+err.Error())
 		return u, nil
 	}
+	if err := s.checkVersions(ctx, c, in, plan, found); err != nil {
+		return updateRun{}, err
+	}
 	u.builder = builder
 	if changes {
 		if err := u.prepareNodes(m, s.now()); err != nil {
@@ -519,6 +531,7 @@ type machines struct {
 	servers []cloud.Instance // those of the server and combined groups that stay, by name, as planNodes says
 	listed  []cloud.Instance // all that the cloud listed, for the machine that a wait names by ID
 	removal removalPlan      // what the apply carries out through the rollout decisions
+	reading *nomadReading    // what the plan read of Nomad when that was what a roll observes, else nil
 	warning string           // why the plan lacks the purge of the nodes that deleted machines left, or ""
 }
 
@@ -547,7 +560,9 @@ func (s *Service) planChanges(ctx context.Context, p cloud.Provider, m *model.Cl
 	if err != nil {
 		return UpdatePlan{}, machines{}, err
 	}
-	found := machines{servers: nodes.servers, listed: instances, removal: nodes.removal, warning: nodes.warning}
+	found := machines{
+		servers: nodes.servers, listed: instances, removal: nodes.removal, reading: nodes.reading, warning: nodes.warning,
+	}
 	return UpdatePlan{Infra: infra, Nodes: nodes.changes, Purges: nodes.purges}, found, nil
 }
 
