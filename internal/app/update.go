@@ -195,10 +195,14 @@ func (s NodeStep) String() string {
 // fails, with and without apply, before it changes anything, when a server or a node that is not down runs a newer
 // Nomad than the version of the new node or of the new pin, when the new pin is more than one minor version above, or
 // of another major version than, the oldest release that a server or a node that is not down runs, when a version
-// that Nomad reports is no version number, and when the read fails. A server that reports no version is not compared.
-// A cluster that cannot answer is not checked. When that reading shows a server on an older Nomad than the version of
-// the specs, or a server that reports no version, and the plan boots a client, the plan stands and Update tells
-// OnWarning once, after its first plan, that the client waits for the servers: the apply stops before it.
+// that Nomad reports is no version number, and when the read fails; a read that fails because no server answers also
+// names spec.access.api. A server that reports no version is not compared. A cluster that cannot answer is not
+// checked. When no server answers and the plan creates, updates or replaces an infrastructure object, the plan stands
+// instead: Update tells OnWarning once, after its first plan, that it could not ask, and the apply asks again once it
+// has applied those changes, as the order below says. When the reading that the plan made shows a server on an older
+// Nomad than the version of the specs, or a server that reports no version, and the plan boots a client, the plan
+// stands and Update tells OnWarning once, after its first plan, that the client waits for the servers: the apply stops
+// before it.
 // The Nomad step is part of the plan until the store holds the mark of the ACL bootstrap, and also, with the mark, when
 // no server or combined machine of the cluster is left: the servers that come are a new Nomad, so it bootstraps again.
 // After the bootstrap it is part of the plan when the plan creates or waits for a server or combined node. Without
@@ -208,16 +212,19 @@ func (s NodeStep) String() string {
 //
 // With apply it takes the cluster's lock and plans again under it. When that plan has changes, it calls OnUpdatePlan
 // with it, then OnWarning with each warning about the cluster, such as a Nomad API that the whole internet may reach or
-// a Nomad version that the channel has not tested. Then it raises the tent version, writes the missing secrets and the
+// a Nomad version that the channel has not tested. Then it raises the tent version and writes the missing secrets. When
+// the plan owes the check of the versions, it applies the infrastructure's changes other than its deletes now, then
+// reads what a rolling update observes and holds the version of the specs against it as the plan does; a refusal, or a
+// read that fails, ends the run there, before it writes the completed spec or changes a node. Then it writes the
 // completed spec, raises the highest index of the machine names of each server and combined group to the highest among
 // the listed machines (a create of such a machine raises it again, before the request), and applies the plan in this
-// order: the infrastructure's changes other than its deletes; the deletion of a stale mark of the bootstrap; the waits
-// that repeat a create, then the creates, of the server and combined nodes;
-// the Nomad step, which waits for a leader, bootstraps the ACL system with the stored secret, waits for healthy servers
-// that all vote and for an active key in Nomad's keyring, reads the Raft configuration when the plan has a server or
-// combined change, and then, for each server and combined node of the plan in order, waits for a combined node to
-// register, checks that its server votes at its private address, and replaces its user data with a stub and labels its
-// machine as joined, and last writes the mark;
+// order: the infrastructure's changes other than its deletes, unless the run applied them before the owed check; the
+// deletion of a stale mark of the bootstrap; the waits that repeat a create, then the creates, of the server and
+// combined nodes; the Nomad step, which waits for a leader, bootstraps the ACL system with the stored secret, waits
+// for healthy servers that all vote and for an active key in Nomad's keyring, reads the Raft configuration when the
+// plan has a server or combined change, and then, for each server and combined node of the plan in order, waits for a
+// combined node to register, checks that its server votes at its private address, and replaces its user data with a
+// stub and labels its machine as joined, and last writes the mark;
 // then the waits for client nodes, the deletes of the clients that never registered and the creates of the missing
 // clients; before the first change that boots a client, the update reads the Raft configuration and autopilot's report
 // once. When Nomad cannot be asked, the update stops there, with what it did before standing. When that client would
@@ -298,9 +305,13 @@ type updateRun struct {
 	servers   []cloud.Instance // the machines of the server and combined groups that stay, by name
 	listed    []cloud.Instance // every machine the cloud listed, for the machine that a wait names by ID
 	removal   removalPlan      // what the apply carries out through the rollout decisions
-	// readWarnings say what the plan could not read: the release files that tell the outdated machines, or the nodes
-	// that deleted machines left; and which client waits for the servers. Update tells them once, after its first plan.
+	// readWarnings say what the plan could not read: the release files that tell the outdated machines, the nodes
+	// that deleted machines left, or the versions that Nomad reports; and which client waits for the servers. Update
+	// tells them once, after its first plan.
 	readWarnings []string
+	// owedVersions is the check of the versions that the apply makes after the infrastructure's changes, because the
+	// plan could not read Nomad before them; nil when the plan owes none.
+	owedVersions versionCheck
 	// staleMark is set when the store holds the mark of a bootstrap that the servers of the plan do not stand behind.
 	staleMark bool
 }
@@ -413,13 +424,14 @@ func (s *Service) planUpdate(ctx context.Context, l statestore.Layout, cache ass
 		u.readWarnings = append(u.readWarnings, couldNotTellOutdated+err.Error())
 		return u, nil
 	}
-	waits, err := s.checkVersions(ctx, c, in, plan, found)
+	warning, owed, err := s.checkVersions(ctx, c, in, plan, found)
 	if err != nil {
 		return updateRun{}, err
 	}
-	if waits != "" {
-		u.readWarnings = append(u.readWarnings, waits)
+	if warning != "" {
+		u.readWarnings = append(u.readWarnings, warning)
 	}
+	u.owedVersions = owed
 	u.builder = builder
 	if changes {
 		if err := u.prepareNodes(m, s.now()); err != nil {
@@ -622,6 +634,15 @@ func (s *Service) applyUpdate(ctx context.Context, l statestore.Layout, u *updat
 	if err := s.writeSecrets(ctx, u.secrets.writes); err != nil {
 		return err
 	}
+	opts := s.applyOptions()
+	if u.owedVersions != nil {
+		if err := u.applyInfraTasks(ctx, opts); err != nil {
+			return err
+		}
+		if err := u.owedVersions(ctx); err != nil {
+			return err
+		}
+	}
 	if u.plan.Completed {
 		if _, err := s.Store.Put(ctx, l.Completed(), u.completed, statestore.PutOptions{}); err != nil {
 			return fmt.Errorf("write the completed spec: %w", err)
@@ -630,9 +651,10 @@ func (s *Service) applyUpdate(ctx context.Context, l statestore.Layout, u *updat
 	if err := u.names.raiseToListed(ctx, u.listed); err != nil {
 		return err
 	}
-	opts := s.applyOptions()
-	if err := u.plan.Infra.ApplyTaskChanges(ctx, opts); err != nil {
-		return fmt.Errorf("apply the infrastructure: %w", err)
+	if u.owedVersions == nil {
+		if err := u.applyInfraTasks(ctx, opts); err != nil {
+			return err
+		}
 	}
 	if u.staleMark {
 		path := l.NomadBootstrapped()
@@ -648,6 +670,14 @@ func (s *Service) applyUpdate(ctx context.Context, l statestore.Layout, u *updat
 	}
 	if err := u.plan.Infra.ApplyDeletes(ctx, opts); err != nil {
 		return fmt.Errorf("delete infrastructure objects: %w", err)
+	}
+	return nil
+}
+
+// applyInfraTasks applies the infrastructure's changes other than its deletes.
+func (u *updateRun) applyInfraTasks(ctx context.Context, opts engine.ApplyOptions) error {
+	if err := u.plan.Infra.ApplyTaskChanges(ctx, opts); err != nil {
+		return fmt.Errorf("apply the infrastructure: %w", err)
 	}
 	return nil
 }

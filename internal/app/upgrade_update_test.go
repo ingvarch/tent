@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 
@@ -953,5 +954,341 @@ func TestUpdateDoesNotRemoveNodesOrDeleteInfrastructureAfterTheStop(t *testing.T
 		if got := len(instanceIDs(f)); got != machines {
 			t.Errorf("the account has %d machines, want the %d it had: no node is removed", got, machines)
 		}
+	})
+}
+
+// answersOnceTheFirewallHasTheRule makes the Nomad API of w refuse every call with a "not ready" error until the cloud
+// f has created a firewall rule, and returns a function that tells whether it was created. The rule stands for the
+// operator's new address in spec.access.api. When atRule is not nil, it runs just before the request that creates the
+// rule.
+func answersOnceTheFirewallHasTheRule(f *vultrfake.Fake, w *nomadWorld, atRule func()) (reachable func() bool) {
+	var open atomic.Bool
+	w.SetHook(func(ctx context.Context, _ nomadfake.Call, next func(context.Context) error) error {
+		if !open.Load() {
+			return errNotReady
+		}
+		return next(ctx)
+	})
+	f.SetHook(func(ctx context.Context, c vultrfake.Call, next func(context.Context) error) error {
+		if c.Name == "CreateFirewallRule" && atRule != nil {
+			atRule()
+		}
+		err := next(ctx)
+		if c.Name == "CreateFirewallRule" && err == nil {
+			open.Store(true)
+		}
+		return err
+	})
+	return open.Load
+}
+
+// withNewAddress is the test cluster's Cluster with the operator's address range in spec.access.api.
+func withNewAddress(t *testing.T, doc string) string {
+	t.Helper()
+	return edit(t, doc, "sshKeys:", "access:\n    api: [203.0.113.0/24]\n  sshKeys:")
+}
+
+// loseWorker deletes the machine of prod-workers-1.
+func loseWorker(t *testing.T, f *vultrfake.Fake) {
+	t.Helper()
+	if err := f.DeleteInstance(t.Context(), instanceNamed(t, f, "prod-workers-1")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// unaskedWarnings makes svc keep the warnings that say the plan could not ask Nomad which versions run, and returns
+// the pointer to them.
+func unaskedWarnings(svc *app.Service) *[]string {
+	var warned []string
+	svc.OnWarning = func(msg string) {
+		if strings.HasPrefix(msg, "tent could not ask Nomad which versions run: ") {
+			warned = append(warned, msg)
+		}
+	}
+	return &warned
+}
+
+// askAgainSuffix ends the warning of a plan that could not ask Nomad which versions run and changes the infrastructure.
+const askAgainSuffix = "; update asks again once it has applied the infrastructure's changes, before it writes the " +
+	"completed spec or creates a node"
+
+// neverAnswers makes the Nomad API of w refuse every call with a "not ready" error.
+func neverAnswers(w *nomadWorld) {
+	w.SetHook(func(context.Context, nomadfake.Call, func(context.Context) error) error { return errNotReady })
+}
+
+// wantUnasked fails the test unless warned holds one warning that ends the way a plan ends that could not ask.
+func wantUnasked(t *testing.T, warned []string) {
+	t.Helper()
+	if len(warned) != 1 || !strings.HasSuffix(warned[0], askAgainSuffix) ||
+		!strings.Contains(warned[0], "no server is ready") {
+		t.Errorf("the warnings = %q, want one that names the cause (no server is ready) and ends with %q", warned,
+			askAgainSuffix)
+	}
+}
+
+// TestUpdateAppliesTheFirewallBeforeAskingNomadWhenNoServerAnswers loses a worker and gives spec.access.api a new
+// address, with a Nomad API that answers only once the firewall has the rule. The plan lists both changes and warns
+// once; the apply creates the rule, asks Nomad, creates the worker and ends applied; the next plan has no change.
+func TestUpdateAppliesTheFirewallBeforeAskingNomadWhenNoServerAnswers(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b := olderWorld(t)
+		svc := b.w.svc
+		loseWorker(t, b.f)
+		reachable := answersOnceTheFirewallHasTheRule(b.f, b.w, nil)
+		mustReplace(t, svc, withNewAddress(t, keyedClusterYAML))
+		warned := unaskedWarnings(svc)
+
+		plan, err := svc.Update(t.Context(), "prod", false)
+		if err != nil || !plan.Infra.HasChanges() || len(plan.Nodes) != 1 || plan.Nodes[0].Name != "prod-workers-1" {
+			t.Fatalf("Update without apply = %v, %v\nwant the rule and the create of prod-workers-1", planText(t, plan), err)
+		}
+		wantUnasked(t, *warned)
+		*warned = nil
+
+		plan, err = svc.Update(t.Context(), "prod", true)
+
+		if err != nil || !plan.Applied {
+			t.Fatalf("Update = applied %t, %v; want an applied plan", plan.Applied, err)
+		}
+		wantUnasked(t, *warned)
+		if !reachable() {
+			t.Error("the firewall has no rule for the new address")
+		}
+		if got := machinesOf(b.f, "workers"); !slices.Equal(got, []string{"prod-workers-0", "prod-workers-1"}) {
+			t.Errorf("the workers are %v, want both", got)
+		}
+		wantConverged(t, svc)
+	})
+}
+
+// TestUpdateWritesThePinAfterTheFirewallWhenNoServerAnswers is the same with an upgrade in place of the lost worker:
+// the rule is in the firewall before the completed spec moves to the new version.
+func TestUpdateWritesThePinAfterTheFirewallWhenNoServerAnswers(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b := olderWorld(t)
+		svc := b.w.svc
+		svc.Channels = stableChannel("2.0.0", newerNomad, olderNomad, newerNomad)
+		if _, err := svc.UpgradeCluster(t.Context(), "prod", true); err != nil {
+			t.Fatalf("UpgradeCluster: %v", err)
+		}
+		var completedAtTheRule []byte
+		answersOnceTheFirewallHasTheRule(b.f, b.w, func() {
+			completedAtTheRule, _, _ = svc.Store.Get(t.Context(), completedPath)
+		})
+		mustReplace(t, svc, withNewAddress(t, withVersion(t, keyedClusterYAML, newerNomad)))
+		warned := unaskedWarnings(svc)
+
+		plan, err := svc.Update(t.Context(), "prod", true)
+
+		if err != nil || !plan.Applied {
+			t.Fatalf("Update = applied %t, %v; want an applied plan", plan.Applied, err)
+		}
+		wantUnasked(t, *warned)
+		if got := decode(t, string(completedAtTheRule)).Cluster.Spec.Nomad.Version; got != olderNomad {
+			t.Errorf("the completed spec held %q when the rule was made, want %q", got, olderNomad)
+		}
+		wantPinned(t, svc, newerNomad)
+		wantConverged(t, svc)
+	})
+}
+
+// loseWorkerAndGiveANewAddress is the cluster of the tests below: a worker is lost, spec.access.api has a new address,
+// and the Nomad API answers only once the firewall has the rule. It returns the world and the function that tells
+// whether the rule exists.
+func loseWorkerAndGiveANewAddress(t *testing.T) (b liveWorld, reachable func() bool) {
+	t.Helper()
+	b = olderWorld(t)
+	loseWorker(t, b.f)
+	reachable = answersOnceTheFirewallHasTheRule(b.f, b.w, nil)
+	mustReplace(t, b.w.svc, withNewAddress(t, keyedClusterYAML))
+	return b, reachable
+}
+
+// onlyWorkerZero fails the test unless prod-workers-0 is the one machine of the worker group.
+func onlyWorkerZero(t *testing.T, f *vultrfake.Fake) {
+	t.Helper()
+	if got := machinesOf(f, "workers"); !slices.Equal(got, []string{"prod-workers-0"}) {
+		t.Errorf("the workers are %v, want prod-workers-0 alone", got)
+	}
+}
+
+// unaskedStart starts the error of a plan or an apply that boots prod-workers-1 and could not read Nomad.
+const unaskedStart = "update would create node prod-workers-1, and tent could not ask Nomad which versions run: "
+
+// wantUnaskedError fails the test unless err starts the way an unread Nomad starts it, ends with the hint and matches
+// ErrNotReady.
+func wantUnaskedError(t *testing.T, err error) {
+	t.Helper()
+	if err == nil || !strings.HasPrefix(err.Error(), unaskedStart) || !strings.HasSuffix(err.Error(), hintOfAccess) ||
+		!errors.Is(err, nomadops.ErrNotReady) {
+		t.Errorf("error = %v\nwant one that starts with %q, ends with %q and matches %v", err, unaskedStart,
+			hintOfAccess, nomadops.ErrNotReady)
+	}
+}
+
+// TestUpdateStopsAtTheOwedCheckWhenTheSpecsVersionIsOlderThanAServer reads Nomad after the firewall has the rule and
+// finds a server on a newer Nomad than the specs ask for: the run ends there with the refusal of a plan, the rule is
+// in the firewall, and the completed spec and the nodes are as before. The next plan refuses with the same text and
+// writes nothing.
+func TestUpdateStopsAtTheOwedCheckWhenTheSpecsVersionIsOlderThanAServer(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b, reachable := loseWorkerAndGiveANewAddress(t)
+		svc := b.w.svc
+		reportsNewer(b.w, "prod-servers-0")
+		if err := svc.Store.Delete(t.Context(), namesPath); err != nil { // a raise before the check would write it again
+			t.Fatalf("delete %s: %v", namesPath, err)
+		}
+		stored := snapshot(t, svc.Store)
+		want := "update would create node prod-workers-1: tent never moves a node to an older Nomad: the cluster's " +
+			"version is 2.0.6, and server prod-servers-0.global runs 2.0.7; set spec.nomad.version to 2.0.7 or newer"
+
+		plan, err := svc.Update(t.Context(), "prod", true)
+
+		wantError(t, err, want)
+		if plan.Applied {
+			t.Error("Update applied the plan")
+		}
+		if !reachable() {
+			t.Error("the firewall has no rule for the new address")
+		}
+		wantSnapshot(t, svc.Store, stored)
+		onlyWorkerZero(t, b.f)
+		wantUpdateRefused(t, b, want)
+	})
+}
+
+// TestUpdateStopsAtTheOwedCheckWhenNoServerAnswersAfterTheFirewall keeps Nomad closed after the rule is made: the run
+// ends with the error of a read that fails and the hint, and the completed spec and the nodes are as before.
+func TestUpdateStopsAtTheOwedCheckWhenNoServerAnswersAfterTheFirewall(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b := olderWorld(t)
+		svc := b.w.svc
+		loseWorker(t, b.f)
+		neverAnswers(b.w)
+		mustReplace(t, svc, withNewAddress(t, keyedClusterYAML))
+		stored := snapshot(t, svc.Store)
+		rules := countCalls(b.f, "CreateFirewallRule")
+
+		_, err := svc.Update(t.Context(), "prod", true)
+
+		wantUnaskedError(t, err)
+		if countCalls(b.f, "CreateFirewallRule") == rules {
+			t.Error("the firewall got no rule before the check")
+		}
+		wantSnapshot(t, svc.Store, stored)
+		onlyWorkerZero(t, b.f)
+
+		calls := len(b.f.Calls())
+		_, err = svc.Update(t.Context(), "prod", true)
+		wantUnaskedError(t, err)
+		wantNoWrites(t, b.f.Calls()[calls:])
+		wantSnapshot(t, svc.Store, stored)
+		b.w.SetHook(nil)
+		mustUpdate(t, svc)
+		if got := machinesOf(b.f, "workers"); !slices.Equal(got, []string{"prod-workers-0", "prod-workers-1"}) {
+			t.Errorf("the workers are %v, want both", got)
+		}
+		wantConverged(t, svc)
+	})
+}
+
+// TestUpdateFailsWithTheHintWhenNoServerAnswersAndTheInfrastructureHasNoChange fails the plan of a lost worker when
+// no server answers and the infrastructure stays as it is: the error carries the hint of spec.access.api, and nothing
+// is written.
+func TestUpdateFailsWithTheHintWhenNoServerAnswersAndTheInfrastructureHasNoChange(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b := olderWorld(t)
+		loseWorker(t, b.f)
+		neverAnswers(b.w)
+		stored := snapshot(t, b.w.svc.Store)
+		for _, apply := range []bool{false, true} {
+			_, err := b.w.svc.Update(t.Context(), "prod", apply)
+			wantUnaskedError(t, err)
+		}
+		wantSnapshot(t, b.w.svc.Store, stored)
+		onlyWorkerZero(t, b.f)
+	})
+}
+
+// TestUpdateFailsWhenOnlyDeletesChangeTheInfrastructureAndNoServerAnswers does not let the plan stand when the
+// infrastructure's changes are deletes alone, which run last: it fails with the hint, as it does for no change.
+func TestUpdateFailsWhenOnlyDeletesChangeTheInfrastructureAndNoServerAnswers(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b := olderWorld(t)
+		svc := b.w.svc
+		loseWorker(t, b.f)
+		mustReplace(t, svc, edit(t, keyedClusterYAML, "  - "+devKey+"\n", ""))
+		plan, err := svc.Update(t.Context(), "prod", false)
+		if err != nil {
+			t.Fatalf("Update without apply: %v", err)
+		}
+		if s := plan.Infra.Summary(); s.Create+s.Update+s.Replace != 0 || s.Delete == 0 {
+			t.Fatalf("the infrastructure's changes are %v, want deletes alone", s)
+		}
+		neverAnswers(b.w)
+		stored := snapshot(t, svc.Store)
+		keys := len(b.f.SSHKeys())
+		for _, apply := range []bool{false, true} {
+			_, err := svc.Update(t.Context(), "prod", apply)
+			wantUnaskedError(t, err)
+		}
+		wantSnapshot(t, svc.Store, stored)
+		if got := len(b.f.SSHKeys()); got != keys {
+			t.Errorf("the account has %d SSH keys, want the %d it had", got, keys)
+		}
+	})
+}
+
+// TestUpdateFailsWhenTheReadFailsForAnotherReasonAlthoughTheInfrastructureChanges keeps the plan failing, without the
+// hint, for a read that fails with an error other than a Nomad that is not ready.
+func TestUpdateFailsWhenTheReadFailsForAnotherReasonAlthoughTheInfrastructureChanges(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b := olderWorld(t)
+		loseWorker(t, b.f)
+		mustReplace(t, b.w.svc, withNewAddress(t, keyedClusterYAML))
+		stored := snapshot(t, b.w.svc.Store)
+		rules := countCalls(b.f, "CreateFirewallRule")
+		const want = unaskedStart + "read the Raft configuration: boom"
+		for _, apply := range []bool{false, true} {
+			b.w.Fail(t, "Peers", errBoom)
+			_, err := b.w.svc.Update(t.Context(), "prod", apply)
+			wantError(t, err, want)
+		}
+		wantSnapshot(t, b.w.svc.Store, stored)
+		if countCalls(b.f, "CreateFirewallRule") != rules {
+			t.Error("the firewall got a rule, want none")
+		}
+	})
+}
+
+// TestUpdateKeepsThePinWhenTheOwedCheckRefusesALowerPin puts the old version back into the specs of an upgraded
+// cluster together with a new address, beside a server that runs the new version: the rule reaches the firewall, the
+// owed check refuses to lower the pin, and the completed spec still holds the new version.
+func TestUpdateKeepsThePinWhenTheOwedCheckRefusesALowerPin(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b := upgradedWorld(t)
+		svc := b.w.svc
+		reportsNewer(b.w, "prod-servers-0")
+		reachable := answersOnceTheFirewallHasTheRule(b.f, b.w, nil)
+		mustReplace(t, svc, withNewAddress(t, withVersion(t, keyedClusterYAML, olderNomad)))
+		stored := snapshot(t, svc.Store)
+
+		_, err := svc.Update(t.Context(), "prod", true)
+
+		wantError(t, err, lowering("server prod-servers-0.global"))
+		if !reachable() {
+			t.Error("the firewall has no rule for the new address")
+		}
+		wantSnapshot(t, svc.Store, stored)
+		wantPinned(t, svc, newerNomad)
 	})
 }
