@@ -1,8 +1,11 @@
 package statestore_test
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 
@@ -54,6 +57,8 @@ func TestLayoutPaths(t *testing.T) {
 		{"GossipKey", l.GossipKey(), "prod/secrets/gossip.key"},
 		{"ACLBootstrapSecret", l.ACLBootstrapSecret(), "prod/secrets/acl-bootstrap-token"},
 		{"NomadBootstrapped", l.NomadBootstrapped(), "prod/nomad/bootstrapped"},
+		{"NomadRestored", l.NomadRestored(), "prod/nomad/restored"},
+		{"Backups", l.Backups(), "prod/backups/"},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s() = %q, want %q", tc.name, tc.got, tc.want)
@@ -84,7 +89,7 @@ func TestLayoutPathsInStore(t *testing.T) {
 	l := mustLayout(t, "prod")
 	objects := append(
 		[]string{l.TentVersion(), l.ClusterSpec(), mustNodeGroup(t, l, "workers"), l.Completed(), l.Lock(),
-			mustNameIndex(t, l, "servers")},
+			mustNameIndex(t, l, "servers"), l.NomadRestored(), l.Backup(backupTaken, backupBootstrap).Path},
 		l.Secrets()...)
 	for _, p := range objects {
 		mustPut(t, s, p)
@@ -93,11 +98,13 @@ func TestLayoutPathsInStore(t *testing.T) {
 		prefix string
 		want   []string
 	}{
-		{l.Prefix(), []string{"prod/cluster.completed.yaml", "prod/cluster.yaml", "prod/lock",
-			"prod/names/servers", "prod/nodegroups/workers.yaml", "prod/pki/ca-bundle.pem", "prod/pki/private/ca.key",
-			"prod/secrets/acl-bootstrap-token", "prod/secrets/gossip.key", "prod/tent-version"}},
+		{l.Prefix(), []string{backupPath, "prod/cluster.completed.yaml", "prod/cluster.yaml", "prod/lock",
+			"prod/names/servers", "prod/nodegroups/workers.yaml", "prod/nomad/restored", "prod/pki/ca-bundle.pem",
+			"prod/pki/private/ca.key", "prod/secrets/acl-bootstrap-token", "prod/secrets/gossip.key",
+			"prod/tent-version"}},
 		{l.NodeGroups(), []string{"prod/nodegroups/workers.yaml"}},
 		{l.NameIndexes(), []string{"prod/names/servers"}},
+		{l.Backups(), []string{backupPath}},
 	} {
 		got, err := s.List(t.Context(), tc.prefix)
 		if err != nil {
@@ -172,5 +179,143 @@ func TestClustersEmptyStore(t *testing.T) {
 	got, err := statestore.Clusters(t.Context(), openFile(t, t.TempDir()))
 	if err != nil || len(got) != 0 {
 		t.Errorf("Clusters() = %q, %v; want none", got, err)
+	}
+}
+
+var (
+	backupTaken     = time.Date(2026, 10, 9, 23, 2, 7, 0, time.UTC)
+	backupBootstrap = time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+)
+
+const backupPath = "prod/backups/20261001T100000Z/20261009T230207Z.snap"
+
+func TestBackupName(t *testing.T) {
+	zone := time.FixedZone("UTC+3", 3*60*60)
+	local := time.Date(2026, 10, 10, 2, 2, 7, 999_999_999, zone)
+	if got, want := statestore.BackupName(local), "20261009T230207Z"; got != want {
+		t.Errorf("BackupName(%v) = %q, want %q", local, got, want)
+	}
+}
+
+func TestLayoutBackup(t *testing.T) {
+	l := mustLayout(t, "prod")
+	taken := time.Date(2026, 10, 10, 2, 2, 7, 500, time.FixedZone("UTC+3", 3*60*60))
+	want := statestore.Backup{
+		Name: "20261009T230207Z", Time: backupTaken, Bootstrap: "20261001T100000Z", Path: backupPath,
+	}
+	got := l.Backup(taken, backupBootstrap)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("Backup() (-want +got):\n%s", diff)
+	}
+	if got.Time.Location() != time.UTC {
+		t.Errorf("Backup().Time is in %v, want UTC", got.Time.Location())
+	}
+}
+
+func TestLayoutBackupAt(t *testing.T) {
+	l := mustLayout(t, "prod")
+	want := l.Backup(backupTaken, backupBootstrap)
+	if got, ok := l.BackupAt(backupPath); !ok || cmp.Diff(want, got) != "" {
+		t.Errorf("BackupAt(%q) = %+v, %v; want %+v, true", backupPath, got, ok, want)
+	}
+	for _, p := range []string{
+		"prod-2/backups/20261001T100000Z/20261009T230207Z.snap",
+		"other/backups/20261001T100000Z/20261009T230207Z.snap",
+		"20261001T100000Z/20261009T230207Z.snap",
+		"prod/backups/x.snap",
+		"prod/backups/20261001T100000Z/20261009T230207Z",
+		"prod/backups/20261001t100000Z/20261009T230207Z.snap",
+		"prod/backups/20261001T100000z/20261009T230207Z.snap",
+		"prod/backups/20261001T100000Z/20261009t230207Z.snap",
+		"prod/backups/20261001T100000Z/20261009T230207z.snap",
+		"prod/backups/2026-10-01T10:00:00Z/20261009T230207Z.snap",
+		"prod/backups/20261001T100000Z/2026-10-09T23:02:07Z.snap",
+		"prod/backups/20261001T100000Z/20261009T230207.5Z.snap",
+		"prod/backups/20261001T100000.5Z/20261009T230207Z.snap",
+		"prod/backups/20261301T100000Z/20261009T230207Z.snap",
+		"prod/backups/20261001T100000Z/20261309T230207Z.snap",
+		"prod/backups/20261001T100000Z/extra/20261009T230207Z.snap",
+		"prod/backups/20261001T100000Z/20261009T230207Z.snap.bak",
+		"prod/backups/20261001T100000Z/20261009T230207Z.snap/",
+		"prod/backups/20261001T100000Z/.snap",
+		"prod/backups/20261001T100000Z/20261009T230207.snap",
+		"prod/backups/20261001T100000Z/20261009T230207Z.SNAP",
+		"prod/backups/20261001T100000/20261009T230207Z.snap",
+		"prod/backups//20261009T230207Z.snap",
+		"prod/backups/20261001T100000Z",
+		"prod/backups/",
+		"prod/nomad/restored",
+		"",
+	} {
+		if got, ok := l.BackupAt(p); ok {
+			t.Errorf("BackupAt(%q) = %+v, true; want false", p, got)
+		}
+	}
+}
+
+// listStore is a store whose List returns paths and err, in the order given.
+type listStore struct {
+	statestore.Store
+	paths []string
+	err   error
+}
+
+func (s listStore) List(context.Context, string) ([]string, error) { return s.paths, s.err }
+
+func TestBackups(t *testing.T) {
+	l := mustLayout(t, "prod")
+	at := func(h int) time.Time { return time.Date(2026, 10, 9, h, 0, 0, 0, time.UTC) }
+	boot1, boot2 := at(1), at(2)
+	early, late := l.Backup(at(5), boot2), l.Backup(at(6), boot1)
+	tie1, tie2 := l.Backup(at(7), boot1), l.Backup(at(7), boot2)
+	s := openFile(t, t.TempDir())
+	for _, p := range []string{
+		tie2.Path, late.Path, tie1.Path, early.Path,
+		"prod/backups/notes.txt",
+		"prod/backups/20261001T100000Z/x.snap",
+		"prod-2/backups/20261001T100000Z/20261009T230207Z.snap",
+		l.NomadRestored(),
+	} {
+		mustPut(t, s, p)
+	}
+	got, err := statestore.Backups(t.Context(), s, l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff([]statestore.Backup{early, late, tie1, tie2}, got); diff != "" {
+		t.Errorf("Backups() (-want +got):\n%s", diff)
+	}
+}
+
+// TestBackupsOrdersOneTimeByBootstrap checks that Backups orders the backups of one time by their bootstrap when the
+// store lists them in another order.
+func TestBackupsOrdersOneTimeByBootstrap(t *testing.T) {
+	l := mustLayout(t, "prod")
+	at := time.Date(2026, 10, 9, 7, 0, 0, 0, time.UTC)
+	first, second := l.Backup(at, at.Add(-2*time.Hour)), l.Backup(at, at.Add(-time.Hour))
+	got, err := statestore.Backups(t.Context(), listStore{paths: []string{second.Path, first.Path}}, l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff([]statestore.Backup{first, second}, got); diff != "" {
+		t.Errorf("Backups() (-want +got):\n%s", diff)
+	}
+}
+
+func TestBackupsEmptyStore(t *testing.T) {
+	got, err := statestore.Backups(t.Context(), openFile(t, t.TempDir()), mustLayout(t, "prod"))
+	if err != nil || len(got) != 0 {
+		t.Errorf("Backups() = %+v, %v; want none", got, err)
+	}
+}
+
+func TestBackupsListError(t *testing.T) {
+	broken := errors.New("disk on fire")
+	s := listStore{err: broken}
+	got, err := statestore.Backups(t.Context(), s, mustLayout(t, "prod"))
+	if !errors.Is(err, broken) || got != nil ||
+		!strings.HasPrefix(err.Error(), "list the backups of cluster prod: ") {
+		t.Errorf("Backups() = %+v, %v; want a wrapped error starting with %q", got, err,
+			"list the backups of cluster prod: ")
 	}
 }
