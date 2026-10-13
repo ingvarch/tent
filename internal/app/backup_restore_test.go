@@ -35,6 +35,22 @@ type rebuilt struct {
 	backup  app.StoredBackup // of the earlier servers; it holds firstSnapshot
 	earlier time.Time        // when the earlier servers were bootstrapped
 	mark    time.Time        // when the servers that run now were bootstrapped
+	// accessor is the accessor of the bootstrap token of the servers that run now, before any restore.
+	accessor string
+}
+
+// bootstrapSecretPath is where the state store keeps the ACL bootstrap secret of the test cluster.
+const bootstrapSecretPath = "prod/secrets/acl-bootstrap-token"
+
+// accessorOf returns the accessor that the stored bootstrap secret has on the servers of the world now.
+func accessorOf(t *testing.T, svc *app.Service, w *nomadWorld) string {
+	t.Helper()
+	token := secret.Secret(get(t, svc.Store, bootstrapSecretPath))
+	got, err := w.Client(nomadops.Config{Token: token}).TokenAccessor(t.Context())
+	if err != nil {
+		t.Fatalf("TokenAccessor: %v", err)
+	}
+	return got
 }
 
 // rebuiltWorld builds the test cluster, stores a backup, deletes its servers and runs update, which bootstraps new
@@ -52,7 +68,8 @@ func rebuiltWorld(t *testing.T) rebuilt {
 		t.Fatalf("update after the loss of the servers left the mark at %v, want a time after %v: "+
 			"a restore needs the new servers' mark", mark, earlier)
 	}
-	return rebuilt{svc: svc, f: f, w: w, backup: backup, earlier: earlier, mark: mark}
+	return rebuilt{svc: svc, f: f, w: w, backup: backup, earlier: earlier, mark: mark,
+		accessor: accessorOf(t, svc, w)}
 }
 
 // utc writes a time as the texts of a restore do.
@@ -68,12 +85,16 @@ func (r rebuilt) planText(nodes string) string {
 }
 
 // record returns the record of a restore of the backup named backup into the servers bootstrapped at mark, as tent
-// writes it: with the time restored when that is not empty.
-func record(backup string, mark time.Time, restored string) string {
-	if restored == "" {
-		return fmt.Sprintf(`{"backup":%q,"bootstrap":%q}`+"\n", backup, statestore.BackupName(mark))
+// writes it: with the accessor and the time restored when they are not empty.
+func record(backup, accessor string, mark time.Time, restored string) string {
+	rec := fmt.Sprintf(`{"backup":%q,"bootstrap":%q`, backup, statestore.BackupName(mark))
+	if accessor != "" {
+		rec += fmt.Sprintf(`,"accessor":%q`, accessor)
 	}
-	return fmt.Sprintf(`{"backup":%q,"bootstrap":%q,"restored":%q}`+"\n", backup, statestore.BackupName(mark), restored)
+	if restored != "" {
+		rec += fmt.Sprintf(`,"restored":%q`, restored)
+	}
+	return rec + "}\n"
 }
 
 // restore runs a restore of the backup that from names, with apply, and returns the plan and the error.
@@ -100,12 +121,18 @@ func (r rebuilt) restoredCopies() []string {
 	return got
 }
 
-// wantNotRestored fails the test unless Nomad restored nothing and the store holds no record.
-func (r rebuilt) wantNotRestored(t *testing.T) {
+// wantNoSnapshotTaken fails the test when Nomad restored a snapshot.
+func (r rebuilt) wantNoSnapshotTaken(t *testing.T) {
 	t.Helper()
 	if got := r.restoredCopies(); len(got) != 0 {
 		t.Errorf("Nomad restored %d snapshots, want none", len(got))
 	}
+}
+
+// wantNotRestored fails the test unless Nomad restored nothing and the store holds no record.
+func (r rebuilt) wantNotRestored(t *testing.T) {
+	t.Helper()
+	r.wantNoSnapshotTaken(t)
 	r.wantNotRestoredRecord(t)
 }
 
@@ -256,8 +283,8 @@ func TestBackupRestoreApplies(t *testing.T) {
 			t.Errorf("plan (-want +got):\n%s", diff)
 		}
 		wantEvents := []string{
-			"nomad Nodes", "nomad Jobs", "nomad Nodes", "nomad Jobs",
-			"write " + versionPath, "write " + restoredPath + " without a time",
+			"nomad Nodes", "nomad Jobs", "nomad Nodes", "nomad Jobs", "write " + versionPath,
+			"nomad TokenAccessor", "write " + restoredPath + " without a time",
 			"nomad RestoreSnapshot", "nomad Bootstrap", "write " + restoredPath + " with the time",
 		}
 		if diff := cmp.Diff(wantEvents, tl.events); diff != "" {
@@ -275,7 +302,7 @@ func TestBackupRestoreApplies(t *testing.T) {
 			t.Errorf("leases at the snapshot (-want +got):\n%s", diff)
 		}
 		wantStored(t, r.svc.Store, restoredPath,
-			[]byte(record(r.backup.Name, r.mark, now.UTC().Format(time.RFC3339Nano))))
+			[]byte(record(r.backup.Name, r.accessor, r.mark, now.UTC().Format(time.RFC3339Nano))))
 		wantLockFree(t, r.svc.Store)
 		var applied bytes.Buffer
 		if err := plan.WriteApplied(&applied); err != nil {
@@ -410,15 +437,107 @@ func TestBackupRestoreStopsWhenTheJobsCannotBeRead(t *testing.T) {
 	})
 }
 
-// TestBackupRestoreResumesACutRestore finds a record of this backup without a time while Nomad lists jobs, as after a
-// restore that was cut: the plan says it resumes and asks for no jobs; the run sends the backup, checks the secret and
-// writes the time.
-func TestBackupRestoreResumesACutRestore(t *testing.T) {
+// tookAccessor is the accessor that a record names when Nomad took the backup after the record was written: the
+// servers' bootstrap token has another one now.
+const tookAccessor = "00000000-0000-4000-8000-0000000000aa"
+
+// resumeText is the third line of the plan of a resumed restore, with the lines around it.
+func (r rebuilt) resumeText(state string) string {
+	return fmt.Sprintf("Restore backup %s (taken %s) into cluster prod.\n"+
+		"The servers that run now were bootstrapped on %s; the backup is of earlier servers.\n%s\n"+
+		"Nomad's jobs, nodes, ACL tokens, variables and keyring become those of the backup.\n",
+		r.backup.Name, utc(r.backup.Time), utc(r.mark), state)
+}
+
+// TestBackupRestoreResumesARestoreThatNomadTook finds a record of this backup without a time whose accessor is not the
+// bootstrap token's any more, so Nomad took the backup, while Nomad lists jobs: the plan says that, in text and JSON,
+// and asks for no jobs; the run sends the backup, checks the secret and writes the time, and the record keeps its
+// accessor.
+func TestBackupRestoreResumesARestoreThatNomadTook(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		r := rebuiltWorld(t)
-		put(t, r.svc.Store, restoredPath, []byte(record(r.backup.Name, r.mark, "")))
+		put(t, r.svc.Store, restoredPath, []byte(record(r.backup.Name, tookAccessor, r.mark, "")))
 		r.w.SetJobs([]nomadops.Job{{Namespace: "default", ID: "from-the-backup"}})
+		now := fixClock(r.svc)
+		before := len(r.w.Log())
+
+		plan, err := r.svc.BackupRestore(t.Context(), "prod", app.Latest, false)
+
+		if err != nil {
+			t.Fatalf("BackupRestore: %v", err)
+		}
+		want := app.RestorePlan{
+			Cluster: "prod", Backup: r.backup.Backup, Bootstrapped: r.mark.UTC(), Nodes: 2, Resumes: true, Taken: true,
+		}
+		if diff := cmp.Diff(want, plan); diff != "" {
+			t.Errorf("plan (-want +got):\n%s", diff)
+		}
+		var text bytes.Buffer
+		if err := plan.WriteText(&text); err != nil {
+			t.Fatalf("WriteText: %v", err)
+		}
+		wantText := r.resumeText("A restore of this backup was started and Nomad took the backup, but it has not ended: " +
+			"tent sends the backup again. The servers list 2 nodes.")
+		if text.String() != wantText {
+			t.Errorf("WriteText =\n%s\nwant\n%s", text.String(), wantText)
+		}
+		got, err := json.Marshal(plan)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		if !strings.HasSuffix(string(got), `"nodes":2,"resumes":true,"taken":true}`) {
+			t.Errorf("JSON = %s, want it to end with nodes, resumes and taken", got)
+		}
+		if names := nomadCallNames(r.w, before); !slices.Equal(names, []string{"Nodes", "TokenAccessor"}) {
+			t.Errorf("calls of Nomad = %v, want Nodes and TokenAccessor and no Jobs", names)
+		}
+
+		tl := r.logTo(nil)
+
+		plan = r.mustRestore(t, app.Latest)
+
+		if !plan.Applied || !plan.Resumes || !plan.Taken {
+			t.Errorf("plan = %+v, want Applied, Resumes and Taken", plan)
+		}
+		wantEvents := []string{
+			"nomad Nodes", "nomad TokenAccessor", "nomad Nodes", "nomad TokenAccessor", "nomad RestoreSnapshot",
+			"nomad Bootstrap", "write " + restoredPath + " with the time",
+		}
+		if diff := cmp.Diff(wantEvents, tl.events); diff != "" {
+			t.Errorf("events: no Jobs and no new record without a time (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff([]string{firstSnapshot}, r.restoredCopies()); diff != "" {
+			t.Errorf("restored snapshots (-want +got):\n%s", diff)
+		}
+		wantStored(t, r.svc.Store, restoredPath,
+			[]byte(record(r.backup.Name, tookAccessor, r.mark, now.UTC().Format(time.RFC3339Nano))))
+	})
+}
+
+// failSends makes every RestoreSnapshot of the world fail as a network error does, with the snapshot never reaching
+// Nomad.
+func (r rebuilt) failSends() {
+	r.w.SetHook(func(ctx context.Context, c nomadfake.Call, next func(context.Context) error) error {
+		if c.Name == "RestoreSnapshot" {
+			return fmt.Errorf("dial tcp: i/o timeout: %w", nomadops.ErrNotReady)
+		}
+		return next(ctx)
+	})
+}
+
+// TestBackupRestoreResumesAFailedSend sends the backup again, after a run whose send reached no server, when Nomad
+// lists no job: the accessor is the one in the record, so Nomad did not take the backup, the plan says that and counts
+// no job, and the run ends with the time and the record's accessor.
+func TestBackupRestoreResumesAFailedSend(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		r := rebuiltWorld(t)
+		r.failSends()
+		if _, err := r.restore(app.Latest); !errors.Is(err, nomadops.ErrNotReady) {
+			t.Fatalf("the first run: %v, want the network error", err)
+		}
+		r.w.SetHook(nil)
 		now := fixClock(r.svc)
 		before := len(r.w.Log())
 
@@ -437,46 +556,121 @@ func TestBackupRestoreResumesACutRestore(t *testing.T) {
 		if err := plan.WriteText(&text); err != nil {
 			t.Fatalf("WriteText: %v", err)
 		}
-		wantText := fmt.Sprintf("Restore backup %s (taken %s) into cluster prod.\n"+
-			"The servers that run now were bootstrapped on %s; the backup is of earlier servers.\n"+
-			"A restore of this backup was started and has not ended: tent sends the backup again. "+
-			"The servers list 2 nodes.\n"+
-			"Nomad's jobs, nodes, ACL tokens, variables and keyring become those of the backup.\n",
-			r.backup.Name, utc(r.backup.Time), utc(r.mark))
+		wantText := r.resumeText("A restore of this backup was started and Nomad did not take the backup: tent sends " +
+			"it again. They run no job and list 2 nodes.")
 		if text.String() != wantText {
 			t.Errorf("WriteText =\n%s\nwant\n%s", text.String(), wantText)
 		}
-		got, err := json.Marshal(plan)
-		if err != nil {
-			t.Fatalf("Marshal: %v", err)
+		if names := nomadCallNames(r.w, before); !slices.Equal(names, []string{"Nodes", "TokenAccessor", "Jobs"}) {
+			t.Errorf("calls of Nomad = %v, want Nodes, TokenAccessor and Jobs", names)
 		}
-		if !strings.HasSuffix(string(got), `"nodes":2,"resumes":true}`) {
-			t.Errorf("JSON = %s, want it to end with nodes and resumes", got)
-		}
-		if names := nomadCallNames(r.w, before); !slices.Equal(names, []string{"Nodes"}) {
-			t.Errorf("calls of Nomad = %v, want one Nodes and no Jobs", names)
-		}
-
-		tl := r.logTo(nil)
 
 		plan = r.mustRestore(t, app.Latest)
 
-		if !plan.Applied || !plan.Resumes {
-			t.Errorf("plan = %+v, want Applied and Resumes", plan)
-		}
-		wantEvents := []string{
-			"nomad Nodes", "nomad Nodes", "nomad RestoreSnapshot", "nomad Bootstrap",
-			"write " + restoredPath + " with the time",
-		}
-		if diff := cmp.Diff(wantEvents, tl.events); diff != "" {
-			t.Errorf("events: no Jobs and no new record without a time (-want +got):\n%s", diff)
+		if !plan.Applied || !plan.Resumes || plan.Taken {
+			t.Errorf("plan = %+v, want Applied and Resumes, and no Taken", plan)
 		}
 		if diff := cmp.Diff([]string{firstSnapshot}, r.restoredCopies()); diff != "" {
 			t.Errorf("restored snapshots (-want +got):\n%s", diff)
 		}
 		wantStored(t, r.svc.Store, restoredPath,
-			[]byte(record(r.backup.Name, r.mark, now.UTC().Format(time.RFC3339Nano))))
+			[]byte(record(r.backup.Name, r.accessor, r.mark, now.UTC().Format(time.RFC3339Nano))))
 	})
+}
+
+// TestBackupRestoreRefusesJobsAfterAFailedSend refuses, with the text for jobs and with and without apply, a restore
+// whose earlier run never reached Nomad when jobs were registered in the meantime, however much later: the record stays
+// as it was, and once the jobs are gone the run sends the backup.
+func TestBackupRestoreRefusesJobsAfterAFailedSend(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		r := rebuiltWorld(t)
+		r.failSends()
+		if _, err := r.restore(app.Latest); !errors.Is(err, nomadops.ErrNotReady) {
+			t.Fatalf("the first run: %v, want the network error", err)
+		}
+		r.w.SetHook(nil)
+		var jobs []nomadops.Job
+		for i := range 12 {
+			jobs = append(jobs, nomadops.Job{Namespace: "default", ID: fmt.Sprintf("prod-%d", i)})
+		}
+		r.w.SetJobs(jobs)
+		time.Sleep(30 * 24 * time.Hour)
+
+		for _, apply := range []bool{false, true} {
+			_, err := r.svc.BackupRestore(t.Context(), "prod", app.Latest, apply)
+
+			wantError(t, err, r.jobsWere("12 jobs", "were"))
+		}
+		r.wantNoSnapshotTaken(t)
+		wantStored(t, r.svc.Store, restoredPath, []byte(record(r.backup.Name, r.accessor, r.mark, "")))
+
+		r.w.SetJobs(nil)
+		plan := r.mustRestore(t, app.Latest)
+
+		if !plan.Applied || !plan.Resumes {
+			t.Errorf("plan = %+v, want Applied and Resumes once the jobs are gone", plan)
+		}
+	})
+}
+
+// TestBackupRestoreTreatsARecordWithoutAnAccessorAsNotTaken applies the rule for jobs to a record that holds no
+// accessor, so that nothing is sent over jobs on a record that cannot tell.
+func TestBackupRestoreTreatsARecordWithoutAnAccessorAsNotTaken(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		r := rebuiltWorld(t)
+		put(t, r.svc.Store, restoredPath, []byte(record(r.backup.Name, "", r.mark, "")))
+		r.w.SetJobs([]nomadops.Job{{Namespace: "default", ID: "new"}})
+
+		_, err := r.restore(app.Latest)
+
+		wantError(t, err, r.jobsWere("1 job", "was"))
+		r.wantNoSnapshotTaken(t)
+		r.w.SetJobs(nil)
+
+		plan := r.mustRestore(t, app.Latest)
+
+		if !plan.Applied || !plan.Resumes || plan.Taken {
+			t.Errorf("plan = %+v, want Applied and Resumes, and no Taken", plan)
+		}
+	})
+}
+
+// TestBackupRestoreNamesAFailedRead ends with the cause when the accessor of tent's token cannot be read: in the plan
+// of a resumed restore, before the lock, and under the lock for a first run, where nothing is written and nothing sent.
+func TestBackupRestoreNamesAFailedRead(t *testing.T) {
+	t.Parallel()
+	for _, resume := range []bool{true, false} {
+		t.Run(fmt.Sprintf("resume %t", resume), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				r := rebuiltWorld(t)
+				if resume {
+					put(t, r.svc.Store, restoredPath, []byte(record(r.backup.Name, r.accessor, r.mark, "")))
+				}
+				r.w.Fail(t, "TokenAccessor", errPermanent)
+				rec := &writeLog{Store: r.svc.Store}
+				r.svc.Store = rec
+
+				_, err := r.restore(app.Latest)
+
+				if err == nil || !strings.HasPrefix(err.Error(), "read the accessor of tent's token: ") ||
+					!errors.Is(err, errPermanent) {
+					t.Errorf("error = %v, want the read and the cause", err)
+				}
+				r.wantNoSnapshotTaken(t)
+				if resume && len(rec.writes) != 0 {
+					t.Errorf("writes %v, want none: the plan fails before the lock", rec.writes)
+				}
+				if !resume {
+					if paths := list(t, r.svc.Store, restoredPath); len(paths) != 0 {
+						t.Errorf("the store holds the record %v, want none", paths)
+					}
+				}
+				wantLockFree(t, r.svc.Store)
+			})
+		})
+	}
 }
 
 // TestBackupRestoreIgnoresTheRecordOfOtherServers meets a record of earlier servers, which names this or another
@@ -488,13 +682,13 @@ func TestBackupRestoreIgnoresTheRecordOfOtherServers(t *testing.T) {
 		name   string
 		record func(r rebuilt) string
 	}{
-		{"another backup without a time", func(r rebuilt) string { return record("20000101T000000Z", r.earlier, "") }},
-		{"this backup without a time", func(r rebuilt) string { return record(r.backup.Name, r.earlier, "") }},
+		{"another backup without a time", func(r rebuilt) string { return record("20000101T000000Z", "", r.earlier, "") }},
+		{"this backup without a time", func(r rebuilt) string { return record(r.backup.Name, "", r.earlier, "") }},
 		{"another backup with a time", func(r rebuilt) string {
-			return record("20000101T000000Z", r.earlier, "2026-10-10T08:20:00Z")
+			return record("20000101T000000Z", "", r.earlier, "2026-10-10T08:20:00Z")
 		}},
 		{"this backup with a time", func(r rebuilt) string {
-			return record(r.backup.Name, r.earlier, "2026-10-10T08:20:00Z")
+			return record(r.backup.Name, "", r.earlier, "2026-10-10T08:20:00Z")
 		}},
 		{"no fields", func(rebuilt) string { return "{}\n" }},
 	} {
@@ -518,7 +712,7 @@ func TestBackupRestoreIgnoresTheRecordOfOtherServers(t *testing.T) {
 					t.Errorf("plan = %+v, want Applied and no Resumes", plan)
 				}
 				wantStored(t, r.svc.Store, restoredPath,
-					[]byte(record(r.backup.Name, r.mark, now.UTC().Format(time.RFC3339Nano))))
+					[]byte(record(r.backup.Name, r.accessor, r.mark, now.UTC().Format(time.RFC3339Nano))))
 			})
 		})
 	}
@@ -571,7 +765,7 @@ func TestBackupRestoreAnotherBackup(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := rebuiltWorld(t)
 		other := r.anotherEarlier(t)
-		done := record(r.backup.Name, r.mark, "2026-10-10T08:20:00Z")
+		done := record(r.backup.Name, "", r.mark, "2026-10-10T08:20:00Z")
 		put(t, r.svc.Store, restoredPath, []byte(done))
 		before := len(r.w.Log())
 
@@ -591,7 +785,7 @@ func TestBackupRestoreAnotherBackup(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := rebuiltWorld(t)
 		other := r.anotherEarlier(t)
-		started := record(r.backup.Name, r.mark, "")
+		started := record(r.backup.Name, "", r.mark, "")
 		put(t, r.svc.Store, restoredPath, []byte(started))
 		r.w.SetJobs([]nomadops.Job{{Namespace: "default", ID: "a"}, {Namespace: "other", ID: "b"}})
 
@@ -608,7 +802,7 @@ func TestBackupRestoreAnotherBackup(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := rebuiltWorld(t)
 		other := r.anotherEarlier(t)
-		put(t, r.svc.Store, restoredPath, []byte(record(r.backup.Name, r.mark, "")))
+		put(t, r.svc.Store, restoredPath, []byte(record(r.backup.Name, "", r.mark, "")))
 		now := fixClock(r.svc)
 
 		plan := r.mustRestore(t, other.Name)
@@ -620,7 +814,7 @@ func TestBackupRestoreAnotherBackup(t *testing.T) {
 			t.Errorf("restored snapshots (-want +got):\n%s", diff)
 		}
 		wantStored(t, r.svc.Store, restoredPath,
-			[]byte(record(other.Name, r.mark, now.UTC().Format(time.RFC3339Nano))))
+			[]byte(record(other.Name, r.accessor, r.mark, now.UTC().Format(time.RFC3339Nano))))
 	})
 }
 
@@ -707,8 +901,17 @@ func TestBackupRestoreLatestSkipsTheServersThatRun(t *testing.T) {
 	})
 }
 
+// lockedOut is the text of the lock-out after a restore: tent's secret is no token of the servers.
+func (r rebuilt) lockedOut() string {
+	return fmt.Sprintf("the restore replaced the ACL tokens of cluster prod, and the ACL bootstrap secret of the state "+
+		"store is none of them: tent can no longer call the cluster. The object %s is no backup that tent took of "+
+		"this cluster. Delete the server machines in the cloud, run tent update cluster --yes, and restore another "+
+		"backup with tent backup restore --from NAME, since latest takes this one again", r.backup.Path)
+}
+
 // TestBackupRestoreLockOut ends with the lock-out text when the stored secret no longer works after the restore,
-// leaves the record without a time and does not name the backup's bytes.
+// leaves the record without a time and does not name the backup's bytes. The next run, with and without apply, ends
+// with the same text and sends nothing.
 func TestBackupRestoreLockOut(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
@@ -723,16 +926,62 @@ func TestBackupRestoreLockOut(t *testing.T) {
 
 		plan, err := r.restore(app.Latest)
 
-		wantError(t, err, fmt.Sprintf("the restore replaced the ACL tokens of cluster prod, and the ACL bootstrap secret "+
-			"of the state store is none of them: tent can no longer call the cluster. The object %s is no backup that "+
-			"tent took of this cluster. Delete the server machines in the cloud, run tent update cluster --yes, and "+
-			"restore another backup", r.backup.Path))
+		wantError(t, err, r.lockedOut())
 		if plan.Applied {
 			t.Errorf("plan = %+v, want it not applied", plan)
 		}
-		wantStored(t, r.svc.Store, restoredPath, []byte(record(r.backup.Name, r.mark, "")))
+		wantStored(t, r.svc.Store, restoredPath, []byte(record(r.backup.Name, r.accessor, r.mark, "")))
+		wantLockFree(t, r.svc.Store)
+
+		for _, apply := range []bool{false, true} {
+			_, err = r.svc.BackupRestore(t.Context(), "prod", app.Latest, apply)
+
+			wantError(t, err, r.lockedOut())
+		}
+		if got := r.restoredCopies(); len(got) != 1 {
+			t.Errorf("Nomad took %d snapshots, want the one of the first run", len(got))
+		}
+		wantStored(t, r.svc.Store, restoredPath, []byte(record(r.backup.Name, r.accessor, r.mark, "")))
 		wantLockFree(t, r.svc.Store)
 	})
+}
+
+// TestBackupRestoreLockOutAtTheReach gives the lock-out text, and not the bare 403, when a resumed restore is refused
+// at the first read of Nomad, as a real Nomad answers a secret that is no token. A restore that is no resume keeps the
+// plain error: nothing was restored that could have replaced the tokens.
+func TestBackupRestoreLockOutAtTheReach(t *testing.T) {
+	t.Parallel()
+	denied := fmt.Errorf("nomad: GET /v1/nodes: 403: Permission denied: %w", nomadops.ErrDenied)
+	for _, tc := range []struct {
+		name   string
+		resume bool // a record of the backup without a time is stored
+		want   func(r rebuilt) string
+	}{
+		{"a resume", true, func(r rebuilt) string { return r.lockedOut() }},
+		{"a first run", false, func(rebuilt) string { return "reach Nomad: " + denied.Error() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				r := rebuiltWorld(t)
+				if tc.resume {
+					put(t, r.svc.Store, restoredPath, []byte(record(r.backup.Name, r.accessor, r.mark, "")))
+				}
+				r.w.SetHook(func(ctx context.Context, c nomadfake.Call, next func(context.Context) error) error {
+					if c.Name == "Nodes" {
+						return denied
+					}
+					return next(ctx)
+				})
+
+				_, err := r.svc.BackupRestore(t.Context(), "prod", app.Latest, false)
+
+				wantError(t, err, tc.want(r))
+				if !tc.resume && !errors.Is(err, nomadops.ErrDenied) {
+					t.Errorf("error = %v, want it to keep matching ErrDenied", err)
+				}
+			})
+		})
+	}
 }
 
 // TestBackupRestoreNamesAFailedCheck ends with the cause, and with the advice to run the command again, when the
@@ -749,7 +998,7 @@ func TestBackupRestoreNamesAFailedCheck(t *testing.T) {
 			!strings.HasSuffix(err.Error(), "; run the command again") || !errors.Is(err, errPermanent) {
 			t.Errorf("error = %v, want the check, the cause and the advice", err)
 		}
-		wantStored(t, r.svc.Store, restoredPath, []byte(record(r.backup.Name, r.mark, "")))
+		wantStored(t, r.svc.Store, restoredPath, []byte(record(r.backup.Name, r.accessor, r.mark, "")))
 
 		plan := r.mustRestore(t, app.Latest)
 
@@ -773,7 +1022,7 @@ func TestBackupRestoreNamesAFailedRecord(t *testing.T) {
 		{"the first write", 1, "write " + restoredPath + ": put \"" + restoredPath + "\": interrupted", 0,
 			func(rebuilt) string { return "" }},
 		{"the second write", 2, "write " + restoredPath + ": put \"" + restoredPath + "\": interrupted; " +
-			"run the command again", 1, func(r rebuilt) string { return record(r.backup.Name, r.mark, "") }},
+			"run the command again", 1, func(r rebuilt) string { return record(r.backup.Name, r.accessor, r.mark, "") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -860,7 +1109,7 @@ func TestBackupRestoreNamesWhatNomadRefuses(t *testing.T) {
 		}
 		secrettest.CheckHidden(t, map[string]string{"the error": err.Error()},
 			map[string][]byte{"the object": bad}, "")
-		wantStored(t, r.svc.Store, restoredPath, []byte(record(r.backup.Name, r.mark, "")))
+		wantStored(t, r.svc.Store, restoredPath, []byte(record(r.backup.Name, r.accessor, r.mark, "")))
 		wantLockFree(t, r.svc.Store)
 		if _, err := r.restore(app.Latest); err == nil {
 			t.Error("the second run succeeded, want the same refusal")
@@ -962,13 +1211,13 @@ func TestBackupRestoreDecidesAgainUnderTheLock(t *testing.T) {
 		calls  []string               // of Nomad after the release
 	}{
 		{"a restore of another backup ended", func(t *testing.T, r rebuilt) {
-			put(t, r.svc.Store, restoredPath, []byte(record("20000101T000000Z", r.mark, "2026-10-10T08:20:00Z")))
+			put(t, r.svc.Store, restoredPath, []byte(record("20000101T000000Z", "", r.mark, "2026-10-10T08:20:00Z")))
 		}, func(rebuilt) string {
 			return "cluster prod was restored from backup 20000101T000000Z on 2026-10-10 08:20:00 UTC; tent restores " +
 				"one backup into servers that it built again: to restore another one, " + rebuildWay + " first"
 		}, false, nil},
 		{"a restore of this backup ended", func(t *testing.T, r rebuilt) {
-			put(t, r.svc.Store, restoredPath, []byte(record(r.backup.Name, r.mark, "2026-10-10T08:20:00Z")))
+			put(t, r.svc.Store, restoredPath, []byte(record(r.backup.Name, "", r.mark, "2026-10-10T08:20:00Z")))
 		}, func(rebuilt) string { return "" }, true, nil},
 		{"the backup became current", func(t *testing.T, r rebuilt) {
 			put(t, r.svc.Store, markPath, []byte(r.earlier.Format(time.RFC3339)+"\n"))

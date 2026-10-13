@@ -472,7 +472,8 @@ func TestBackupRestoreIsDoneOnce(t *testing.T) {
 }
 
 // TestBackupRestoreResumes sends the backup again when a record without a time shows that an earlier run was cut: the
-// plan says so, the hint stays and --yes ends it with the summary and the notice.
+// plan says so, and says that Nomad did not take the backup, since a record without an accessor cannot tell it did; the
+// hint stays and --yes ends it with the summary and the notice.
 func TestBackupRestoreResumes(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s, f, mark := builtBackups(t)
@@ -484,8 +485,8 @@ func TestBackupRestoreResumes(t *testing.T) {
 		done := runBackup(t, f, backupArgs(s, "restore", "--yes")...)
 
 		resumed := strings.Replace(restoreText(earlier, mark, 3), "They run no job and list 3 nodes.\n",
-			"A restore of this backup was started and has not ended: tent sends the backup again. The servers list "+
-				"3 nodes.\n", 1)
+			"A restore of this backup was started and Nomad did not take the backup: tent sends it again. They run no "+
+				"job and list 3 nodes.\n", 1)
 		wantResult(t, plan.result, 0, resumed, restoreHint)
 		wantResult(t, done.result, 0, "Restored: backup "+earlier.Name+" into cluster prod.\n", restoreNotice)
 	})

@@ -55,6 +55,9 @@ type API interface {
 	// Bootstrap bootstraps the ACL system with bootstrapSecret as the secret of the management token. It is safe to
 	// repeat, and fails with ErrBootstrapMismatch when the ACL system was bootstrapped with another secret.
 	Bootstrap(ctx context.Context, bootstrapSecret secret.Secret) error
+	// TokenAccessor returns the accessor ID of the ACL token that the API sends. It fails with an error that matches
+	// ErrDenied when the secret is the secret of no token of the cluster.
+	TokenAccessor(ctx context.Context) (string, error)
 	// IntroToken returns a new client introduction token for the node and pool of req.
 	IntroToken(ctx context.Context, req IntroRequest) (secret.Secret, error)
 	// CreateToken makes a management token that expires after req.TTL.

@@ -27,11 +27,11 @@ type Server struct {
 // deadline. A node that the first server purged is gone on the next one, which counts as purged. A
 // TransferLeadership to the server that leads by then is answered 200 and changes nothing. A peer that the first
 // server removed is gone on the next one, which counts as removed. A ForceLeave that is repeated is answered 200 and
-// changes nothing more. Members is a read, and shows the gossip pool as the server that answers sees it. So is
-// SaveSnapshot: each try reads a whole new snapshot. A RestoreSnapshot that is repeated restores the same state again,
-// and what was written between the two restores is lost twice; a snapshot that Nomad refuses is answered 500 by every
-// server, so it goes to each server once and the error names each cause. ErrGone ends a call at once, like any error
-// that is not ErrNotReady.
+// changes nothing more. Members is a read, and shows the gossip pool as the server that answers sees it. So are
+// TokenAccessor and SaveSnapshot: each try of SaveSnapshot reads a whole new snapshot. A RestoreSnapshot that is
+// repeated restores the same state again, and what was written between the two restores is lost twice; a snapshot that
+// Nomad refuses is answered 500 by every server, so it goes to each server once and the error names each cause.
+// ErrGone ends a call at once, like any error that is not ErrNotReady.
 //
 // When no server answers, the error matches ErrNotReady and names each server with its cause, so the waits go on
 // polling over Servers and show the last causes when they end. Servers is safe for concurrent use.
@@ -114,6 +114,11 @@ func (s *Servers) Leader(ctx context.Context) (string, error) {
 func (s *Servers) Bootstrap(ctx context.Context, bootstrapSecret secret.Secret) error {
 	_, err := try(ctx, s, func(a API) (struct{}, error) { return struct{}{}, a.Bootstrap(ctx, bootstrapSecret) })
 	return err
+}
+
+// TokenAccessor returns the accessor ID of the ACL token that the servers' APIs send.
+func (s *Servers) TokenAccessor(ctx context.Context) (string, error) {
+	return try(ctx, s, func(a API) (string, error) { return a.TokenAccessor(ctx) })
 }
 
 // IntroToken returns a new client introduction token for the node and pool of req.

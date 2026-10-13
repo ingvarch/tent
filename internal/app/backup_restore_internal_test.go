@@ -293,9 +293,22 @@ func TestRestoreRecordRoundTrip(t *testing.T) {
 			want: `{"backup":"20261008T030000Z","bootstrap":"20261010T080000Z"}` + "\n",
 		},
 		{
+			name: "with an accessor",
+			rec:  restoreRecord{Backup: "20261008T030000Z", Bootstrap: "20261010T080000Z", Accessor: "8f3a1c2e"},
+			want: `{"backup":"20261008T030000Z","bootstrap":"20261010T080000Z","accessor":"8f3a1c2e"}` + "\n",
+		},
+		{
 			name: "with a time",
 			rec:  restoreRecord{Backup: "20261008T030000Z", Bootstrap: "20261010T080000Z", Restored: &restored},
 			want: `{"backup":"20261008T030000Z","bootstrap":"20261010T080000Z","restored":"2026-10-10T08:20:00Z"}` + "\n",
+		},
+		{
+			name: "with an accessor and a time",
+			rec: restoreRecord{
+				Backup: "20261008T030000Z", Bootstrap: "20261010T080000Z", Accessor: "8f3a1c2e", Restored: &restored,
+			},
+			want: `{"backup":"20261008T030000Z","bootstrap":"20261010T080000Z","accessor":"8f3a1c2e",` +
+				`"restored":"2026-10-10T08:20:00Z"}` + "\n",
 		},
 	}
 	for _, tc := range tests {
@@ -358,5 +371,27 @@ func TestPickBackupWritesTheMarkInUTC(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "bootstrapped on 2026-10-01 10:00:00 UTC;") {
 			t.Fatalf("from %q: error = %v, want the mark in UTC", from, err)
 		}
+	}
+}
+
+func TestTookBackup(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		recorded, found string
+		want            bool
+	}{
+		{"the same accessor: Nomad took nothing", "8f3a1c2e", "8f3a1c2e", false},
+		{"another accessor: Nomad took the backup", "8f3a1c2e", "0b1c2d3e", true},
+		{"a record without an accessor cannot tell", "", "0b1c2d3e", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := restoreRecord{Backup: "20261008T030000Z", Bootstrap: "20261010T080000Z", Accessor: tc.recorded}
+			if got := tookBackup(rec, tc.found); got != tc.want {
+				t.Errorf("tookBackup(%+v, %q) = %v, want %v", rec, tc.found, got, tc.want)
+			}
+		})
 	}
 }

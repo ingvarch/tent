@@ -81,6 +81,9 @@ func pickBackup(cluster string, backups []statestore.Backup, from string, mark t
 type restoreRecord struct {
 	Backup    string `json:"backup"`    // the backup's name
 	Bootstrap string `json:"bootstrap"` // the servers: the time of their bootstrap mark, as a backup's path writes it
+	// Accessor is the accessor of the servers' bootstrap token as tent read it before it sent the backup. After Nomad
+	// took the backup the token has the accessor that it had in the cluster of the backup.
+	Accessor string `json:"accessor,omitempty"`
 	// Restored is when the restore ended. It is nil while the restore has not ended: tent writes the record before it
 	// sends the backup.
 	Restored *time.Time `json:"restored,omitempty"`
@@ -157,6 +160,21 @@ func refuseJobs(cluster string, jobs []nomadops.Job, mark time.Time, started str
 		"purge the jobs first, or %s", cluster, count, were, mark.UTC().Format(restoreTimeLayout), rebuildWay)
 }
 
+// tookBackup reports whether Nomad took the backup after tent wrote rec: the bootstrap token has the accessor found
+// now, which is not the one that rec holds. A record without an accessor cannot tell, so it says no.
+func tookBackup(rec restoreRecord, found string) bool {
+	return rec.Accessor != "" && found != rec.Accessor
+}
+
+// lockedOut is the error of a restore of the object at backupPath after which the ACL bootstrap secret of the state
+// store is the secret of no token of the servers.
+func lockedOut(cluster, backupPath string) error {
+	return fmt.Errorf("the restore replaced the ACL tokens of %s, and the ACL bootstrap secret of the state store is "+
+		"none of them: tent can no longer call the cluster. The object %s is no backup that tent took of this "+
+		"cluster. Delete the server machines in the cloud, run tent update cluster --yes, and restore another backup "+
+		"with tent backup restore --from NAME, since latest takes this one again", clusterLabel(cluster), backupPath)
+}
+
 // RestorePlan is what a restore of a backup does.
 type RestorePlan struct {
 	Cluster      string
@@ -167,6 +185,9 @@ type RestorePlan struct {
 	Nodes int
 	// Resumes reports that a restore of this backup was started and has not ended: tent sends the backup again.
 	Resumes bool
+	// Taken reports, for a plan with Resumes, that Nomad took the backup in the run that was cut: tent sends it again
+	// without a look at the jobs, which may be the backup's.
+	Taken bool
 	// Restored reports that these servers were restored from this backup already, so nothing is left to do.
 	Restored bool
 	// Applied reports that BackupRestore restored the backup.
@@ -182,9 +203,13 @@ func (p RestorePlan) WriteText(w io.Writer) error {
 	}
 	nodes := "list " + quantity(p.Nodes, "node")
 	state := "They run no job and " + nodes + "."
-	if p.Resumes {
-		state = "A restore of this backup was started and has not ended: tent sends the backup again. The servers " +
-			nodes + "."
+	switch {
+	case p.Resumes && p.Taken:
+		state = "A restore of this backup was started and Nomad took the backup, but it has not ended: tent sends " +
+			"the backup again. The servers " + nodes + "."
+	case p.Resumes:
+		state = "A restore of this backup was started and Nomad did not take the backup: tent sends it again. " +
+			"They run no job and " + nodes + "."
 	}
 	return writeText(w, "the plan", fmt.Sprintf("Restore backup %s (taken %s) into %s.\n"+
 		"The servers that run now were bootstrapped on %s; the backup is of earlier servers.\n%s\n"+
@@ -200,8 +225,9 @@ func (p RestorePlan) WriteApplied(w io.Writer) error {
 }
 
 // MarshalJSON encodes the plan as {"cluster": "prod", "backup": {"name": "...", "time": "...", "path": "..."},
-// "bootstrapped": "2026-10-10T08:00:00Z", "nodes": 2, "resumes": true, "restored": true, "applied": true}; resumes,
-// restored and applied are left out when false, and nodes is left out of a plan with restored, which asks no Nomad.
+// "bootstrapped": "2026-10-10T08:00:00Z", "nodes": 2, "resumes": true, "taken": true, "restored": true, "applied":
+// true}; resumes, taken, restored and applied are left out when false, and nodes is left out of a plan with restored,
+// which asks no Nomad.
 func (p RestorePlan) MarshalJSON() ([]byte, error) {
 	type backup struct {
 		Name string `json:"name"`
@@ -214,13 +240,14 @@ func (p RestorePlan) MarshalJSON() ([]byte, error) {
 		Bootstrapped string `json:"bootstrapped"`
 		Nodes        *int   `json:"nodes,omitempty"`
 		Resumes      bool   `json:"resumes,omitempty"`
+		Taken        bool   `json:"taken,omitempty"`
 		Restored     bool   `json:"restored,omitempty"`
 		Applied      bool   `json:"applied,omitempty"`
 	}{
 		Cluster:      p.Cluster,
 		Backup:       backup{p.Backup.Name, p.Backup.Time.UTC().Format(time.RFC3339), p.Backup.Path},
 		Bootstrapped: p.Bootstrapped.UTC().Format(time.RFC3339),
-		Resumes:      p.Resumes, Restored: p.Restored, Applied: p.Applied,
+		Resumes:      p.Resumes, Taken: p.Taken, Restored: p.Restored, Applied: p.Applied,
 	}
 	if !p.Restored {
 		out.Nodes = &p.Nodes
@@ -234,13 +261,17 @@ type restoreRun struct {
 	built builtCluster
 	state restoreState
 	api   *nomadops.Servers
+	// accessor is the accessor that the record of a resumed restore holds.
+	accessor string
 }
 
 // BackupRestore plans the restore of the backup that from names, or of the newest backup of earlier servers when from
 // is Latest, into the cluster's Nomad and, with apply, carries it out under the cluster's lock. It restores only into
 // servers that tent built again after the backup, only while Nomad lists no job, and only one backup into the servers
-// of one bootstrap. A restore that was cut is finished by running the command again. The plan is made once without the
-// lock and again under it. A backup is a secret: it holds the ACL tokens and the keyring of Nomad.
+// of one bootstrap. A restore that was cut is finished by running the command again: it is sent without a look at the
+// jobs when the accessor of the bootstrap token shows that Nomad took the backup, and with the rule for jobs otherwise.
+// The plan is made once without the lock and again under it. A backup is a secret: it holds the ACL tokens and the
+// keyring of Nomad.
 func (s *Service) BackupRestore(ctx context.Context, cluster, from string, apply bool) (_ RestorePlan, err error) {
 	defer func() { err = stopped(ctx, err) }()
 	l, err := s.layout(ctx, cluster)
@@ -299,18 +330,33 @@ func (s *Service) planRestore(ctx context.Context, l statestore.Layout, from str
 	}
 	nodes, err := checkReach(ctx, servers)
 	if err != nil {
+		if state == restoreCut && errors.Is(err, nomadops.ErrDenied) {
+			err = lockedOut(l.Cluster(), backup.Path)
+		}
 		return run, err
 	}
 	run.api, run.plan.Nodes = servers, len(nodes)
+	started := ""
 	if state == restoreCut {
-		run.plan.Resumes = true
-		return run, nil
+		run.plan.Resumes, run.accessor = true, rec.Accessor
+		found, err := servers.TokenAccessor(ctx)
+		switch {
+		case errors.Is(err, nomadops.ErrDenied):
+			return run, lockedOut(l.Cluster(), backup.Path)
+		case err != nil:
+			return run, fmt.Errorf("read the accessor of tent's token: %w", err)
+		}
+		if run.plan.Taken = tookBackup(*rec, found); run.plan.Taken {
+			return run, nil
+		}
+	} else {
+		started = startedBackup(rec, mark)
 	}
 	jobs, err := servers.Jobs(ctx)
 	if err != nil {
 		return run, fmt.Errorf("list the jobs: %w", err)
 	}
-	return run, refuseJobs(l.Cluster(), jobs, mark, startedBackup(rec, mark))
+	return run, refuseJobs(l.Cluster(), jobs, mark, started)
 }
 
 // startedBackup returns the backup that rec names for the servers bootstrapped at mark, or "" when rec is not of
@@ -339,8 +385,9 @@ func (s *Service) storedRestore(ctx context.Context, l statestore.Layout) (*rest
 }
 
 // restore sends the backup to Nomad and checks that tent's own access survived. The caller holds the lock. It writes
-// the record before it sends the backup, without a time, so that a run that is cut after Nomad took the backup sends
-// it again although the backup's jobs are there. It writes the time once the check has passed.
+// the record before it sends the backup, with the accessor of the bootstrap token and without a time, so that a run
+// that is cut after Nomad took the backup sends it again although the backup's jobs are there. It writes the time once
+// the check has passed.
 func (s *Service) restore(ctx context.Context, l statestore.Layout, run restoreRun) (RestorePlan, error) {
 	plan, cluster := run.plan, l.Cluster()
 	data, _, err := s.Store.Get(ctx, plan.Backup.Path)
@@ -354,8 +401,14 @@ func (s *Service) restore(ctx context.Context, l statestore.Layout, run restoreR
 	if err := statestore.RaiseVersion(ctx, s.Store, l, s.Version); err != nil {
 		return plan, err
 	}
-	rec := restoreRecord{Backup: plan.Backup.Name, Bootstrap: statestore.BackupName(plan.Bootstrapped)}
+	rec := restoreRecord{
+		Backup: plan.Backup.Name, Bootstrap: statestore.BackupName(plan.Bootstrapped), Accessor: run.accessor,
+	}
 	if run.state == restoreNew {
+		var err error
+		if rec.Accessor, err = run.api.TokenAccessor(ctx); err != nil {
+			return plan, fmt.Errorf("read the accessor of tent's token: %w", err)
+		}
 		if err := s.putRecord(ctx, l, rec); err != nil {
 			return plan, err
 		}
@@ -365,10 +418,7 @@ func (s *Service) restore(ctx context.Context, l statestore.Layout, run restoreR
 	}
 	switch err := run.api.Bootstrap(ctx, run.built.secrets.bootstrap); {
 	case errors.Is(err, nomadops.ErrBootstrapMismatch):
-		return plan, fmt.Errorf("the restore replaced the ACL tokens of %s, and the ACL bootstrap secret of the state "+
-			"store is none of them: tent can no longer call the cluster. The object %s is no backup that tent took of "+
-			"this cluster. Delete the server machines in the cloud, run tent update cluster --yes, and restore another "+
-			"backup", clusterLabel(cluster), plan.Backup.Path)
+		return plan, lockedOut(cluster, plan.Backup.Path)
 	case err != nil:
 		return plan, fmt.Errorf("check tent's access after the restore: %w; run the command again", err)
 	}

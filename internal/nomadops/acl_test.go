@@ -327,3 +327,66 @@ func TestIntroTokenErrors(t *testing.T) {
 		})
 	}
 }
+
+// accessorRequest is the request of TokenAccessor: token/self with the client's own token.
+var accessorRequest = gotRequest{Method: http.MethodGet, Path: selfPath, Query: "region=" + region,
+	Token: clientToken, Peer: "cli." + region + ".nomad"}
+
+// TestTokenAccessor checks that the accessor is the one that token/self answers for the client's own token.
+func TestTokenAccessor(t *testing.T) {
+	p := newPKI(t, v1alpha1.RoleServer, region)
+	token := pki.NewBootstrapSecret()
+	srv := newNomadServer(t, p.server, p.ca.Bundle(), answer(http.StatusOK, managementToken(token)))
+
+	got, err := newClient(t, srv, p, token).TokenAccessor(t.Context())
+
+	if err != nil {
+		t.Fatalf("TokenAccessor: %s", show(t, err, clientTokens(token)))
+	}
+	if want := "8f3a1c2e-7b4d-4e6f-9a0b-1c2d3e4f5a6b"; got != want {
+		t.Errorf("TokenAccessor() = %q, want %q", got, want)
+	}
+	checkRequests(t, srv, clientTokens(token), accessorRequest)
+}
+
+// TestTokenAccessorErrors checks the class of each answer that a read of the accessor can get: a 403 matches
+// ErrDenied alone, and the answers that may change match ErrNotReady.
+func TestTokenAccessorErrors(t *testing.T) {
+	p := newPKI(t, v1alpha1.RoleServer, region)
+	token := pki.NewBootstrapSecret()
+	cases := []struct {
+		name     string
+		handler  http.HandlerFunc
+		want     string
+		notReady bool
+		denied   bool
+	}{
+		{"a secret that is no token", answer(http.StatusForbidden, "Permission denied"),
+			"nomad: GET /v1/acl/token/self: 403: Permission denied", false, true},
+		{"no leader", answer(http.StatusInternalServerError, "No cluster leader"),
+			"nomad: GET /v1/acl/token/self: 500: No cluster leader", true, false},
+		{"rate limited", answer(http.StatusTooManyRequests, "slow down"),
+			"nomad: GET /v1/acl/token/self: 429: slow down", true, false},
+		{"no token/self", answer(http.StatusNotFound, "Not found"),
+			"nomad: GET /v1/acl/token/self: 404: Not found", false, false},
+		{"an answer cut short", cutAnswer(t), "nomad: GET /v1/acl/token/self: unexpected EOF", true, false},
+		{"no accessor in the answer", answer(http.StatusOK, `{"Type":"management"}`),
+			"nomad: GET /v1/acl/token/self: the answer holds no accessor", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newNomadServer(t, p.server, p.ca.Bundle(), tc.handler)
+
+			got, err := newClient(t, srv, p, token).TokenAccessor(t.Context())
+
+			checkCallErr(t, err, tc.want, tc.notReady, clientTokens(token))
+			if errors.Is(err, nomadops.ErrDenied) != tc.denied {
+				t.Errorf("errors.Is(ErrDenied) = %v, want %v", !tc.denied, tc.denied)
+			}
+			if got != "" {
+				t.Errorf("TokenAccessor() = %q with the error, want none", got)
+			}
+			checkRequests(t, srv, clientTokens(token), accessorRequest)
+		})
+	}
+}

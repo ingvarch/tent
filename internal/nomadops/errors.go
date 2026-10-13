@@ -23,6 +23,9 @@ var (
 	// ErrGone means the node or the Raft peer that the call names is not in the cluster. It is permanent: the same
 	// call fails the same way.
 	ErrGone = errors.New("not in the cluster")
+	// ErrDenied means the server answered 403: the call's token is no token of the cluster, or may not make the call.
+	// It is permanent: the same call fails the same way.
+	ErrDenied = errors.New("permission denied")
 	// ErrBootstrapMismatch means the cluster's ACL system was bootstrapped with a secret other than the one given.
 	ErrBootstrapMismatch = errors.New(
 		"the ACL system was bootstrapped with a secret other than the one in secrets/acl-bootstrap-token")
@@ -41,6 +44,7 @@ type callError struct {
 	message      string // the answer's body, on one line and cut to maxMessage bytes
 	notReady     bool   // the error matches ErrNotReady
 	gone         bool   // the error matches ErrGone
+	denied       bool   // the error matches ErrDenied
 	cause        error  // why the call failed without an answer, or why the answer is of no use
 }
 
@@ -58,9 +62,9 @@ func (e *callError) Error() string {
 	return s
 }
 
-// Is makes errors.Is hold for ErrNotReady and ErrGone when the error is of that class.
+// Is makes errors.Is hold for ErrNotReady, ErrGone and ErrDenied when the error is of that class.
 func (e *callError) Is(target error) bool {
-	return e.notReady && target == ErrNotReady || e.gone && target == ErrGone
+	return e.notReady && target == ErrNotReady || e.gone && target == ErrGone || e.denied && target == ErrDenied
 }
 
 // Unwrap returns the cause of the error, such as the error of the caller's context, or nil for an answer with an
@@ -77,6 +81,7 @@ func newCallError(method, path string, err error) error {
 	switch {
 	case errors.As(err, &answer):
 		e.status, e.message = answer.StatusCode(), message(answer.Body())
+		e.denied = e.status == http.StatusForbidden
 		e.notReady = e.status == http.StatusTooManyRequests || e.status >= http.StatusInternalServerError
 	case errors.As(err, &urlErr):
 		e.cause, e.notReady = urlErr.Err, !tlsFailure(urlErr.Err)

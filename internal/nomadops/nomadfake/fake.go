@@ -35,8 +35,9 @@ import (
 // returns no value.
 //
 // The fake is simpler than Nomad in these ways:
-//   - It checks no ACL token: each call succeeds whatever token its client holds. Tokens tells which tokens the
-//     clients got. Only before the bootstrap does a call fail: Nodes, Jobs, Health, Peers, KeyringReady, IntroToken,
+//   - It checks no ACL token: each call succeeds whatever token its client holds, except TokenAccessor, which knows
+//     the bootstrap secret alone and answers 403 for any other. Tokens tells which tokens the clients got. Only before
+//     the bootstrap does a call fail: TokenAccessor, Nodes, Jobs, Health, Peers, KeyringReady, IntroToken,
 //     CreateToken, MarkIneligible, Drain, Purge, TransferLeadership, RemovePeer, Members, ForceLeave, SaveSnapshot
 //     and RestoreSnapshot fail for good, as Nomad's 403, until a Bootstrap succeeds; Leader and Bootstrap work. Peers
 //     fails so, since Nomad answers the Raft configuration to a management token alone.
@@ -54,7 +55,9 @@ import (
 //   - Jobs lists what SetJobs set, and no job changes over time or by any other call.
 //   - A snapshot is the bytes "nomadfake snapshot <n>", and holds nothing of the cluster: RestoreSnapshot records the
 //     snapshot for Restored and changes no node, job, peer, member, health or leader, though Nomad's restore changes
-//     the keyring, the ACL tokens, the jobs and the nodes that registered after the snapshot.
+//     the keyring, the ACL tokens, the jobs and the nodes that registered after the snapshot. Of the tokens it models
+//     one thing: the bootstrap secret gets the accessor that the bootstrap token had in the cluster that saved the
+//     snapshot, as in Nomad.
 //   - Its keyring has an active key as soon as the ACL system is bootstrapped, unless SetKeyringDelay holds it back;
 //     meanwhile KeyringReady is false and IntroToken fails as Nomad's 500 does.
 //
@@ -64,18 +67,20 @@ type Fake struct {
 	mu           sync.Mutex
 	leader       string
 	bootstrapped secret.Secret // the secret of the management token, once the ACL system is bootstrapped
+	accessor     string        // the accessor of that token
 	nodes        []fakeNode
 	jobs         []nomadops.Job
 	drainReads   int // how many reads of the nodes a new drain stays under way for
 	health       nomadops.Health
 	peers        []nomadops.Peer
 	members      []fakeMember
-	keyringReads int             // how many reads of the keyring still find no active key
-	tokens       []secret.Secret // the tokens of the clients, in the order Client made them
-	issued       []IssuedToken   // the management tokens that CreateToken made, in order
-	saves        int             // how many snapshots the cluster saved
-	restored     []secret.Secret // the snapshots that the cluster restored, in order
-	faults       []fault         // in the order they were set
+	keyringReads int               // how many reads of the keyring still find no active key
+	tokens       []secret.Secret   // the tokens of the clients, in the order Client made them
+	issued       []IssuedToken     // the management tokens that CreateToken made, in order
+	saves        int               // how many snapshots the cluster saved
+	accessors    map[string]string // the accessor of the bootstrap token of the cluster that saved each snapshot
+	restored     []secret.Secret   // the snapshots that the cluster restored, in order
+	faults       []fault           // in the order they were set
 	calls        []Call
 }
 
@@ -92,7 +97,7 @@ func (f *Fake) Client(cfg nomadops.Config) nomadops.API {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.tokens = append(f.tokens, slices.Clone(cfg.Token))
-	return client{f: f, server: cfg.Address}
+	return client{f: f, server: cfg.Address, token: slices.Clone(cfg.Token)}
 }
 
 // SetLeader makes addr the RPC address of the cluster's leader, such as 10.0.0.5:4647. An empty addr leaves the
@@ -105,21 +110,22 @@ func (f *Fake) SetLeader(addr string) {
 
 // NewCluster makes the cluster a new one, as New returns it: without a leader, nodes, jobs, peers or bootstrap, and
 // with the zero Health, a keyring that is ready at once and drains that complete at the first read. The log of calls,
-// the clients' tokens, the issued tokens, the count of saved snapshots, the restored snapshots and the faults stay.
+// the clients' tokens, the issued tokens, the count of saved snapshots and their accessors, the restored snapshots
+// and the faults stay.
 func (f *Fake) NewCluster() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.leader, f.bootstrapped, f.nodes, f.jobs, f.peers, f.members = "", nil, nil, nil, nil, nil
+	f.leader, f.bootstrapped, f.accessor, f.nodes, f.jobs, f.peers, f.members = "", nil, "", nil, nil, nil, nil
 	f.health = nomadops.Health{}
 	f.keyringReads, f.drainReads = 0, 0
 }
 
-// SetBootstrapped makes the cluster one whose ACL system was bootstrapped with a copy of bootstrapSecret, without a
-// call and whether or not the cluster has a leader.
+// SetBootstrapped makes the cluster one whose ACL system was bootstrapped with a copy of bootstrapSecret, with a new
+// accessor for its token, without a call and whether or not the cluster has a leader.
 func (f *Fake) SetBootstrapped(bootstrapSecret secret.Secret) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.bootstrapped = slices.Clone(bootstrapSecret)
+	f.bootstrapped, f.accessor = slices.Clone(bootstrapSecret), uuid.New()
 }
 
 // SetKeyringDelay makes the next reads calls of KeyringReady after the bootstrap find no active key, and makes
@@ -249,8 +255,9 @@ var (
 	// errKeyring is the 500 of Nomad for an intro token that is asked for before the keyring has a key.
 	errKeyring = notReadyError("500: failed to sign node introduction identity claims: keyring has not been " +
 		"initialized yet")
-	// errDenied is the 403 of Nomad for a call that needs an ACL token before any exists.
-	errDenied = errors.New("permission denied")
+	// errDenied is the 403 of Nomad for a call that needs an ACL token before any exists, or for a secret that is no
+	// token.
+	errDenied = deniedError("permission denied")
 )
 
 // notReadyError is a cause that matches nomadops.ErrNotReady, as the 5xx answers of Nomad do.
@@ -260,6 +267,14 @@ func (e notReadyError) Error() string { return string(e) }
 
 // Is makes errors.Is hold for nomadops.ErrNotReady.
 func (notReadyError) Is(target error) bool { return target == nomadops.ErrNotReady }
+
+// deniedError is a cause that matches nomadops.ErrDenied, as the 403 answers of Nomad do.
+type deniedError string
+
+func (e deniedError) Error() string { return string(e) }
+
+// Is makes errors.Is hold for nomadops.ErrDenied.
+func (deniedError) Is(target error) bool { return target == nomadops.ErrDenied }
 
 // callError is the error of a call that the fake fails.
 type callError struct {
@@ -307,7 +322,8 @@ func (f *Fake) call(ctx context.Context, server, name, arg string, do func() err
 // client is the nomadops.API of a client of the cluster.
 type client struct {
 	f      *Fake
-	server string // the Address of the Config that made the client
+	server string        // the Address of the Config that made the client
+	token  secret.Secret // the Token of that Config
 }
 
 // Format prints the client as nomadfake.Client, whatever the verb: fmt would print the secrets of the fake for %s and
@@ -333,12 +349,28 @@ func (c client) Bootstrap(ctx context.Context, bootstrapSecret secret.Secret) er
 	return c.f.call(ctx, c.server, "Bootstrap", bootstrapSecret.String(), func() error {
 		switch {
 		case c.f.bootstrapped == nil:
-			c.f.bootstrapped = slices.Clone(bootstrapSecret)
+			c.f.bootstrapped, c.f.accessor = slices.Clone(bootstrapSecret), uuid.New()
 		case !bytes.Equal(c.f.bootstrapped, bootstrapSecret):
 			return nomadops.ErrBootstrapMismatch
 		}
 		return nil
 	})
+}
+
+// TokenAccessor returns the accessor of the bootstrap token when the client's token is the bootstrap secret, and
+// fails as Nomad's 403 for any other secret: the fake knows no other token. Each bootstrap of a new cluster makes a
+// new accessor, and a restore of a snapshot that the fake saved gives the secret the accessor of the cluster that the
+// snapshot was taken from.
+func (c client) TokenAccessor(ctx context.Context) (string, error) {
+	var accessor string
+	err := c.f.call(ctx, c.server, "TokenAccessor", "", func() error {
+		if c.f.bootstrapped == nil || !bytes.Equal(c.f.bootstrapped, c.token) {
+			return errDenied
+		}
+		accessor = c.f.accessor
+		return nil
+	})
+	return result(accessor, err)
 }
 
 // IntroToken returns a JWT without a signature whose claims are Nomad's {"nomad_node_name": <node>,
@@ -750,7 +782,8 @@ const errBadSnapshot = notReadyError("500: failed to restore from snapshot: fail
 	"gzip: invalid header")
 
 // SaveSnapshot returns "nomadfake snapshot <n>", where n counts the saves that the cluster carried out, from 1, whoever
-// asked; a save whose answer was lost counts, and one that fails before the bootstrap does not.
+// asked; a save whose answer was lost counts, and one that fails before the bootstrap does not. The fake remembers the
+// accessor that the bootstrap token has at the save, for RestoreSnapshot.
 func (c client) SaveSnapshot(ctx context.Context) (secret.Secret, error) {
 	var snap secret.Secret
 	err := c.f.call(ctx, c.server, "SaveSnapshot", "", func() error {
@@ -759,14 +792,19 @@ func (c client) SaveSnapshot(ctx context.Context) (secret.Secret, error) {
 		}
 		c.f.saves++
 		snap = secret.Secret(snapshotPrefix + strconv.Itoa(c.f.saves))
+		if c.f.accessors == nil {
+			c.f.accessors = map[string]string{}
+		}
+		c.f.accessors[string(snap)] = c.f.accessor
 		return nil
 	})
 	return result(snap, err)
 }
 
-// RestoreSnapshot records a copy of the snapshot for Restored and changes nothing else in the cluster. Bytes that do
-// not start with "nomadfake snapshot " fail as Nomad's 500 does for a file that is no snapshot, which matches
-// nomadops.ErrNotReady. It refuses an empty snapshot before any call, as the client does.
+// RestoreSnapshot records a copy of the snapshot for Restored and changes nothing else in the cluster, except that a
+// snapshot that SaveSnapshot returned gives the bootstrap secret the accessor that the cluster had when it saved it.
+// Bytes that do not start with "nomadfake snapshot " fail as Nomad's 500 does for a file that is no snapshot, which
+// matches nomadops.ErrNotReady. It refuses an empty snapshot before any call, as the client does.
 func (c client) RestoreSnapshot(ctx context.Context, snap secret.Secret) error {
 	if err := nomadops.CheckSnapshot(snap); err != nil {
 		return &callError{name: "RestoreSnapshot", cause: err}
@@ -779,6 +817,9 @@ func (c client) RestoreSnapshot(ctx context.Context, snap secret.Secret) error {
 			return errBadSnapshot
 		}
 		c.f.restored = append(c.f.restored, slices.Clone(snap))
+		if accessor, ok := c.f.accessors[string(snap)]; ok {
+			c.f.accessor = accessor
+		}
 		return nil
 	})
 }

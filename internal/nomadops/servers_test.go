@@ -59,6 +59,13 @@ func (s *stub) Leader(context.Context) (string, error) {
 
 func (s *stub) Bootstrap(context.Context, secret.Secret) error { return s.record("Bootstrap") }
 
+func (s *stub) TokenAccessor(context.Context) (string, error) {
+	if err := s.record("TokenAccessor"); err != nil {
+		return "", err
+	}
+	return "accessor", nil
+}
+
 func (s *stub) IntroToken(context.Context, nomadops.IntroRequest) (secret.Secret, error) {
 	if err := s.record("IntroToken"); err != nil {
 		return nil, err
@@ -240,6 +247,10 @@ func TestServersEveryMethodMovesOn(t *testing.T) {
 		"Leader": func(ctx context.Context, a nomadops.API) error { _, err := a.Leader(ctx); return err },
 		"Bootstrap": func(ctx context.Context, a nomadops.API) error {
 			return a.Bootstrap(ctx, pki.NewBootstrapSecret())
+		},
+		"TokenAccessor": func(ctx context.Context, a nomadops.API) error {
+			_, err := a.TokenAccessor(ctx)
+			return err
 		},
 		"IntroToken": func(ctx context.Context, a nomadops.API) error {
 			_, err := a.IntroToken(ctx, nomadops.IntroRequest{NodeName: "n", NodePool: "default", TTL: time.Minute})

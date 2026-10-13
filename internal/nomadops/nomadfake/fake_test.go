@@ -46,11 +46,11 @@ var introRequest = nomadops.IntroRequest{NodeName: "prod-workers-1", NodePool: "
 // tokenRequest asks for a token named "tent export nomad ana@laptop" for 24 hours.
 var tokenRequest = nomadops.TokenRequest{Name: "tent export nomad ana@laptop", TTL: 24 * time.Hour}
 
-// newAPI returns a fake that has a leader, and a client of it with a new token.
+// newAPI returns a fake that has a leader, and a client of it whose token is bootstrapSecret.
 func newAPI() (*nomadfake.Fake, nomadops.API) {
 	f := nomadfake.New()
 	f.SetLeader(leader)
-	return f, f.Client(nomadops.Config{Token: pki.NewBootstrapSecret()})
+	return f, f.Client(nomadops.Config{Token: bootstrapSecret})
 }
 
 // newBootstrappedAPI is newAPI after a bootstrap with bootstrapSecret, the first call in the fake's log.
@@ -144,6 +144,10 @@ var apiCalls = []apiCall{
 		return err
 	}, nil},
 	{"Bootstrap", func(ctx context.Context, a nomadops.API) error { return a.Bootstrap(ctx, bootstrapSecret) }, nil},
+	{"TokenAccessor", func(ctx context.Context, a nomadops.API) error {
+		_, err := a.TokenAccessor(ctx)
+		return err
+	}, nil},
 	{"IntroToken", func(ctx context.Context, a nomadops.API) error {
 		_, err := a.IntroToken(ctx, introRequest)
 		return err
@@ -275,14 +279,14 @@ func argOf(name string) string {
 	return ""
 }
 
-// TestACLCallsNeedTheBootstrap checks that, before the ACL system is bootstrapped, Nodes, Jobs, Health, Peers,
-// KeyringReady, IntroToken, CreateToken, MarkIneligible, Drain, Purge, TransferLeadership, RemovePeer, Members,
+// TestACLCallsNeedTheBootstrap checks that, before the ACL system is bootstrapped, TokenAccessor, Nodes, Jobs, Health,
+// Peers, KeyringReady, IntroToken, CreateToken, MarkIneligible, Drain, Purge, TransferLeadership, RemovePeer, Members,
 // ForceLeave, SaveSnapshot and RestoreSnapshot fail for good as Nomad's 403 does, while Leader and Bootstrap work; and
 // that they work after the bootstrap.
 func TestACLCallsNeedTheBootstrap(t *testing.T) {
-	for _, name := range []string{"IntroToken", "CreateToken", "Nodes", "Jobs", "Health", "Peers", "KeyringReady",
-		"MarkIneligible", "Drain", "Purge", "TransferLeadership", "RemovePeer", "Members", "ForceLeave", "SaveSnapshot",
-		"RestoreSnapshot"} {
+	for _, name := range []string{"TokenAccessor", "IntroToken", "CreateToken", "Nodes", "Jobs", "Health", "Peers",
+		"KeyringReady", "MarkIneligible", "Drain", "Purge", "TransferLeadership", "RemovePeer", "Members", "ForceLeave",
+		"SaveSnapshot", "RestoreSnapshot"} {
 		t.Run(name, func(t *testing.T) {
 			f, a := newAPI()
 			var call apiCall
@@ -1114,7 +1118,7 @@ func TestConcurrentUse(t *testing.T) {
 				// Not named like tableNode: Register without an ID would replace it under a call that needs it.
 				f.Register(nomadops.Node{Name: "worker-" + strconv.Itoa(w), Status: "ready", Eligible: true})
 				f.SetHealth(nomadops.Health{Healthy: true, Voters: i})
-				a := f.Client(nomadops.Config{Token: pki.NewBootstrapSecret()})
+				a := f.Client(nomadops.Config{Token: bootstrapSecret})
 				for _, c := range apiCalls {
 					c.prepare(f)
 					if err := c.call(ctx, a); err != nil {
@@ -1148,9 +1152,9 @@ func TestCallsNameTheServerOfTheClient(t *testing.T) {
 			if err := earlier.Bootstrap(t.Context(), bootstrapSecret); err != nil {
 				t.Fatalf("Bootstrap: %v", err)
 			}
-			first := f.Client(nomadops.Config{Address: "198.51.100.1:4646", Token: pki.NewBootstrapSecret()})
-			second := f.Client(nomadops.Config{Address: "198.51.100.2:4646", Token: pki.NewBootstrapSecret()})
-			anonymous := f.Client(nomadops.Config{Token: pki.NewBootstrapSecret()})
+			first := f.Client(nomadops.Config{Address: "198.51.100.1:4646", Token: bootstrapSecret})
+			second := f.Client(nomadops.Config{Address: "198.51.100.2:4646", Token: bootstrapSecret})
+			anonymous := f.Client(nomadops.Config{Token: bootstrapSecret})
 
 			c.prepare(f)
 			for _, a := range []nomadops.API{first, second, first, anonymous} {
