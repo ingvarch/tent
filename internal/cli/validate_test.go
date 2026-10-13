@@ -564,8 +564,10 @@ func TestValidateHelp(t *testing.T) {
 		", and with 1 when tent could not check",
 		"It checks that each node group has its machines, that the cloud reports them as running, that each has " +
 			"joined Nomad, that Nomad has a leader, that the servers vote, are alive and healthy, that the clients are " +
-			"registered, ready and eligible, that every node runs the pinned Nomad version, and that no certificate " +
+			"registered, ready and eligible, that every node runs the cluster's Nomad version, and that no certificate " +
 			"has ended.",
+		"certificates that end within 30 days, specs that tent update cluster has not applied and nodes that tent " +
+			"rolling-update cluster replaces.",
 	} {
 		if got.code != 0 || !strings.Contains(got.out, want) {
 			t.Errorf("exit code = %d, stdout\n%s\nwant 0 and it to hold %q", got.code, got.out, want)

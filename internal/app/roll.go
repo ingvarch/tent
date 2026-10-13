@@ -264,17 +264,27 @@ func (s *Service) checkApplied(ctx context.Context, l statestore.Layout, c loade
 	if !marked {
 		return fmt.Errorf("%s has no Nomad yet; run tent update cluster first", name)
 	}
-	completed, err := spec.Encode(c.objs)
+	applied, err := c.specsApplied()
 	if err != nil {
-		return fmt.Errorf("encode the completed spec of %s: %w", name, err)
+		return err
 	}
 	switch {
 	case c.stored == nil:
 		return fmt.Errorf("%s has no completed spec; run tent update cluster first", name)
-	case !bytes.Equal(c.stored, completed):
+	case !applied:
 		return fmt.Errorf("the specs of %s changed since the last tent update cluster; run it first", name)
 	}
 	return nil
+}
+
+// specsApplied reports whether the stored completed spec of c is the one that its specs make now. It reports false
+// when the store has none.
+func (c loadedCluster) specsApplied() (bool, error) {
+	completed, err := spec.Encode(c.objs)
+	if err != nil {
+		return false, fmt.Errorf("encode the completed spec of %s: %w", clusterLabel(c.m.Name), err)
+	}
+	return bytes.Equal(c.stored, completed), nil
 }
 
 // isServerMachine reports whether the machine in belongs to a server or combined group of m.

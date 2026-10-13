@@ -130,10 +130,10 @@ func checkNomad(c loadedCluster, set machineSet, answer nomadAnswer, now time.Ti
 	found.failures = append(found.failures, answer.failures...)
 	if view := answer.view; view != nil {
 		servers, clients := set.servers(c.m), set.clients(c.m)
-		pinned := c.objs.Cluster.Spec.Nomad.Version
+		version := c.objs.Cluster.Spec.Nomad.Version
 		found.failures = append(found.failures, serverFailures(servers, set.owned, view.peers, view.health)...)
 		found.failures = append(found.failures, clientFailures(clients, view.nodes)...)
-		found.failures = append(found.failures, versionFailures(servers, view.health, clients, view.nodes, pinned)...)
+		found.failures = append(found.failures, versionFailures(servers, view.health, clients, view.nodes, version)...)
 	}
 	return found
 }
@@ -313,23 +313,23 @@ func clientFailures(clients []cloud.Instance, nodes []nomadops.Node) []Failure {
 }
 
 // versionFailures returns a failure for each server in autopilot's report and each client among nodes that runs a
-// Nomad version other than pinned, in no particular order. A server that the report lacks, and a client that Nomad does
-// not list or lists as down, are not compared.
+// Nomad version other than version, the cluster's version, in no particular order. A server that the report lacks, and
+// a client that Nomad does not list or lists as down, are not compared.
 func versionFailures(servers []cloud.Instance, health nomadops.Health, clients []cloud.Instance,
-	nodes []nomadops.Node, pinned string,
+	nodes []nomadops.Node, version string,
 ) []Failure {
 	var fs []Failure
-	differs := func(in cloud.Instance, role, version string) {
+	differs := func(in cloud.Instance, role, nodeVersion string) {
 		fs = append(fs, nodeFailure(checkNomadVersion, in,
-			fmt.Sprintf("its %s runs Nomad %s; the cluster is pinned to %s", role, version, pinned)))
+			fmt.Sprintf("its %s runs Nomad %s; the cluster's version is %s", role, nodeVersion, version)))
 	}
 	for _, in := range servers {
-		if sv, ok := serverReport(health.Servers, in); ok && sv.Version != pinned {
+		if sv, ok := serverReport(health.Servers, in); ok && sv.Version != version {
 			differs(in, "server", sv.Version)
 		}
 	}
 	for _, in := range clients {
-		if n, ok := clientNode(nodes, in); ok && n.Status != "down" && n.Version != pinned {
+		if n, ok := clientNode(nodes, in); ok && n.Status != "down" && n.Version != version {
 			differs(in, "client", n.Version)
 		}
 	}
