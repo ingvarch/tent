@@ -1,0 +1,2 @@
+State: cluster.completed.yaml will be written.
+Outdated: prod-servers-0, prod-servers-1, prod-servers-2, prod-workers-0 and prod-workers-1; tent rolling-update cluster replaces them.

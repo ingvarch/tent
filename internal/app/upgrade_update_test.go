@@ -478,11 +478,7 @@ func TestUpdateStopsBeforeTheCreateOfAClientThatNeverRegistered(t *testing.T) {
 			t.Errorf("the workers are %v, want prod-workers-0 alone: the delete stands and the create does not", got)
 		}
 
-		b := liveWorld{f: f, w: w}
-		b.api, err = svc.Nomad(nomadops.Config{Address: "198.51.100.1:4646"})
-		if err != nil {
-			t.Fatal(err)
-		}
+		b := liveOf(t, svc, f, w)
 		if _, err := svc.RollingUpdate(t.Context(), "prod", app.RollOptions{Apply: true}); err != nil {
 			t.Fatalf("RollingUpdate: %v", err)
 		}
