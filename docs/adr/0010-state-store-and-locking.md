@@ -5,7 +5,9 @@
   tests) was built on 2026-09-26 in `internal/statestore`;
   [architecture §10](../architecture.md#10-state-store-and-locking) describes it as built. The Hetzner firewall
   mutex comes with the Hetzner provider in M4, not M1 ([ADR-0014](0014-vultr-first-provider-and-e2e.md)). The layout
-  gained `names/<nodegroup>` in M3.4 ([ADR-0038](0038-rolling-update-of-server-groups.md), item 22).
+  gained `names/<nodegroup>` in M3.4 ([ADR-0038](0038-rolling-update-of-server-groups.md), item 22), and in M3.8 the
+  backups `backups/<bootstrap>/<taken>.snap` and the record `nomad/restored`, which `delete cluster` knows
+  ([ADR-0042](0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md)).
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0003](0003-cloud-is-source-of-truth.md), [ADR-0007](0007-security-baseline.md),

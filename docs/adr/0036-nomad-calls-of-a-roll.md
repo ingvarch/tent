@@ -3,7 +3,11 @@
 - **Status:** Accepted; amended by [ADR-0038](0038-rolling-update-of-server-groups.md) (M3.4 uses the transfer, the
   peer removal, the members and the force-leave: a call to a server that does not answer waits the call timeout of 30 s
   before `Servers` moves on, so the loop leaves a stopped server, and a server whose peer it removes while the server
-  runs, out of its API)
+  runs, out of its API) and by
+  [ADR-0042](0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md) (M3.8 wires the snapshot calls
+  into `tent backup`, which asks again for up to 5 minutes after the 500 that follows a change of the servers;
+  decision 47 settles where a restore may go: only into servers that `update` built again; `Jobs` and `TokenAccessor`
+  are two more reads of the kind this ADR describes, and a fourth class of errors, `ErrDenied`, matches a 403)
 - **Date:** 2026-10-08
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0017](0017-api-driven-server-removal.md), [ADR-0031](0031-bootstrap-in-update.md) and

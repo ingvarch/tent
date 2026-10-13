@@ -197,6 +197,19 @@ packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries that
       machine report its own version. The upgrade ran on the fakes. Nomad 2.0.6 and 2.0.7 ran together in a local lab
       without tent, where the servers were rolled by hand in tent's order (platform notes §1.3); M3.9's `upgrade`
       scenario runs it on Vultr.
+  - M3.8 added `tent backup create`, `list` and `restore` (`internal/app` `backup.go`, `backup_restore.go`, `access.go`;
+    `internal/cli/backup.go`; `internal/statestore` `layout.go`; `internal/nomadops` `jobs.go`, `acl.go`; ADR-0042;
+    maintainer decisions 46 and 47): a backup is a snapshot of Nomad's state, stored under `backups/<bootstrap>/` with
+    the time of the bootstrap mark in its path, and `restore` puts one into servers that `update` built again.
+    - `create` runs under the lock, waits up to 5 minutes for a snapshot, and raises `tent-version`. `list` reads only
+      the state store.
+    - `restore` refuses a backup of the servers that run now (R2), another backup after a restore (R3, one for each
+      bootstrap) and any job on the servers (R4). It writes the record `nomad/restored` with the bootstrap token's
+      accessor before it sends the backup, and a resumed run applies R4 unless the accessor shows that Nomad took the
+      backup. After the restore it checks the stored bootstrap secret and ends with a lock-out error when it fails.
+      `latest` refuses when the earlier backups are of more than one rebuild.
+    - `nomadops` has `Jobs`, `TokenAccessor` and the class `ErrDenied`. `delete cluster` deletes the backups and the
+      record. The run on Vultr gave a rebuilt server its old private address (platform notes §3.16).
 
 ## Read before changing anything
 

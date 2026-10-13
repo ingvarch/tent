@@ -31,7 +31,7 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0007](0007-security-baseline.md) | Security baseline: PKI, mTLS, ACL, client introduction | Accepted; see 0019; amended by 0024, 0029 and 0033 |
 | [0008](0008-node-credential-delivery.md) | Node credential delivery: user data in v1, bootstrap controller as the target | Accepted; exception in 0019; amended by 0029 and 0032 |
 | [0009](0009-server-discovery-fixed-ip-slots.md) | Nomad server discovery on Hetzner through fixed private IP slots | Accepted (Hetzner-specific; generic strategy in 0016) |
-| [0010](0010-state-store-and-locking.md) | State store backends, layout and locking | Accepted; see 0015; amended by 0038 |
+| [0010](0010-state-store-and-locking.md) | State store backends, layout and locking | Accepted; see 0015; amended by 0038 and 0042 |
 | [0011](0011-nomad-only-scope-and-licensing.md) | Nomad-only scope for v1 and licensing boundaries | Accepted; extended by 0026 |
 | [0012](0012-testing-strategy.md) | Testing strategy: fakes, golden integration tests, E2E on Hetzner | Accepted; E2E platform amended by 0014; E2E running and marking amended by 0034 |
 | [0013](0013-technology-stack.md) | Technology stack and release engineering | Accepted; govultr added by 0018; extended by 0020; JSON Schema generator and spec decoding libraries added by 0022 |
@@ -52,14 +52,15 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0028](0028-tent-node-agent-units-and-delivery.md) | tent-node agent, units and delivery | Accepted; amended by 0029 and 0030 |
 | [0029](0029-host-firewall-runtime-and-cni-on-nodes.md) | Host firewall, container runtime and CNI plugins on nodes | Accepted; amended by 0030 and 0032 |
 | [0030](0030-nomad-on-nodes.md) | Nomad on nodes | Accepted; amended by 0031, 0032, 0033 and 0038 |
-| [0031](0031-bootstrap-in-update.md) | Bootstrap in `update` | Accepted; amended by 0032, 0033, 0034, 0036, 0038, 0039, 0040 and 0041 |
+| [0031](0031-bootstrap-in-update.md) | Bootstrap in `update` | Accepted; amended by 0032, 0033, 0034, 0036, 0038, 0039, 0040, 0041 and 0042 |
 | [0032](0032-joined-label-scrub-and-delete-guard.md) | The joined label, the scrub and the delete guard | Accepted; amended by 0033, 0037, 0039 and 0040 |
 | [0033](0033-operator-commands.md) | Operator commands: validate, export nomad and ui | Accepted; amended by 0040 and 0041 |
 | [0034](0034-e2e-suite-on-vultr.md) | The E2E suite on Vultr | Accepted |
 | [0035](0035-rollout-decisions.md) | Rollout decisions | Accepted; the refusal of two voters and single servers is gone (built in M3.4); amended by 0036, 0037, 0038, 0039, 0040 and 0041 |
-| [0036](0036-nomad-calls-of-a-roll.md) | The Nomad calls of a roll | Accepted; amended by 0038 |
+| [0036](0036-nomad-calls-of-a-roll.md) | The Nomad calls of a roll | Accepted; amended by 0038 and 0042 |
 | [0037](0037-rolling-update-of-client-groups.md) | Rolling update of client groups | Accepted; amended by 0038, 0039, 0040 and 0041 |
 | [0038](0038-rolling-update-of-server-groups.md) | Rolling update of server groups | Accepted; amended by 0039 and 0040 |
 | [0039](0039-rolling-update-of-combined-groups.md) | Rolling update of combined groups | Accepted; amended by 0040 |
 | [0040](0040-scale-down-through-the-rollout.md) | Scale down through the rollout | Accepted; amended by 0041 |
 | [0041](0041-upgrading-a-clusters-nomad-version.md) | Upgrading a cluster's Nomad version | Accepted |
+| [0042](0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md) | Backups in the state store and the restore after a loss of the servers | Accepted |

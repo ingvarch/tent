@@ -60,7 +60,13 @@
 > that runs, and it stops before a client that would run a newer Nomad than a server. The upgrade ran on the fakes.
 > Nomad 2.0.6 and 2.0.7 ran together in a local lab without tent, where the servers were rolled by hand in tent's
 > order ([platform notes §1.3](platform-notes.md#13-upgrades-and-version-skew)); M3.9's `upgrade` scenario runs it on
-> Vultr. M3.8 wires the snapshots into `tent backup`.
+> Vultr. M3.8 built `tent backup create`, `list` and `restore`
+> ([ADR-0042](adr/0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md)):
+> a backup is a snapshot of Nomad's state in the state store, under `backups/<bootstrap>/`, and a restore puts one
+> into servers that `update` built again from the same state store, only while they run no job and once for each
+> bootstrap. A restore that is cut is finished by running the command again, `delete cluster` deletes the backups, and
+> the run on Vultr gave the rebuilt server its old private address, so the old worker came back by itself ([platform
+> notes §3.16](platform-notes.md#316-spike-runs)).
 >
 > **Work items live in GitHub:** each milestone below links to its GitHub milestone, and the
 > [tent roadmap project][project] shows the open issues. This file keeps the goals and exit criteria; close issues as
@@ -75,7 +81,7 @@ These come from [architecture §18](architecture.md#18-open-questions). The firs
 seventh to the fifteenth on 2026-09-28, the sixteenth to the twenty-first on 2026-09-29, the twenty-second to the
 twenty-fourth on 2026-09-30, the twenty-fifth to the twenty-seventh on 2026-10-05, and the twenty-eighth to the
 thirty-second on 2026-10-06, the thirty-third to the thirty-fifth on 2026-10-07, the thirty-seventh to the
-forty-fourth on 2026-10-08, the forty-fifth and the forty-eighth on 2026-10-09, and the forty-ninth and the fiftieth on
+forty-fourth on 2026-10-08, the forty-fifth to the forty-eighth on 2026-10-09, and the forty-ninth and the fiftieth on
 2026-10-12. The maintainer extended the twenty-third on 2026-10-02.
 
 | # | Question | Decision |
@@ -124,6 +130,8 @@ forty-fourth on 2026-10-08, the forty-fifth and the forty-eighth on 2026-10-09, 
 | 43 | Server and combined names only grow | a roll of three servers makes `prod-servers-3`, `-4` and `-5` (2026-10-08); built in M3.4: the index above the highest that a machine, a server or a member has, and since decision 48 above the remembered index too ([ADR-0038](adr/0038-rolling-update-of-server-groups.md)) |
 | 44 | tent-node stays in every node's spec hash | each tent release rolls the servers too; an operator who wants to defer them rolls the client groups with `--nodegroups` (2026-10-08); the hash holds it already, and M3.4 lets the default selection roll the servers ([ADR-0038](adr/0038-rolling-update-of-server-groups.md)) |
 | 45 | What `upgrade cluster` writes | the new Nomad version, into `spec.nomad.version` of `cluster.yaml`, whether the spec set a version before or only the pin held it, so that the version is explicit from then on (2026-10-09); with nothing to upgrade it writes nothing; built in M3.7 ([ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)) |
+| 46 | `delete cluster` deletes the backups | with the rest of the state, and it lists them and the record of a restore in its plan; an object under `backups/` that is no backup is unknown and refused without `--force` (2026-10-09); built in M3.8 ([ADR-0042](adr/0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md)) |
+| 47 | A restore goes only into servers that were built again | a restore of a backup goes only into a cluster whose servers `update` built again from the same state store, while they run no job, and once for each bootstrap (2026-10-09; a restore into a running cluster is unsafe, so nothing else is built); the maintainer kept one restore for each bootstrap and chose the accessor of the bootstrap token for a resumed restore and a refusal of `latest` across bootstraps on 2026-10-13; built in M3.8 ([ADR-0042](adr/0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md)) |
 | 48 | tent remembers the highest index of each server and combined group | in the state store at `names/<nodegroup>`, so that the names of such a group only grow, also after a shrink or an operator's delete (2026-10-09); built in M3.4 for the roll, where a new server takes the index above it, and in M3.6 for the planner of `update` ([ADR-0038](adr/0038-rolling-update-of-server-groups.md), item 22, [ADR-0040](adr/0040-scale-down-through-the-rollout.md)) |
 | 49 | A node group keeps its role | `replace` and `edit` refuse to change the `spec.role` of a node group that the store holds (2026-10-12); built in M3.5: tent has no way to change the role of a stored group, since a cluster has exactly one server or combined group and no command deletes a node group ([ADR-0039](adr/0039-rolling-update-of-combined-groups.md)) |
 | 50 | No channel file from a URL | the channel is the one embedded in tent; an operator who wants another Nomad version than tent recommends sets `spec.nomad.version` (2026-10-12); architecture §13.5 and ADR-0026 had planned a URL that overrides the embedded file ([ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)) |
@@ -305,6 +313,10 @@ Work after M6 or not scheduled yet: [issues with the `later` label][later].
 - 2026-10-13: M3.7 is built (`tent upgrade cluster`, see the status block above). Maintainer decisions 45 and 50 are
   built, and decision 39 is narrowed. Recorded in [ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md). Closes
   #104.
+- 2026-10-13: M3.8 is built: `tent backup create`, `list` and `restore`, and `delete cluster` that deletes the backups.
+  Maintainer decisions 46 and 47 are built. It ran on Vultr: a cluster of one server and one worker, a new server with
+  the old private address, and a restore in 4 s ([platform notes §3.16](platform-notes.md#316-spike-runs)). Recorded
+  in [ADR-0042](adr/0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md). Closes #105.
 
 [project]: https://github.com/users/ingvarch/projects/2
 [later]: https://github.com/ingvarch/tent/issues?q=is%3Aissue%20label%3Alater

@@ -1900,7 +1900,8 @@ type Capabilities struct {
   secrets/gossip.key                     # secret
   secrets/acl-bootstrap-token            # secret
   nomad/bootstrapped                     # the mark that the ACL system is bootstrapped (the time)
-  backups/<timestamp>.snap               # Raft snapshots (contain the keyring: secret)
+  nomad/restored                         # which backup the servers of one bootstrap are restored from (M3.8)
+  backups/<bootstrap>/<taken>.snap       # snapshots of Nomad's state, which hold its ACL tokens and keyring: secret (M3.8)
   history/<timestamp>-<operation>.yaml   # audit trail of applies
 ```
 
@@ -1911,8 +1912,33 @@ that hold a `cluster.yaml`.
 all vote, Nomad's keyring has an active key, and the server and combined machines of the plan are scrubbed and labelled
 (M2.7a, M2.7b, M2.9,
 [13.2](#132-tent-update-cluster---yes)). `update` deletes it and writes it again when the store holds it and no server
-or combined machine of the cluster stays. Only its existence is read; it holds the time in RFC 3339 and a newline.
+or combined machine of the cluster stays. It holds the time in RFC 3339 and a newline. `update` reads only its
+existence; since M3.8 `backup create`, `backup list` and `backup restore` read the time too ([13.8](#138-backups)).
 `tent delete cluster` knows it ([13.7](#137-tent-delete-cluster---yes)).
+
+**Backups** (M3.8, [ADR-0042](adr/0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md)).
+- **`backups/<bootstrap>/<taken>.snap`** holds Nomad's bytes as `SaveSnapshot` returned them, so `nomad operator
+  snapshot inspect` reads a downloaded copy. `<taken>` is when tent got the snapshot and `<bootstrap>` the time in
+  the bootstrap mark at that moment. Both are UTC in whole seconds, written as `20261009T230207Z` (Go layout
+  `20060102T150405Z`): digits, `T` and `Z`, so each is a valid path segment on every backend and the names sort by
+  time. The backup's name is `<taken>`.
+- **`statestore.Layout`** names the objects (`Backups`, `Backup`, `BackupAt`, `NomadRestored`), `BackupName` writes a
+  time and `ParseBackupName` reads one. `ParseBackupName` accepts only text that `BackupName` writes back, so
+  `20261009t230207z`, `2026-10-09T23:02:07Z` and a time with a fraction are no backup. `statestore.Backups` lists the
+  backups, oldest first and among those of one time by their bootstrap, and leaves out other objects under the prefix.
+  Its error is `list the backups of cluster prod: <cause>`.
+- **A bootstrap in the path** lets a restore tell a backup of the servers that run now from a backup of earlier
+  servers by an equality test with the mark ([13.8](#138-backups)).
+- **`nomad/restored`** is one line of JSON and a line end, written with a plain `Put`:
+  `{"backup":"20261008T030000Z","bootstrap":"20261010T080000Z","accessor":"<accessor ID>"}`, and the same with
+  `"restored":"2026-10-10T08:20:00Z"` once the restore has ended. A record that does not decode is `prod/nomad/restored:
+  <error>`.
+- **tent stores no second backup of a name.** The `Put` carries `IfNoneMatch` on a store that enforces conditional
+  puts. On a store that does not, a second backup in the same second replaces the first. The file backend always
+  enforces them, and the s3 backend does when its probe shows it.
+- **Memory.** tent holds one snapshot in memory, as `secret.Secret`, from `SaveSnapshot` to `Put` and from `Get` to
+  `RestoreSnapshot`, and sets no limit. A snapshot of 2000 jobs was 305 KB ([platform notes
+  §1.2](platform-notes.md#12-features-tent-relies-on)).
 
 `names/<nodegroup>` holds the highest index that a machine name of a server or combined group has had (M3.4,
 maintainer decision 48, [ADR-0038](adr/0038-rolling-update-of-server-groups.md) item 22): decimal digits and a newline,
@@ -1954,10 +1980,12 @@ the s3 backend's probe writes below `.tent-probe/` ([10.4](#104-locking)).
 **Version guard.** `CheckVersion` fails when `tent-version` names a newer tent than the running one, for example
 `cluster prod needs tent v0.4.0 or newer; this is v0.3.1`. `RaiseVersion` records the running version when it is newer,
 under the cluster's lock. `update` raises it, and since M3.4 so does an apply of `rolling-update` that has a next step,
-so an older tent is refused after a roll by a newer one. A release, a pre-release and `git describe` output are checked,
-and `v0.3.0-4-gabc1234` counts as `v0.3.0`. Development builds, such as `dev` and GoReleaser `-SNAPSHOT` builds, skip
-the guard and never raise the version. The rule is `buildinfo.Release`. tent-node's assets use the stricter
-`buildinfo.IsRelease`, under which `git describe` output is a development build ([8.5](#85-artifacts-and-verification)).
+so an older tent is refused after a roll by a newer one. Since M3.8 so do `backup create` and `backup restore --yes`. A
+release, a pre-release and `git
+describe` output are checked, and `v0.3.0-4-gabc1234` counts as `v0.3.0`. Development builds, such as `dev` and
+GoReleaser `-SNAPSHOT` builds, skip the guard and never raise the version. The rule is `buildinfo.Release`. tent-node's
+assets use the stricter `buildinfo.IsRelease`, under which `git describe` output is a development build
+([8.5](#85-artifacts-and-verification)).
 
 `tent delete cluster` removes the state last. It refuses to remove files it does not recognise unless `--force` is
 given.
@@ -1965,12 +1993,16 @@ given.
 ### 10.3 Secrets at rest
 
 - v1 relies on the bucket being private and on provider-side encryption.
+- A backup is a secret: the snapshot holds the secrets of Nomad's tokens in clear (the bootstrap token, client tokens
+  and management tokens with a TTL), the keyring and the job, node and policy names ([platform notes
+  §1.2](platform-notes.md#12-features-tent-relies-on)). The file backend writes it with mode `0600` in `0700`
+  directories, as the other secrets. No output, error or log of the backup commands shows its bytes.
 - Later, an optional `SecretStore` layer over `Store` adds client-side encryption with `age`.
 
 ### 10.4 Locking
 
-Mutating commands (`create`, `replace`, `edit`, `update`, `rolling-update`, `upgrade`, `delete`, `backup restore`)
-take a cluster lock. `statestore.NewLocker` picks the first mechanism that fits the store:
+Mutating commands (`create`, `replace`, `edit`, `update`, `rolling-update`, `upgrade`, `delete`, `backup create`,
+`backup restore --yes`) take a cluster lock. `statestore.NewLocker` picks the first mechanism that fits the store:
 
 | Order | Mechanism | Where |
 |---|---|---|
@@ -2996,6 +3028,21 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
   - **Snapshots** are `secret.Secret` in memory and keep Nomad's bytes. Both calls have 5 minutes, the other calls keep
     30 seconds. A save fails for good without a `Digest` header that matches the bytes, or with no bytes.
   - **`nomadfake`** carries out each write on its own state ([15](#15-testing)).
+- **Built in M3.8** ([ADR-0042](adr/0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md)).
+  `nomadops.API` gains two reads and an error class.
+  - **`Jobs`** returns the jobs of every namespace, each with `Namespace` and `ID`, from `GET /v1/jobs?namespace=*`
+    through `Raw().Query`: the module's `Jobs().List` sorts by ID and panics on a null in the list, so tent reads
+    the list itself and leaves a null out. A job that was stopped stays listed until it is purged. It has the 30
+    seconds and the error classes of the other reads.
+  - **`TokenAccessor`** returns the accessor ID of the token that the client's secret is (`GET /v1/acl/token/self`,
+    the path that `Bootstrap` reads). An answer without an accessor is a permanent error.
+  - **`ErrDenied`** is a fourth class: the server answered 403. It is permanent, so `Servers` returns it at once.
+    `Bootstrap` uses it to tell a secret that is no token of the cluster.
+  - **`Servers`** sends `Jobs` and `TokenAccessor` through `try`, as it sends every read.
+  - **`nomadfake`** has `SetJobs` and `Jobs` (403 before the bootstrap, `ErrNotReady` without a leader; `NewCluster`
+    clears the jobs, `RestoreSnapshot` leaves them). Each bootstrap of a new cluster gets an accessor,
+    `SaveSnapshot` remembers the accessor of the cluster it was taken from, and `RestoreSnapshot` makes the bootstrap
+    secret map to that accessor, as Nomad does. A secret that no token has answers 403.
 
 **Built in M2.7a.** The flow of `update` with Nomad ([ADR-0031](adr/0031-bootstrap-in-update.md)). It is in
 `internal/app` and reaches Nomad only through `internal/nomadops`.
@@ -4118,8 +4165,10 @@ while something does. It is `Service.ValidateCluster` in `internal/app`.
   guard of `update` ([13.4](#134-scaling)) does not apply, and the command calls no Nomad.
 - **State.** The state is `tent-version`, the specs, the completed spec, since M2.1 the four secrets: the CA's key and
   bundle, the gossip key and the ACL bootstrap secret, since M2.7a the bootstrap mark `nomad/bootstrapped`, and since
-  M3.4 the objects `names/<nodegroup>` ([10.2](#102-layout)). The mark and the name objects go with the first objects,
-  in the order of their paths and before the secrets. The command deletes every object directly under `names/` without
+  M3.4 the objects `names/<nodegroup>` ([10.2](#102-layout)), and since M3.8 the backups and the record of a restore
+  `nomad/restored` (decision 46). The mark, the record, the backups and the name objects go with the first objects, in
+  the order of their paths and before the secrets. An object under `backups/` that is no backup, such as a file put
+  there by hand, counts as unknown. The command deletes every object directly under `names/` without
   `--force`, also one of a group that the specs no longer have; `names` itself or an object deeper than a node group's
   counts as unknown.
   Other objects under the cluster in the store, such as another object under `pki/`, make tent refuse before it calls
@@ -4156,6 +4205,8 @@ while something does. It is `Service.ValidateCluster` in `internal/app`.
   - The store of a cluster that `update` has bootstrapped also holds the mark and the highest index of the names of
     each server group. The plan then lists `- state prod/nomad/bootstrapped` and `- state prod/names/servers` among the
     first objects, in the order of the paths, and the state count is two higher.
+  - Each backup adds `- state prod/backups/20261001T100000Z/20261009T230207Z.snap`, and a restored cluster
+    `- state prod/nomad/restored`. They come among the first objects too, and the state count grows by one for each.
   - Without `--yes`, a hint follows on stderr: `run with --yes to delete them`, or `--yes --force` with `--force`.
   - With `--yes`, tent prints the plan made under the lock (step 3), deletes with each step on stderr as it happens
     ([14](#14-cli)), and then prints a blank line and a line such as `Deleted: 2 nodes, 3 infrastructure objects, 8
@@ -4172,13 +4223,204 @@ while something does. It is `Service.ValidateCluster` in `internal/app`.
 
 ### 13.8 Backups
 
-- **`tent backup create`** reads `GET /v1/operator/snapshot` and stores the snapshot under `backups/`.
-- **`tent backup restore`** writes it back with `PUT /v1/operator/snapshot`.
-- **The calls** are `SaveSnapshot` and `RestoreSnapshot` (M3.2, [ADR-0036](adr/0036-nomad-calls-of-a-roll.md)); the
-  commands are built in M3.8. Where a restore may go is open for the maintainer
-  ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)).
+**Built in M3.8** (`internal/app` `backup.go`, `backup_restore.go`, `access.go`; `internal/cli/backup.go`;
+[ADR-0042](adr/0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md); maintainer decisions 46
+and 47). Three commands keep Nomad's state in the state store and put it back into servers that tent built again. The
+calls are `SaveSnapshot` and `RestoreSnapshot` (M3.2, [ADR-0036](adr/0036-nomad-calls-of-a-roll.md)).
+
+- **Access.** `backup create` and `backup restore` reach Nomad as `export nomad` does: `loadBuilt` reads the specs,
+  the four secrets and the bootstrap mark, `reach` lists the machines once and makes the API over the server and
+  combined machines that have a public address, and `bootstrapMark` reads the mark. They fail with the errors of
+  `export nomad` for a cluster that `update` has not built. Both then make one read that needs a leader and a token
+  that Nomad accepts (`Nodes`), so a server that tent cannot reach ends the run before anything changes; its error is
+  `reach Nomad: <error>`, with the hint of the other commands when no server answered.
+- **Needs.** `backup create` and `backup restore` need the cloud's credentials (`VULTR_API_KEY` for Vultr) and a way to
+  port 4646 of the servers, which `spec.access.api` allows. So does `backup restore` without `--yes`, whose plan reads
+  Nomad, except for a plan that is restored already. `backup list` reads only the state store and works while the
+  servers are gone.
 - **Scheduling.** The snapshot agent is Enterprise-only, so scheduled backups are the operator's cron or CI calling
-  `tent backup create`.
+  `tent backup create`. Only `delete cluster` removes a backup; a lifecycle rule of the bucket or a delete of the
+  objects removes the others.
+
+**`tent backup create [NAME]`**
+
+```
+1. the cluster's layout, loadBuilt and the time of the mark, without the lock: a cluster that update has not built
+   takes none
+2. lock "backup create" → loadBuilt and the mark again: update may have built new servers meanwhile
+3. reach and the read of the nodes
+4. SaveSnapshot, with the wait below
+5. RaiseVersion
+6. Put of backups/<bootstrap>/<taken>.snap, with IfNoneMatch on a store that enforces it → unlock
+```
+
+- **The lock** is held for the whole run. A scheduled backup that meets a roll or an `update` waits up to
+  `--lock-timeout` and fails with the holder's name.
+- **The wait.** After the servers change, Nomad answers 500 `Raft error when taking snapshot: cannot take snapshot now,
+  wait until the configuration entry at 132 has been applied (have applied 131)` until its next Raft write: 59 s in
+  one run, 11 s until a write by hand in another ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)).
+  An error that matches `ErrNotReady` makes tent ask again every 2 seconds for up to 5 minutes, counted by the real
+  clock, with one warning before the first wait: `WARNING: Nomad cannot take a snapshot yet: <error>; trying again for
+  up to 5m0s`. `<error>` lists each server's refusal. At the limit the error is `no snapshot from Nomad within 5m0s:
+  <error>; after its servers change Nomad takes none until its next write: run the command again`. Any other error
+  ends the run at once as `take a snapshot of Nomad: <error>`. The wait ends when the context ends, as a lost lock
+  ends it.
+- **The name** of the backup is `Service.Now` at the `Put`. A `Put` that finds the object is `backup 20261009T230207Z of
+  cluster prod exists already; run the command again`; any other error is `store the backup: <error>`.
+- **Output.** `-o table` prints `stored backup 20261009T230207Z of cluster prod (16855 bytes)`. `-o json` and `-o yaml`
+  print `{"cluster": "prod", "name": "20261009T230207Z", "time": "2026-10-09T23:02:07Z", "path":
+  "prod/backups/20261001T100000Z/20261009T230207Z.snap", "size": 16855}`.
+- **Cuts.** A cut before the `Put` leaves nothing and the next run makes a backup. A cut during the `Put` leaves
+  nothing too: the file backend removes its temp file when a write fails and an s3 `PutObject` that fails stores
+  nothing. A `Put` whose answer is lost may leave a whole object that the run did not report, and the next run makes
+  one more. A lock that is lost after the `Put` ends with `the change is saved, but the lock of cluster prod was lost
+  before tent released it`. A tent that is killed while the file backend writes leaves a temp file `.tent-tmp-*` with
+  snapshot bytes in the backup's directory, which `List` hides and `delete cluster` does not see.
+
+**`tent backup list [NAME]`**
+
+- It reads the cluster's specs (an unknown cluster fails as the other commands do), the bootstrap mark and the backups,
+  and calls no cloud and no Nomad, and takes no lock. A backup is `earlier` when its bootstrap is not the mark's time,
+  and `current` otherwise. A cluster without a mark has only earlier backups.
+- `-o table` prints the backups oldest first, the times as `noticeTime` writes them:
+
+  ```
+  NAME               TAKEN                     BOOTSTRAPPED              SERVERS
+  20261008T030000Z   2026-10-08 03:00:00 UTC   2026-10-01 10:00:00 UTC   earlier
+  20261010T090000Z   2026-10-10 09:00:00 UTC   2026-10-05 08:00:00 UTC   current
+  ```
+
+  With no backups stdout gets the header line alone, as `get clusters` prints it for an empty store, and stderr the
+  line `cluster prod has no backups`. `-o json` and `-o yaml` print a list of `{"name", "time", "path", "bootstrap",
+  "servers"}` (`bootstrap` as the path writes it, `servers` `earlier` or `current`), and `[]` for none.
+
+**`tent backup restore [NAME] [--from NAME|latest] [--yes]`**
+
+```
+1. the plan, without the lock: loadBuilt and the mark (R1), the backups and the choice of one (R2), the record and
+   what it says (R3), reach and the read of the nodes, for a restore that was cut the read of the bootstrap token's
+   accessor, and the read of the jobs (R4) unless that accessor shows that Nomad took the backup
+2. without --yes: print the plan and stop
+3. lock "backup restore" → the plan again, with every rule
+4. Get of the backup, a check that it is not empty, RaiseVersion
+5. a new restore reads the accessor of the servers' bootstrap token and writes the record without a time
+6. RestoreSnapshot
+7. Bootstrap with the stored secret: the check of tent's own access
+8. Put of the record with the time → unlock
+```
+
+- **The rules** ([ADR-0042](adr/0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md), items 6 to
+  9). R1: the store holds the secrets and the mark. R2: the backup is of earlier servers. R3: the record of this
+  bootstrap names no other backup whose restore ended. R4: Nomad lists no job, unless the record shows that Nomad took
+  the backup. `--from` defaults to `latest`.
+  - **`latest`** takes the newest backup of earlier servers when every earlier backup is of one bootstrap, and refuses
+    when they are of more. Backups of the servers that run now are passed over. A restore that needed `--from` is
+    repeated, or finished, with the same `--from`.
+  - **A plan that is restored already** takes no lock and asks no cloud and no Nomad. When the plan under the lock
+    finds the restore ended, the run returns it with no error.
+  - **A Nomad that cannot list its jobs** ends the run before the lock as `list the jobs: <error>`.
+- **What tent does for each record** of the bootstrap that runs now:
+
+  | The record | tent |
+  |---|---|
+  | none, or of another bootstrap | R4; then the record, the restore, the check, the time |
+  | this backup, with a time | nothing: it is restored already |
+  | this backup, no time | reads the accessor of the bootstrap token. The record's accessor, or a record without one: Nomad did not take the backup, so R4 applies, and the restore goes on and keeps the record. Another accessor: Nomad took it, so tent sends it again without R4. A 403: the lock-out error |
+  | another backup, with a time | R3 refuses |
+  | another backup, no time | as none: R4, whose text names the backup that was started; then the new record |
+
+  A record of another backup without a time comes from a restore that was cut, or from an object that Nomad refused.
+  Nomad then holds nothing or that backup's state, so while it lists no job another backup may take its place.
+- **The accessor.** After a restore the bootstrap secret belongs to the token of the backup, with the backup's
+  accessor ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)). The record keeps the accessor that
+  the new servers' token had before the restore, so a resumed run tells by it whether Nomad took the backup.
+- **The check of tent's access.** Nomad answers 200 to a restore also when the token of the call is gone afterwards.
+  tent sends one bootstrap request with the stored secret in the body and as `X-Nomad-Token`; Nomad answers 400 `ACL
+  bootstrap already done` whether the secret is a token or none; then tent reads `token/self`. A 403 or a token that is
+  no management token is a lock-out. The record stays without a time, and a next run without new servers ends at the
+  same error. Only a file put under `backups/` by hand can cause it.
+- **Texts** (the times as `2006-01-02 15:04:05 MST`, in UTC; the tests pin them):
+  - No backup at all, with any `--from`: `cluster prod has no backups`.
+  - `--from` is neither `latest` nor a name: `invalid backup name "x": want latest or a name that tent backup list
+    shows, such as 20261009T230207Z`.
+  - No backup of that name: `cluster prod has no backup 20261009T230207Z; tent backup list shows its backups`. Two
+    or more of a name, which tent never makes: `cluster prod has 2 backups named 20261009T230207Z: <path> and <path>;
+    remove all but one`.
+  - R2, by name: `backup 20261009T230207Z is of the servers that cluster prod runs now, which tent bootstrapped on
+    2026-10-01 10:00:00 UTC; tent restores a backup only into servers that tent update cluster built again after it`.
+  - R2, `latest`: `every backup of cluster prod is of the servers that it runs now, which tent bootstrapped on
+    2026-10-01 10:00:00 UTC; tent restores a backup only into servers that tent update cluster built again after it;
+    after a loss, tent update cluster builds new servers only when no server machine is left, so delete the remaining
+    ones in the cloud first`.
+  - `latest` across bootstraps: `cluster prod has earlier backups of 2 sets of servers: 20261008T030000Z of the
+    servers bootstrapped on 2026-10-01 10:00:00 UTC and 20261012T040000Z of the servers bootstrapped on 2026-10-11
+    09:00:00 UTC; name one with --from`, the oldest bootstrap first.
+  - R3: `cluster prod was restored from backup 20261008T030000Z on 2026-10-10 08:20:00 UTC; tent restores one backup
+    into servers that it built again: to restore another one, delete the server machines in the cloud and run tent
+    update cluster --yes first`.
+  - R4: `cluster prod runs 12 jobs that were registered after its servers were built again on 2026-10-10 08:00:00 UTC;
+    a restore replaces them with the backup's. tent restores a backup only into servers that run no job: purge the
+    jobs first, or delete the server machines in the cloud and run tent update cluster --yes` (`runs 1 job that was
+    registered` for one).
+  - R4 with a started restore: `a restore of backup 20261008T030000Z into cluster prod was started and has not ended,
+    and the cluster runs 12 jobs. Run tent backup restore --from 20261008T030000Z --yes to end it; to restore another
+    backup, purge the jobs first, or delete the server machines in the cloud and run tent update cluster --yes`.
+  - Failures of the apply: `backup X of cluster prod holds no snapshot`; `read backup X: <error>`; `read the accessor
+    of tent's token: <error>`; `write prod/nomad/restored: <error>` (the second write adds `; run the command
+    again`); `restore backup X: <error>; run the command again`; `check tent's access after the restore: <error>; run
+    the command again`.
+  - The lock-out: `the restore replaced the ACL tokens of cluster prod, and the ACL bootstrap secret of the state store
+    is none of them: tent can no longer call the cluster. The object <path> is no backup that tent took of this
+    cluster. Delete the server machines in the cloud, run tent update cluster --yes, and restore another backup with
+    tent backup restore --from NAME, since latest takes this one again`.
+- **The plan** (`-o table`):
+
+  ```
+  Restore backup 20261008T030000Z (taken 2026-10-08 03:00:00 UTC) into cluster prod.
+  The backup is of servers bootstrapped on 2026-10-01 10:00:00 UTC; the servers that run now were bootstrapped on 2026-10-10 08:00:00 UTC.
+  They run no job and list 2 nodes.
+  Nomad's jobs, nodes, ACL tokens, variables and keyring become those of the backup.
+  ```
+
+  A resumed restore replaces the third line: `A restore of this backup was started
+  and Nomad took the backup, but it has not ended: tent sends the backup again. The servers list 2 nodes.` or `A
+  restore of this backup was started and Nomad did not take the backup: tent sends it again. They run no job and list
+  2 nodes.` A plan that is restored already is `cluster prod is already restored from backup 20261008T030000Z`. The
+  node count is a fact and no refusal. `-o json` and `-o yaml` print `{"cluster", "backup": {"name", "time", "path"},
+  "bootstrapped", "nodes", "resumes", "taken", "restored", "applied"}`, with `resumes`, `taken`, `restored` and
+  `applied` left out when false and `nodes` left out of a plan that is restored already.
+- **Output after `--yes`.** `-o table` prints `Restored: backup 20261008T030000Z into cluster prod.` and then, on
+  stderr, the notice below; `-o json` and `-o yaml` print the plan with `"applied": true` and the same notice on
+  stderr. Without `--yes` stderr gets `run with --yes to restore it`, except for a plan that is restored already.
+
+  ```
+  Nomad now holds the jobs, nodes, ACL tokens, variables and keyring of the backup: run tent export nomad again.
+  Nomad lists the backup's nodes as ready for about 5 minutes whether they answer or not, and it refuses a client
+  that registered with these servers before the restore. After 5 minutes run tent validate cluster, and replace the
+  nodes that it reports with tent rolling-update cluster --yes --force --nodegroups GROUPS.
+  ```
+
+- **Exit codes** of the three commands: 0, or 1 on an error or a refusal.
+- **Cuts.** Before the record, only `tent-version` may have changed, and the next run is a first run. After the record
+  and before Nomad took the backup, the next run reads the same accessor and goes through R4. After Nomad took it and
+  before the time, the accessor differs and the next run sends the backup again, checks the secret and writes the time.
+  A restore that was sent to one server and lost its answer is sent to the next server, and Nomad restores the same
+  state again. After the time, the next run prints `already restored`, with no call and no lock. Nomad refuses an object
+  that is no snapshot on every server with a 500 that tent cannot tell from a lost answer; Nomad stays as it was, the
+  record stays without a time, and another backup passes R4 while Nomad lists no job.
+- **After a restore** (platform notes §1.2). Nomad holds the jobs, nodes, ACL tokens, variables and keyring of the
+  backup, and the Raft peers stay the servers that run. Tokens made on the new servers are gone, so `tent export
+  nomad` runs again. A client of the backup that still runs and reaches the servers registers again by itself, with
+  its tasks running; it reaches them only at the addresses that its `05-join.hcl` holds. Nomad lists a node of the
+  backup as `ready` for about 5 minutes whether it answers or not (measured for a restore into a running cluster, an
+  inference for new servers). A client that registered with the new servers before the restore is not in the backup,
+  and Nomad refuses it until its agent restarts, so the operator replaces such a node with `rolling-update cluster
+  --yes --force --nodegroups GROUPS`. tent does not wait and marks no machine.
+- **After a loss of the servers** the operator runs, in order: when a server machine is left, deletes it in the cloud
+  (`update` builds new servers only when no server or combined machine stays); `tent update cluster --yes` (with
+  `--allow-single-server` for one server), which builds the servers and bootstraps them with the stored secret; `tent
+  backup list`; `tent backup restore --yes`; `tent export nomad`; and after 5 minutes `tent validate cluster` and a
+  forced roll of the groups that it reports.
 
 ---
 
@@ -4186,8 +4428,9 @@ while something does. It is `Service.ValidateCluster` in `internal/app`.
 
 The last column names the milestone that built the command. The spec commands of M0 work only on the state store;
 `update cluster` and `delete cluster` of M1 reach the cloud, and `validate cluster`, `export nomad` and `ui` of M2.8 and
-`rolling-update cluster` of M3.3 reach the cloud and the Nomad API. `upgrade cluster` of M3.7 reaches the state store
-and, to check a release, HashiCorp's release site. The other commands come with later milestones
+`rolling-update cluster` of M3.3, `backup create` and `backup restore` of M3.8 reach the cloud and the Nomad API.
+`upgrade cluster` of M3.7 reaches the state store and, to check a release, HashiCorp's release site, and `backup list`
+of M3.8 reaches the state store alone. The other commands come with later milestones
 ([roadmap](roadmap.md)).
 
 | Command | kops analogue | Purpose | Built |
@@ -4206,7 +4449,7 @@ and, to check a release, HashiCorp's release site. The other commands come with 
 | `tent export nomad [NAME] [--ttl 24h] [--dir DIR] [--shell sh\|fish]` | `export kubeconfig --admin` | short-lived operator credentials in files, and the shell lines that use them ([9.7](#97-operator-access)) | M2.8 |
 | `tent ui [NAME] [--listen 127.0.0.1:4646]` | — | local mTLS proxy for the UI and CLI ([9.7](#97-operator-access)) | M2.8 |
 | `tent cost` | — | monthly and hourly cost of the cluster or plan (Vultr `/plans`, Hetzner `/pricing`) | — |
-| `tent backup create\|restore` | etcd-manager backups | Raft snapshots | — |
+| `tent backup create [NAME]`, `tent backup list [NAME]`, `tent backup restore [NAME] [--from NAME\|latest] [--yes]` | etcd-manager backups | snapshots of Nomad's state in the state store, and their restore into servers that `update` built again ([13.8](#138-backups)) | M3.8 |
 | `tent toolbox dump` | `toolbox dump` | diagnostics bundle (via SSH) | — |
 | `tent state unlock [NAME] [--force]` | — | remove a stale lock | M0 |
 | `tent version` | `version` | build info | M0 |
@@ -4224,9 +4467,10 @@ and, to check a release, HashiCorp's release site. The other commands come with 
   named `cluster`, `clusters`, `nodegroup` or `nodegroups`.
 - Cloud credentials come from the environment. tent reads `VULTR_API_KEY` only when a command reaches a cluster on
   Vultr: `update cluster`, `delete cluster`, `create --yes`, since M2.8 `validate cluster`, `export nomad` and `ui`, and
-  since M3.3 `rolling-update cluster` ([7.1](#71-interfaces)). The last four need it because tent stores no address of
-  a machine: a server's public address, which the calls to port 4646 need, comes from the cloud's list.
-  `upgrade cluster` reaches no cloud and needs no credentials.
+  since M3.3 `rolling-update cluster` and since M3.8 `backup create` and `backup restore`, with or without `--yes`
+  ([7.1](#71-interfaces)). The last six need it because tent stores no address of a machine: a server's public
+  address, which the calls to port 4646 need, comes from the cloud's list. `upgrade cluster` and `backup list` reach
+  no cloud and need no credentials.
   `HCLOUD_TOKEN` comes with the Hetzner provider.
 - A development build of tent reads `TENT_NODE_URL` and `TENT_NODE_SHA256` once at start, for the tent-node that its
   nodes download ([8.5](#85-artifacts-and-verification)). A release build ignores them. The long help of
@@ -4331,6 +4575,13 @@ and, to check a release, HashiCorp's release site. The other commands come with 
     carry `level` and `msg`, which progress lines never have.
 - `upgrade cluster` prints its plan, or with `--yes` its result, on stdout, as text or as data, the hint on stderr, and
   no progress lines ([13.5](#135-tent-upgrade-cluster---yes)).
+- `backup create` prints one line on stdout, or with `-o json` and `-o yaml` the backup, and on stderr the warning of
+  its wait: `WARNING: Nomad cannot take a snapshot yet: <error>; trying again for up to 5m0s`. `backup list` prints a
+  table, or the list as data, and `cluster prod has no backups` on stderr for none. `backup restore` prints its plan,
+  or with `--yes` the line `Restored: backup 20261008T030000Z into cluster prod.` (`-o json` and `-o yaml` print the
+  plan with `"applied": true`), and on stderr the hint `run with --yes to restore it` or the notice that follows a
+  restore. None of the three prints progress lines, and none prints a snapshot's bytes in any output format, in a log
+  or in an error ([13.8](#138-backups)).
 - `validate cluster`, `export nomad` and `ui` print one result on stdout and notices on stderr, and no progress lines
   ([13.6](#136-tent-validate-cluster---wait-duration), [9.7](#97-operator-access)). None of them prints a secret, in
   any output format, in a log or in an error. `export nomad` prints the six shell lines, or with `-o json` and `-o yaml`
@@ -4416,6 +4667,7 @@ and, to check a release, HashiCorp's release site. The other commands come with 
 - While another tent holds the lock, a command waits up to `--lock-timeout` and says once who holds it, for example
   `cluster prod is locked by igor@laptop (pid 4242) for replace since 2026-09-27 10:00:00 UTC; waiting up to 5m0s
   (--lock-timeout)`. With `--lock-timeout 0` it fails at once.
+- `backup list` and `backup restore` without `--yes` take no lock, and `backup create` and `backup restore --yes` do.
 - It warns when the store allows only a best-effort lock, and when it takes over the lock of a holder whose lease
   expired or whose tent ended.
 - `state unlock` removes a lock whose holder expired or ended, and with `--force` any lock that a live holder can
@@ -4479,6 +4731,16 @@ and, to check a release, HashiCorp's release site. The other commands come with 
   finished by running the command again. The long help of `validate
   cluster`, `export nomad` and `ui` says what they check or write, what they print, and that they need the cloud's
   credentials and a way to port 4646 of the servers; the help of `validate cluster` also gives its exit codes. The long
+  help of `backup create` says what a snapshot holds and that it is a secret stored as the cluster's other secrets,
+  that tent takes the lock and asks Nomad again for up to 5 minutes after the servers change, that it needs the
+  cloud's credentials and a way to port 4646 of the servers, that `delete cluster` deletes the backups and nothing else
+  removes one, and that a cron or CI job schedules it. The long help of `backup list` says what BOOTSTRAPPED and
+  SERVERS show and that it reads only the state store. The long help of `backup restore` says that it is for a
+  cluster that lost its servers, that a server machine that is left is deleted in the cloud first, that `update`
+  comes before it, which backup `--from` and `latest` take and when `latest` refuses, that tent restores only into
+  servers that run no job and one backup into servers that it built again, what `--yes` does and that a run that
+  stops is finished by running the command again, what Nomad holds afterwards, and what to do about the nodes. The
+  long help of `delete cluster` says that the state holds the cluster's backups, which are deleted with it. The long
   help of `upgrade cluster` says what the cluster's version is, that tent checks the signed checksums of the release
   and prints the upgrade, that `--yes` writes `spec.nomad.version` and changes nothing in the cloud, that `update
   cluster` and `rolling-update cluster` follow, that a cluster moves by at most one minor version at a time, that
@@ -5017,6 +5279,34 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
        call of both fakes: those of M3.3 to M3.5, the workers' limits, and at every `CreateInstance` the two version
        rules. The roll creates 5 machines in both clusters, drains 2 and 5 nodes, stops 3 and deletes 5, and purges 2
        and 5 nodes.
+   - **Built in M3.8** ([ADR-0042](adr/0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md)): the
+     backup commands run on `vultrfake` and `nomadfake`, with the file store and the test world of `internal/app`.
+     - **Units.** `statestore`'s names and their parse; `pickBackup`, `recorded`, `refuseJobs` and `tookBackup` as
+       tables; the record's encode and decode, with its times in UTC. `nomadops`' `Jobs` and `TokenAccessor` on
+       `httptest` servers with mTLS from `internal/pki`: the request, a null in the list, no jobs, each error class, a
+       slow server and the context. `nomadfake`: an accessor for each bootstrap, a restore that gives the bootstrap
+       secret the backup's accessor, and 403 for a secret that no token has.
+     - **The use cases** (`backup_test.go`, `backup_restore_test.go`): the object and its bytes and mode; the lock held
+       at every step, and a run that waits for it; a snapshot that Nomad refuses for a while, and one that it refuses
+       until the limit; no replacement of a backup; the plan made again under the lock, in tests that change the
+       store while the run waits for the lock; every refusal and each text; the lock-out; a resumed restore with
+       the same accessor, with another one, with none and with a 403; the list. "Servers built again" is made in the
+       world as a real loss is: delete the server instances in `vultrfake`, sleep an hour in the bubble, run `update
+       --yes`.
+     - **Cuts** (`backup_cut_test.go`): a backup cut before and after the read of the nodes, the snapshot and the
+       write of the backup, and a restore cut in its plan and before and after each write of the record, the send and
+       the check, are finished or repeated by the next run, and no object is partial. A restore cut after Nomad took
+       the backup is sent again although the backup's jobs are there; one whose send failed meets R4
+       (`backup_restore_test.go`).
+     - **The commands** (`internal/cli/backup_test.go`): each output format, the help texts, the flags, the hint and the
+       notice, the exit codes, a missing key, and the wait for the lock.
+     - **No bytes.** The fake's snapshot bytes go to `secrettest.CheckHidden` for every output of the three commands
+       and use cases, the refusals and failures that the tests run (a bad name, jobs, an existing backup, the wait's
+       limit, a 403), and the debug log with `-vv`.
+     - **`delete cluster`:** the plan and the delete with backups and a record, and a foreign object under `backups/`.
+     - **What the fakes do not show:** what a restore does to Nomad (the fake records the bytes). The runs of
+       [platform notes §1.2](platform-notes.md#12-features-tent-relies-on) and
+       [§3.16](platform-notes.md#316-spike-runs) cover it.
 4. **tent-node tests.** Phases run with an abstracted filesystem and exec. Occasionally they run in a
    systemd-enabled container or a VM.
    - **Built in M2.5.** `internal/nodeup/nodeuptest` holds the fakes: an in-memory filesystem that behaves as
@@ -5219,7 +5509,7 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
 | A reboot of a client kills its tasks without a migration, since clients do not drain themselves at shutdown | the tasks are down until the client restarts them, if it is back first, or the scheduler replaces them after the missed heartbeats | a self-drain would leave the node ineligible after every reboot or restart (hashicorp/nomad#17093); tent drains a client through the API before it removes it ([ADR-0017](adr/0017-api-driven-server-removal.md), [ADR-0030](adr/0030-nomad-on-nodes.md)) |
 | A client's servers are not up within `verify`'s 2 minutes | `up` fails on the client, and on the first boot `install` and cloud-init, though Nomad joins later | `update` creates clients after the servers are healthy and judges a client by its registration in Nomad (M2.7a) |
 | tent-node restarts Docker, after a hand edit of `daemon.json` and an `up` by hand, or dockerd crashes | the node's docker tasks restart after the restart policy's delay (17-20 s seen): Nomad's docker driver stops the containers that live-restore kept ([platform notes §6.4](platform-notes.md#64-restarts-of-docker-containerd-and-nomad)) | accepted on 2026-10-05 ([ADR-0030](adr/0030-nomad-on-nodes.md)); tent-node restarts Docker only for its own `daemon.json` |
-| nomadops relies on one Nomad answer read in the v1.11.3 source, not in 2.0.7: 403 from `token/self` for an unknown secret (the report in the 429 of an unhealthy cluster was seen on 2.0.7 on 2026-10-05, [platform notes §1.2](platform-notes.md#12-features-tent-relies-on); the text `ACL bootstrap already done` on 2026-10-05, [§1.6](platform-notes.md#16-the-agent-on-a-node)) | a repeated bootstrap fails | nomadops matches status codes and one message prefix; E2E runs real Nomad from M2.9 ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)) |
+| nomadops relies on one Nomad answer that was first read in the v1.11.3 source: 403 from `token/self` for an unknown secret, which 2.0.7 gave on 2026-10-09, and the answer of a repeated bootstrap with that secret as the token, 400 on 2026-10-10 ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on), the runs of 2026-10-09 and 2026-10-10) (the report in the 429 of an unhealthy cluster was seen on 2.0.7 on 2026-10-05, [platform notes §1.2](platform-notes.md#12-features-tent-relies-on); the text `ACL bootstrap already done` on 2026-10-05, [§1.6](platform-notes.md#16-the-agent-on-a-node)) | a repeated bootstrap fails | nomadops matches status codes and one message prefix; E2E runs real Nomad from M2.9 ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)) |
 | `extraConfig` overrides tent's settings, such as `data_dir`, the TLS paths, the dynamic ports or Nomad's bridge subnet (`bridge_network_subnet`) | a node cannot find its files, a client is refused, or the host firewall blocks workloads | documented as unsupported ([3.3](#33-api-rules), [8.4](#84-nomad-configuration-rendering)) |
 | A unit ordering between cloud-init, tent-node and Nomad hangs the boot, or `up` hangs | the node never comes up; cloud-init never finishes | `install` waits for `up`, and no unit is ordered on cloud-init, `multi-user.target` or `nomad.service`, nor `nomad.service` on `tent-node.service` (a unit test checks); `nomad.service` is never enabled; finite start timeouts (45 minutes for `up`); `status.json` on every run; the M2.5 VM check boots and reboots a node ([8.1](#81-bootstrap-chain)) |
 | Secrets in user data | node impersonation if metadata leaks | mitigations in [9.4](#94-secrets-on-nodes-threat-model), including the scrub on Vultr once a node has joined (M2.7b); a node that never joins keeps them; bootstrap controller in v2 |
@@ -5230,6 +5520,8 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
 | A token whose answer was lost, an earlier export's token and a `tent ui` token stay valid until they expire | an old token works for up to 24 hours | each has a TTL, and `nomad acl token delete <accessor>` revokes one early; `export nomad` prints the accessor ([9.2](#92-acl-and-tokens)) |
 | The autopilot report shows a killed server as `alive` for about 36 s on Nomad 2.0.7, and the Raft configuration keeps its vote until autopilot removes it ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)) | `validate` can read a server that died seconds ago as valid | `validate --wait`, or a second run, checks again ([13.6](#136-tent-validate-cluster---wait-duration)) |
 | tent stores no node certificate ([9.1](#91-pki)) | `validate` reads a node certificate's end by estimate | a warning 30 days ahead leaves room for the difference |
+| A restore replaces every ACL token of the servers, and a backup whose bootstrap token is not the stored secret leaves tent no way to call the cluster | `tent backup restore` ends with the lock-out error, and the record stays without a time | only a file put under `backups/` by hand can cause it, since tent stores snapshots of its own servers, which hold the stored secret; tent checks the secret right after the restore, and the error names the way out: delete the server machines, run `update`, restore with `--from` ([13.8](#138-backups), [ADR-0042](adr/0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md)) |
+| A backup holds the secrets of Nomad's tokens in clear, with its keyring (platform notes §1.2) | whoever reads the state store reads the cluster's access | stored as the other secrets are (mode `0600` in `0700` directories on the file backend, a private bucket on s3); `delete cluster` deletes them; no output, error or log shows the bytes; a lifecycle rule of the bucket limits how many stay ([10.3](#103-secrets-at-rest)) |
 | `nomad.service` should end as failed after every stop of a server or combined node, since servers run with `leave_on_terminate = false` (seen on a real server on 2026-10-05, [platform notes §3.16](platform-notes.md#316-spike-runs)) | an operator or a monitor sees a failed unit after a stop or restart that worked | accepted: `SuccessExitStatus=1` would hide real failures (decision 26 of [18](#18-open-questions), [ADR-0031](adr/0031-bootstrap-in-update.md)) |
 | A drain moves a combined or client node's allocations to the other nodes, and tent checks that those nodes are ready, eligible and not draining, and does not check that they have room | an allocation that fits on no other node, or that a constraint or host volume binds to the old node, waits for the drain's deadline (`drainTimeout`, 1 h by default) and is stopped then | the replacement has the group's machine type and is up before the drain; a shorter `drainTimeout` bounds the wait ([13.3](#133-tent-rolling-update-cluster---yes), [ADR-0039](adr/0039-rolling-update-of-combined-groups.md)) |
 | A system allocation of a drained node is marked `stop` about 1 s after the drain completes, and its task ran 4 to 5.6 s longer on a local Nomad ([platform notes §1.2](platform-notes.md#12-features-tent-relies-on)); the roll stops the machine soon after | a system task may be cut at the stop; this holds for client rolls too | not seen in four stops on Vultr (2026-10-12); a wait until the system allocations have stopped is not built |
@@ -5433,6 +5725,15 @@ Decided on 2026-10-08 (the maintainer took every recommendation put to them at t
     spec set a version before or only the pin held it, so that the version is explicit from then on (decided on
     2026-10-09). With nothing to upgrade it writes nothing. Built in M3.7 ([13.5](#135-tent-upgrade-cluster---yes),
     [ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)).
+46. **`delete cluster` deletes the backups** with the rest of the state, and lists them and the record of a restore in
+    its plan (decided on 2026-10-09). An object under `backups/` that is no backup is unknown and refused without
+    `--force`. Built in M3.8 ([13.7](#137-tent-delete-cluster---yes), [10.2](#102-layout)).
+47. **A restore goes only into a cluster whose servers were built again from the same state store** (disaster
+    recovery; decided on 2026-10-09). The run of that day found a restore into a running cluster unsafe, so nothing
+    else is built. Built in M3.8 ([13.8](#138-backups)), with three choices of the maintainer on 2026-10-13: one
+    restore per bootstrap stays (R3, as recommended); a resumed restore tells by the accessor of the
+    bootstrap token whether Nomad took the backup; and `latest` refuses when the earlier backups are of more than one
+    set of servers.
 48. **tent remembers the highest index of each server and combined group** in the state store
     (`names/<nodegroup>`, [10.2](#102-layout)), so that the names of such a group only grow, also after a shrink or an
     operator's delete (decided on 2026-10-09; the limit that M3.4 found in decision 43's rule). Built in M3.4 for the
@@ -5453,10 +5754,6 @@ Decided on 2026-10-12:
     Nomad version than tent recommends sets `spec.nomad.version`. Section 13.5 and ADR-0026 had planned a URL that
     overrides the embedded file ([13.5](#135-tent-upgrade-cluster---yes),
     [ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)).
-
-Open for the maintainer: where `tent backup restore` may restore a snapshot ([13.8](#138-backups); the facts are in
-[platform notes §1.2](platform-notes.md#12-features-tent-relies-on)), and what backups and `delete cluster` do
-together; they are asked at the start of M3.8.
 
 Open for the maintainer, from the final review of M3.7 (Q14):
 - **Taking an upgrade back once the roll's first new server has joined.** After `upgrade --yes`, `update --yes` and
@@ -5481,7 +5778,8 @@ in [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md), and decisions 29
 to 42 in [ADR-0037](adr/0037-rolling-update-of-client-groups.md), decisions 37, 38, 43, 44 and 48 in
 [ADR-0038](adr/0038-rolling-update-of-server-groups.md) (decisions 37 and 38 were first named in ADR-0035, item 15), and
 decision 49 in [ADR-0039](adr/0039-rolling-update-of-combined-groups.md), and decisions 45 and 50 in
-[ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md).
+[ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md), and decisions 46 and 47 in
+[ADR-0042](adr/0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md).
 
 ---
 
