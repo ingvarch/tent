@@ -80,6 +80,13 @@ func (s *stub) Nodes(context.Context) ([]nomadops.Node, error) {
 	return []nomadops.Node{{Name: "n"}}, nil
 }
 
+func (s *stub) Jobs(context.Context) ([]nomadops.Job, error) {
+	if err := s.record("Jobs"); err != nil {
+		return nil, err
+	}
+	return []nomadops.Job{{Namespace: "default", ID: "web"}}, nil
+}
+
 func (s *stub) Peers(context.Context) ([]nomadops.Peer, error) {
 	if err := s.record("Peers"); err != nil {
 		return nil, err
@@ -243,6 +250,7 @@ func TestServersEveryMethodMovesOn(t *testing.T) {
 			return err
 		},
 		"Nodes":  func(ctx context.Context, a nomadops.API) error { _, err := a.Nodes(ctx); return err },
+		"Jobs":   func(ctx context.Context, a nomadops.API) error { _, err := a.Jobs(ctx); return err },
 		"Health": func(ctx context.Context, a nomadops.API) error { _, err := a.Health(ctx); return err },
 		"Peers":  func(ctx context.Context, a nomadops.API) error { _, err := a.Peers(ctx); return err },
 		"KeyringReady": func(ctx context.Context, a nomadops.API) error {
@@ -351,6 +359,11 @@ func (r ctxRecorder) Nodes(ctx context.Context) ([]nomadops.Node, error) {
 	return r.API.Nodes(ctx)
 }
 
+func (r ctxRecorder) Jobs(ctx context.Context) ([]nomadops.Job, error) {
+	r.record(ctx)
+	return r.API.Jobs(ctx)
+}
+
 func (r ctxRecorder) Peers(ctx context.Context) ([]nomadops.Peer, error) {
 	r.record(ctx)
 	return r.API.Peers(ctx)
@@ -416,6 +429,7 @@ func TestServersPassArgumentsContextAndValues(t *testing.T) {
 	f := nomadfake.New()
 	f.SetLeader(leaderAddr)
 	f.Register(nomadops.Node{Name: "prod-workers-1", Status: "ready", Eligible: true})
+	f.SetJobs([]nomadops.Job{{Namespace: "dev", ID: "batch"}})
 	f.SetHealth(nomadops.Health{Healthy: true, Voters: 3})
 	f.SetPeers([]nomadops.Peer{{Name: "prod-servers-0.eu", Voter: true}})
 	var seen []context.Context
@@ -455,6 +469,9 @@ func TestServersPassArgumentsContextAndValues(t *testing.T) {
 	if err != nil || len(nodes) != 1 || nodes[0].Name != "prod-workers-1" {
 		t.Errorf("Nodes() = %v, %v; want prod-workers-1", nodes, err)
 	}
+	if got, err := s.Jobs(ctx); err != nil || !cmp.Equal(got, []nomadops.Job{{Namespace: "dev", ID: "batch"}}) {
+		t.Errorf("Jobs() = %+v, %v; want the set one", got, err)
+	}
 	if h, err := s.Health(ctx); err != nil || !cmp.Equal(h, nomadops.Health{Healthy: true, Voters: 3}, equateAddrs) {
 		t.Errorf("Health() = %+v, %v; want the set one", h, err)
 	}
@@ -479,6 +496,7 @@ func TestServersPassArgumentsContextAndValues(t *testing.T) {
 		{Name: "IntroToken", Server: "single", Arg: introArg},
 		{Name: "Leader", Server: addr1},
 		{Name: "Nodes", Server: addr1},
+		{Name: "Jobs", Server: addr1},
 		{Name: "Health", Server: addr1},
 		{Name: "Peers", Server: addr1},
 		{Name: "KeyringReady", Server: addr1},
@@ -487,8 +505,8 @@ func TestServersPassArgumentsContextAndValues(t *testing.T) {
 	if diff := cmp.Diff(want, f.Calls()); diff != "" {
 		t.Errorf("calls (-want +got):\n%s", diff)
 	}
-	if len(seen) != 10 { // the calls of Servers: the ones of single have no recorder
-		t.Fatalf("%d calls seen, want 10", len(seen))
+	if len(seen) != 11 { // the calls of Servers: the ones of single have no recorder
+		t.Fatalf("%d calls seen, want 11", len(seen))
 	}
 	for i, c := range seen {
 		if c != ctx {
@@ -534,6 +552,20 @@ func TestServersPermanentErrorStopsAtOnce(t *testing.T) {
 	if !errors.Is(err, permanent) || err.Error() != permanent.Error() {
 		t.Errorf("Leader() error = %v, want the permanent error as it is", err)
 	}
+	wantStubCalls(t, b)
+}
+
+// A permanent error of the read of the jobs ends the call: the second server is not tried.
+func TestServersJobsPermanentErrorStopsAtOnce(t *testing.T) {
+	permanent := errors.New("forbidden")
+	a, b := &stub{err: permanent}, &stub{}
+
+	got, err := servers(t, a, b).Jobs(t.Context())
+
+	if !errors.Is(err, permanent) || got != nil {
+		t.Errorf("Jobs() = %v, %v; want the permanent error and no jobs", got, err)
+	}
+	wantStubCalls(t, a, "Jobs")
 	wantStubCalls(t, b)
 }
 
