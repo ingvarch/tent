@@ -2,7 +2,8 @@
 // cluster's Nomad version to the one that its channel recommends, removes a stale cluster lock, updates a cluster's
 // cloud objects and nodes to its specs, bootstraps Nomad on a new cluster, checks a cluster's machines, Nomad and
 // certificates against its specs, and deletes a cluster's cloud objects and its state. It also issues an operator's
-// access to a cluster's Nomad API: a certificate and a management token that expire.
+// access to a cluster's Nomad API: a certificate and a management token that expire. It stores snapshots of Nomad's
+// state as backups, lists them, and restores one into servers that tent built again.
 package app
 
 import (
@@ -71,9 +72,9 @@ type Service struct {
 	// and returns that error.
 	OnRollPlan func(RollPlan) error
 	// Now, when set, returns the current time for new CA, node and operator certificates, for the mark of the Nomad
-	// bootstrap, for the name of a backup, for the age of a client's machine that has not joined, for the certificate
-	// checks of a validation, for the time that the rollout decisions see and, unless Assets.Now is set, for the
-	// signature check of the downloaded files; it defaults to time.Now.
+	// bootstrap, for the name of a backup, for the time that a restore ended, for the age of a client's machine that has
+	// not joined, for the certificate checks of a validation, for the time that the rollout decisions see and, unless
+	// Assets.Now is set, for the signature check of the downloaded files; it defaults to time.Now.
 	Now func() time.Time
 }
 
