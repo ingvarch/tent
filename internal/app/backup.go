@@ -55,19 +55,32 @@ type ListedBackup struct {
 	Earlier bool
 }
 
-// MarshalJSON encodes it as {"name": "20261009T230207Z", "time": "2026-10-09T23:02:07Z", "path": "...", "servers":
-// "earlier"}; servers is "current" for a backup of the servers that run now.
+// Bootstrapped returns when the servers that the backup is of were bootstrapped, in UTC.
+func (b ListedBackup) Bootstrapped() time.Time { return bootstrapTime(b.Backup) }
+
+// bootstrapTime returns when the servers that the backup is of were bootstrapped, in UTC, or the zero time when
+// b.Bootstrap is not in the form that statestore.BackupName writes.
+func bootstrapTime(b statestore.Backup) time.Time {
+	if t, ok := statestore.ParseBackupName(b.Bootstrap); ok {
+		return t
+	}
+	return time.Time{}
+}
+
+// MarshalJSON encodes it as {"name": "20261009T230207Z", "time": "2026-10-09T23:02:07Z", "path": "...", "bootstrap":
+// "20261001T100000Z", "servers": "earlier"}; servers is "current" for a backup of the servers that run now.
 func (b ListedBackup) MarshalJSON() ([]byte, error) {
 	servers := "current"
 	if b.Earlier {
 		servers = "earlier"
 	}
 	return marshalJSON("the backup", struct {
-		Name    string `json:"name"`
-		Time    string `json:"time"`
-		Path    string `json:"path"`
-		Servers string `json:"servers"`
-	}{b.Name, b.Time.UTC().Format(time.RFC3339), b.Path, servers})
+		Name      string `json:"name"`
+		Time      string `json:"time"`
+		Path      string `json:"path"`
+		Bootstrap string `json:"bootstrap"`
+		Servers   string `json:"servers"`
+	}{b.Name, b.Time.UTC().Format(time.RFC3339), b.Path, b.Bootstrap, servers})
 }
 
 // Backups returns the backups of the cluster in the state store, oldest first; a cluster without any gets an empty

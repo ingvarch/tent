@@ -117,16 +117,16 @@ func (l Layout) BackupAt(p string) (Backup, bool) {
 	if !ok {
 		return Backup{}, false
 	}
-	taken, okTaken := parseBackupName(name)
-	bootstrapped, okBootstrapped := parseBackupName(bootstrap)
+	taken, okTaken := ParseBackupName(name)
+	bootstrapped, okBootstrapped := ParseBackupName(bootstrap)
 	if !okTaken || !okBootstrapped {
 		return Backup{}, false
 	}
 	return l.Backup(taken, bootstrapped), true
 }
 
-// parseBackupName reads a time that BackupName wrote, and fails for any other text.
-func parseBackupName(s string) (time.Time, bool) {
+// ParseBackupName reads a time that BackupName wrote, and reports false for any other text.
+func ParseBackupName(s string) (time.Time, bool) {
 	t, err := time.Parse(backupTimeLayout, s)
 	return t, err == nil && BackupName(t) == s
 }

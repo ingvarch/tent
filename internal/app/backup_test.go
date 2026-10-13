@@ -759,11 +759,24 @@ func TestListedBackupJSON(t *testing.T) {
 			t.Fatalf("Marshal: %v", err)
 		}
 		const want = `[{"name":"20261009T230207Z","time":"2026-10-09T23:02:07Z",` +
-			`"path":"prod/backups/20261001T100000Z/20261009T230207Z.snap","servers":"earlier"},` +
+			`"path":"prod/backups/20261001T100000Z/20261009T230207Z.snap","bootstrap":"20261001T100000Z",` +
+			`"servers":"earlier"},` +
 			`{"name":"20261009T230207Z","time":"2026-10-09T23:02:07Z",` +
-			`"path":"prod/backups/20261001T100000Z/20261009T230207Z.snap","servers":"current"}]`
+			`"path":"prod/backups/20261001T100000Z/20261009T230207Z.snap","bootstrap":"20261001T100000Z",` +
+			`"servers":"current"}]`
 		if string(got) != want {
 			t.Errorf("JSON = %s\nwant   %s", got, want)
 		}
 	})
+}
+
+// TestListedBackupBootstrapped returns the time of the servers that a backup is of, in UTC.
+func TestListedBackupBootstrapped(t *testing.T) {
+	t.Parallel()
+	taken, bootstrapped := time.Date(2026, 10, 9, 23, 2, 7, 0, time.UTC), time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	b := app.ListedBackup{Backup: backupOf(t, taken, bootstrapped)}
+
+	if got := b.Bootstrapped(); !got.Equal(bootstrapped) || got.Location() != time.UTC {
+		t.Errorf("Bootstrapped = %v, want %v in UTC", got, bootstrapped)
+	}
 }

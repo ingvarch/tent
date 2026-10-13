@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/ingvarch/tent/internal/english"
@@ -26,7 +27,8 @@ const rebuildWay = "delete the server machines in the cloud and run tent update 
 
 // pickBackup returns the backup that a restore of from takes among backups, which are sorted oldest first, for a
 // cluster whose bootstrap mark holds the time mark. A backup is of earlier servers when its bootstrap is not the
-// mark's.
+// mark's. Latest takes the newest backup of earlier servers when all of them are of one bootstrap, and fails when
+// they are of more: only the operator knows which of them holds the workload.
 func pickBackup(cluster string, backups []statestore.Backup, from string, mark time.Time) (statestore.Backup, error) {
 	if len(backups) == 0 {
 		return statestore.Backup{}, fmt.Errorf("cluster %s has no backups", cluster)
@@ -35,13 +37,22 @@ func pickBackup(cluster string, backups []statestore.Backup, from string, mark t
 	const rebuilt = "which tent bootstrapped on %s; tent restores a backup only into servers that tent update " +
 		"cluster built again after it"
 	if from == Latest {
-		for _, b := range slices.Backward(backups) {
-			if b.Bootstrap != current {
-				return b, nil
-			}
+		earlier := newestPerBootstrap(backups, current)
+		switch len(earlier) {
+		case 0:
+			return statestore.Backup{}, fmt.Errorf("every backup of cluster %s is of the servers that it runs now, "+
+				rebuilt+"; after a loss, tent update cluster builds new servers only when no server machine is left, "+
+				"so delete the remaining ones in the cloud first", cluster, mark.UTC().Format(restoreTimeLayout))
+		case 1:
+			return earlier[0], nil
 		}
-		return statestore.Backup{}, fmt.Errorf("every backup of cluster %s is of the servers that it runs now, "+rebuilt,
-			cluster, mark.UTC().Format(restoreTimeLayout))
+		items := make([]string, len(earlier))
+		for i, b := range earlier {
+			items[i] = fmt.Sprintf("%s of the servers bootstrapped on %s", b.Name,
+				bootstrapTime(b).Format(restoreTimeLayout))
+		}
+		return statestore.Backup{}, fmt.Errorf("cluster %s has earlier backups of %d sets of servers: %s; "+
+			"name one with --from", cluster, len(earlier), english.And(items))
 	}
 	l, err := statestore.NewLayout(cluster)
 	if err != nil {
@@ -75,6 +86,25 @@ func pickBackup(cluster string, backups []statestore.Backup, from string, mark t
 			from, cluster, mark.UTC().Format(restoreTimeLayout))
 	}
 	return named[0], nil
+}
+
+// newestPerBootstrap returns the newest of the backups of each bootstrap other than current, the oldest bootstrap
+// first. backups are sorted oldest first.
+func newestPerBootstrap(backups []statestore.Backup, current string) []statestore.Backup {
+	var newest []statestore.Backup
+	for _, b := range backups {
+		if b.Bootstrap == current {
+			continue
+		}
+		i := slices.IndexFunc(newest, func(n statestore.Backup) bool { return n.Bootstrap == b.Bootstrap })
+		if i < 0 {
+			newest = append(newest, b)
+		} else {
+			newest[i] = b
+		}
+	}
+	slices.SortFunc(newest, func(a, b statestore.Backup) int { return strings.Compare(a.Bootstrap, b.Bootstrap) })
+	return newest
 }
 
 // restoreRecord says which backup the servers of one bootstrap are being restored from, or were.
@@ -212,10 +242,10 @@ func (p RestorePlan) WriteText(w io.Writer) error {
 			"They run no job and " + nodes + "."
 	}
 	return writeText(w, "the plan", fmt.Sprintf("Restore backup %s (taken %s) into %s.\n"+
-		"The servers that run now were bootstrapped on %s; the backup is of earlier servers.\n%s\n"+
+		"The backup is of servers bootstrapped on %s; the servers that run now were bootstrapped on %s.\n%s\n"+
 		"Nomad's jobs, nodes, ACL tokens, variables and keyring become those of the backup.\n",
 		p.Backup.Name, p.Backup.Time.UTC().Format(restoreTimeLayout), clusterLabel(p.Cluster),
-		p.Bootstrapped.UTC().Format(restoreTimeLayout), state))
+		bootstrapTime(p.Backup).Format(restoreTimeLayout), p.Bootstrapped.UTC().Format(restoreTimeLayout), state))
 }
 
 // WriteApplied writes the line "Restored: backup 20261008T030000Z into cluster prod.".
