@@ -1,11 +1,13 @@
 package statestore
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
 // clusterSpec is the name of a cluster's spec, the object that makes a top-level name a cluster.
@@ -69,6 +71,70 @@ func (l Layout) NameIndex(group string) (string, error) {
 	return l.NameIndexes() + group, nil
 }
 
+// backupTimeLayout writes the times in a backup's path: UTC, whole seconds, only digits, 'T' and 'Z'.
+const backupTimeLayout = "20060102T150405Z"
+
+// backupExt ends the name of a backup's object.
+const backupExt = ".snap"
+
+// Backup names one backup of a cluster: a snapshot of its Nomad state.
+type Backup struct {
+	Name      string    // when it was taken, in UTC, such as 20261009T230207Z
+	Time      time.Time // that time, in UTC and whole seconds
+	Bootstrap string    // the servers it is of: the time of their bootstrap mark, written as Name is
+	Path      string    // its object: <cluster>/backups/<Bootstrap>/<Name>.snap
+}
+
+// BackupName returns how a backup's path writes the time t: in UTC, in whole seconds, such as 20261009T230207Z.
+func BackupName(t time.Time) string { return t.UTC().Format(backupTimeLayout) }
+
+// Backups returns the prefix of the cluster's backups.
+func (l Layout) Backups() string { return l.Prefix() + "backups/" }
+
+// Backup returns the backup taken at taken from the servers that were bootstrapped at bootstrapped.
+func (l Layout) Backup(taken, bootstrapped time.Time) Backup {
+	b := Backup{
+		Name:      BackupName(taken),
+		Time:      taken.UTC().Truncate(time.Second),
+		Bootstrap: BackupName(bootstrapped),
+	}
+	b.Path = l.Backups() + b.Bootstrap + "/" + b.Name + backupExt
+	return b
+}
+
+// BackupAt returns the backup whose object is at path p, and false for any other path: one of another cluster, of
+// another shape, or with a time that BackupName does not write.
+func (l Layout) BackupAt(p string) (Backup, bool) {
+	rest, ok := strings.CutPrefix(p, l.Backups())
+	if !ok {
+		return Backup{}, false
+	}
+	bootstrap, file, ok := strings.Cut(rest, "/")
+	if !ok {
+		return Backup{}, false
+	}
+	name, ok := strings.CutSuffix(file, backupExt)
+	if !ok {
+		return Backup{}, false
+	}
+	taken, okTaken := parseBackupName(name)
+	bootstrapped, okBootstrapped := parseBackupName(bootstrap)
+	if !okTaken || !okBootstrapped {
+		return Backup{}, false
+	}
+	return l.Backup(taken, bootstrapped), true
+}
+
+// parseBackupName reads a time that BackupName wrote, and fails for any other text.
+func parseBackupName(s string) (time.Time, bool) {
+	t, err := time.Parse(backupTimeLayout, s)
+	return t, err == nil && BackupName(t) == s
+}
+
+// NomadRestored returns the path of the record of a restore: which backup the servers of a bootstrap are being
+// restored from, or were.
+func (l Layout) NomadRestored() string { return l.Prefix() + "nomad/restored" }
+
 // Completed returns the path of the spec last applied, with all defaults.
 func (l Layout) Completed() string { return l.Prefix() + "cluster.completed.yaml" }
 
@@ -111,4 +177,23 @@ func Clusters(ctx context.Context, s Store) ([]string, error) {
 	// Paths sort "a-b/" before "a/", names sort "a" before "a-b".
 	slices.Sort(clusters)
 	return clusters, nil
+}
+
+// Backups lists the cluster's backups in the store, oldest first, and among those of one time by their bootstrap.
+// Objects under the prefix that are no backups are left out.
+func Backups(ctx context.Context, s Store, l Layout) ([]Backup, error) {
+	paths, err := s.List(ctx, l.Backups())
+	if err != nil {
+		return nil, fmt.Errorf("list the backups of cluster %s: %w", l.cluster, err)
+	}
+	var backups []Backup
+	for _, p := range paths {
+		if b, ok := l.BackupAt(p); ok {
+			backups = append(backups, b)
+		}
+	}
+	slices.SortFunc(backups, func(a, b Backup) int {
+		return cmp.Or(a.Time.Compare(b.Time), strings.Compare(a.Bootstrap, b.Bootstrap))
+	})
+	return backups, nil
 }
