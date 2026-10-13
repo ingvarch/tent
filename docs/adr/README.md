@@ -26,7 +26,7 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0002](0002-direct-cloud-apis-and-own-engine.md) | Call cloud APIs directly and reconcile with an in-house engine | Accepted |
 | [0003](0003-cloud-is-source-of-truth.md) | The cloud is the source of truth: ownership labels and deterministic names | Accepted; extended by 0015 |
 | [0004](0004-layered-architecture.md) | Layered architecture: a cloud-agnostic core and providers that translate intents | Accepted; provider order changed by 0014; narrowed by 0021; amended by 0035 |
-| [0005](0005-immutable-nodes-and-nomad-aware-rollouts.md) | Immutable nodes and Nomad-aware rolling updates | Accepted; amended by 0017, 0030, 0031, 0032, 0035, 0037, 0038, 0039 and 0040 |
+| [0005](0005-immutable-nodes-and-nomad-aware-rollouts.md) | Immutable nodes and Nomad-aware rolling updates | Accepted; amended by 0017, 0030, 0031, 0032, 0035, 0037, 0038, 0039, 0040 and 0041 |
 | [0006](0006-two-binaries-and-nodeconfig.md) | Two binaries and a versioned NodeConfig contract | Accepted; extended by 0026; amended by 0027 and 0028 |
 | [0007](0007-security-baseline.md) | Security baseline: PKI, mTLS, ACL, client introduction | Accepted; see 0019; amended by 0024, 0029 and 0033 |
 | [0008](0008-node-credential-delivery.md) | Node credential delivery: user data in v1, bootstrap controller as the target | Accepted; exception in 0019; amended by 0029 and 0032 |
@@ -47,18 +47,19 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0023](0023-vultr-inventory-dedupe-and-images.md) | Vultr inventory, dedupe, images and firewall groups | Accepted |
 | [0024](0024-cluster-pki-storage-and-certificates.md) | Cluster PKI storage and certificate details | Accepted; amended by 0031 and 0033 |
 | [0025](0025-stdlib-only-helper-packages.md) | Standard-library-only helper packages | Accepted; amended by 0027 |
-| [0026](0026-channels-and-release-assets.md) | Channels and release assets | Accepted; M2.3 follow-ups moved to M2.7 by 0027; amended by 0028 and 0031 |
+| [0026](0026-channels-and-release-assets.md) | Channels and release assets | Accepted; M2.3 follow-ups moved to M2.7 by 0027; amended by 0028, 0031 and 0041 |
 | [0027](0027-nodeconfig-contract-rendering-and-spec-hash.md) | NodeConfig contract, rendering and spec hash | Accepted; amended by 0028, 0029, 0030, 0031, 0032 and 0038 |
 | [0028](0028-tent-node-agent-units-and-delivery.md) | tent-node agent, units and delivery | Accepted; amended by 0029 and 0030 |
 | [0029](0029-host-firewall-runtime-and-cni-on-nodes.md) | Host firewall, container runtime and CNI plugins on nodes | Accepted; amended by 0030 and 0032 |
 | [0030](0030-nomad-on-nodes.md) | Nomad on nodes | Accepted; amended by 0031, 0032, 0033 and 0038 |
-| [0031](0031-bootstrap-in-update.md) | Bootstrap in `update` | Accepted; amended by 0032, 0033, 0034, 0036, 0038, 0039 and 0040 |
+| [0031](0031-bootstrap-in-update.md) | Bootstrap in `update` | Accepted; amended by 0032, 0033, 0034, 0036, 0038, 0039, 0040 and 0041 |
 | [0032](0032-joined-label-scrub-and-delete-guard.md) | The joined label, the scrub and the delete guard | Accepted; amended by 0033, 0037, 0039 and 0040 |
-| [0033](0033-operator-commands.md) | Operator commands: validate, export nomad and ui | Accepted; amended by 0040 |
+| [0033](0033-operator-commands.md) | Operator commands: validate, export nomad and ui | Accepted; amended by 0040 and 0041 |
 | [0034](0034-e2e-suite-on-vultr.md) | The E2E suite on Vultr | Accepted |
-| [0035](0035-rollout-decisions.md) | Rollout decisions | Accepted; the refusal of two voters and single servers is gone (built in M3.4); amended by 0036, 0037, 0038, 0039 and 0040 |
+| [0035](0035-rollout-decisions.md) | Rollout decisions | Accepted; the refusal of two voters and single servers is gone (built in M3.4); amended by 0036, 0037, 0038, 0039, 0040 and 0041 |
 | [0036](0036-nomad-calls-of-a-roll.md) | The Nomad calls of a roll | Accepted; amended by 0038 |
-| [0037](0037-rolling-update-of-client-groups.md) | Rolling update of client groups | Accepted; amended by 0038, 0039 and 0040 |
+| [0037](0037-rolling-update-of-client-groups.md) | Rolling update of client groups | Accepted; amended by 0038, 0039, 0040 and 0041 |
 | [0038](0038-rolling-update-of-server-groups.md) | Rolling update of server groups | Accepted; amended by 0039 and 0040 |
 | [0039](0039-rolling-update-of-combined-groups.md) | Rolling update of combined groups | Accepted; amended by 0040 |
-| [0040](0040-scale-down-through-the-rollout.md) | Scale down through the rollout | Accepted |
+| [0040](0040-scale-down-through-the-rollout.md) | Scale down through the rollout | Accepted; amended by 0041 |
+| [0041](0041-upgrading-a-clusters-nomad-version.md) | Upgrading a cluster's Nomad version | Accepted |

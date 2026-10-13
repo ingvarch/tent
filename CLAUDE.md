@@ -179,6 +179,24 @@ packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries that
     - `validate cluster` asks Nomad before it plans the machines and names the surplus and the clients that never
       registered as `update` does.
     - The real-cloud checks ran on Vultr on 2026-10-12 (platform notes §3.16).
+  - M3.7 added `tent upgrade cluster` (`internal/app` `upgrade.go`, `upgrade_plan.go`, `versions.go`;
+    `internal/cli/upgrade.go`; `internal/channels`; `internal/assets`; ADR-0041; maintainer decisions 45 and 50): it
+    writes the Nomad version that the channel recommends into `spec.nomad.version` of `cluster.yaml`, under the lock,
+    with no cloud and no Nomad, once the signed checksums of that release verify for both architectures.
+    - A version moves up by at most one minor version at a time (`channels.CheckMove`): against the pin in `create`,
+      `replace`, `edit` and every load of the specs, and against the oldest node that Nomad reports in `update`. A
+      version in the spec still wins over the pin, a lower one too.
+    - `update` pins a Nomad version only after its release files verify (this narrows decision 39). A plan that boots
+      a node or moves the pin reads what a roll observes and fails when the node would run an older Nomad than one
+      that runs; when no server answers and the plan has an infrastructure change other than a delete, the check runs
+      after those changes. The apply stops before the first client that would run a newer Nomad than a server, after
+      it has deleted the machines that never joined, and `rolling-update` then fills the group.
+    - `rollout.CheckNewNode` holds the version rules of a new node. Its refusals and `validate cluster` say `the
+      cluster's version`, and `validate` warns that `update` has not applied the specs.
+    - `assetstest` serves the signed checksums of Nomad 2.0.6 and 2.0.7, and the test world's `NodeVersions` lets each
+      machine report its own version. The upgrade ran on the fakes. Nomad 2.0.6 and 2.0.7 ran together in a local lab
+      without tent, where the servers were rolled by hand in tent's order (platform notes §1.3); M3.9's `upgrade`
+      scenario runs it on Vultr.
 
 ## Read before changing anything
 

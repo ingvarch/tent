@@ -23,6 +23,9 @@
   server steps are those of ADR-0038, with a window after the transfer of a drained leader)
   and by
   [ADR-0040](0040-scale-down-through-the-rollout.md) (scale-down is built; the guard stays for two cases)
+  and by
+  [ADR-0041](0041-upgrading-a-clusters-nomad-version.md) (upgrades by replacement are built: `upgrade cluster` writes
+  the new Nomad version into the spec, `update` pins it, and `rolling-update` replaces the nodes, servers first)
 - **Date:** 2026-09-25
 - **Deciders:** ingvarch
 - **Related:** [ADR-0004](0004-layered-architecture.md), [ADR-0009](0009-server-discovery-fixed-ip-slots.md),

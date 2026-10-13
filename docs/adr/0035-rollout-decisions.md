@@ -22,6 +22,10 @@
   changed; in a shrink a victim that leads hands the leadership only to a server that stays, and a joined client
   without a private address is the first machine that its group loses, with no step taken on it and no other machine
   taken in its place)
+  and by
+  [ADR-0041](0041-upgrading-a-clusters-nomad-version.md) (its item 15: `rollout.CheckNewNode` holds the version
+  rules of a new node for `Next`, for the hold of a client group and for `update`, and the refusal says `the cluster's
+  version is`)
 - **Date:** 2026-10-08
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0004](0004-layered-architecture.md),

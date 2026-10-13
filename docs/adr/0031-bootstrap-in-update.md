@@ -19,6 +19,12 @@
   [ADR-0040](0040-scale-down-through-the-rollout.md) (the order of an apply gains the removals of nodes that joined
   and the purges, after the node deletes; every plan of a cluster that can answer reads Nomad's nodes, so a second
   `update --yes` makes one Nomad call)
+  and by
+  [ADR-0041](0041-upgrading-a-clusters-nomad-version.md) (the apply stops before the first client that would run a
+  newer Nomad than a server, after it has deleted the machines that never joined; a plan that boots a node or moves
+  the Nomad pin reads what a roll observes, and when no server answers and the plan has an infrastructure change
+  other than a delete, the apply makes that check after those changes and before the completed spec; the pin moves
+  only after its release files verify)
 - **Date:** 2026-10-05
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),
