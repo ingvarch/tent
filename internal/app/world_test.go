@@ -33,11 +33,7 @@ func newLiveWorldWith(t *testing.T, setup func(*nomadWorld)) liveWorld {
 		setup(w)
 	}
 	mustUpdate(t, svc)
-	api, err := svc.Nomad(nomadops.Config{Address: "198.51.100.1:4646"})
-	if err != nil {
-		t.Fatalf("Nomad: %v", err)
-	}
-	return liveWorld{f: f, w: w, api: api}
+	return liveOf(t, svc, f, w)
 }
 
 // nodes returns the nodes that the Nomad of the world lists.
