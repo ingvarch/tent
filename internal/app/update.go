@@ -336,7 +336,7 @@ func (s *Service) loadCluster(ctx context.Context, l statestore.Layout) (loadedC
 	}
 	ch, err := checkCluster(objs.Cluster, objs.NodeGroups, s.Validate, s.channel)
 	if err != nil {
-		return loadedCluster{}, err
+		return loadedCluster{}, s.adviseUpgrade(objs.Cluster, err)
 	}
 	stored, err := s.readCompleted(ctx, l)
 	if err != nil {
@@ -351,6 +351,30 @@ func (s *Service) loadCluster(ctx context.Context, l statestore.Layout) (loadedC
 		return loadedCluster{}, err
 	}
 	return loadedCluster{objs: objs, ch: ch, stored: stored, pinned: pinned, m: m}, nil
+}
+
+// setsOlderThanMinimum reports whether the Cluster c, which has its defaults, sets a Nomad version that is older than
+// its channel's minimum. It reports false for a channel that tent does not know.
+func (s *Service) setsOlderThanMinimum(c *v1alpha1.Cluster) bool {
+	ch, err := s.channel(c.Spec.Channel)
+	return err == nil && ch.OlderThanMinimum(c.Spec.Nomad.Version)
+}
+
+// adviseUpgrade adds the advice to run tent upgrade cluster to the problem with spec.nomad.version in err, when the
+// Cluster c sets a version that is older than its channel's minimum. Any other err comes back as it is.
+func (s *Service) adviseUpgrade(c *v1alpha1.Cluster, err error) error {
+	problems, ok := errors.AsType[v1alpha1.Errors](err)
+	if !ok || !s.setsOlderThanMinimum(c) {
+		return err
+	}
+	object := clusterObject(c)
+	advised := slices.Clone(problems)
+	for i, p := range advised {
+		if p.Object == object && p.Path == nomadVersionPath {
+			advised[i].Detail += "; " + upgradeAdvice
+		}
+	}
+	return advised
 }
 
 // planUpdate loads and checks a cluster's specs, as Update says, and plans the changes that bring the cloud to them and
@@ -522,6 +546,9 @@ func unreadablePin(l statestore.Layout, err error) error {
 		"%s in the state store by hand", err, l.Completed())
 }
 
+// upgradeAdvice is what to do about a Nomad version that is older than its channel's minimum.
+const upgradeAdvice = "run tent upgrade cluster"
+
 // pinOutsideChannel returns the error of a cluster pinned to the Nomad version pinned when the channel ch does not
 // allow it, and nil otherwise.
 func pinOutsideChannel(cluster string, l statestore.Layout, ch *channels.Channel, pinned string) error {
@@ -532,7 +559,7 @@ func pinOutsideChannel(cluster string, l statestore.Layout, ch *channels.Channel
 	}
 	advice := "set spec.nomad.version to a version that the channel allows"
 	if ch.OlderThanMinimum(pinned) {
-		advice = "run tent upgrade cluster, or " + advice
+		advice = upgradeAdvice + ", or " + advice
 	}
 	return fmt.Errorf("%s is pinned to Nomad %s (%s), which %s; %s", clusterLabel(cluster), pinned, l.Completed(),
 		v.Problem, advice)

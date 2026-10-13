@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -90,15 +91,18 @@ func TestSpecChecksTheChannel(t *testing.T) {
 		name string
 		doc  string
 		want v1alpha1.FieldError
+		// loaded is what update, which loads the stored Cluster, adds to the want's detail.
+		loaded string
 	}{
 		{"unknown channel", edit(t, clusterYAML, "region: ams", "region: ams\n  channel: x"),
-			problem("spec.channel", `unknown channel "x"; known: stable`)},
+			problem("spec.channel", `unknown channel "x"; known: stable`), ""},
 		{"version that is not X.Y.Z", withVersion(t, clusterYAML, "2.0"),
-			problem("spec.nomad.version", `"2.0" is not a Nomad version such as 2.0.7`)},
+			problem("spec.nomad.version", `"2.0" is not a Nomad version such as 2.0.7`), ""},
 		{"version older than the channel's minimum", withVersion(t, clusterYAML, "1.11.0"),
-			problem("spec.nomad.version", "1.11.0 is older than 2.0.0, the oldest Nomad that channel stable allows")},
+			problem("spec.nomad.version", "1.11.0 is older than 2.0.0, the oldest Nomad that channel stable allows"),
+			"; run tent upgrade cluster"},
 		{"version of the next major", withVersion(t, clusterYAML, "3.0.0"),
-			problem("spec.nomad.version", "3.0.0 is newer than this tent knows; channel stable allows 2.x from 2.0.0")},
+			problem("spec.nomad.version", "3.0.0 is newer than this tent knows; channel stable allows 2.x from 2.0.0"), ""},
 	} {
 		for _, uc := range specChecks {
 			t.Run(tc.name+"/"+uc.name, func(t *testing.T) {
@@ -111,7 +115,11 @@ func TestSpecChecksTheChannel(t *testing.T) {
 				}
 				stored := snapshot(t, svc.Store)
 				for _, apply := range []bool{false, true} {
-					wantFieldErrors(t, uc.run(t, svc, tc.doc, apply), tc.want)
+					want := tc.want
+					if uc.name == "update" {
+						want.Detail += tc.loaded
+					}
+					wantFieldErrors(t, uc.run(t, svc, tc.doc, apply), want)
 				}
 				wantSnapshot(t, svc.Store, stored)
 			})
@@ -670,4 +678,113 @@ func TestCommandsThatLoadTheSpecsLoadAVersionOlderThanThePin(t *testing.T) {
 		_, err = svc.RollingUpdate(t.Context(), "prod", app.RollOptions{})
 		wantError(t, err, "the specs of cluster prod changed since the last tent update cluster; run it first")
 	})
+}
+
+// TestCommandsThatLoadTheSpecsPointToUpgradeForAVersionBelowTheMinimum adds "run tent upgrade cluster" to the channel's
+// problem with the Nomad version that the stored Cluster sets, when the version is older than the channel's minimum,
+// and keeps the other problems of the specs after it. A version that the channel refuses for another reason gets no
+// advice.
+func TestCommandsThatLoadTheSpecsPointToUpgradeForAVersionBelowTheMinimum(t *testing.T) {
+	t.Parallel()
+	smallServers := edit(t, serversYAML, "size: 3", "size: 2")
+	groupProblem := v1alpha1.FieldError{
+		Object: "NodeGroup servers", Path: "spec.size", Detail: "must be 1, 3 or 5 for role=server",
+	}
+	for _, tc := range []struct {
+		name    string
+		cluster string
+		servers string
+		want    []v1alpha1.FieldError
+	}{
+		{"older than the minimum", withVersion(t, clusterYAML, "1.11.0"), serversYAML,
+			[]v1alpha1.FieldError{problem("spec.nomad.version",
+				"1.11.0 is older than 2.0.0, the oldest Nomad that channel stable allows; run tent upgrade cluster")}},
+		{
+			"older than the minimum, and other problems",
+			edit(t, withVersion(t, clusterYAML, "1.11.0"), "region: ams", "region: ams\n    zones: [fra]"),
+			smallServers,
+			[]v1alpha1.FieldError{
+				problem("spec.nomad.version",
+					"1.11.0 is older than 2.0.0, the oldest Nomad that channel stable allows; run tent upgrade cluster"),
+				problem("spec.cloud.zones", "must be [ams]: Vultr has no zones"),
+				groupProblem,
+			},
+		},
+		{"of the next major", withVersion(t, clusterYAML, "3.0.0"), serversYAML,
+			[]v1alpha1.FieldError{problem("spec.nomad.version",
+				"3.0.0 is newer than this tent knows; channel stable allows 2.x from 2.0.0")}},
+		{"not a version", withVersion(t, clusterYAML, "2.0"), serversYAML, []v1alpha1.FieldError{problem(
+			"spec.nomad.version", `"2.0" is not a Nomad version such as 2.0.7`)}},
+		{"a pre-release older than the minimum", withVersion(t, clusterYAML, "1.11.0-rc.1"), serversYAML,
+			[]v1alpha1.FieldError{problem("spec.nomad.version", `"1.11.0-rc.1" is not a Nomad version such as 2.0.7`)}},
+	} {
+		for _, uc := range []struct {
+			name string
+			run  func(t *testing.T, svc *app.Service) error
+		}{
+			{"update", func(t *testing.T, svc *app.Service) error {
+				_, err := svc.Update(t.Context(), "prod", true)
+				return err
+			}},
+			{"rolling-update", func(t *testing.T, svc *app.Service) error {
+				_, err := svc.RollingUpdate(t.Context(), "prod", app.RollOptions{Apply: true})
+				return err
+			}},
+			{"validate", func(t *testing.T, svc *app.Service) error {
+				_, err := svc.ValidateCluster(t.Context(), "prod")
+				return err
+			}},
+		} {
+			t.Run(tc.name+"/"+uc.name, func(t *testing.T) {
+				t.Parallel()
+				svc, _ := newService(t)
+				svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.7")
+				mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
+				put(t, svc.Store, clusterPath, encode(t, tc.cluster))
+				put(t, svc.Store, serversPath, encode(t, tc.servers))
+				wantFieldErrors(t, uc.run(t, svc), tc.want...)
+			})
+		}
+	}
+}
+
+// TestWritesWithoutAClusterPointToUpgradeForAStoredVersionBelowTheMinimum adds "run tent upgrade cluster" to the
+// channel's problem when a replace or an edit of a node group alone fails over the stored Cluster's version, which is
+// older than the channel's minimum. A write whose input holds such a Cluster gets the problem without the advice.
+func TestWritesWithoutAClusterPointToUpgradeForAStoredVersionBelowTheMinimum(t *testing.T) {
+	t.Parallel()
+	const detail = "1.11.0 is older than 2.0.0, the oldest Nomad that channel stable allows"
+	old := withVersion(t, clusterYAML, "1.11.0")
+	for _, apply := range []bool{false, true} {
+		for _, uc := range []struct {
+			name string
+			run  func(t *testing.T, svc *app.Service, apply bool) error
+			want string
+		}{
+			{"replace", func(t *testing.T, svc *app.Service, apply bool) error {
+				_, err := svc.Replace(t.Context(), decode(t, workersYAML), apply)
+				return err
+			}, detail + "; run tent upgrade cluster"},
+			{"edit", func(t *testing.T, svc *app.Service, apply bool) error {
+				ref := load(t, svc, v1alpha1.KindNodeGroup, "workers")
+				_, err := svc.Save(t.Context(), ref, decode(t, workersYAML), apply)
+				return err
+			}, detail + "; run tent upgrade cluster"},
+			{"replace with the Cluster", func(t *testing.T, svc *app.Service, apply bool) error {
+				_, err := svc.Replace(t.Context(), decode(t, old), apply)
+				return err
+			}, detail},
+		} {
+			t.Run(fmt.Sprintf("%s/apply=%t", uc.name, apply), func(t *testing.T) {
+				t.Parallel()
+				svc, _ := newService(t)
+				svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.7")
+				mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
+				put(t, svc.Store, clusterPath, encode(t, old))
+				stored := snapshot(t, svc.Store)
+				wantFieldErrors(t, uc.run(t, svc, apply), problem("spec.nomad.version", uc.want))
+				wantSnapshot(t, svc.Store, stored)
+			})
+		}
+	}
 }
