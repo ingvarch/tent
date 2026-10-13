@@ -66,7 +66,8 @@ func planNomad(m *model.Cluster, changes []NodeChange, staying []cloud.Instance,
 
 // needsNomad reports whether applying the plan calls Nomad: for the Nomad step, for the servers' versions before a
 // client boots, for a client's intro token or its registration wait, to ask whether a node that the plan deletes has
-// joined, or to remove a node or purge one.
+// joined, or to remove a node or purge one. A check of the versions that the plan owes is not counted: such a plan has
+// reached for Nomad already.
 func (u updateRun) needsNomad() bool {
 	return u.plan.Nomad != nil || len(u.removal.groups) > 0 ||
 		slices.ContainsFunc(u.plan.Nodes, func(c NodeChange) bool { return c.Action == NodeDelete || !isServerChange(c) })

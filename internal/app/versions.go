@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/ingvarch/tent/internal/channels"
+	"github.com/ingvarch/tent/internal/cloud"
+	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/rollout"
 )
 
@@ -123,47 +125,104 @@ func checkPinMove(cluster, from, to string, nomad rollout.Nomad) error {
 		"tent rolling-update cluster, and move then", what, err, oldest.who, back)
 }
 
+// couldNotAskVersions starts the cause of a read of the versions that failed.
+const couldNotAskVersions = "tent could not ask Nomad which versions run: "
+
+// versionCheck is the check of the versions that an apply makes when its plan could not read Nomad.
+type versionCheck func(ctx context.Context) error
+
 // checkVersions holds the Nomad version of the specs against what Nomad reports, for the changes of a plan: a plan
 // that boots a node needs a version that is not older than the Nomad of a server or of a node that is not down, and a
 // plan that writes another version into the completed spec than the stored one needs the rules of checkPinMove. It
 // reads what the plan read already (found), else what a roll observes. A cluster that cannot answer, because the store
 // holds no mark of its bootstrap or no server runs with a public address, gets no check. A read that fails ends the
-// plan. The warning that it returns is empty unless the plan boots a client that clientAhead says waits for the
-// servers.
+// plan. When no server answers, the error carries the hint for spec.access.api, unless the plan has an
+// infrastructure change other than a delete: then the plan stands with a warning, and owed is the check that the
+// apply makes once it has applied those changes. The warning is otherwise empty unless the plan boots a client that
+// clientAhead says waits for the servers.
 func (s *Service) checkVersions(ctx context.Context, c loadedCluster, in planInput, plan UpdatePlan, found machines,
-) (warning string, err error) {
+) (warning string, owed versionCheck, err error) {
 	to := c.objs.Cluster.Spec.Nomad.Version
-	boot := slices.IndexFunc(plan.Nodes, bootsMachine)
-	moves := to != c.pinned
-	if !in.marked || boot < 0 && !moves {
-		return "", nil
+	if !in.marked || !slices.ContainsFunc(plan.Nodes, bootsMachine) && to == c.pinned {
+		return "", nil, nil
 	}
 	reading := found.reading
 	if reading == nil {
-		read, err := readForRemoval(ctx, c.m, found.listed, plan.Nodes, s.nomadAsker(in.access))
+		read, err := s.readVersions(ctx, c, in, plan.Nodes, found.listed)
 		switch {
 		case errors.Is(err, errNoServerToAsk):
-			return "", nil
+			return "", nil, nil
+		case errors.Is(err, nomadops.ErrNotReady) && infraRunsFirst(plan):
+			warning = couldNotAskVersions + err.Error() +
+				"; update asks again once it has applied the infrastructure's changes, before it writes the " +
+				"completed spec or creates a node"
+			owed = func(ctx context.Context) error { return s.askVersions(ctx, c, in, plan.Nodes, found.listed) }
+			return warning, owed, nil
 		case err != nil:
-			what := pinPhrase(c.m.Name, c.pinned, to)
-			if boot >= 0 {
-				what = createPhrase(plan.Nodes[boot])
-			}
-			return "", fmt.Errorf("%s, and tent could not ask Nomad which versions run: %w", what, err)
+			return "", nil, cannotRead(c, plan.Nodes, err)
 		}
 		reading = &read
 	}
 	nomad := reading.state()
-	if err := checkNewNodes(plan.Nodes, to, nomad); err != nil {
-		return "", err
-	}
-	if err := checkPinMove(c.m.Name, c.pinned, to, nomad); err != nil {
-		return "", err
+	if err := holdVersions(c, plan.Nodes, nomad); err != nil {
+		return "", nil, err
 	}
 	if node, why := clientAhead(plan.Nodes, to, nomad); why != nil {
-		return waitWarning(node, why), nil
+		return waitWarning(node, why), nil, nil
 	}
-	return "", nil
+	return "", nil, nil
+}
+
+// infraRunsFirst reports whether the plan has an infrastructure change other than a delete: the changes that an apply
+// which owes the check of the versions carries out before that check.
+func infraRunsFirst(p UpdatePlan) bool {
+	if p.Infra == nil {
+		return false
+	}
+	s := p.Infra.Summary()
+	return s.Create+s.Update+s.Replace > 0
+}
+
+// askVersions is the check of the versions that an apply owes: it reads what a roll observes and holds the specs'
+// version against it, as checkVersions does. A read that fails, and a refusal, are its errors.
+func (s *Service) askVersions(ctx context.Context, c loadedCluster, in planInput, nodes []NodeChange,
+	listed []cloud.Instance,
+) error {
+	read, err := s.readVersions(ctx, c, in, nodes, listed)
+	if err != nil {
+		return cannotRead(c, nodes, err)
+	}
+	return holdVersions(c, nodes, read.state())
+}
+
+// readVersions reads what a roll observes of Nomad, through the servers among the listed machines.
+func (s *Service) readVersions(ctx context.Context, c loadedCluster, in planInput, nodes []NodeChange,
+	listed []cloud.Instance,
+) (nomadReading, error) {
+	return readForRemoval(ctx, c.m, listed, nodes, s.nomadAsker(in.access))
+}
+
+// holdVersions fails when the plan's nodes or its pin break a rule of checkNewNodes or checkPinMove against nomad.
+func holdVersions(c loadedCluster, nodes []NodeChange, nomad rollout.Nomad) error {
+	to := c.objs.Cluster.Spec.Nomad.Version
+	if err := checkNewNodes(nodes, to, nomad); err != nil {
+		return err
+	}
+	return checkPinMove(c.m.Name, c.pinned, to, nomad)
+}
+
+// cannotRead is the error of a plan, or of an apply that owes the check, when the read of Nomad failed with err. It
+// carries the hint for spec.access.api when no server answered.
+func cannotRead(c loadedCluster, nodes []NodeChange, err error) error {
+	what := pinPhrase(c.m.Name, c.pinned, c.objs.Cluster.Spec.Nomad.Version)
+	if i := slices.IndexFunc(nodes, bootsMachine); i >= 0 {
+		what = createPhrase(nodes[i])
+	}
+	err = fmt.Errorf("%s, and %s%w", what, couldNotAskVersions, err)
+	if errors.Is(err, nomadops.ErrNotReady) {
+		return withReachHint(err)
+	}
+	return err
 }
 
 // errServerWithoutVersion is why a client waits for the servers when one of them reports no Nomad version yet.
