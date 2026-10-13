@@ -19,6 +19,7 @@ import (
 	"github.com/ingvarch/tent/internal/channels"
 	"github.com/ingvarch/tent/internal/cloud"
 	"github.com/ingvarch/tent/internal/cloud/vultr/vultrfake"
+	"github.com/ingvarch/tent/internal/nodeconfig"
 	"github.com/ingvarch/tent/internal/nomadops"
 	"github.com/ingvarch/tent/internal/nomadops/nomadfake"
 	"github.com/ingvarch/tent/internal/secret"
@@ -66,18 +67,18 @@ type nomadCall struct {
 // and SetHaltLag turn on the worst case of a leader that adds a removed server again (see them).
 //
 // The servers are named <hostname>.global at their private address:4647, with the Raft ID r-<instance id>, and each
-// runs the world's Nomad version, as each node does. A TransferLeadership, RemovePeer or ForceLeave that succeeds
-// through a client of the world changes the model for good. One that fails does not, even when LoseResponse made the
-// fake carry it out: the world undoes it at the next call, so a test loses the answer of such a write with a hook that
-// calls next and returns an error. Once the cluster has a leader, each ready client or combined instance registers at
-// its private address (the first VPC of the instance on the Vultr fake), unless it is withheld, with the ID n-<instance
-// id>, and only once in a cluster: a mark, a drain or a purge that a test or a run makes stays. The node of a machine
-// that is gone or not ready for downAfter reads down from then on, with its drain complete, while the world's last view
-// of the fake still lists it; the view is what the last read of the nodes returned, plus the nodes the world registered
-// since, minus those that a client of the world purged; any other write since that read is not in it. A cluster whose
-// servers are all gone is a new, unbootstrapped Nomad when new ones come. The fake's own methods, such as Fail,
-// LoseResponse and SetDrainReads, are the world's. A test changes what the world answers with ChangeServer, DropServer,
-// ChangePeers, ChangeNode and DropNode.
+// runs the world's Nomad version, as each node does, unless NodeVersions gives each machine the version of its create
+// request. A TransferLeadership, RemovePeer or ForceLeave that succeeds through a client of the world changes the model
+// for good. One that fails does not, even when LoseResponse made the fake carry it out: the world undoes it at the next
+// call, so a test loses the answer of such a write with a hook that calls next and returns an error. Once the cluster
+// has a leader, each ready client or combined instance registers at its private address (the first VPC of the instance
+// on the Vultr fake), unless it is withheld, with the ID n-<instance id>, and only once in a cluster: a mark, a drain
+// or a purge that a test or a run makes stays. The node of a machine that is gone or not ready for downAfter reads down
+// from then on, with its drain complete, while the world's last view of the fake still lists it; the view is what the
+// last read of the nodes returned, plus the nodes the world registered since, minus those that a client of the world
+// purged; any other write since that read is not in it. A cluster whose servers are all gone is a new, unbootstrapped
+// Nomad when new ones come. The fake's own methods, such as Fail, LoseResponse and SetDrainReads, are the world's. A
+// test changes what the world answers with ChangeServer, DropServer, ChangePeers, ChangeNode and DropNode.
 type nomadWorld struct {
 	*nomadfake.Fake
 	cloud *vultrfake.Fake
@@ -104,8 +105,14 @@ type nomadWorld struct {
 	tb           testing.TB
 	// unhealthy keeps the servers from being healthy, whatever the instances show.
 	unhealthy bool
-	// version is the Nomad version that every server and node reports; empty for the one of the stable channel.
+	// version is the world's Nomad version, which a machine reports unless NodeVersions gives it its own; empty for the
+	// one of the stable channel.
 	version string
+	// nodeVersions makes a machine report the version of its create request (see NodeVersions).
+	nodeVersions bool
+	// created is the version of the nomad asset in each machine's create request, by instance ID, read once; empty for a
+	// machine without a request, a NodeConfig or a nomad asset.
+	created map[string]string
 	// What a test changed in the answers, by the name of the machine's node.
 	serverEdits  map[string]func(*nomadops.ServerHealth)
 	droppedNodes map[string]bool
@@ -133,6 +140,7 @@ func withNomad(svc *app.Service, f *vultrfake.Fake) *nomadWorld { return withNom
 func withNomadOf(svc *app.Service, f *vultrfake.Fake, name string) *nomadWorld {
 	w := &nomadWorld{
 		Fake: nomadfake.New(), cloud: f, svc: svc, name: name, withheld: map[string]bool{}, withheldIDs: map[string]bool{},
+		created:      map[string]string{},
 		serverEdits:  map[string]func(*nomadops.ServerHealth){},
 		droppedNodes: map[string]bool{}, nodeEdits: map[string]func(*nomadops.Node){}, droppedServers: map[string]bool{},
 		downAfter: defaultDownAfter,
@@ -147,14 +155,48 @@ func withNomadOf(svc *app.Service, f *vultrfake.Fake, name string) *nomadWorld {
 	return w
 }
 
-// pinned returns the Nomad version that every server and node reports: the one that SetVersion made, or else the one
-// that the embedded stable channel recommends, which a cluster is pinned to. The caller holds w.mu.
+// pinned returns the world's Nomad version: the one that SetVersion made, or else the one that the embedded stable
+// channel recommends, which a cluster is pinned to. The caller holds w.mu.
 func (w *nomadWorld) pinned() string {
 	if w.version != "" {
 		return w.version
 	}
 	return stableNomad()
 }
+
+// versionOf returns the Nomad version that the machine with the instance ID id reports: the version of the nomad asset
+// in its create request when NodeVersions is on and the request has one, and else pinned. It reads the request once
+// for each instance, so a machine reports the same version after the fake forgot the request of its deleted instance.
+// The caller holds w.mu.
+func (w *nomadWorld) versionOf(id string) string {
+	if !w.nodeVersions {
+		return w.pinned()
+	}
+	v, ok := w.created[id]
+	if !ok {
+		v = nomadAssetVersion(w.createdConfig(id))
+		w.created[id] = v
+	}
+	if v == "" {
+		return w.pinned()
+	}
+	return v
+}
+
+// nomadAssetVersion returns the version of the nomad asset of nc, or "" when nc is nil or has none.
+func nomadAssetVersion(nc *nodeconfig.NodeConfig) string {
+	if nc == nil {
+		return ""
+	}
+	i := slices.IndexFunc(nc.Assets, isNomadAsset)
+	if i < 0 {
+		return ""
+	}
+	return nc.Assets[i].Version
+}
+
+// isNomadAsset reports whether a is the asset that holds the Nomad zip.
+func isNomadAsset(a nodeconfig.Asset) bool { return a.Name == nodeconfig.NomadAsset }
 
 // stableNomad returns the Nomad version that the embedded stable channel recommends, read once: the world asks at
 // every call of a test.
@@ -192,11 +234,23 @@ func (w *nomadWorld) SetDownAfter(d time.Duration) {
 	w.downAfter = d
 }
 
-// SetVersion makes v the Nomad version that every server and node reports from now on.
+// SetVersion makes v the Nomad version that every server and node reports from now on, unless NodeVersions gives a
+// machine the version of its create request.
 func (w *nomadWorld) SetVersion(v string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.version = v
+}
+
+// NodeVersions makes each server and node report the Nomad version of the nomad asset in the NodeConfig of the request
+// that created its machine, instead of the world's version. A machine without a create request, without a NodeConfig or
+// without a nomad asset in it still reports the world's version, which SetVersion changes. The world reads a machine's
+// request at its first report after this call, so a test calls it before it builds the cluster: a machine that was
+// deleted before then reports the world's version.
+func (w *nomadWorld) NodeVersions() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.nodeVersions = true
 }
 
 // ChangeServer changes the entry of the autopilot report for the server machine called name by change, in every
@@ -416,7 +470,7 @@ func (w *nomadWorld) registerClients(clients []machine) {
 			continue
 		}
 		n := nomadops.Node{
-			ID: nodeIDOf(m.id), Name: m.name, Status: "ready", Eligible: true, Address: m.private, Version: w.pinned(),
+			ID: nodeIDOf(m.id), Name: m.name, Status: "ready", Eligible: true, Address: m.private, Version: w.versionOf(m.id),
 		}
 		w.Register(n)
 		w.registered[m.id], w.listed[n.ID] = true, n
