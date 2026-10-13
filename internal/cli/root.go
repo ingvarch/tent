@@ -39,8 +39,8 @@ func WithProviders(p Providers) Option {
 	return func(o *globalOptions) { o.providers = p }
 }
 
-// WithAssets tells update cluster where the files that nodes download are found; without it, it reads the public
-// release sites.
+// WithAssets tells update cluster, rolling-update cluster, validate cluster and upgrade cluster where the files that
+// nodes download are found; without it, they read the public release sites.
 func WithAssets(a assets.Options) Option {
 	return func(o *globalOptions) { o.assets = a }
 }
@@ -133,6 +133,7 @@ func newRootCommand(s Streams, opts *globalOptions) *cobra.Command {
 		newVersionCommand(opts), newCreateCommand(opts), newGetCommand(opts), newReplaceCommand(opts),
 		newDeleteCommand(opts), newStateCommand(opts), newEditCommand(opts), newUpdateCommand(opts),
 		newValidateCommand(opts), newExportCommand(opts), newUICommand(opts), newRollingUpdateCommand(opts),
+		newUpgradeCommand(opts),
 	)
 	return cmd
 }
