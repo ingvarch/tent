@@ -12,6 +12,11 @@
   [ADR-0040](0040-scale-down-through-the-rollout.md) (the loop serves the removals of `update`; items 12, 14 and 15
   changed: `update` names a new server or combined machine above the remembered index, a plan that may remove a node
   that joined fails when the release files cannot be read, and the guard's text no longer names `rolling-update`)
+  and by
+  [ADR-0041](0041-upgrading-a-clusters-nomad-version.md) (decision 39 is narrowed: an `update` that would write
+  another Nomad version into the completed spec fails when it cannot read that version's release files, also when it
+  creates no node; every other plan behaves as before; after an upgrade `update` lists every node as
+  outdated)
 - **Date:** 2026-10-08
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),

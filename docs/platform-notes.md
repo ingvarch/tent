@@ -6,7 +6,8 @@ design relies on.
 > **Verified on 2026-09-25**, [section 5](#5-s3-compatible-object-stores) on 2026-09-26,
 > [section 6](#6-ubuntu-on-nodes) on 2026-09-29 ([6.4](#64-restarts-of-docker-containerd-and-nomad) on 2026-10-05,
 > [6.5](#65-cloud-init-and-the-stub) on 2026-10-06) and [1.6](#16-the-agent-on-a-node) from 2026-09-29 to 2026-10-05,
-> and the items of [1.2](#12-features-tent-relies-on) and 1.6 that give their own date.
+> and the items of [1.1](#11-releases-and-support-), [1.2](#12-features-tent-relies-on), 1.3, 1.4 and 1.6 that give
+> their own date.
 > Sources: official documentation, the Hetzner Cloud OpenAPI spec
 > (`https://docs.hetzner.cloud/cloud.spec.json`), the Vultr API reference (OpenAPI spec from a Wayback copy of
 > `https://www.vultr.com/api/`, 2026-09-12) plus live calls to public Vultr endpoints, release APIs and upstream
@@ -47,6 +48,10 @@ design relies on.
     monthly); "no breaking changes"; Raft WAL log store.
     - 2.0.3 added `acl token create -token` (custom secret) and `client.default_ineligible`.
     - 2.0.4 deprecated unauthenticated `server join`.
+- **Releases on 2026-10-10.** The release index (`https://api.releases.hashicorp.com/v1/releases/nomad`) lists 2.0.7,
+  created 2026-09-18T16:19:20Z, as the latest CE release, with no 2.0.8 and no 2.1.0. 2.0.6 was created
+  2026-09-09T19:59:49Z. `https://releases.hashicorp.com/nomad/2.0.6/` lists the same files as 2.0.7's directory:
+  `nomad_2.0.6_SHA256SUMS`, its `.sig` and `.72D7468F.sig`, and the zips of darwin, linux and windows.
 - **Support.** For 2.0.0 and later, CE has a two-year base backport policy; 2.0.x base support ends 2028-04-30.
 
 ### 1.2 Features tent relies on
@@ -776,7 +781,58 @@ through Playwright, with a throwaway `httputil.ReverseProxy`, and read in the so
   replacement.
 - **Skew.** The rule is "backward compatible for at least 2 point releases". Servers on 1.9+ reject clients older than
   1.6. There are no downgrades.
-- **Unverified:** the skew rule has not been restated for the 2.x versioning scheme.
+- **The upgrade guide, read on 2026-10-10** (`https://developer.hashicorp.com/nomad/docs/upgrade`, which a fetch tool
+  named the page of v2.0.x; the same sentences are in `website/content/docs/upgrade/index.mdx` of the source of Nomad
+  1.11.3):
+  - "Nomad strives to be backward compatible for at least 2 point release, so Nomad v1.7.x works with v1.5.x."
+  - "Nomad does _not_ support downgrading at this time. Downgrading clients requires draining allocations and removing
+    the data directory. Downgrading servers safely requires re-provisioning the cluster."
+  - "New features are unlikely to work correctly until all nodes have been upgraded."
+  - "While it is possible to upgrade Nomad client nodes before servers, this guide recommends upgrading servers first
+    as many new client features will not work until servers are upgraded."
+  - "Rolling: New hosts containing the new Nomad version may be added followed by the removal of old hosts."
+  - "Continue with the upgrades across the servers making sure to do a single Nomad server at a time."
+- **The page of version details** (`.../docs/upgrade/upgrade-specific`, 2026-10-10) has sections for 2.0.0 and 2.0.4
+  and none for 2.0.5 to 2.0.7, and no sentence about versions that an upgrade may skip. The section of 2.0.4 says that
+  2.1.0 removes `server.retry_join` and `server.start_join`; tent writes `server_join { retry_join }`.
+- **Minimum versions in the source of 1.11.3.** A server turns some features on only when every server has a minimum
+  version (`ServersMeetMinimumVersion`). An intro token is signed only when every server of the region runs 1.11.0 or
+  newer (`minVersionNodeIntro`); 2.0.6 and 2.0.7 are above it. The other minimums were not read, and nothing was read
+  in the source of 2.0.7.
+- **Unverified:** the skew rule has not been restated for the 2.x versioning scheme: the guide of 2026-10-10 still gives
+  its example in 1.x terms.
+- **Measured on 2026-10-10** (a local lab on 127.0.0.1, macOS, darwin_arm64; Nomad 2.0.6, revision `f74ce32f`, beside
+  2.0.7, revision `9dcbdc5e`; ACL, mTLS, gossip encryption and `client_introduction { enforcement = "strict" }`; servers
+  with `bootstrap_expect = 3`, `server_join { retry_join }`, `leave_on_terminate = false` and `autopilot {
+  cleanup_dead_servers = true }`; up to seven servers and three clients with `raw_exec` jobs; a server stopped with
+  SIGKILL):
+  - A 2.0.7 server joined three 2.0.6 servers: a nonvoter after 0.3 s, a healthy nonvoter in autopilot's report after
+    1.4 s, a voter after 13.4 s (15.3 s in the report), with autopilot healthy and failure tolerance 1 at every read.
+    The 2.0.6 leader logged `nomad.autopilot: Promoting server`. The next two 2.0.7 servers voted after 17.4 s and
+    12.4 s.
+  - A 2.0.6 server joined three 2.0.7 servers: Nomad 2.0.7 did not refuse it (one run). It was a nonvoter after 0.3 s,
+    healthy after 1.9 s, and the 2.0.7 leader promoted it after 13.7 s. Autopilot stayed healthy and a job was placed
+    meanwhile. Only tent's own rules keep an older server out.
+  - Autopilot's `Version`, the node list's `Version` and the members' `build` tag are `2.0.6` and `2.0.7`, with nothing
+    before or after. `/v1/agent/self` has an empty `VersionPrerelease` and `VersionMetadata`. During the mix autopilot
+    reports each server with its own version and reads healthy.
+  - The leadership moved from a 2.0.6 leader to a 2.0.7 server (200 in 0.06 s, autopilot healthy at the first read) and
+    back (200 in 0.11 s; autopilot answered 429 with failure tolerance 0 for up to 2.2 s, as on one version, see
+    [1.2](#12-features-tent-relies-on)). A job ran on a 2.0.6 client under a 2.0.7 leader after 1.1 s,
+    and both versions gave an intro token.
+  - Servers rolled in tent's order (a 2.0.7 server first; for each 2.0.6 server a kill, the wait until autopilot stops
+    counting it, the peer removal, a force-leave with prune; the leader last, after a transfer): Serf marked the killed
+    servers failed after 36.1 to 43.7 s, autopilot removed two of three peers itself 0.5 to 1.6 s after that, and each
+    force-leave answered 200. The 2.0.6 client stayed `ready` and eligible, its allocation kept its ID with 0 restarts,
+    and jobs submitted after each removal ran on it within 1.6 s. Its `/v1/agent/servers` listed the three 2.0.7
+    servers though its configuration names the old ones. Two and a half hours later it was still `ready`.
+  - A 2.0.7 client with an intro token joined three 2.0.6 servers: `ready` after 0.3 s, and a job ran on it after
+    1.1 s. The control without a token was refused (`node registration without introduction token:
+    enforcement_level=strict`).
+  - The logs of ten agents hold no line about a version difference (`mismatch`, `incompat`, `unsupported`,
+    `downgrade`, `upgrade`, `newer version`, `older version`, `protocol version`, `minimum version`, `version skew`).
+  - Not shown: a combined agent, a drain, Docker tasks, Linux, versions more than one patch apart, and tent-node's
+    `refresh-join` (the clients learned the new servers from Nomad's heartbeats).
 
 ### 1.4 Downloads and verification
 
@@ -787,6 +843,11 @@ through Playwright, with a throwaway `httputil.ReverseProxy`, and read in the so
 - **Checksums and signatures:** `nomad_{V}_SHA256SUMS`, plus detached signatures `nomad_{V}_SHA256SUMS.sig` and
   `….72D7468F.sig`.
 - **JSON index:** `https://api.releases.hashicorp.com/v1/releases/nomad/{V|latest}`.
+- **Nomad 2.0.6** (checked on 2026-10-10). Its `nomad_2.0.6_SHA256SUMS` lists
+  `c6da734081a41d51cadf15ec880d5eab0313093a29d2ee0984ca5ae1cdf867ec` for `nomad_2.0.6_linux_amd64.zip`. The sha256 of
+  the `darwin_arm64` zip that the lab of [1.3](#13-upgrades-and-version-skew) ran matched its line,
+  `a76e9a8a63d8e6c62bae942834a32fafa66776657c285c0031da0abe3f87107a`. tent's tests serve the file and its signature
+  byte for byte (`internal/assets/assetstest/testdata`); the signature verifies at the test clock of 2026-09-28.
 - **Release signing key:** `https://www.hashicorp.com/.well-known/pgp-key.txt`, fingerprint
   `C874 011F 0AB4 0511 0D02 1055 3436 5D94 72D7 468F`. The 2.0.7 signature and the linux_amd64 sha256 were checked
   and are valid. Checked again on 2026-09-28, for the copy that tent embeds:

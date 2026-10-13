@@ -1,6 +1,10 @@
 # ADR-0040: Scale down through the rollout
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by
+  [ADR-0041](0041-upgrading-a-clusters-nomad-version.md) (a plan that boots a node or moves the Nomad pin reads what a
+  roll observes besides the plans of item 6, and fails when the read fails, unless no server answers and the plan
+  has an infrastructure change other than a delete: the apply then reads after those changes; item 5 holds for every
+  other plan)
 - **Date:** 2026-10-12
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md),

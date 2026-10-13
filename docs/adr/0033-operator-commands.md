@@ -3,6 +3,10 @@
 - **Status:** Accepted; amended by
   [ADR-0040](0040-scale-down-through-the-rollout.md) (`validate cluster` names the machines that `update` would
   remove; a client that never registered reads `client-not-registered` and its replacement `machine-missing`)
+  and by
+  [ADR-0041](0041-upgrading-a-clusters-nomad-version.md) (its item 15: a version is consistent when it equals the
+  cluster's version, the Nomad version of the specs, else the pin, and the failure says `the cluster's version is`;
+  `validate cluster` warns that `update` has not applied the specs while the completed spec differs)
 - **Date:** 2026-10-07
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0007](0007-security-baseline.md), [ADR-0018](0018-vultr-provider-design.md),

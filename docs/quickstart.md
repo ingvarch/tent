@@ -310,8 +310,8 @@ cluster demo is valid: 3 servers and 3 clients run Nomad 2.0.7
 tent compares the specs with the machines in the cloud and with Nomad, and changes nothing. It checks that every node
 group has its machines and that the cloud reports them running, that each node has joined, that Nomad has a leader,
 that every server votes and is healthy, that every client is registered, ready and eligible, that each node runs the
-pinned Nomad version, and that no certificate has ended. It needs `VULTR_API_KEY` and a way to port 4646 of the servers,
-which `--api-access` allows.
+cluster's Nomad version, and that no certificate has ended. It needs `VULTR_API_KEY` and a way to port 4646 of the
+servers, which `--api-access` allows.
 
 On stderr tent warns about what is not a failure. This cluster is combined and runs in one data center, so it prints:
 

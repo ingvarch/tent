@@ -1,6 +1,6 @@
 # Roadmap
 
-> **Current status (2026-10-12):** M0 Foundation, M1 Vultr infrastructure and M2 Nomad bootstrap are complete. M3 Day-2
+> **Current status (2026-10-13):** M0 Foundation, M1 Vultr infrastructure and M2 Nomad bootstrap are complete. M3 Day-2
 > operations is in progress.
 >
 > M0 built the Go module, `tent version`, the Makefile, the import rules in golangci-lint, CI on Linux, macOS and
@@ -53,7 +53,14 @@
 > group's role. M3.6 built the scale-down in `update` ([ADR-0040](adr/0040-scale-down-through-the-rollout.md)): the
 > nodes that a smaller spec no longer has are removed through the rollout decisions, a client drained first and a
 > server removed through the Raft and gossip calls, a node that Nomad lists as down and that no machine has is purged,
-> and a new server takes a name above the highest that its group has had. M3.8 wires the snapshots into `tent backup`.
+> and a new server takes a name above the highest that its group has had. M3.7 built `tent upgrade cluster`
+> ([ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)): it writes the Nomad version that the channel recommends
+> into `spec.nomad.version` once the signed checksums of that release verify, a version moves up by at most one minor
+> version at a time, `update` pins a version only after its release files verify and refuses a node older than one
+> that runs, and it stops before a client that would run a newer Nomad than a server. The upgrade ran on the fakes.
+> Nomad 2.0.6 and 2.0.7 ran together in a local lab without tent, where the servers were rolled by hand in tent's
+> order ([platform notes §1.3](platform-notes.md#13-upgrades-and-version-skew)); M3.9's `upgrade` scenario runs it on
+> Vultr. M3.8 wires the snapshots into `tent backup`.
 >
 > **Work items live in GitHub:** each milestone below links to its GitHub milestone, and the
 > [tent roadmap project][project] shows the open issues. This file keeps the goals and exit criteria; close issues as
@@ -68,8 +75,8 @@ These come from [architecture §18](architecture.md#18-open-questions). The firs
 seventh to the fifteenth on 2026-09-28, the sixteenth to the twenty-first on 2026-09-29, the twenty-second to the
 twenty-fourth on 2026-09-30, the twenty-fifth to the twenty-seventh on 2026-10-05, and the twenty-eighth to the
 thirty-second on 2026-10-06, the thirty-third to the thirty-fifth on 2026-10-07, the thirty-seventh to the
-forty-fourth on 2026-10-08, the forty-eighth on 2026-10-09, and the forty-ninth on 2026-10-12. The maintainer
-extended the twenty-third on 2026-10-02.
+forty-fourth on 2026-10-08, the forty-fifth and the forty-eighth on 2026-10-09, and the forty-ninth and the fiftieth on
+2026-10-12. The maintainer extended the twenty-third on 2026-10-02.
 
 | # | Question | Decision |
 |---|---|---|
@@ -110,14 +117,16 @@ extended the twenty-third on 2026-10-02.
 | 35 | `rolling-update` is its own command | `update` never replaces a node and reports how many are outdated (2026-10-07; [ADR-0035](adr/0035-rollout-decisions.md)) |
 | 37 | From two voters to one | with two voters the live server's peer is removed first, the machine is stopped at once, then it is forced out of the gossip pool with prune; amends ADR-0017 for two voters (2026-10-08); built in M3.4: the peer goes first whenever fewer than two other voters vote, and the stop is held until a reconcile of Nomad's leader that the run saw ([ADR-0038](adr/0038-rolling-update-of-server-groups.md)) |
 | 38 | A single-server group rolls | without the failure-tolerance check, through two voters (decision 37), with `--allow-single-server` (2026-10-08); built in M3.4; the new server gets no `bootstrap_expect` ([ADR-0038](adr/0038-rolling-update-of-server-groups.md)) |
-| 39 | The outdated report and the exit codes | `update` prints the outdated nodes as a line of its plan and a JSON field, and they do not make `update --exit-code` exit 2; `rolling-update --exit-code` exits 2 while a roll is due; `validate cluster` warns about them; when the release files cannot be read, `validate` and an `update` that creates no node warn and go on (an `update` that creates a node still fails); for M3.9, `ha` runs on ubuntu-24.04 and `upgrade` on ubuntu-26.04 in one run, with the backup step in `ha` (2026-10-08); built in M3.3, the E2E runs in M3.9 ([ADR-0037](adr/0037-rolling-update-of-client-groups.md)) |
+| 39 | The outdated report and the exit codes | `update` prints the outdated nodes as a line of its plan and a JSON field, and they do not make `update --exit-code` exit 2; `rolling-update --exit-code` exits 2 while a roll is due; `validate cluster` warns about them; when the release files cannot be read, `validate` and an `update` that creates no node warn and go on (an `update` that creates a node still fails; since M3.7 so does one that would write another Nomad version into the completed spec, [ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)); for M3.9, `ha` runs on ubuntu-24.04 and `upgrade` on ubuntu-26.04 in one run, with the backup step in `ha` (2026-10-08); built in M3.3, the E2E runs in M3.9 ([ADR-0037](adr/0037-rolling-update-of-client-groups.md)) |
 | 40 | A forced roll survives a cut | each forced machine is labelled `tent/replace=true` at the start of the run, and every run replaces labelled machines, with or without `--force` (2026-10-08); built in M3.3 ([ADR-0037](adr/0037-rolling-update-of-client-groups.md)) |
 | 41 | Client names above the group's range are accepted | a new node takes the lowest index that no machine and no Nomad node holds (2026-10-08); built in M3.3 ([ADR-0037](adr/0037-rolling-update-of-client-groups.md)) |
 | 42 | `update` before `rolling-update` | `rolling-update` refuses until `update` has applied the current specs, also after an upgrade of tent (2026-10-08); built in M3.3 ([ADR-0037](adr/0037-rolling-update-of-client-groups.md)) |
 | 43 | Server and combined names only grow | a roll of three servers makes `prod-servers-3`, `-4` and `-5` (2026-10-08); built in M3.4: the index above the highest that a machine, a server or a member has, and since decision 48 above the remembered index too ([ADR-0038](adr/0038-rolling-update-of-server-groups.md)) |
 | 44 | tent-node stays in every node's spec hash | each tent release rolls the servers too; an operator who wants to defer them rolls the client groups with `--nodegroups` (2026-10-08); the hash holds it already, and M3.4 lets the default selection roll the servers ([ADR-0038](adr/0038-rolling-update-of-server-groups.md)) |
+| 45 | What `upgrade cluster` writes | the new Nomad version, into `spec.nomad.version` of `cluster.yaml`, whether the spec set a version before or only the pin held it, so that the version is explicit from then on (2026-10-09); with nothing to upgrade it writes nothing; built in M3.7 ([ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)) |
 | 48 | tent remembers the highest index of each server and combined group | in the state store at `names/<nodegroup>`, so that the names of such a group only grow, also after a shrink or an operator's delete (2026-10-09); built in M3.4 for the roll, where a new server takes the index above it, and in M3.6 for the planner of `update` ([ADR-0038](adr/0038-rolling-update-of-server-groups.md), item 22, [ADR-0040](adr/0040-scale-down-through-the-rollout.md)) |
 | 49 | A node group keeps its role | `replace` and `edit` refuse to change the `spec.role` of a node group that the store holds (2026-10-12); built in M3.5: tent has no way to change the role of a stored group, since a cluster has exactly one server or combined group and no command deletes a node group ([ADR-0039](adr/0039-rolling-update-of-combined-groups.md)) |
+| 50 | No channel file from a URL | the channel is the one embedded in tent; an operator who wants another Nomad version than tent recommends sets `spec.nomad.version` (2026-10-12); architecture §13.5 and ADR-0026 had planned a URL that overrides the embedded file ([ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)) |
 
 New questions for the maintainer are issues with the `decision` label.
 
@@ -293,6 +302,9 @@ Work after M6 or not scheduled yet: [issues with the `later` label][later].
   index; `validate cluster` names the machines that `update` would remove. Maintainer decisions 34 and 48 are built.
   Runs on Vultr: [platform notes §3.16](platform-notes.md#316-spike-runs). Recorded in
   [ADR-0040](adr/0040-scale-down-through-the-rollout.md). Closes #103.
+- 2026-10-13: M3.7 is built (`tent upgrade cluster`, see the status block above). Maintainer decisions 45 and 50 are
+  built, and decision 39 is narrowed. Recorded in [ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md). Closes
+  #104.
 
 [project]: https://github.com/users/ingvarch/projects/2
 [later]: https://github.com/ingvarch/tent/issues?q=is%3Aissue%20label%3Alater

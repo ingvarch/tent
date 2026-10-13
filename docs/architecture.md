@@ -164,7 +164,7 @@ spec:
   sshKeys:
     - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILVMgcq7nf63leSBwZNfB40Oi4XwSKWNKchNmRGNCb9k ops@example
   nomad:
-    version: 2.0.7               # empty means the version the cluster was first built with (see 13.2)
+    version: 2.0.7               # empty means the version the cluster is pinned to (see 13.2); tent upgrade cluster sets it
     region: global
     tls: {verifyHTTPSClient: true}
     clientIntroduction: strict   # strict | warn | none
@@ -281,9 +281,29 @@ This table is also the check that the abstraction survives several providers.
     Cluster prod: spec.nomad.version: 3.0.0 is newer than this tent knows; channel stable allows 2.x from 2.0.0
     ```
 
+    `update`, `rolling-update`, `validate cluster` and a `replace` or `edit` of a node group alone add `; run tent
+    upgrade cluster` to the problem of the third line (1.11.0 is the example) when the stored Cluster sets a version
+    older than the channel's minimum. A write whose input holds the Cluster keeps the channel's problem without it. A
+    version that the channel refuses for another reason gets no advice.
+
     The example in the second line is the channel's recommended version. An unknown channel leaves the version
     unchecked.
   - A version that the channel allows but has not tested passes with a warning ([14](#14-cli)).
+  - **The move rule** (M3.7, [ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)). A version in the spec may
+    be at most one minor version above the one in the stored completed spec, the pin, and may be lower. `create`,
+    `replace` and `edit` read the completed spec and add a field error beside the channel's, which stands alone when
+    the channel refuses the version too:
+
+    ```
+    Cluster prod: spec.nomad.version: 2.2.0 is more than one minor version above 2.0.7, the Nomad version that the cluster is pinned to; move to 2.1 first
+    ```
+
+    A version of another major version than the pin reads `2.0.7 is of another major version than 1.11.0, the Nomad
+    version that the cluster is pinned to`, with no advice. A store without a completed spec, a completed spec that does
+    not decode, a write of node groups alone and `create --dry-run` without a state store are not checked. A stored
+    `cluster.yaml` that got past the writers fails every command that loads the specs (`update`, `rolling-update`,
+    `validate cluster` and `upgrade cluster`) with the same text, which has `(prod/cluster.completed.yaml)` after the
+    pin and the advice after that, before any cloud call.
   - A spec without a version runs the version pinned in the completed spec, which the first `update` takes from the
     channel ([13.2](#132-tent-update-cluster---yes)).
 - **Fixed cloud.** A cluster's `cloud.provider` and `cloud.region` never change (decided on 2026-09-28,
@@ -1314,9 +1334,16 @@ The golden files and a sketch: [Appendix A](#appendix-a-nomad-agent-configuratio
   plan with a machine that stays reads them, once per run, to tell which machines are outdated, and so does `validate
   cluster` when a machine stays and the store holds the secrets, and `rolling-update`. They need releases.hashicorp.com,
   and for a release build github.com. `validate` and an `update` plan that creates no node go on with a warning when
-  they cannot read them; an `update` plan that creates a node, and `rolling-update`, fail
+  they cannot read them; an `update` plan that creates a node or would write another Nomad version into the completed
+  spec (M3.7), and `rolling-update`, fail
   ([13.2](#132-tent-update-cluster---yes), [13.3](#133-tent-rolling-update-cluster---yes),
-  [ADR-0031](adr/0031-bootstrap-in-update.md), [ADR-0037](adr/0037-rolling-update-of-client-groups.md)).
+  [ADR-0031](adr/0031-bootstrap-in-update.md), [ADR-0037](adr/0037-rolling-update-of-client-groups.md),
+  [ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)).
+- **`upgrade cluster` checks the release of its target** (M3.7, `assets.CheckNomad`). It reads `nomad_<v>_SHA256SUMS`
+  and its signature, one request each, verifies them as it does for a download, and fails unless the file lists the
+  linux zip of amd64 and arm64. It asks for both since it asks no cloud which architecture the machine types have, and
+  it downloads no zip. `update` reads the files again for the architecture of each group when it pins the version
+  ([13.2](#132-tent-update-cluster---yes)).
 - **tent-node's downloads** (M2.6a, [ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md)). tent-node keeps
   one file per asset, `/var/lib/tent/assets/<name>` (0600; `/var/lib/tent` and `assets` 0700). A file with
   NodeConfig's sha256, mode 0600 and owner root is used without a download; tent-node checks it as a stream
@@ -1903,7 +1930,9 @@ and writes it. A server group's new machine takes the index above it ([13.3](#13
     in its group, or the write fails with `node prod-servers-x: its name has no index in node group servers`; a run
     that has no record of the names fails with `node prod-servers-3: no record of the names of node group servers`.
   - In every apply of `update` that has changes, to the highest listed name of each group, after the completed spec
-    and before the infrastructure and the nodes. This is how a cluster that an earlier tent built gets its objects.
+    and before the nodes. It also comes before the infrastructure, unless the run owes the version check of M3.7:
+    then the infrastructure's creates, updates and replaces come first ([13.2](#132-tent-update-cluster---yes)). This
+    is how a cluster that an earlier tent built gets its objects.
   - In every apply of `rolling-update` that has a next step, to the highest listed name of each group it rolls, right
     after the tent version and before the first replace label. A plan without `--yes`, or an apply without a next
     step, writes nothing.
@@ -2577,13 +2606,15 @@ no longer has, those that joined included ([ADR-0040](adr/0040-scale-down-throug
  2. plan: inventory → provider.BuildInfra → engine plan; Nodes.List → node changes (13.4), which asks Nomad for
     its nodes and, when a node that joined may go, for what a roll observes; the refusals about nodes that joined;
     the completed spec; the missing secrets (M2.1); the Nomad step; for a plan that creates a node or repeats the
-    create of one, the assets, a node config per group and the size of each node's user data
+    create of one, the assets, a node config per group and the size of each node's user data; the Nomad version of
+    the specs against what Nomad reports, for a plan that boots a node or moves the pin (M3.7)
  3. without --yes: print the plan and stop
  4. lock → check the tent version → steps 1 and 2 again; the plan made under the lock is the one applied
  5. raise the tent version → write the missing secrets → write the completed spec when the plan says so → raise the
     highest name index of each server and combined group to the highest listed name ([10.2](#102-layout))
  6. the infrastructure's task changes (Plan.ApplyTaskChanges); then, when the plan bootstraps and the store holds a
-    stale mark, the delete of the mark
+    stale mark, the delete of the mark. A run that owes the version check (M3.7) applies the infrastructure's creates,
+    updates and replaces right after step 5's secrets, makes the check, and only then goes on with the rest of step 5
  7. server and combined nodes: the waits that repeat a create, by name; then the creates, one at a time, by group
     and index, each seeded with the servers that exist and with a new operation id (cloud.NewOpID)
  8. the Nomad step: wait for a leader → bootstrap the ACL system → wait until the servers are healthy and all vote
@@ -2592,7 +2623,8 @@ no longer has, those that joined included ([ADR-0040](adr/0040-scale-down-throug
     check that a voter sits at its address; scrub its user data and label its machine → write the mark
  9. client nodes: the waits; then the deletes of clients that never registered; then the creates, one at a time, by
     group and index. A create, and a wait that repeats one, boots the machine with an intro token. Each client is
-    waited for until it has registered, then scrubbed and labelled, before the next change
+    waited for until it has registered, then scrubbed and labelled, before the next change. Before the first change
+    that boots a client the run checks the servers' versions and stops when the client would run a newer Nomad (M3.7)
 10. the deletes of machines that never joined, one at a time, by name: duplicates, surplus machines, machines of groups
     not in the spec; each after Nomad's answer that its machine has not joined
     → the removals of nodes that joined and the purges of nodes without a machine: the loop of rolling-update in the
@@ -2695,7 +2727,8 @@ nodes, step 12 of the target below.
 - **When the files cannot be read.** A plan that creates no node and may remove no node that joined goes on without
   the report and without a purge, and tells `OnWarning` once, `tent could not tell which nodes are outdated:
   <error>`. A plan that creates a node fails, as it did before, and so does a plan that may remove a node that joined.
-  When the run's context ends, the read fails with the interruption and `update` ends.
+  So does a plan that would write another Nomad version into the completed spec (see below). When the run's context
+  ends, the read fails with the interruption and `update` ends.
 
 **Built in M3.6** ([ADR-0040](adr/0040-scale-down-through-the-rollout.md), decision 34). The removals of nodes that
 joined and the purges of nodes without a machine, in step 10 above. How the machines are chosen and what the loop does
@@ -2714,6 +2747,109 @@ is in [13.4](#removing-nodes-that-joined).
   only when Nomad lists the node as down, so a plan that comes sooner than that shows no change for it.
 - **The loop** runs inside the lock that `update` holds, after the deletes of step 10. A first Ctrl-C ends it at the
   next poll with `Error: interrupted`; nothing is undone, and the next `update` goes on.
+
+**Built in M3.7** ([ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md), decision 45). What `update` does with the
+Nomad version of the specs after `upgrade cluster` has written it ([13.5](#135-tent-upgrade-cluster---yes)).
+- **The pin moves with the completed spec.** The plan has one change of the store and no node change, and every
+  group's spec hash changes, so the plan names every machine as outdated
+  (`internal/app/testdata/flow_upgrade.update.plan.golden`):
+
+  ```
+  State: cluster.completed.yaml will be written.
+  Outdated: prod-servers-0, prod-servers-1, prod-servers-2, prod-workers-0 and prod-workers-1; tent rolling-update cluster replaces them.
+  ```
+
+  `update --exit-code` exits with 2 for this plan, since the completed spec is a change. The outdated nodes alone are
+  none (decision 39). A new tent release changes every hash too (decision 44), so a machine is outdated or it is not,
+  whatever the cause.
+- **The release files first.** A plan that writes another Nomad version into the completed spec than the stored one,
+  a lower version included, fails when it cannot read that version's release files. It fails before the lock and any
+  write, and the plan without `--yes` fails too: `cluster prod: tent pins Nomad 2.0.99 only after it has read the
+  release files that the nodes download: <cause>`. When the plan also boots a node, the builder's error comes as
+  before. A cluster that an older tent pinned to a version without release files keeps its behaviour while the spec
+  holds the pin. This narrows decision 39.
+- **The checks against Nomad.** A check is due when the plan boots a node or the version of the specs differs from the
+  pin. The cluster can answer when the store holds the bootstrap mark and a server or combined machine has joined,
+  runs and has a public address; a cluster that cannot answer gets no check. The plan reads what a roll observes
+  (`Peers`, `Health`, `Members`, `Nodes`) after M3.6's one `Nodes` call, so it makes four reads more; a plan that read
+  for a removal reuses its reading. An applied `update` plans twice. The reads are in the calls goldens of
+  `flow_scale` and `flow_unregistered`, which gained four lines for each plan. A read that fails ends the plan. A
+  service without a Nomad client fails such a plan before the lock. A report that is no version number, or a node that
+  Nomad lists without a version, is refused as in a roll (`rollout.CheckNewNode`); a server that reports none is not
+  compared, and a reported version is cut to its release `X.Y.Z` before the rule of one minor version.
+  - **A node older than one that runs.** The plan fails whole, with and without `--yes` and `--exit-code`, when a node
+    that it boots or a pin that it writes is older than the Nomad of a server or of a node that is not down. The advice
+    names the newest release that Nomad reports:
+
+    ```
+    update would create node prod-workers-2: tent never moves a node to an older Nomad: the cluster's version is 2.0.6, and server prod-servers-0.global runs 2.0.7; set spec.nomad.version to 2.0.7 or newer
+    update would lower the Nomad version of cluster prod from 2.0.7 to 2.0.6: tent never moves a node to an older Nomad: the cluster's version is 2.0.6, and server prod-servers-3.global runs 2.0.7; set spec.nomad.version to 2.0.7 again and finish the roll with tent rolling-update cluster
+    ```
+
+    A store with no pin reads `update would set the Nomad version of cluster prod to 2.0.6`. So `update` lowers a pin
+    only while no server and no node that is not down reports a newer Nomad; how an upgrade is taken back is told in
+    [13.5](#135-tent-upgrade-cluster---yes).
+  - **A pin too far above the oldest node.** The plan fails when the new pin is more than one minor version above the
+    oldest release that a server or a node that is not down reports, since a pin that moved twice with no roll between
+    has nodes two moves behind: `update would change the Nomad version of cluster prod from 2.1.0 to 2.2.0: 2.2.0 is
+    more than one minor version above 2.0.7, which server prod-servers-0.global still runs; set spec.nomad.version to
+    2.1.0 again, roll every node with tent rolling-update cluster, and move then`. A store with no pin gets the advice
+    `a version below <the minor version after next of the oldest>`.
+  - **A read that fails:** `update would create node prod-workers-2, and tent could not ask Nomad which versions run:
+    <cause>`, or `update would change the Nomad version of cluster prod from 2.0.6 to 2.0.7, and tent could not ask
+    Nomad which versions run: <cause>`. So such a plan needs the Nomad API while the servers run; every other plan
+    keeps M3.6's single call and its warning.
+  - **When no server answers.** The error matches `nomadops.ErrNotReady` then, and its text ends with the hint `;
+    tent reaches the servers on port 4646: check spec.access.api`. If the plan also has an infrastructure change other
+    than a delete (a create, an update or a replace), the plan stands instead, with one warning after M3.6's: `tent
+    could not ask Nomad which versions run: <cause>; update asks again once it has applied the infrastructure's
+    changes, before it writes the completed spec or creates a node`. The reason is an operator whose address changed:
+    one `update --yes` must apply the firewall change while a create or an upgrade is pending. The apply then makes
+    the check after the infrastructure's creates, updates and replaces and before the completed spec, the name index
+    and every node change. The order of that run is the tent version, the secrets, those infrastructure changes, the
+    check, the completed spec, the name index, then the usual order; a run that owes no check keeps its order. The
+    refusals of the owed check are the plan's texts. It reads once and does not wait for the cloud to enforce the new
+    rule, so a run can end with the hint and the next run goes through; after such a run the store is as before but
+    for the tent version and the secrets, and the next plan, which has deletes alone, fails with the hint until Nomad
+    answers. Behind a firewall that drops packets, a plan of three servers waits up to 90 s for M3.6's `Nodes` call
+    and 90 s for the versions' read (30 s for each server that a call tries), and an applied update plans twice. A
+    plan that may remove a node that joined, and a plan that must judge a stale client, still fail when no server
+    answers.
+  - **A client that waits.** When the plan boots a client and a server reports an older Nomad than the specs' version,
+    `Update` tells `OnWarning` once, with and without `--yes`: `node prod-workers-2 waits for the servers: a new node
+    would run Nomad 2.0.7, newer than the 2.0.6 of server prod-servers-0.global; this update stops before it: run tent
+    rolling-update cluster, then tent update cluster again`. The plan still lists the create.
+- **The stop in the apply.** Once in a run, after the servers' changes and the Nomad step and before the first change
+  that boots a client (a create, or a wait that repeats one), the applier reads the Raft configuration and autopilot's
+  report (`Peers` and `Health`, two reads in every run that boots a client; `flow_build`, `flow_scale` and
+  `flow_unregistered` gained the two lines before the first `IntroToken`) and stops when that client would run a newer
+  Nomad than a server:
+  - a server on an older Nomad: `update stops before node prod-workers-2: a new node would run Nomad 2.0.7, newer than
+    the 2.0.6 of server prod-servers-0.global; run tent rolling-update cluster, then tent update cluster again`;
+  - a server that reports no version: `update stops before node prod-workers-2: a server reports no Nomad version yet;
+    run tent update cluster again`;
+  - a read that fails: `update stops before node prod-workers-2: tent could not ask Nomad which versions its servers
+    run: <cause>`.
+
+  What the run did before stands: the completed spec, the infrastructure, the servers of the plan with their joined
+  labels and the Nomad step. After the stop the run holds back every change that boots a client (a create, or a wait
+  with an operation id), still carries out the waits for clients whose machines exist and the deletes of machines that
+  never joined, in the plan's order, and then returns the stop, before the removals of nodes that joined and the
+  infrastructure's deletes. Without those deletes `update` and `rolling-update` looped without end beside a
+  server machine that never came up. A read of the versions that fails ends the run at once. A server or combined node
+  that is newer than the servers that run is created, which is how a server group grows. On the fakes the first build
+  passes, since its servers are of the run's own version. Whether autopilot's report holds a version for every Raft
+  peer at that read on a real cluster is not verified
+  ([ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)); a server that reports none stops the run with the
+  second text above. The rule is in the apply since a refusal of the whole plan would hold back the servers and the
+  completed spec, which `rolling-update` needs (`requireSize`, `checkApplied`). After the stop two commands follow and
+  no spec is edited: `rolling-update --yes` replaces the servers and fills the client group (rule C4), and `update`
+  then has no change ([ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md), item 12).
+  - A server and a worker are lost during an upgrade. `update --yes` creates the server, which joins the two older
+    servers and votes, and stops before the worker. `rolling-update --yes` replaces the two older servers, creates two
+    workers of the new version and removes the old one. `update` then has no change.
+  - A client that never registered is found at the upgrade. `update --yes` writes the completed spec, deletes that
+    machine and stops before its create. `rolling-update --yes` replaces the servers and then fills the group.
 
 **Built in M2.1.** Step 2 of the target below, ensure secrets, runs after tent raises the tent version and before the
 infrastructure (step 5 above). The secrets are the CA's key and bundle, the gossip key and the ACL bootstrap secret
@@ -2739,16 +2875,20 @@ in the completed spec ([ADR-0026](adr/0026-channels-and-release-assets.md)).
   completed spec, else the one that the channel recommends. So the first `update` pins the recommended version, and a
   later tent that recommends another one keeps it: tent does not move a cluster to another Nomad by itself
   ([13.5](#135-tent-upgrade-cluster---yes)). A version that the spec set and then left out stays pinned.
-- **A version in the spec wins** over the pin, even a lower one: `update` refuses no downgrade. `rolling-update`
-  never creates a node older than a server or than a node that is not down (M3.3; the rule is item 6 of
-  [ADR-0035](adr/0035-rollout-decisions.md)), and `upgrade cluster` will refuse one (M3.7).
+- **A version in the spec wins** over the pin, a lower one too, and the spec writers accept it. tent refuses an older
+  Nomad beside a newer node: `rolling-update` creates no node older than a server or than a node that is not down (M3.3;
+  the rule is item 6 of [ADR-0035](adr/0035-rollout-decisions.md)), and since M3.7 `update` fails a plan that would do
+  it (Built in M3.7, above). A version more than one minor version above the pin is refused
+  ([3.3](#33-api-rules)).
 - **When the pin is written.** The pinned version is part of the completed spec, so a change of the version alone is
   a plan that writes `cluster.completed.yaml` and nothing else. So is the first plan of a cluster whose completed spec
   an older tent wrote without a version. Since M2.7a the first run pins the version before the first node (step 5), so
   a first `update` that is cut and then run again by a newer tent keeps the version that the first run pinned.
 - **A pin outside the channel** fails the plan before it writes anything or reaches the cloud, such as `cluster prod
   is pinned to Nomad 2.0.7 (prod/cluster.completed.yaml), which is older than 2.1.0, the oldest Nomad that channel
-  stable allows; set spec.nomad.version to a version that the channel allows`.
+  stable allows; run tent upgrade cluster, or set spec.nomad.version to a version that the channel allows`. The advice
+  to run `upgrade cluster` comes with a pin older than the channel's minimum only
+  ([13.5](#135-tent-upgrade-cluster---yes)).
 - **A completed spec that does not decode, or holds no Cluster,** blocks `update` only when the pin is needed, that
   is when the spec leaves `spec.nomad.version` empty. The error then says to set `spec.nomad.version` to the Nomad
   version the cluster was built with, or to fix the file by hand. With a version in the spec, `update` writes a new
@@ -2758,7 +2898,8 @@ in the completed spec ([ADR-0026](adr/0026-channels-and-release-assets.md)).
   does not warn.
 - **Downloads.** NodeConfig carries the assets from M2.3, and `update` reads their release files since M2.7a, in a plan
   that creates a node or repeats the create of one, and since M3.3 in every plan with a machine that stays
-  ([8.5](#85-artifacts-and-verification)).
+  ([8.5](#85-artifacts-and-verification)). A plan that writes another Nomad version needs them too (Built in M3.7,
+  above).
 
 **Built in M2.3, used since M2.7a.** NodeConfig, the rendering of the Nomad configuration, the spec hash and the user
 data exist ([8.3](#83-nodeconfig-contract), [8.4](#84-nomad-configuration-rendering),
@@ -2910,7 +3051,8 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
   - **No Nomad client.** The service's Nomad factory must be set when the plan has a Nomad step, a client create or
     wait, or a node delete. Without it the apply fails at its start with `no Nomad client is set up`, before it raises
     the tent version or writes anything. A plan without `--yes` fails only when it must ask Nomad: about a client that
-    may never have registered, or, since M3.6, when a node that joined may go ([13.4](#134-scaling)).
+    may never have registered, since M3.6 when a node that joined may go ([13.4](#134-scaling)), or, since M3.7,
+    when it boots a node or moves the Nomad pin of a cluster that can answer (Built in M3.7, above).
   - **The calls.** One `nomadops` client per known server with a public address, at `<public IP>:4646`, with the
     region, the CA bundle, the operator certificate and the bootstrap secret as the token, over `nomadops.Servers`. A
     cluster with no such server fails with `cluster prod: no server has a public address`. Then `WaitLeader`; with the
@@ -2976,8 +3118,9 @@ booted the placeholder, carried no `tent/spec-hash` label and got no secrets. Th
   - `read the Raft configuration: <cause>`;
   - `node <name>: the cloud reports no private address for it yet; run the command again`, when a registration wait
     or a vote check meets a machine without an address.
-- **Calls.** On the fakes, a build of three servers and two clients makes one `Peers` call, then one `GetInstance` and
-  one `UpdateInstance` per server; each client's `Nodes` wait is followed by its own pair
+- **Calls.** On the fakes, a build of three servers and two clients makes one `Peers` call in the Nomad step, then one
+  `GetInstance` and one `UpdateInstance` per server, then, since M3.7, one `Peers` and one `Health` read before the
+  first `IntroToken`; each client's `Nodes` wait is followed by its own pair
   (`internal/app/testdata/flow_build.calls.golden`). A second `update --yes` plans nothing, makes one Nomad call, the
   `Nodes` read of its plan (since M3.6), and only reads the cloud.
 
@@ -3280,6 +3423,28 @@ a client group's create or the start of a new victim's removal (C4, C5) while a 
 node would; removals already under way go on. A node is outdated when its `tent/spec-hash`
 differs from the desired hash, when it has none, when it carries `tent/replace=true`, or when `--force` is given.
 
+**After an upgrade** (built in M3.7, [ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)). `upgrade cluster`
+and `update` leave every node outdated ([13.2](#132-tent-update-cluster---yes)), and the rules above roll them in the
+right order. No rule was added for the roll.
+- **Servers before clients.** A group's steps come only when the groups before it have none, and the server or combined
+  group is first. A client group's create or the start of a new removal is refused while a server of the Raft
+  configuration runs an older Nomad, so `rolling-update --nodegroups workers` right after `update` is refused with a
+  text such as `node group workers: a new node would run Nomad 2.0.8, newer than the 2.0.7 of server
+  prod-servers-0.global; roll the servers first`. A server that has just joined reports no version for a moment, and
+  the client group waits for it.
+- **Never older.** The check runs at every decision. Its refusal reads `tent never moves a node to an older Nomad: the
+  cluster's version is 2.0.6, and node prod-workers-0 runs 2.0.7`. The version rules of a new node are one function,
+  `rollout.CheckNewNode`, which `Next`, the hold of a client group and `update` call.
+- **A roll cut between the servers and the clients** goes on at the clients, and an `update` between the two runs has
+  no change. A client group below its size, for instance after the stop of `update` before a client, is filled by the
+  roll (rule C4: it creates while the up-to-date machines are fewer than the size).
+- **The leader** is the last victim of a server group and hands over to an up-to-date voter. The leadership moved from
+  2.0.6 to 2.0.7 and back on a local Nomad ([platform notes §1.3](platform-notes.md#13-upgrades-and-version-skew)).
+- **The exception is a combined group.** Its new node runs a client of the new version while the other servers are
+  old, and its create is not held back, since a combined group has no other order. Nomad's guide advises against it.
+  A 2.0.7 client with an intro token joined three 2.0.6 servers on the local Nomad, and a combined agent itself was not
+  run; M3.9's `upgrade` scenario runs it on Vultr.
+
 **Servers**, one at a time. A server group never goes below its size: it creates the replacement first.
 
 ```
@@ -3474,6 +3639,10 @@ planner is in `internal/app`; its shared helpers are in `internal/rollout`
   `-0`, `-1` and `-2` with `-2` deleted gives `-3`, and a cluster whose machines are all gone is built again as `-3`,
   `-4` and `-5`. A cut after the write of the index and before the create leaves a gap. The node goes into the group's
   zone with the fewest nodes, the zone listed first on a tie.
+  - **During an upgrade** (M3.7). An `update` that grows a group and also writes a newer Nomad version into the
+    completed spec creates the new servers, which join the older servers, and stops before the first new client; the
+    roll then fills the client group ([13.2](#132-tent-update-cluster---yes),
+    [ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)).
 - **Scale down.** A group with more nodes than its size loses the machines that `rollout.Surplus` lists. A machine
   that never joined is deleted at once. A machine that joined is removed through the rollout decisions
   ([below](#removing-nodes-that-joined)).
@@ -3666,13 +3835,123 @@ cni:
 - This relaxes the rule planned here, that only channel-tested version pairs are allowed. Nomad's 2.x version skew
   policy has still not been restated ([platform notes §1.3](platform-notes.md#13-upgrades-and-version-skew)).
 
-**`upgrade cluster`, target.**
-- Reads the cluster's channel. A URL can override the embedded file.
-- The command proposes upgrades, also for a cluster whose pinned Nomad version
-  ([13.2](#132-tent-update-cluster---yes)) the channel no longer allows, rewrites the spec and prints the plan. Then
-  run `update` and `rolling-update`.
-- It never downgrades, and neither does `rolling-update`.
-- **Later:** an opt-in in-place upgrade strategy (swap the binary and restart).
+- **No channel file from a URL** (decision 50, 2026-10-12; the text is in [18](#18-open-questions)).
+
+**Built in M3.7** ([ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md), decisions 45 and 50).
+`tent upgrade cluster [NAME] [--yes] [--allow-single-server]`, in `internal/app` (`Service.UpgradeCluster`) and
+`internal/cli`. It moves the cluster to the Nomad version that its channel recommends by writing that version into
+`spec.nomad.version` of `cluster.yaml`. Nothing changes in the cloud or in Nomad; `update` pins the version and
+`rolling-update` replaces the nodes ([13.2](#132-tent-update-cluster---yes),
+[13.3](#133-tent-rolling-update-cluster---yes)).
+- **What it reads.** The state store (the tent version, `cluster.yaml`, the node groups and `cluster.completed.yaml`:
+  one list of `nodegroups/` and one get of each object per plan), the channel embedded in tent and, when an upgrade is
+  due, the signed checksums of the target ([8.5](#85-artifacts-and-verification)). It needs no `VULTR_API_KEY`, no way
+  to the Nomad API and no `TENT_NODE_URL`, and it does not know what the nodes run. The release site gets two requests
+  per run, and none when nothing is to upgrade or the plan fails before the release is checked.
+- **The cluster's version** is `spec.nomad.version` when the spec sets it, else the pin of the completed spec. A cluster
+  with neither has no version yet: its first `update` pins the recommended one. The target is the channel's
+  recommended version. No flag names the target and no flag names the channel; `spec.channel` does, and `stable` is the
+  only one.
+- **The plan,** in this order:
+  1. The cluster name and the tent version of the store.
+  2. The specs, loaded with their defaults and checked as `update` checks them, except that a version of the spec that
+     is older than the channel's minimum is left out of the checked copy, so that the upgrade can mend it. Any other
+     problem stops the command.
+  3. The stored pin. With a version in the spec, the move from the pin to it must pass the rule of one minor version
+     ([3.3](#33-api-rules)), with the error that the load gives. With no version in the spec, a completed spec that
+     does not decode is the error of `update`.
+  4. With no version in the spec and a pin that the channel does not allow: a pin older than the minimum goes on, since
+     the upgrade is its way out; any other such pin fails with the error of `update`.
+  5. Nothing is to upgrade when the cluster has no version yet, when the recommended version equals the cluster's, and
+     when it is older. An older recommendation is never written. A cluster that a newer tent wrote never gets here:
+     the version guard of step 1 refuses it.
+  6. Otherwise the target is the recommended version, and with a pin the move must pass the rule of one minor version.
+     When the channel allows a release of the minor version between, the error names the way through it:
+     `cluster prod is pinned to Nomad 2.0.7, and channel stable recommends 2.2.3: 2.2.3 is more than one minor version
+     above 2.0.7; set spec.nomad.version to a 2.1 release with tent edit cluster, run tent update cluster and tent
+     rolling-update cluster, and upgrade again`. When the channel's minimum lies above that minor version, it ends
+     `; channel stable of this tent allows no 2.1 release: move the cluster to 2.1 with an older tent first`. Another
+     major version gets the first sentence alone: `...recommends 3.0.0: 3.0.0 is of another major version than 2.0.7`.
+  7. The release of the target must verify: `tent could not verify the release of Nomad 2.0.7, which channel stable
+     recommends: <cause>`.
+  8. The write: the stored Cluster, as stored and without defaults, with the version set, planned as a `replace` of
+     that one object. So the cluster that results is validated as `replace` validates it, and the writes are the
+     raise of the tent version and one conditional put of `cluster.yaml`.
+- **The write** takes the cluster's lock only when a version is to be written, plans again under it and keeps a change
+  that another tent made meanwhile. A cut between the two writes leaves a raised tent version and the old spec, and the
+  next run writes the spec. A put that meets another writer fails with `cluster prod changed meanwhile; run the command
+  again`. The command encodes the Cluster again without defaults, so a `cluster.yaml` that was edited by hand in the
+  store loses its comments, as with `replace`.
+- **Output.** Without `--yes`, `-o table`, with the hint `run with --yes to write spec.nomad.version` on stderr
+  (`internal/app/testdata/upgrade_plan.golden`):
+
+  ```
+  cluster prod: upgrade Nomad from 2.0.6 to 2.0.7, which channel stable recommends.
+  After the upgrade: tent update cluster, then tent rolling-update cluster.
+  ```
+
+  With `--yes`, after the write, and the warnings about the cluster that results on stderr, each once (an open
+  `access.api`, a combined group, a version that the channel has not tested):
+
+  ```
+  cluster prod: spec.nomad.version is now 2.0.7; the cluster was on Nomad 2.0.6.
+  Next: tent update cluster, then tent rolling-update cluster.
+  ```
+
+  With nothing to upgrade the command prints one of `cluster prod: nothing to upgrade: its Nomad version is 2.0.7,
+  which channel stable recommends.`, `cluster prod: nothing to upgrade: its Nomad version is 2.0.8, newer than the 2.0.7
+  that channel stable recommends.` and `cluster prod: nothing to upgrade: it has no Nomad version yet; its first tent
+  update cluster takes 2.0.7.`, prints nothing on stderr, takes no lock and writes nothing, also with `--yes`. When the
+  spec sets a version and the pin is another one, the first two are followed by `tent update cluster has not applied
+  Nomad 2.0.7 yet: the cluster is pinned to 2.0.6.`
+  - **Data.** `-o json` and `-o yaml` print the plan with the keys `cluster`, `channel`, `recommended`, then `spec`,
+    `pinned`, `current` and `target`, which are left out when empty, and `applied`, which is left out unless true;
+    `-o yaml` sorts the keys by name. With `--yes` the plan has `"applied": true`, also when nothing was to upgrade. A
+    plan that is due and has no `--yes` prints its hint on stderr in every format.
+    `internal/app/testdata/upgrade_plan_applied.json.golden`:
+
+    ```json
+    {
+      "cluster": "prod",
+      "channel": "stable",
+      "recommended": "2.0.7",
+      "pinned": "2.0.6",
+      "current": "2.0.6",
+      "target": "2.0.7",
+      "applied": true
+    }
+    ```
+
+  - **Exit codes.** 0 for a plan, for nothing to upgrade and for a write; 1 for an error. A write whose lock was lost
+    afterwards prints the applied text, the warnings and then `Error: the change is saved, but the lock of cluster
+    prod was lost before tent released it`, and exits with 1. There is no `--exit-code`, and `--nomad-version` is an
+    unknown flag. A server group of one needs `--allow-single-server`, also without `--yes`.
+- **Where each rule is checked.**
+
+  | Who | What it checks | How it fails |
+  |---|---|---|
+  | `upgrade cluster` | the target against the pin | an error of the plan (step 6) |
+  | `create`, `replace`, `edit` | the spec's version against the pin | a field error ([3.3](#33-api-rules)) |
+  | `update`, `rolling-update`, `validate cluster`, `upgrade cluster` | the stored spec's version against the pin | an error before any cloud call |
+  | `update`, a plan that moves the pin | its release files; Nomad's report | before any write ([13.2](#132-tent-update-cluster---yes)) |
+  | `update`, a plan that boots a node | no node runs a newer Nomad | before any write |
+  | `update`, an apply that boots a client | no server runs an older Nomad | the run stops before that client |
+  | `rolling-update` | a new node against what Nomad reports | a refusal of `rollout` ([13.3](#133-tent-rolling-update-cluster---yes)) |
+
+- **A hand edit of `spec.nomad.version`.** Older than the pin: accepted, and `update` applies it or refuses it as
+  below. More than one minor version above the pin: `replace` and `edit` refuse it, and written into the store past
+  them every command that loads the cluster refuses it. Newer and released: accepted, with the warning `Nomad 2.0.8 is
+  not tested by this tent; channel stable tests 2.0.7` when the channel has not tested it, and `update` reads its
+  release files and moves the pin. This is the way to a version that the channel does not recommend. A version in the
+  channel's range that was never released, such as 2.0.99: `replace` and `edit` accept it since they read no release
+  site, and `update` refuses to pin it and writes nothing. A version outside the channel is a field error.
+- **Taking an upgrade back.** After `upgrade --yes` alone, put the old version back with `edit` or `replace`, or
+  remove the field if the version was only pinned. If `update --yes` ran too and no node runs the new version, the old
+  version goes into the spec (leaving the field out keeps the new pin) and `update --yes` lowers the pin. If a node runs
+  the new version, `update` refuses to lower the pin and `rolling-update` refuses every roll under an older version: the
+  way is forward, with the new version in the spec and `rolling-update`. A cluster that cannot answer has nothing to
+  ask, and `update` lowers its pin ([13.2](#132-tent-update-cluster---yes)).
+- **Later:** an opt-in in-place upgrade strategy (swap the binary and restart), a flag for the target version.
 
 ### 13.6 `tent validate cluster [--wait DURATION]`
 
@@ -3733,7 +4012,7 @@ while something does. It is `Service.ValidateCluster` in `internal/app`.
   | `server-unhealthy` | the same entry | `autopilot reports its server unhealthy` |
   | `client-not-registered` | each expected client with `Nodes`, told by name and private address | `Nomad lists no client of its name at 10.64.0.7`, or `the cloud reports no private address for it` |
   | `client-not-ready` | that node's status and eligibility | `its Nomad client is down`, `its Nomad client is initializing` or `its Nomad client is ready but not eligible` |
-  | `nomad-version` | each server's and each client's version with the pinned one, as text | `its client runs Nomad 2.0.6; the cluster is pinned to 2.0.7` (`its server runs …` for a server); a server that the report lacks and a client that Nomad does not list or lists as `down` are not compared |
+  | `nomad-version` | each server's and each client's version with the cluster's version, as text | `its client runs Nomad 2.0.6; the cluster's version is 2.0.7` (`its server runs …` for a server); a server that the report lacks and a client that Nomad does not list or lists as `down` are not compared |
   | `certificate-expired` | the CA's end, and each machine's creation time plus a year, with now | `its node certificate ended about 2027-10-05`, or for the CA, with no node, `the cluster CA ended on 2036-10-05` |
 
   - The expected servers are the machines that stay in the server and combined groups, the expected clients those in
@@ -3763,6 +4042,9 @@ while something does. It is `Service.ValidateCluster` in `internal/app`.
   - `the certificate of node prod-workers-0 ends about 2026-11-01, in 26 days; node certificates last one year, and a
     node gets a new one when it is replaced`, by node name, and `the cluster CA ends on 2036-10-05, in 29 days; tent
     cannot renew a CA yet` (`in 1 day` and `in less than a day` for the last day);
+  - `tent update cluster has not applied the specs of cluster prod yet`, since M3.7, when the stored completed spec is
+    not the one that the specs make, also when the store holds none. It is the next thing to read after `upgrade cluster
+    --yes`. It adds no failure;
   - `2 nodes are outdated: prod-workers-0 and prod-workers-1; tent rolling-update cluster replaces them` (`1 node is
     outdated: prod-workers-0; tent rolling-update cluster replaces it`), since M3.3, for the machines that stay and
     that carry no spec hash, a spec hash that is not their group's, or the label `tent/replace=true` (decision 39,
@@ -3775,6 +4057,10 @@ while something does. It is `Service.ValidateCluster` in `internal/app`.
     no failure, and with `--wait` the notice is that of the last round.
   - `-o table`, valid: `cluster prod is valid: 3 servers and 2 clients run Nomad 2.0.7`. The counts are the machines
     that stay under the specs, by their group's role, a combined machine as a server and a client.
+    The version, and `nomadVersion` of the data, is the cluster's version: the version of the specs, else
+    the pin, else the channel's recommendation (M3.7 changed the wording of the failure, not the value). From `upgrade
+    cluster --yes` until the roll has ended the command exits with 2, since each node that still runs the old version is
+    a `nomad-version` failure.
   - `-o table`, not valid: a table with the columns `NODE` and `FAILURE`, then a blank line and `cluster prod is not
     valid: 4 failures` (`1 failure`).
   - `-o json` and `-o yaml`: `cluster`, `valid`, `servers`, `clients`, `nomadVersion`, `failures` (each with `check`,
@@ -3900,7 +4186,8 @@ while something does. It is `Service.ValidateCluster` in `internal/app`.
 
 The last column names the milestone that built the command. The spec commands of M0 work only on the state store;
 `update cluster` and `delete cluster` of M1 reach the cloud, and `validate cluster`, `export nomad` and `ui` of M2.8 and
-`rolling-update cluster` of M3.3 reach the cloud and the Nomad API. The other commands come with later milestones
+`rolling-update cluster` of M3.3 reach the cloud and the Nomad API. `upgrade cluster` of M3.7 reaches the state store
+and, to check a release, HashiCorp's release site. The other commands come with later milestones
 ([roadmap](roadmap.md)).
 
 | Command | kops analogue | Purpose | Built |
@@ -3913,7 +4200,7 @@ The last column names the milestone that built the command. The spec commands of
 | `tent apply -f FILE` | — | `replace` + `update` | — |
 | `tent update cluster [NAME] [--yes] [--exit-code]` | `update cluster` | infrastructure, node counts, the Nomad cluster: servers, ACL bootstrap, clients, the scrub of user data, the delete guard, the removal of nodes that joined ([13.2](#132-tent-update-cluster---yes)) | M1; Nomad in M2.7a; scrub and guard in M2.7b; the report of outdated nodes in M3.3; the removals in M3.6 |
 | `tent rolling-update cluster [NAME] [--yes] [--nodegroups a,b] [--force] [--exit-code] [--allow-single-server]` | `rolling-update cluster` | Nomad-aware replacement of the outdated nodes: client groups by `maxSurge` and `maxUnavailable`, server and combined groups one node at a time ([13.3](#133-tent-rolling-update-cluster---yes)) | M3.3 for client groups; M3.4 for server groups; M3.5 for combined groups |
-| `tent upgrade cluster [--yes]` | `upgrade cluster` | version bumps from the channel | — |
+| `tent upgrade cluster [NAME] [--yes] [--allow-single-server]` | `upgrade cluster` | the Nomad version that the cluster's channel recommends, written into `spec.nomad.version` ([13.5](#135-tent-upgrade-cluster---yes)) | M3.7 |
 | `tent validate cluster [NAME] [--wait DURATION] [--allow-single-server]` | `validate cluster` | the machines and Nomad against the specs; exits with 2 while they differ ([13.6](#136-tent-validate-cluster---wait-duration)) | M2.8 |
 | `tent delete cluster [NAME] [--yes] [--force]` | `delete cluster` | full cleanup by ownership markers ([13.7](#137-tent-delete-cluster---yes)) | M1 |
 | `tent export nomad [NAME] [--ttl 24h] [--dir DIR] [--shell sh\|fish]` | `export kubeconfig --admin` | short-lived operator credentials in files, and the shell lines that use them ([9.7](#97-operator-access)) | M2.8 |
@@ -3939,6 +4226,7 @@ The last column names the milestone that built the command. The spec commands of
   Vultr: `update cluster`, `delete cluster`, `create --yes`, since M2.8 `validate cluster`, `export nomad` and `ui`, and
   since M3.3 `rolling-update cluster` ([7.1](#71-interfaces)). The last four need it because tent stores no address of
   a machine: a server's public address, which the calls to port 4646 need, comes from the cloud's list.
+  `upgrade cluster` reaches no cloud and needs no credentials.
   `HCLOUD_TOKEN` comes with the Hetzner provider.
 - A development build of tent reads `TENT_NODE_URL` and `TENT_NODE_SHA256` once at start, for the tent-node that its
   nodes download ([8.5](#85-artifacts-and-verification)). A release build ignores them. The long help of
@@ -4041,6 +4329,8 @@ The last column names the milestone that built the command. The spec commands of
   - With `-o json`, stderr mixes the JSON progress lines with plain `WARNING:` lines and the logs. A program reads
     the lines that start with `{`. The logs are text unless `--log-format json` makes them JSON objects too; they
     carry `level` and `msg`, which progress lines never have.
+- `upgrade cluster` prints its plan, or with `--yes` its result, on stdout, as text or as data, the hint on stderr, and
+  no progress lines ([13.5](#135-tent-upgrade-cluster---yes)).
 - `validate cluster`, `export nomad` and `ui` print one result on stdout and notices on stderr, and no progress lines
   ([13.6](#136-tent-validate-cluster---wait-duration), [9.7](#97-operator-access)). None of them prints a secret, in
   any output format, in a log or in an error. `export nomad` prints the six shell lines, or with `-o json` and `-o yaml`
@@ -4134,11 +4424,12 @@ The last column names the milestone that built the command. The spec commands of
 - The first Ctrl-C or SIGTERM cancels the command, which then releases its lock. A second one ends tent at once.
 
 **Warnings, errors and exit codes**
-- tent warns about the cluster that results from a change: after `create`, `replace` or a saved `edit`, and before
-  `update cluster --yes` or `rolling-update cluster --yes` applies changes. `validate cluster` warns on every run. A
-  command prints each warning once, `create --yes` included. A plan without `--yes`, `delete cluster`, `get`, `state
-  unlock`, `export nomad` and `ui` leave no changed cluster behind and do not warn, except `update`'s warning that it
-  could not tell which nodes are outdated. tent warns:
+- tent warns about the cluster that results from a change: after `create`, `replace`, a saved `edit` or an
+  `upgrade cluster --yes` that wrote, and before `update cluster --yes` or `rolling-update cluster --yes` applies
+  changes. `validate cluster` warns on every run. A command prints each warning once, `create --yes` included. A plan
+  without `--yes`, `delete cluster`, `get`, `state unlock`, `export nomad` and `ui` leave no changed cluster behind and
+  do not warn, except `update`'s warnings that it could not tell which nodes are outdated, that it could not ask Nomad
+  (about a node of a deleted machine, or which versions run) and that a client waits for the servers. tent warns:
   - while `access.api` lets the whole internet reach the Nomad API, a `/0` range such as the default `0.0.0.0/0`;
   - for a combined node group: `WARNING: node group nodes is combined: its nodes run the Nomad servers and the
     workloads together, which is meant for development and small clusters; workloads share them with Raft and the
@@ -4147,14 +4438,20 @@ The last column names the milestone that built the command. The spec commands of
     `update cluster --yes` applies changes ([8.5](#85-artifacts-and-verification));
   - when the cluster's Nomad version is one that its channel allows but has not tested
     ([13.5](#135-tent-upgrade-cluster---yes)), such as `WARNING: Nomad 2.0.8 is not tested by this tent; channel
-    stable tests 2.0.7`. `create`, `replace` and `edit` check the version that the spec sets, and `update` also a
-    pinned one ([13.2](#132-tent-update-cluster---yes));
+    stable tests 2.0.7`. `create`, `replace`, `edit` and `upgrade cluster` check the version that the spec sets, and
+    `update` also a pinned one ([13.2](#132-tent-update-cluster---yes));
   - `update cluster`, with or without `--yes`, warns once `tent could not tell which nodes are outdated: <error>`
-    when it cannot read the release files of a plan that creates no node and may remove none that joined
-    ([13.2](#132-tent-update-cluster---yes)), and warns once `tent could not ask Nomad whether a node of a deleted
-    machine is left: <error>` when its read of Nomad's nodes fails and nothing in the plan needs the read;
+    when it cannot read the release files of a plan that creates no node, may remove none that joined and writes
+    no other Nomad version into the completed spec ([13.2](#132-tent-update-cluster---yes)), warns once `tent could not
+    ask Nomad whether a node of a deleted machine is left: <error>` when its read of Nomad's nodes fails and nothing in
+    the plan needs the read, and warns once `node prod-workers-2 waits for the servers: <reason>; this update stops
+    before it: <advice>` when the plan boots a client beside servers on an older Nomad (M3.7), and warns once `tent
+    could not ask Nomad which versions run: <cause>; update asks again once it has applied the infrastructure's changes,
+    before it writes the completed spec or creates a node` when no server answers a plan that boots a node or moves the
+    pin and that has an infrastructure change other than a delete (M3.7);
   - and `validate cluster` also warns about a cluster in one failure domain, about certificates that end within 30
-    days and about outdated nodes ([13.6](#136-tent-validate-cluster---wait-duration)).
+    days, about specs that `update` has not applied and about outdated nodes
+    ([13.6](#136-tent-validate-cluster---wait-duration)).
 - An error goes to stderr after `Error: `. An invalid spec prints `Error: invalid spec:` and then one indented line
   per problem, with the field path ([3.3](#33-api-rules)). An `update cluster` that would delete a node of a server
   or combined group that the specs lack, a machine without a group label, or one of two machines of one name that both
@@ -4181,7 +4478,11 @@ The last column names the milestone that built the command. The spec commands of
   rolls before the client groups, that `update` comes first, what `--yes` and `--force` do, and that a run that stops is
   finished by running the command again. The long help of `validate
   cluster`, `export nomad` and `ui` says what they check or write, what they print, and that they need the cloud's
-  credentials and a way to port 4646 of the servers; the help of `validate cluster` also gives its exit codes.
+  credentials and a way to port 4646 of the servers; the help of `validate cluster` also gives its exit codes. The long
+  help of `upgrade cluster` says what the cluster's version is, that tent checks the signed checksums of the release
+  and prints the upgrade, that `--yes` writes `spec.nomad.version` and changes nothing in the cloud, that `update
+  cluster` and `rolling-update cluster` follow, that a cluster moves by at most one minor version at a time, that
+  `edit cluster` sets another version, and that it needs no cloud credentials.
 - Exit codes: 0 success, 1 error, 2 when `update cluster --exit-code` finds a plan with changes, `rolling-update
   cluster --exit-code` finds a next step or `validate cluster` finds the cluster not valid, and 130 when a second
   Ctrl-C or SIGTERM ends tent. Outdated nodes are no change of `update`, so they never make it exit with 2. Exit code 2
@@ -4311,12 +4612,13 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
    - **Built in M2.7a** ([ADR-0031](adr/0031-bootstrap-in-update.md)): the same kind of tests for the whole flow with
      Nomad, on `vultrfake` and `nomadfake`.
      - **The fakes.**
-       - `internal/assets/assetstest` serves HashiCorp's signed `SHA256SUMS` and `.sig` of Nomad 2.0.7 and the
-         `checksums.txt` of every release of tent, with a line for `tent-node_linux_amd64` and `_arm64` (made-up
-         sums), through an `http.RoundTripper` without a network. Every other URL is 404, so a test that pins another
-         Nomad version gets 404. It gives the constants and the clock (2026-09-28 12:00 UTC, when the signature
-         verifies with the embedded key) that callers need. The tests of `internal/app`,
-         `internal/cli`, `internal/assets` and `hack/tent-node-userdata` share it. It imports only the standard library.
+       - `internal/assets/assetstest` serves HashiCorp's signed `SHA256SUMS` and `.sig` of Nomad 2.0.7 and, since M3.7,
+         of 2.0.6 (`OlderNomadVersion`; the tests upgrade from it) and the `checksums.txt` of every release of tent,
+         with a line for `tent-node_linux_amd64` and `_arm64` (made-up sums), through an `http.RoundTripper` without a
+         network. Every other URL is 404, so a test that pins another Nomad version, such as 2.0.99, gets 404. It gives
+         the constants and the clock (2026-09-28 12:00 UTC, when the signature verifies with the embedded key) that
+         callers need. The tests of `internal/app`, `internal/cli`, `internal/assets` and `hack/tent-node-userdata`
+         share it. It imports only the standard library.
        - `nomadfake` logs the server that each call reached, and the tests of `nomadops.Servers` run on stub APIs
          and on it, with the waits in `testing/synctest`.
        - A test channel of the app copies the CNI plugins of the embedded `stable` channel, and tests run `update`
@@ -4357,9 +4659,11 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
        registers a client or combined node at the first VPC address of its instance, which it reads with
        `vultrfake.InstanceVPCs`, and only while the cluster has a leader. `vultrfake.SetInstanceTags` and
        `SetInstanceUserData` change an instance without a call.
-     - **Golden files.** `flow_build.calls.golden` holds the `Peers` call and the `GetInstance` and
-       `UpdateInstance` of each scrub; `flow_scale.calls.golden` holds the pair of the new client's scrub, one `Nodes`
-       call in each of its two plans (since M3.6) and no `Peers` call. `flow_unregistered.plan.golden` and
+     - **Golden files.** `flow_build.calls.golden` holds the `Peers` call of the Nomad step, the `GetInstance` and
+       `UpdateInstance` of each scrub and, since M3.7, the `Peers` and `Health` reads before the first `IntroToken`;
+       `flow_scale.calls.golden` holds the pair of the new client's scrub and, in each of its two plans, the `Nodes`
+       call (since M3.6) followed by the four reads of the version check (`Peers`, `Health`, `Members`, `Nodes`, since
+       M3.7), and in the apply the `Peers` and `Health` reads before `IntroToken`. `flow_unregistered.plan.golden` and
        `flow_unregistered.calls.golden` hold the replacement of a client.
      - **The flows.** A fresh cluster of three servers and two clients, a combined cluster of three and a cluster of
        one node end with the label and the stub on every instance, as the golden files show; a second `update --yes`
@@ -4683,6 +4987,36 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
      - **`validate`** names the surplus machine that `update` would remove, with and without a reading of Nomad, and
        the client that never registered as `update` plans it, and asks Nomad before it plans the machines
        (`validate_test.go`, `validate_nomad_internal_test.go`).
+   - **Built in M3.7** ([ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)): the upgrade runs on the fakes with
+     two real Nomad releases, since only real releases have signed checksums that verify with the embedded key.
+     - **Units.** `channels.CheckMove`, `Compare`, `NextMinor`, `OlderThanMinimum` and `Release`, with `CheckMove`
+       tested from 2.9.0 to 2.10.0 and to 2.11.0; `assets.CheckNomad` (the signature, a line for each architecture, and
+       a call without an architecture, which checks the signature alone); `rollout.CheckNewNode`, with one changed
+       line in `refuse_downgrade.golden`; `checkNewNodes`, `checkPinMove` and `clientAhead` as pure functions over a
+       reading that the test gives (`versions_internal_test.go`).
+     - **The command** (`upgrade_test.go`, `upgrade_plan_test.go`) runs on a service whose providers and Nomad fail
+       the test when called: a store that holds the specs and a completed spec that the test wrote with a pin of 2.0.6
+       (nothing is built), under a channel that recommends 2.0.7, with the version in the spec and with it only pinned;
+       nothing to write; a version below the channel's minimum; every refusal; a completed spec that does not decode;
+       the flag for a server group of one; the warnings after a write; the reads of one plan. The text and the data are
+       in `upgrade_plan.golden`, `upgrade_plan_applied.golden` and the two `upgrade_plan*.json.golden`.
+     - **`update`'s checks** (`upgrade_update_test.go`, `channel_test.go`): the move rule in the writers and the load,
+       the release files before a pin, an upgrade taken back, a pin that does not go under a node, a boot beside a
+       newer node, a cluster that cannot answer, a read that fails, and the stop before a client (beside an older
+       server, a server without a version, a read that fails, a client that never registered, and the wait that
+       repeats a create).
+     - **The world.** The knob `NodeVersions` of the test Nomad world, off by default, makes a server and a node report
+       the version of the `nomad` asset in the request that created their machine. The world reads it once for each
+       instance and keeps it after the instance is deleted. A machine without a create request or a Nomad asset reports
+       the world's version, and `ChangeServer` and `ChangeNode` edit the answer last. A test turns the knob on before it
+       builds the cluster.
+     - **The flows** (`upgrade_flow_test.go`) run `upgrade`, `update` and `rolling-update` with apply: three servers and
+       two workers (`flow_upgrade.update.plan.golden`, `flow_upgrade.roll.plan.golden`, `flow_upgrade.steps.golden`),
+       a combined group of three with two workers (`flow_upgrade_combined.steps.golden`), a roll cut between the servers
+       and the workers, and `--nodegroups workers` refused, then servers, then workers. The invariants hold at every
+       call of both fakes: those of M3.3 to M3.5, the workers' limits, and at every `CreateInstance` the two version
+       rules. The roll creates 5 machines in both clusters, drains 2 and 5 nodes, stops 3 and deletes 5, and purges 2
+       and 5 nodes.
 4. **tent-node tests.** Phases run with an abstracted filesystem and exec. Occasionally they run in a
    systemd-enabled container or a VM.
    - **Built in M2.5.** `internal/nodeup/nodeuptest` holds the fakes: an in-memory filesystem that behaves as
@@ -4877,7 +5211,8 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
 | Undocumented Vultr behaviour (user_data limit, tag syntax, firewall scope, halt semantics) | wrong assumptions in code | `hack/vultr-spike` settled all of these on 2026-09-25 except Object Storage conditional writes; re-run it when Vultr changes something relevant |
 | Vultr counted a deleted machine against the account's instance limit, so the create of a replacement was refused (seen 2026-10-06, run `rugw2m`) | the replacement of a client that never registered fails in an account at its limit | the Vultr provider sends a refused node create again for up to 2 minutes after a delete that it made ([11.3](#113-creating-a-node)); a limit that still holds then returns the limit error with its hint, and so does a rerun of tent right after a run that deleted, since the window does not outlive the process |
 | Hetzner capacity and account limits (5 servers, creation restrictions since June 2026) | Hetzner provider cannot be E2E-tested | Vultr first (ADR-0014); Hetzner E2E in M4 |
-| Nomad 2.x version skew rules not yet restated | broken upgrades | channels allow one major version from a minimum, and tent warns about versions they have not tested; servers before clients |
+| Nomad 2.x version skew rules not yet restated: the upgrade guide of 2026-10-10 states them for 1.x ([platform notes §1.3](platform-notes.md#13-upgrades-and-version-skew)) | broken upgrades | channels allow one major version from a minimum, and tent warns about versions they have not tested; a version moves up by at most one minor version at a time, against the pin and against the oldest node that Nomad reports; servers before clients; no node older than one that runs ([13.5](#135-tent-upgrade-cluster---yes), [ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)); 2.0.6 and 2.0.7 ran together on a local Nomad on 2026-10-10, and a move to the next minor version has never run |
+| A new combined node runs a client of the new Nomad version while the other servers run the old one | the guide advises against a client ahead of its servers, since new client features need new servers | a combined group has no other order; a 2.0.7 client joined three 2.0.6 servers on a local Nomad (a combined agent was not run); M3.9's `upgrade` scenario runs it on Vultr ([13.3](#133-tent-rolling-update-cluster---yes)) |
 | HashiCorp's embedded release key expires on 2030-03-01, or is rotated or revoked | tent cannot verify Nomad downloads, or trusts a revoked key | a weekly CI job fails 180 days before the expiry; a tent release embeds the new key ([8.5](#85-artifacts-and-verification)) |
 | BUSL licence of Nomad | a paid managed offering would need a commercial licence | tent downloads official binaries and never redistributes them; stays free (not legal advice) |
 | Nomad reads a rendered value differently from the HCL1 that the tests use: Nomad parses with its fork `v1.0.1-nomad-1`, the tests with upstream v1.0.0 | a node does not start, or runs with another setting | strict quoting refuses what HCL1 cannot read back; tests parse every golden back; the weekly `online` job runs `nomad config validate` of the channel's minimum and recommended Nomad on the goldens ([ADR-0030](adr/0030-nomad-on-nodes.md)) |
@@ -5075,9 +5410,11 @@ Decided on 2026-10-08 (the maintainer took every recommendation put to them at t
     field; they do not make `update --exit-code` exit 2. `rolling-update --exit-code` exits 2 while a roll is due.
     `validate cluster` warns about them. When the release files cannot be read, `validate` and an `update` that
     creates no node warn that they could not tell which nodes are outdated and go on; an `update` that creates a node
-    fails, as before. For M3.9, `ha` runs on ubuntu-24.04 and `upgrade` on ubuntu-26.04 in one run, with the backup
-    step in `ha` (M3.9). The rest is built in M3.3 ([13.2](#132-tent-update-cluster---yes),
-    [13.6](#136-tent-validate-cluster---wait-duration), [ADR-0037](adr/0037-rolling-update-of-client-groups.md)).
+    fails, as before. Since M3.7 so does one that would write another Nomad version into the completed spec
+    ([ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)). For M3.9, `ha` runs on ubuntu-24.04 and `upgrade` on
+    ubuntu-26.04 in one run, with the backup step in `ha` (M3.9). The rest is built in M3.3
+    ([13.2](#132-tent-update-cluster---yes), [13.6](#136-tent-validate-cluster---wait-duration),
+    [ADR-0037](adr/0037-rolling-update-of-client-groups.md)).
 40. **A forced roll survives a cut.** Each forced machine is labelled `tent/replace=true` at the start of the run, and
     every run replaces labelled machines, with or without `--force`. Built in M3.3
     ([13.3](#133-tent-rolling-update-cluster---yes)).
@@ -5092,6 +5429,10 @@ Decided on 2026-10-08 (the maintainer took every recommendation put to them at t
 44. **tent-node stays in every node's spec hash.** Each tent release rolls the servers too; an operator who wants to
     defer them rolls the client groups with `--nodegroups`. The hash already holds it; M3.4 lets the default selection
     roll the servers ([ADR-0038](adr/0038-rolling-update-of-server-groups.md), item 17).
+45. **What `upgrade cluster` writes:** the new Nomad version, into `spec.nomad.version` of `cluster.yaml`, whether the
+    spec set a version before or only the pin held it, so that the version is explicit from then on (decided on
+    2026-10-09). With nothing to upgrade it writes nothing. Built in M3.7 ([13.5](#135-tent-upgrade-cluster---yes),
+    [ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)).
 48. **tent remembers the highest index of each server and combined group** in the state store
     (`names/<nodegroup>`, [10.2](#102-layout)), so that the names of such a group only grow, also after a shrink or an
     operator's delete (decided on 2026-10-09; the limit that M3.4 found in decision 43's rule). Built in M3.4 for the
@@ -5108,10 +5449,29 @@ Decided on 2026-10-12:
     such a cluster cannot get its old role back and is replaced by a new one (decided the same day, over a flag that
     lets a change through and over a guard in `update`). Built in M3.5 ([14](#14-cli),
     [13.3](#133-tent-rolling-update-cluster---yes), [ADR-0039](adr/0039-rolling-update-of-combined-groups.md)).
+50. **tent reads no channel file from a URL.** The channel is the one embedded in tent. An operator who wants another
+    Nomad version than tent recommends sets `spec.nomad.version`. Section 13.5 and ADR-0026 had planned a URL that
+    overrides the embedded file ([13.5](#135-tent-upgrade-cluster---yes),
+    [ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)).
 
 Open for the maintainer: where `tent backup restore` may restore a snapshot ([13.8](#138-backups); the facts are in
-[platform notes §1.2](platform-notes.md#12-features-tent-relies-on)), what `upgrade cluster` writes, and what backups
-and `delete cluster` do together; they are asked at the start of M3.7 and M3.8.
+[platform notes §1.2](platform-notes.md#12-features-tent-relies-on)), and what backups and `delete cluster` do
+together; they are asked at the start of M3.8.
+
+Open for the maintainer, from the final review of M3.7 (Q14):
+- **Taking an upgrade back once the roll's first new server has joined.** After `upgrade --yes`, `update --yes` and
+  the first step of the roll, the cluster has one server on the new Nomad. `update` then refuses the old version in
+  the spec, and `rolling-update` refuses specs that `update` has not applied. When that server is unhealthy, the roll
+  does not go on either. The way back today is by hand: delete that machine in the cloud, wait until its peer is gone,
+  and run `tent update cluster`
+  ([ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)).
+  - (a) Keep it: the way is forward, and ADR-0041 names the way back by hand.
+  - (b) Let `update` take the upgrade back: the version check leaves out the servers and nodes whose machines the plan
+    removes, so the plan at the old version removes the new server as surplus. Nomad's guide says that downgrading
+    servers needs a new cluster, and whether old servers work on after a newer server led them is not verified, so (b)
+    needs a lab first.
+  - Recommendation: (a) for M3.7, and a lab for (b) before M3.9's `upgrade` scenario if the maintainer wants a way
+    back.
 
 Decisions 18 to 20 are recorded in [ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md), decision 21 in
 [ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md), decisions 22 to 25 in
@@ -5120,7 +5480,8 @@ in [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md), and decisions 29
 [ADR-0033](adr/0033-operator-commands.md), decisions 33 to 35 in [ADR-0035](adr/0035-rollout-decisions.md), decisions 39
 to 42 in [ADR-0037](adr/0037-rolling-update-of-client-groups.md), decisions 37, 38, 43, 44 and 48 in
 [ADR-0038](adr/0038-rolling-update-of-server-groups.md) (decisions 37 and 38 were first named in ADR-0035, item 15), and
-decision 49 in [ADR-0039](adr/0039-rolling-update-of-combined-groups.md).
+decision 49 in [ADR-0039](adr/0039-rolling-update-of-combined-groups.md), and decisions 45 and 50 in
+[ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md).
 
 ---
 

@@ -11,6 +11,12 @@
   first node, so a first `update` that is cut and run again by a newer tent keeps the first run's pin; the
   architecture comes from `cloud.Provider.Arch`; a development build needs `TENT_NODE_URL` and `TENT_NODE_SHA256` for
   such a plan, which `cmd/tent` reads; the warning for a release build shows before the first change)
+  and by
+  [ADR-0041](0041-upgrading-a-clusters-nomad-version.md) (the M3 follow-up is built: `upgrade cluster` moves the
+  cluster to the recommended version, also from one below the channel's minimum; a version moves up by at most one
+  minor version; `update` pins a Nomad version only after its release files verify and refuses a node older than one
+  that runs; item 3 holds, a version in the spec wins over the pin, a lower one too; the channel file from a URL is
+  dropped, decision 50)
 - **Date:** 2026-09-28
 - **Deciders:** ingvarch
 - **Related:** extends [ADR-0006](0006-two-binaries-and-nodeconfig.md),
@@ -149,8 +155,9 @@ each must have. Nothing downloads on nodes yet: NodeConfig takes the files in M2
   first node, with the secrets.
 - M2.5: the release adds `tent-node_linux_amd64` and `tent-node_linux_arm64` to `checksums.txt`, and development
   builds get a place to upload tent-node.
-- M3: `upgrade cluster` moves a pinned version that the channel no longer allows and brings the URL that overrides an
-  embedded channel. It and `rolling-update` refuse downgrades
+- M3: `upgrade cluster` moves a pinned version that the channel no longer allows. Built in M3.7
+  ([ADR-0041](0041-upgrading-a-clusters-nomad-version.md)): it never writes an older version, and `update` and
+  `rolling-update` refuse a node older than one that runs
   ([architecture §13.5](../architecture.md#135-tent-upgrade-cluster---yes)).
 - By 2029-09-02: embed HashiCorp's renewed key.
 
