@@ -312,6 +312,95 @@ func TestDeleteClusterNomadMark(t *testing.T) {
 	wantError(t, err, "cluster prod holds objects tent does not know: "+unknown+"; delete them yourself or use --force")
 }
 
+// Store paths of two backups of the test cluster, of two bootstraps, and of the record of a restore.
+const (
+	backupOnePath = "prod/backups/20261001T100000Z/20261009T230207Z.snap"
+	backupTwoPath = "prod/backups/20261012T080000Z/20261012T090000Z.snap"
+	restoredPath  = "prod/nomad/restored"
+)
+
+// TestDeleteClusterBackups deletes the backups and the record of a restore without force, with the objects that the
+// store lists first and before the secrets, and leaves nothing of the cluster in the store.
+func TestDeleteClusterBackups(t *testing.T) {
+	t.Parallel()
+	svc, _ := newCluster(t)
+	put(t, svc.Store, backupTwoPath, []byte("?"))
+	put(t, svc.Store, backupOnePath, []byte("?"))
+	put(t, svc.Store, restoredPath, []byte("?"))
+	for _, p := range secretPaths {
+		put(t, svc.Store, p, []byte("?"))
+	}
+	want := slices.Concat([]string{backupOnePath, backupTwoPath, completedPath, serversPath, workersPath, restoredPath},
+		secretDeletes, []string{clusterPath, versionPath})
+	plan, err := svc.DeleteCluster(t.Context(), "prod", false, false)
+	wantDeletePlan(t, plan, err, nil, nil, want)
+	var text strings.Builder
+	if err := plan.WriteText(&text); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(text.String(), "\nState: 12 objects to delete.\n") {
+		t.Errorf("the plan's text:\n%s\nwant it to count 12 state objects", text.String())
+	}
+	plan, err = svc.DeleteCluster(t.Context(), "prod", true, false)
+	wantDeletePlan(t, plan, err, nil, nil, want)
+	wantPaths(t, svc.Store)
+}
+
+// TestDeleteClusterUnknownBackupObjects refuses a file under backups/ that is not a backup of the cluster, before any
+// cloud call, and with force deletes it with the rest of the state.
+func TestDeleteClusterUnknownBackupObjects(t *testing.T) {
+	t.Parallel()
+	for _, unknown := range []string{"prod/backups/notes.txt", "prod/backups/20261001T100000Z/x.snap"} {
+		svc, f := newCluster(t)
+		put(t, svc.Store, backupOnePath, []byte("?"))
+		put(t, svc.Store, unknown, []byte("?"))
+		stored := list(t, svc.Store, "")
+		for _, apply := range []bool{false, true} {
+			_, err := svc.DeleteCluster(t.Context(), "prod", apply, false)
+			wantError(t, err, "cluster prod holds objects tent does not know: "+unknown+
+				"; delete them yourself or use --force")
+			wantPaths(t, svc.Store, stored...)
+		}
+		if calls := f.Calls(); len(calls) != 0 {
+			t.Errorf("calls to the cloud: %v", calls)
+		}
+		plan, err := svc.DeleteCluster(t.Context(), "prod", true, true)
+		wantDeletePlan(t, plan, err, nil, nil, []string{
+			backupOnePath, unknown, completedPath, serversPath, workersPath, clusterPath, versionPath,
+		})
+		wantPaths(t, svc.Store)
+	}
+}
+
+// TestDeleteClusterBackupsStopped runs a delete again whose third delete failed: the secrets, cluster.yaml and the
+// tent version are still there, and the next run finishes.
+func TestDeleteClusterBackupsStopped(t *testing.T) {
+	t.Parallel()
+	svc, _ := newCluster(t)
+	put(t, svc.Store, backupOnePath, []byte("?"))
+	put(t, svc.Store, backupTwoPath, []byte("?"))
+	put(t, svc.Store, restoredPath, []byte("?"))
+	for _, p := range secretPaths {
+		put(t, svc.Store, p, []byte("?"))
+	}
+	store := svc.Store
+	svc.Store = &cutStore{Store: store, path: completedPath}
+	plan, err := svc.DeleteCluster(t.Context(), "prod", true, false)
+	if !errors.Is(err, errCut) {
+		t.Fatalf("DeleteCluster error = %v, want one that matches errCut", err)
+	}
+	if plan.Applied {
+		t.Error("the plan of the failed delete says it was applied")
+	}
+	wantPaths(t, store, completedPath, clusterPath, serversPath, workersPath, restoredPath, caBundlePath, caKeyPath,
+		aclPath, gossipPath, versionPath)
+	svc.Store = store
+	plan, err = svc.DeleteCluster(t.Context(), "prod", true, false)
+	wantDeletePlan(t, plan, err, nil, nil, slices.Concat([]string{completedPath, serversPath, workersPath, restoredPath},
+		secretDeletes, []string{clusterPath, versionPath}))
+	wantPaths(t, store)
+}
+
 // TestDeleteClusterUnknownObjectNextToTheSecrets refuses an object under pki/ that is not one of the secrets.
 func TestDeleteClusterUnknownObjectNextToTheSecrets(t *testing.T) {
 	t.Parallel()

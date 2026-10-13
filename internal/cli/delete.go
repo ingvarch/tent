@@ -22,13 +22,13 @@ func newDeleteClusterCommand(opts *globalOptions) *cobra.Command {
 		Short: "Delete a cluster's cloud objects and its state",
 		Long: "Delete the cloud objects of the cluster named by NAME or --name, then its state: first its nodes, " +
 			"then its network, firewalls and SSH keys, and last its specs and the rest of its state in the state " +
-			"store. tent finds the cloud objects by the markers it put on them, on the cloud that the stored " +
-			"cluster.yaml names; for a cluster without cluster.yaml, or on a cloud that tent cannot manage yet, it " +
-			"deletes the state only. Without --yes it prints what it would delete. With --yes it prints that, " +
-			"deletes, prints each step on stderr as it goes, and then prints what it deleted; with -o json or -o " +
-			"yaml it prints the plan it applied. It refuses to delete objects under the cluster in the state store " +
-			"that tent does not know, unless --force is given. tent reads the cloud's credentials from the " +
-			"environment: VULTR_API_KEY for Vultr.",
+			"store. The state holds the cluster's backups, which are deleted with it. tent finds the cloud objects by " +
+			"the markers it put on them, on the cloud that the stored cluster.yaml names; for a cluster without " +
+			"cluster.yaml, or on a cloud that tent cannot manage yet, it deletes the state only. Without --yes it " +
+			"prints what it would delete. With --yes it prints that, deletes, prints each step on stderr as it goes, " +
+			"and then prints what it deleted; with -o json or -o yaml it prints the plan it applied. It refuses to delete " +
+			"objects under the cluster in the state store that tent does not know, unless --force is given. tent " +
+			"reads the cloud's credentials from the environment: VULTR_API_KEY for Vultr.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name, err := opts.clusterArg(args)

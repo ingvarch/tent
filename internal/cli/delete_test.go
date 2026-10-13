@@ -370,6 +370,14 @@ func TestDeleteClusterHelpSaysItDeletesTheCloud(t *testing.T) {
 	}
 }
 
+func TestDeleteClusterHelpSaysItDeletesTheBackups(t *testing.T) {
+	got := runOnCloud(t, "delete", "cluster", "--help")
+	const want = "The state holds the cluster's backups, which are deleted with it."
+	if got.code != 0 || !strings.Contains(got.out, want) {
+		t.Errorf("exit code = %d, stdout\n%s\nwant 0 and it to hold %q", got.code, got.out, want)
+	}
+}
+
 // losingStore removes the lock's lease after it writes or deletes one path, as state unlock --force by someone else
 // would.
 type losingStore struct {

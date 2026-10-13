@@ -28,11 +28,12 @@ const (
 // Providers fails with an error that matches cloud.ErrUnsupportedProvider: tent made no cloud objects there, and the
 // plan names the provider.
 //
-// The state is the tent version, the specs, the completed spec, the Nomad bootstrap mark, the highest indexes of the
-// machine names of the node groups, and the secrets: the CA's key and bundle, the gossip key and the ACL bootstrap
-// secret. Other objects of the cluster in the store make it refuse before it calls the cloud, unless force is set:
-// then they are deleted with the rest of the state. The lock's lease is left to the lock, which removes it when it is
-// released. Without apply, DeleteCluster returns the plan and changes nothing.
+// The state is the tent version, the specs, the completed spec, the Nomad bootstrap mark, the record of a restore, the
+// backups of Nomad's state, the highest indexes of the machine names of the node groups, and the secrets: the CA's
+// key and bundle, the gossip key and the ACL bootstrap secret. Other objects of the cluster in the store make it
+// refuse before it calls the cloud, unless force is set: then they are deleted with the rest of the state. The lock's
+// lease is left to the lock, which removes it when it is released. Without apply, DeleteCluster returns the plan and
+// changes nothing.
 //
 // With apply it takes the cluster's lock, plans again under it, calls OnDeletePlan with that plan and deletes in this
 // order: every node, one at a time by name; then it lists the nodes every 5 seconds until the cloud lists none, for up
@@ -235,10 +236,21 @@ func isNameIndex(l statestore.Layout, p string) bool {
 	return ok && !strings.Contains(group, "/")
 }
 
+// knownState reports whether p, an object that is neither a secret nor the cluster's spec or tent version, is one that
+// tent writes: the completed spec, a node group's spec, the bootstrap mark, the record of a restore, the highest index
+// of a node group's machine names, or a backup.
+func knownState(l statestore.Layout, p string) bool {
+	if _, ok := l.BackupAt(p); ok {
+		return true
+	}
+	return p == l.Completed() || p == l.NomadBootstrapped() || p == l.NomadRestored() || isGroup(l, p) ||
+		isNameIndex(l, p)
+}
+
 // state returns the paths of a cluster's state in the order of deletion: the objects the store lists first, the
-// bootstrap mark and the highest indexes of the machine names among them, then the secrets, then the cluster's spec
-// and tent version last. The secrets go in the reverse order of their writes, so that a delete that stops never
-// leaves a CA bundle without its key.
+// bootstrap mark, the record of a restore, the backups and the highest indexes of the machine names among them, then
+// the secrets, then the cluster's spec and tent version last. The secrets go in the reverse order of their writes, so
+// that a delete that stops never leaves a CA bundle without its key.
 func (s *Service) state(ctx context.Context, l statestore.Layout, force bool) ([]string, error) {
 	all, err := s.Store.List(ctx, l.Prefix())
 	if err != nil {
@@ -252,7 +264,7 @@ func (s *Service) state(ctx context.Context, l statestore.Layout, force bool) ([
 		switch {
 		case p == l.Lock() || slices.Contains(last, p):
 			continue
-		case p != l.Completed() && p != l.NomadBootstrapped() && !isGroup(l, p) && !isNameIndex(l, p):
+		case !knownState(l, p):
 			unknown = append(unknown, p)
 		}
 		paths = append(paths, p)
