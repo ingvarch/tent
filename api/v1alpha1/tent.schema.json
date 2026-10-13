@@ -110,7 +110,7 @@
       "properties": {
         "version": {
           "type": "string",
-          "description": "Version of Nomad, for example 2.0.7. Empty means the version that the cluster was first built with; a new cluster gets the one that the channel recommends."
+          "description": "Version of Nomad, for example 2.0.7. Empty means the version that the cluster is pinned to, the one that tent update cluster last applied; a new cluster gets the one that the channel recommends. tent upgrade cluster sets it."
         },
         "region": {
           "type": "string",

@@ -468,34 +468,59 @@ func pinVersion(c *v1alpha1.Cluster, ch *channels.Channel, l statestore.Layout, 
 	n := &c.Spec.Nomad
 	pinned, err := storedPin(l, stored)
 	if n.Version != "" {
-		if why, advice := moveProblem(pinned, n.Version); why != "" {
-			why += " (" + l.Completed() + ")"
-			if advice != "" {
-				why += "; " + advice
-			}
-			return "", fmt.Errorf("%s: spec.nomad.version: %s", clusterLabel(c.Metadata.Name), why)
+		if err := moveError(c.Metadata.Name, l, pinned, n.Version); err != nil {
+			return "", err
 		}
 		return pinned, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("%w; set spec.nomad.version to the Nomad version the cluster was built with, or fix "+
-			"%s in the state store by hand", err, l.Completed())
+		return "", unreadablePin(l, err)
 	}
 	if pinned == "" {
 		n.Version = ch.Nomad.Recommended
 		return "", nil
 	}
-	// Allows returns nil or a *VersionError.
-	if v, ok := errors.AsType[*channels.VersionError](ch.Allows(pinned)); ok {
-		advice := "set spec.nomad.version to a version that the channel allows"
-		if ch.OlderThanMinimum(pinned) {
-			advice = "run tent upgrade cluster, or " + advice
-		}
-		return "", fmt.Errorf("%s is pinned to Nomad %s (%s), which %s; %s", clusterLabel(c.Metadata.Name), pinned,
-			l.Completed(), v.Problem, advice)
+	if err := pinOutsideChannel(c.Metadata.Name, l, ch, pinned); err != nil {
+		return "", err
 	}
 	n.Version = pinned
 	return pinned, nil
+}
+
+// moveError returns the error of a cluster pinned to the Nomad version pinned whose spec sets the version to, when that
+// is more than one minor version above the pin or of another major version, and nil otherwise.
+func moveError(cluster string, l statestore.Layout, pinned, to string) error {
+	why, advice := moveProblem(pinned, to)
+	if why == "" {
+		return nil
+	}
+	why += " (" + l.Completed() + ")"
+	if advice != "" {
+		why += "; " + advice
+	}
+	return fmt.Errorf("%s: spec.nomad.version: %s", clusterLabel(cluster), why)
+}
+
+// unreadablePin returns the error of a stored completed spec that does not decode, with what to do about it.
+func unreadablePin(l statestore.Layout, err error) error {
+	return fmt.Errorf("%w; set spec.nomad.version to the Nomad version the cluster was built with, or fix "+
+		"%s in the state store by hand", err, l.Completed())
+}
+
+// pinOutsideChannel returns the error of a cluster pinned to the Nomad version pinned when the channel ch does not
+// allow it, and nil otherwise.
+func pinOutsideChannel(cluster string, l statestore.Layout, ch *channels.Channel, pinned string) error {
+	// Allows returns nil or a *VersionError.
+	v, ok := errors.AsType[*channels.VersionError](ch.Allows(pinned))
+	if !ok {
+		return nil
+	}
+	advice := "set spec.nomad.version to a version that the channel allows"
+	if ch.OlderThanMinimum(pinned) {
+		advice = "run tent upgrade cluster, or " + advice
+	}
+	return fmt.Errorf("%s is pinned to Nomad %s (%s), which %s; %s", clusterLabel(cluster), pinned, l.Completed(),
+		v.Problem, advice)
 }
 
 // storedPin returns the Nomad version that the cluster's stored completed spec holds, "" when stored is nil. A
@@ -523,10 +548,16 @@ func moveProblem(pinned, to string) (why, advice string) {
 		return "", ""
 	}
 	why = v.Error() + ", the Nomad version that the cluster is pinned to"
-	if major, _, _ := strings.Cut(pinned, "."); strings.HasPrefix(to, major+".") {
+	if sameMajor(pinned, to) {
 		advice = "move to " + strings.TrimSuffix(channels.NextMinor(pinned), ".0") + " first"
 	}
 	return why, advice
+}
+
+// sameMajor reports whether the Nomad versions a and b have the same major version.
+func sameMajor(a, b string) bool {
+	major, _, _ := strings.Cut(a, ".")
+	return strings.HasPrefix(b, major+".")
 }
 
 // provider returns the cloud provider called name.
