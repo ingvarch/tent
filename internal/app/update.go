@@ -220,17 +220,20 @@ func (s NodeStep) String() string {
 // machine as joined, and last writes the mark;
 // then the waits for client nodes, the deletes of the clients that never registered and the creates of the missing
 // clients; before the first change that boots a client, the update reads the Raft configuration and autopilot's report
-// and stops, with what it did before standing, when that client would run a newer Nomad than a server runs, when a
-// server reports no version yet, or when Nomad cannot be asked; each client boots with an intro token, registers, and
-// is then scrubbed and labelled as a server is, before the next is made; a wait for a client without an operation id
-// asks for no token and calls no cloud until the scrub; then the other node deletes, which are those of machines that
-// never joined. Each delete of a machine with a private address follows Nomad's answer that it has not joined, as a
-// client of its name and private address that is not down or as a server of the Raft configuration, else the machine is
-// scrubbed and labelled and the update fails; a machine without a private address counts as not joined, and its delete
-// asks Nomad nothing. Then come the removals of the nodes that joined and the purges, which the loop of a rolling
-// update carries out in the mode that removes surplus nodes, over a fresh list of the machines, one node at a time as
-// the decisions order; the plan's Removed counts the nodes it drained and purged and the machines it stopped, also when
-// the loop fails. Last come the infrastructure's deletes, so that a firewall group goes only once its nodes are gone.
+// once. When Nomad cannot be asked, the update stops there, with what it did before standing. When that client would
+// run a newer Nomad than a server runs, or a server reports no version yet, the update boots no client: it carries
+// out the rest of these changes, the waits for clients without an operation id and the deletes of machines that never
+// joined, and then returns the stop, before the removals and the infrastructure's deletes. Each client boots with an
+// intro token, registers, and is then scrubbed and labelled as a server is, before the next is made; a wait for a
+// client without an operation id asks for no token and calls no cloud until the scrub. Then come the other node
+// deletes, which are those of machines that never joined. Each delete of a machine with a private address follows
+// Nomad's answer that it has not joined, as a client of its name and private address that is not down or as a server
+// of the Raft configuration, else the machine is scrubbed and labelled and the update fails; a machine without a
+// private address counts as not joined, and its delete asks Nomad nothing. Then come the removals of the nodes that
+// joined and the purges, which the loop of a rolling update carries out in the mode that removes surplus nodes, over
+// a fresh list of the machines, one node at a time as the decisions order; the plan's Removed counts the nodes it
+// drained and purged and the machines it stopped, also when the loop fails. Last come the infrastructure's deletes,
+// so that a firewall group goes only once its nodes are gone.
 // Nodes are created one at a time. A create, a wait and each wait of the Nomad step may take 10 minutes, and a scrub 5.
 // The first step that fails stops the update, and running it again finishes the job. It returns the plan it applied,
 // made under the lock, with the error; the plan says Applied once every step has succeeded, or at once when it has no

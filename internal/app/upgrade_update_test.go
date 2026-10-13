@@ -572,23 +572,32 @@ func TestUpdateStopsBeforeAClientWhenAServerReportsNoVersion(t *testing.T) {
 	})
 }
 
+// failedVersionReads are the ways in which the apply cannot ask Nomad for the servers' versions: fail breaks one of
+// them, and cause ends the error of the run.
+var failedVersionReads = []struct {
+	name  string
+	fail  func(*testing.T, *nomadWorld)
+	cause string
+}{
+	{"Peers", func(t *testing.T, w *nomadWorld) { w.Fail(t, "Peers", errBoom) }, "boom"},
+	{"Health", func(t *testing.T, w *nomadWorld) { w.Fail(t, "Health", errBoom) }, "boom"},
+	{"the client", func(_ *testing.T, w *nomadWorld) {
+		w.svc.Nomad = func(nomadops.Config) (nomadops.API, error) { return nil, errBoom }
+	}, "reach server prod-servers-0: boom"},
+}
+
+// cannotAskStop is the error of an apply that could not ask Nomad for the servers' versions before the client node
+// called node, because of cause.
+func cannotAskStop(node, cause string) string {
+	return "update stops before node " + node + ": tent could not ask Nomad which versions its servers run: " + cause
+}
+
 // TestUpdateStopsBeforeAClientWhenNomadCannotBeAsked fails the read of the servers' versions in the apply, after the
 // plans have read them, and the making of the client of Nomad: the run stops before the client with the cause,
 // nothing is created, and the next update works.
 func TestUpdateStopsBeforeAClientWhenNomadCannotBeAsked(t *testing.T) {
 	t.Parallel()
-	const stops = "update stops before node prod-workers-2: tent could not ask Nomad which versions its servers run: "
-	for _, tc := range []struct {
-		name string
-		fail func(*testing.T, *nomadWorld)
-		want string
-	}{
-		{"Peers", func(t *testing.T, w *nomadWorld) { w.Fail(t, "Peers", errBoom) }, stops + "boom"},
-		{"Health", func(t *testing.T, w *nomadWorld) { w.Fail(t, "Health", errBoom) }, stops + "boom"},
-		{"the client", func(_ *testing.T, w *nomadWorld) {
-			w.svc.Nomad = func(nomadops.Config) (nomadops.API, error) { return nil, errBoom }
-		}, stops + "reach server prod-servers-0: boom"},
-	} {
+	for _, tc := range failedVersionReads {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
@@ -604,7 +613,7 @@ func TestUpdateStopsBeforeAClientWhenNomadCannotBeAsked(t *testing.T) {
 
 				_, err := svc.Update(t.Context(), "prod", true)
 
-				wantError(t, err, tc.want)
+				wantError(t, err, cannotAskStop("prod-workers-2", tc.cause))
 				if !errors.Is(err, errBoom) {
 					t.Errorf("Update = %v, want an error that matches %v", err, errBoom)
 				}
@@ -737,5 +746,212 @@ func TestUpdateStopsBeforeTheWaitThatRepeatsTheCreateOfAClient(t *testing.T) {
 			t.Errorf("the workers are %v, want three", got)
 		}
 		wantAllOn(t, b, newerNomad)
+	})
+}
+
+// neverJoinedServerWorld is the cluster of an upgrade that update applied (the pin is 2.0.7, every node runs 2.0.6),
+// after a roll that gave up because its new server, prod-servers-3, never came up: that machine is a surplus one that
+// never joined. It returns the world and the ID of that machine.
+func neverJoinedServerWorld(t *testing.T) (liveWorld, string) {
+	t.Helper()
+	svc, f, w := newRelease(t)
+	w.NodeVersions()
+	w.ServersOverTime()
+	svc.Channels = stableChannel("2.0.0", olderNomad, olderNomad)
+	mustUpdate(t, svc)
+	b := liveOf(t, svc, f, w)
+	svc.Channels = stableChannel("2.0.0", newerNomad, olderNomad, newerNomad)
+	if _, err := svc.UpgradeCluster(t.Context(), "prod", true); err != nil {
+		t.Fatalf("UpgradeCluster: %v", err)
+	}
+	mustUpdate(t, svc)
+	f.SetHook(func(ctx context.Context, c vultrfake.Call, next func(context.Context) error) error {
+		err := next(ctx)
+		if c.Name != "CreateInstance" {
+			return err
+		}
+		for _, in := range f.Instances() {
+			if in.Hostname == "prod-servers-3" && !f.Halted(in.ID) {
+				_ = f.HaltInstance(ctx, in.ID)
+			}
+		}
+		return err
+	})
+	if _, err := svc.RollingUpdate(t.Context(), "prod", app.RollOptions{Apply: true}); err == nil {
+		t.Fatal("the roll whose new server never comes up did not fail")
+	}
+	f.SetHook(nil)
+	return b, instanceNamed(t, f, "prod-servers-3")
+}
+
+// TestUpdateDeletesTheMachineThatNeverJoinedWhenItStopsBeforeAClient loses a worker machine beside a server that never
+// joined. The plan creates the worker before it deletes that server; the apply stops before the worker, deletes the
+// server's machine, and returns the stop. The roll then ends the upgrade, and one more update has no change.
+func TestUpdateDeletesTheMachineThatNeverJoinedWhenItStopsBeforeAClient(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b, broken := neverJoinedServerWorld(t)
+		svc := b.w.svc
+		if err := b.f.DeleteInstance(t.Context(), instanceNamed(t, b.f, "prod-workers-1")); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := svc.Update(t.Context(), "prod", true)
+
+		wantError(t, err, aheadStop("prod-workers-1"))
+		if slices.Contains(instanceIDs(b.f), broken) {
+			t.Errorf("the machine of prod-servers-3 that never joined (%s) is still there", broken)
+		}
+		if got := machinesOf(b.f, "workers"); !slices.Equal(got, []string{"prod-workers-0"}) {
+			t.Errorf("the workers are %v, want prod-workers-0 alone: the create is held back", got)
+		}
+
+		if _, err := svc.RollingUpdate(t.Context(), "prod", app.RollOptions{Apply: true}); err != nil {
+			t.Fatalf("RollingUpdate: %v", err)
+		}
+		wantAllOn(t, b, newerNomad)
+	})
+}
+
+// TestUpdateStopsBeforeEveryClientAndReadsTheVersionsOnce loses both workers beside a server that never joined: the
+// plan has two creates of clients and the delete after them. The apply creates neither client, makes the delete, and
+// reads the servers' versions once.
+func TestUpdateStopsBeforeEveryClientAndReadsTheVersionsOnce(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b, broken := neverJoinedServerWorld(t)
+		svc := b.w.svc
+		for _, name := range []string{"prod-workers-0", "prod-workers-1"} {
+			if err := b.f.DeleteInstance(t.Context(), instanceNamed(t, b.f, name)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		creates := countCalls(b.f, "CreateInstance")
+		var from int
+		svc.OnUpdatePlan = func(app.UpdatePlan) error {
+			from = len(b.w.Log())
+			return nil
+		}
+
+		_, err := svc.Update(t.Context(), "prod", true)
+
+		wantError(t, err, aheadStop("prod-workers-0"))
+		if n := countCalls(b.f, "CreateInstance"); n != creates {
+			t.Errorf("the update sent %d create requests, want none", n-creates)
+		}
+		if slices.Contains(instanceIDs(b.f), broken) {
+			t.Errorf("the machine of prod-servers-3 that never joined (%s) is still there", broken)
+		}
+		// The guard of the delete reads the Raft configuration too, so Health counts the reads of the versions.
+		if calls := nomadNames(b.w, from); count(calls, "Health") != 1 {
+			t.Errorf("the apply made %d Health calls, want 1: %v", count(calls, "Health"), calls)
+		}
+	})
+}
+
+// TestUpdateWaitsForAClientThatExistsAfterTheStop plans the wait that repeats the create of prod-workers-0 and, after
+// it, the wait for prod-workers-1, whose machine exists: the run stops before the first, carries out the second, and
+// returns the stop.
+func TestUpdateWaitsForAClientThatExistsAfterTheStop(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b := olderWorld(t)
+		svc := b.w.svc
+		if err := b.f.DeleteInstance(t.Context(), instanceNamed(t, b.f, "prod-workers-0")); err != nil {
+			t.Fatal(err)
+		}
+		b.f.SetHook(func(ctx context.Context, c vultrfake.Call, next func(context.Context) error) error {
+			if c.Name != "CreateInstance" {
+				return next(ctx)
+			}
+			_ = next(ctx)
+			return errCutRun
+		})
+		if _, err := svc.Update(t.Context(), "prod", true); !errors.Is(err, errCutRun) {
+			t.Fatalf("the update returned %v, want an error that matches %v", err, errCutRun)
+		}
+		b.f.SetHook(nil)
+		worker1 := instanceNamed(t, b.f, "prod-workers-1")
+		tags, _ := tagsOf(b.f, worker1)
+		b.f.SetInstanceTags(t, worker1, withoutJoined(tags)...)
+		svc.Channels = stableChannel("2.0.0", newerNomad, olderNomad, newerNomad)
+		specsAtVersion(t, svc, newerNomad)
+
+		plan, err := svc.Update(t.Context(), "prod", true)
+
+		wantError(t, err, aheadStop("prod-workers-0"))
+		if got := plan.Nodes; len(got) != 2 || got[0].Name != "prod-workers-0" || got[0].Op == "" ||
+			got[1].Name != "prod-workers-1" || got[1].Op != "" {
+			t.Fatalf("the plan is:\n%s\nwant the wait that repeats the create of prod-workers-0, then the wait for "+
+				"prod-workers-1", planText(t, plan))
+		}
+		wantJoined(t, b.f, "prod-servers-0", "prod-servers-1", "prod-servers-2", "prod-workers-1")
+	})
+}
+
+// TestUpdateEndsTheRunAtOnceWhenItCannotReadTheVersionsBeforeTheDeletes fails the read of the servers' versions in the
+// apply, and the making of the client of Nomad: the run ends before the delete of the machine that never joined.
+func TestUpdateEndsTheRunAtOnceWhenItCannotReadTheVersionsBeforeTheDeletes(t *testing.T) {
+	t.Parallel()
+	for _, tc := range failedVersionReads {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				b, broken := neverJoinedServerWorld(t)
+				svc := b.w.svc
+				if err := b.f.DeleteInstance(t.Context(), instanceNamed(t, b.f, "prod-workers-1")); err != nil {
+					t.Fatal(err)
+				}
+				svc.OnUpdatePlan = func(app.UpdatePlan) error {
+					tc.fail(t, b.w)
+					return nil
+				}
+
+				_, err := svc.Update(t.Context(), "prod", true)
+
+				wantError(t, err, cannotAskStop("prod-workers-1", tc.cause))
+				if !slices.Contains(instanceIDs(b.f), broken) {
+					t.Errorf("the machine of prod-servers-3 (%s) was deleted, want the run to end before the deletes", broken)
+				}
+			})
+		})
+	}
+}
+
+// TestUpdateDoesNotRemoveNodesOrDeleteInfrastructureAfterTheStop loses a worker beside a joined worker of a group that
+// the specs lack and an SSH key that the specs lack: the run stops before the worker, and neither removes that node
+// nor deletes that key.
+func TestUpdateDoesNotRemoveNodesOrDeleteInfrastructureAfterTheStop(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		batch := edit(t, edit(t, workersYAML, "name: workers", "name: batch"), "size: 2", "size: 1")
+		svc, f, w := newRelease(t, keyedClusterYAML, serversYAML, workersYAML, batch)
+		w.NodeVersions()
+		svc.Channels = stableChannel("2.0.0", olderNomad, olderNomad)
+		mustUpdate(t, svc)
+		svc.Channels = stableChannel("2.0.0", newerNomad, olderNomad, newerNomad)
+		mustReplace(t, svc, withVersion(t, edit(t, keyedClusterYAML, "  - "+devKey+"\n", ""), newerNomad))
+		if err := svc.Store.Delete(t.Context(), "prod/nodegroups/batch.yaml"); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.DeleteInstance(t.Context(), instanceNamed(t, f, "prod-workers-1")); err != nil {
+			t.Fatal(err)
+		}
+		plan, err := svc.Update(t.Context(), "prod", false)
+		if err != nil || len(plan.Nodes) != 2 {
+			t.Fatalf("the plan is %v, %v\nwant the create of prod-workers-1 and the removal of prod-batch-0",
+				planText(t, plan), err)
+		}
+		keys, machines := len(f.SSHKeys()), len(instanceIDs(f))
+
+		_, err = svc.Update(t.Context(), "prod", true)
+
+		wantError(t, err, aheadStop("prod-workers-1"))
+		if got := len(f.SSHKeys()); got != keys {
+			t.Errorf("the account has %d SSH keys, want the %d it had: the delete of one does not run", got, keys)
+		}
+		if got := len(instanceIDs(f)); got != machines {
+			t.Errorf("the account has %d machines, want the %d it had: no node is removed", got, machines)
+		}
 	})
 }

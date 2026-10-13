@@ -139,7 +139,10 @@ type applier struct {
 // run carries out the node changes in the order of the plan: the creates and waits of the server and combined nodes,
 // the Nomad step, then the other changes, which are the clients' waits and creates and the deletes of machines that
 // never joined, and last the removals of nodes that joined and the purges. Before the first change that boots a
-// client it reads the servers' Nomad versions and stops when that client would run a newer Nomad than a server.
+// client it reads the servers' Nomad versions. When that client would run a newer Nomad than a server, or a server
+// reports no version yet, the run holds back every change that boots a client, carries out the others, which are the
+// waits without an operation id and the deletes of machines that never joined, and returns the stop before the
+// removals. A read of the versions that fails ends the run at once.
 func (a *applier) run(ctx context.Context) error {
 	var servers, rest []NodeChange
 	for _, c := range a.u.plan.Nodes {
@@ -162,12 +165,17 @@ func (a *applier) run(ctx context.Context) error {
 		}
 	}
 	checked := false
+	var stop error
 	for _, c := range rest {
 		if !checked && bootsMachine(c) {
 			checked = true
-			if err := a.checkClientAhead(ctx, c); err != nil {
+			var err error
+			if stop, err = a.checkClientAhead(ctx, c); err != nil {
 				return err
 			}
+		}
+		if stop != nil && bootsMachine(c) {
+			continue
 		}
 		apply := a.applyClient
 		if c.Action == NodeDelete {
@@ -180,30 +188,33 @@ func (a *applier) run(ctx context.Context) error {
 			a.gone = append(a.gone, c.ID)
 		}
 	}
+	if stop != nil {
+		return stop
+	}
 	var err error
 	a.removed, err = a.removals(ctx)
 	return err
 }
 
-// checkClientAhead stops the run before the client node of c when clientAhead says that it waits for the servers, as
-// when it would run a newer Nomad than one of them or one reports no Nomad version yet, and when the servers cannot
-// be asked. It reads the Raft configuration and autopilot's report.
-func (a *applier) checkClientAhead(ctx context.Context, c NodeChange) error {
+// checkClientAhead reads the Raft configuration and autopilot's report before the change c, which boots a client. It
+// returns stop when clientAhead says that the client waits for the servers, as when it would run a newer Nomad than
+// one of them or one reports no Nomad version yet. It returns err when the servers cannot be asked.
+func (a *applier) checkClientAhead(ctx context.Context, c NodeChange) (stop, err error) {
 	api, err := a.nomadAPI()
 	if err != nil {
-		return cannotAsk(c.Name, err)
+		return nil, cannotAsk(c.Name, err)
 	}
 	var reading nomadReading
 	if reading.peers, err = api.Peers(ctx); err != nil {
-		return cannotAsk(c.Name, err)
+		return nil, cannotAsk(c.Name, err)
 	}
 	if reading.health, err = api.Health(ctx); err != nil {
-		return cannotAsk(c.Name, err)
+		return nil, cannotAsk(c.Name, err)
 	}
 	if node, why := clientAhead([]NodeChange{c}, a.u.version, reading.state()); why != nil {
-		return stopError(node, why)
+		return stopError(node, why), nil
 	}
-	return nil
+	return nil, nil
 }
 
 // applyServer creates the server or combined node of c, or waits for it, and adds it to the known servers. The node
