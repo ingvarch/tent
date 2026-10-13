@@ -1,8 +1,8 @@
-// Package app runs tent's use cases: it creates, gets, replaces and edits cluster specs in the state store, removes a
-// stale cluster lock, updates a cluster's cloud objects and nodes to its specs, bootstraps Nomad on a new cluster,
-// checks a cluster's machines, Nomad and certificates against its specs, and deletes a cluster's cloud objects and its
-// state. It also issues an operator's access to a cluster's Nomad API: a certificate and a management token that
-// expire.
+// Package app runs tent's use cases: it creates, gets, replaces and edits cluster specs in the state store, moves a
+// cluster's Nomad version to the one that its channel recommends, removes a stale cluster lock, updates a cluster's
+// cloud objects and nodes to its specs, bootstraps Nomad on a new cluster, checks a cluster's machines, Nomad and
+// certificates against its specs, and deletes a cluster's cloud objects and its state. It also issues an operator's
+// access to a cluster's Nomad API: a certificate and a management token that expire.
 package app
 
 import (
@@ -36,8 +36,8 @@ type Service struct {
 	// OnTakeover, when set, is called with the lease of a holder that expired or ended when a change takes its lock.
 	OnTakeover func(previous statestore.Lease)
 	// OnWarning, when set, is called with each warning about the cluster that a change goes ahead with, such as a Nomad
-	// API that the whole internet may reach: after a create, replace or save, and before an update applies its
-	// changes. A validation of a cluster calls it with the warnings of its result. One change never calls it
+	// API that the whole internet may reach: after a create, replace, save or upgrade, and before an update applies
+	// its changes. A validation of a cluster calls it with the warnings of its result. One change never calls it
 	// concurrently.
 	OnWarning func(warning string)
 	// Channels, when set, returns the release channel called name, which a cluster's spec names; it defaults to the

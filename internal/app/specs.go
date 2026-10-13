@@ -399,6 +399,20 @@ func (s *Service) plan(ctx context.Context, in input, m mode, readVersion states
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	var pinned string
+	if in.cluster != nil {
+		if pinned, err = s.writerPin(ctx, in.layout); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	return s.planOver(ctx, in, m, readVersion, st, pinned)
+}
+
+// planOver is plan over the stored entries st, which load read, and pinned, the Nomad version of the stored completed
+// spec when the input holds a Cluster.
+func (s *Service) planOver(ctx context.Context, in input, m mode, readVersion statestore.Version,
+	st map[string]entry, pinned string,
+) ([]Change, []step, []string, error) {
 	_, clusterStored := st[in.layout.ClusterSpec()]
 	if !clusterStored && in.cluster == nil {
 		return nil, nil, nil, s.notFound(clusterLabel(in.layout.Cluster()))
@@ -426,12 +440,6 @@ func (s *Service) plan(ctx context.Context, in input, m mode, readVersion states
 	}
 	if len(errs) > 0 {
 		return nil, nil, nil, errors.Join(errs...)
-	}
-	var pinned string
-	if in.cluster != nil {
-		if pinned, err = s.writerPin(ctx, in.layout); err != nil {
-			return nil, nil, nil, err
-		}
 	}
 	warnings, err := s.validate(st, in, pinned)
 	if err != nil {
@@ -708,13 +716,26 @@ func (s *Service) channel(name string) (*channels.Channel, error) {
 
 // check is Check with the channels that lookup finds. It returns the warnings about a valid cluster.
 func check(objs spec.Objects, opts v1alpha1.ValidateOptions, lookup channelLookup) ([]string, error) {
+	c, groups, err := defaulted(objs)
+	if err != nil {
+		return nil, err
+	}
+	ch, err := checkCluster(c, groups, opts, lookup)
+	if err != nil {
+		return nil, err
+	}
+	return warnings(c, groups, ch), nil
+}
+
+// defaulted returns copies of the objects with their defaults filled in.
+func defaulted(objs spec.Objects) (*v1alpha1.Cluster, []*v1alpha1.NodeGroup, error) {
 	var (
 		c   *v1alpha1.Cluster
 		err error
 	)
 	if objs.Cluster != nil {
 		if c, err = clone(objs.Cluster); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	groups := make([]*v1alpha1.NodeGroup, 0, len(objs.NodeGroups))
@@ -724,16 +745,12 @@ func check(objs spec.Objects, opts v1alpha1.ValidateOptions, lookup channelLooku
 		}
 		cg, err := clone(g)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		groups = append(groups, cg)
 	}
 	v1alpha1.SetDefaults(c, groups)
-	ch, err := checkCluster(c, groups, opts, lookup)
-	if err != nil {
-		return nil, err
-	}
-	return warnings(c, groups, ch), nil
+	return c, groups, nil
 }
 
 // checkCluster checks a cluster and its node groups, all with their defaults, as v1alpha1.Validate does, and the

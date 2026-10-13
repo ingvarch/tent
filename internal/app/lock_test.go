@@ -48,32 +48,41 @@ func release(t *testing.T, lock *statestore.Lock) {
 var changes = []struct {
 	name string
 	op   string // the operation its lease names
-	run  func(t *testing.T, svc *app.Service) error
+	// prepare, when set, readies the stored cluster and the service for run, before the store is wrapped.
+	prepare func(t *testing.T, svc *app.Service)
+	run     func(t *testing.T, svc *app.Service) error
 }{
-	{"create", "create", func(t *testing.T, svc *app.Service) error {
+	{"create", "create", nil, func(t *testing.T, svc *app.Service) error {
 		_, err := svc.Create(t.Context(), decode(t, edit(t, workersYAML, "name: workers", "name: web")), true)
 		return err
 	}},
-	{"replace", "replace", func(t *testing.T, svc *app.Service) error {
+	{"replace", "replace", nil, func(t *testing.T, svc *app.Service) error {
 		_, err := svc.Replace(t.Context(), decode(t, edit(t, workersYAML, "size: 2", "size: 4")), true)
 		return err
 	}},
-	{"save", "edit", func(t *testing.T, svc *app.Service) error {
+	{"save", "edit", nil, func(t *testing.T, svc *app.Service) error {
 		_, ref, err := svc.Load(t.Context(), "prod", v1alpha1.KindNodeGroup, "workers")
 		if err == nil {
 			_, err = svc.Save(t.Context(), ref, decode(t, edit(t, workersYAML, "size: 2", "size: 4")), true)
 		}
 		return err
 	}},
-	{"delete", "delete", func(t *testing.T, svc *app.Service) error {
+	{"delete", "delete", nil, func(t *testing.T, svc *app.Service) error {
 		withCloud(svc)
 		_, err := svc.DeleteCluster(t.Context(), "prod", true, false)
 		return err
 	}},
-	{"update", "update", func(t *testing.T, svc *app.Service) error {
+	{"update", "update", nil, func(t *testing.T, svc *app.Service) error {
 		f, _ := withCloud(svc)
 		f.SetBootReads(t, 0, 0) // the nodes are ready at once, so no test waits for them
 		_, err := svc.Update(t.Context(), "prod", true)
+		return err
+	}},
+	{"upgrade", "upgrade", func(t *testing.T, svc *app.Service) {
+		mustReplace(t, svc, withVersion(t, clusterYAML, "2.0.6"))
+		withAssets(svc)
+	}, func(t *testing.T, svc *app.Service) error {
+		_, err := svc.UpgradeCluster(t.Context(), "prod", true)
 		return err
 	}},
 }
@@ -123,6 +132,9 @@ func TestChangesHoldTheLock(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, _ := newService(t)
 			mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
+			if tc.prepare != nil {
+				tc.prepare(t, svc)
+			}
 			rec := &recorder{Store: unwrapped{svc.Store}}
 			svc.Store = rec
 			if err := tc.run(t, svc); err != nil {
@@ -150,6 +162,9 @@ func TestChangesWaitForTheLock(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				svc, _ := newService(t)
 				mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
+				if tc.prepare != nil {
+					tc.prepare(t, svc)
+				}
 				stored := snapshot(t, svc.Store)
 				held := holdLock(t, svc.Store)
 				waits := make(chan error, 10)
@@ -192,6 +207,9 @@ func TestChangesDoNotWaitWithoutTimeout(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, _ := newService(t)
 			mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
+			if tc.prepare != nil {
+				tc.prepare(t, svc)
+			}
 			stored := snapshot(t, svc.Store)
 			held := holdLock(t, svc.Store)
 			svc.OnWait = func(error) { t.Error("OnWait called") }
@@ -232,6 +250,9 @@ func TestChangesCheckTheTentVersion(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, _ := newService(t)
 			mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
+			if tc.prepare != nil {
+				tc.prepare(t, svc)
+			}
 			put(t, svc.Store, versionPath, []byte("v0.9.0\n"))
 			stored := snapshot(t, svc.Store)
 			svc.Version = "v0.4.0"
@@ -639,6 +660,14 @@ func TestChangesThatNeedNoLock(t *testing.T) {
 		Detail: "need exactly one server or combined group, found 2: more, servers",
 	})
 
+	// An upgrade with nothing to write, and one that fails.
+	plan, err := svc.UpgradeCluster(t.Context(), "prod", true)
+	if err != nil || !plan.Applied || plan.Due() {
+		t.Errorf("UpgradeCluster with nothing to upgrade = %+v, %v; want an applied plan with no version to write", plan, err)
+	}
+	_, err = svc.UpgradeCluster(t.Context(), "Prod", true)
+	wantError(t, err, v1alpha1.ValidateName(v1alpha1.KindCluster, "Prod").Error())
+
 	put(t, svc.Store, versionPath, []byte("v0.9.0\n"))
 	svc.Version = "v0.4.0"
 	_, err = svc.Create(t.Context(), decode(t, edit(t, workersYAML, "name: workers", "name: web")), true)
@@ -732,6 +761,16 @@ func TestLockLostAfterTheChange(t *testing.T) {
 		wantChanges(t, changes, cluster(app.Created), group("servers", app.Created), group("workers", app.Created))
 		wantPaths(t, svc.Store, clusterPath, serversPath, workersPath)
 	})
+	t.Run("upgrade", func(t *testing.T) {
+		svc, _ := upgradeAt(t, "2.0.6", "")
+		svc.Store = forceUnlocked{unwrapped{svc.Store}, clusterPath}
+		plan, err := svc.UpgradeCluster(t.Context(), "prod", true)
+		wantSaved(t, err)
+		if plan.Target != "2.0.7" || !plan.Applied {
+			t.Errorf("plan = %+v, want the applied upgrade to 2.0.7", plan)
+		}
+		wantStored(t, svc.Store, clusterPath, encode(t, upgradeCluster(t, "2.0.7")))
+	})
 	t.Run("delete", func(t *testing.T) {
 		svc, _ := newCluster(t)
 		svc.Store = forceUnlocked{unwrapped{svc.Store}, versionPath}
@@ -794,4 +833,85 @@ func TestConditionFailed(t *testing.T) {
 			wantError(t, tc.run(t, svc), tc.want)
 		})
 	}
+}
+
+// TestUpgradePlansAgainUnderTheLock changes the store while an upgrade waits for the lock: the upgrade decides on what
+// it finds once it holds the lock.
+func TestUpgradePlansAgainUnderTheLock(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		other  string // the Cluster that another tent stores meanwhile
+		stored string // the Cluster after the upgrade
+		target string // the version that the upgrade wrote, "" when it wrote none
+	}{
+		{"another tent narrows the API", withVersion(t, narrowClusterYAML, "2.0.6"),
+			withVersion(t, narrowClusterYAML, "2.0.7"), "2.0.7"},
+		{"another tent stores the target", withVersion(t, narrowClusterYAML, "2.0.7"),
+			withVersion(t, narrowClusterYAML, "2.0.7"), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				svc, _ := upgradeAt(t, "2.0.6", "")
+				held := holdLock(t, svc.Store)
+				svc.LockTimeout = time.Minute
+				type result struct {
+					plan app.UpgradePlan
+					err  error
+				}
+				done := make(chan result, 1)
+				go func() {
+					plan, err := svc.UpgradeCluster(t.Context(), "prod", true)
+					done <- result{plan, err}
+				}()
+				synctest.Wait()
+
+				put(t, svc.Store, clusterPath, encode(t, tc.other))
+				release(t, held)
+				got := <-done
+				if got.err != nil {
+					t.Fatalf("UpgradeCluster: %v", got.err)
+				}
+				if got.plan.Target != tc.target || !got.plan.Applied {
+					t.Errorf("plan = %+v, want an applied plan with the target %q", got.plan, tc.target)
+				}
+				wantStored(t, svc.Store, clusterPath, encode(t, tc.stored))
+			})
+		})
+	}
+}
+
+// TestUpgradeFinishesAfterACut runs an upgrade again after a failed write of the tent version, and after a failed write
+// of the spec, which comes second.
+func TestUpgradeFinishesAfterACut(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		path    string
+		version string // the tent version in the store after the cut
+	}{{versionPath, "v0.4.0\n"}, {clusterPath, "v0.5.0\n"}} {
+		t.Run(tc.path, func(t *testing.T) {
+			svc, _ := upgradeAt(t, "2.0.6", "")
+			svc.Store = &failing{Store: svc.Store, path: tc.path}
+			_, err := svc.UpgradeCluster(t.Context(), "prod", true)
+			wantError(t, err, fmt.Sprintf("put %q: interrupted", tc.path))
+			wantStored(t, svc.Store, clusterPath, encode(t, upgradeCluster(t, "2.0.6")))
+			wantStored(t, svc.Store, versionPath, []byte(tc.version))
+
+			plan, err := svc.UpgradeCluster(t.Context(), "prod", true)
+			if err != nil || plan.Target != "2.0.7" {
+				t.Fatalf("UpgradeCluster again = %+v, %v; want the upgrade to 2.0.7", plan, err)
+			}
+			wantStored(t, svc.Store, clusterPath, encode(t, upgradeCluster(t, "2.0.7")))
+			wantStored(t, svc.Store, versionPath, []byte("v0.5.0\n"))
+		})
+	}
+}
+
+// TestUpgradeConditionFailed meets another writer of the Cluster between the plan and the put.
+func TestUpgradeConditionFailed(t *testing.T) {
+	t.Parallel()
+	svc, _ := upgradeAt(t, "2.0.6", "")
+	svc.Store = racing{svc.Store, clusterPath}
+	_, err := svc.UpgradeCluster(t.Context(), "prod", true)
+	wantError(t, err, "cluster prod changed meanwhile; run the command again")
 }

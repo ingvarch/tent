@@ -126,8 +126,9 @@ func ClientIntroductions() []ClientIntroduction {
 
 // ClusterNomad configures the Nomad agents of the whole cluster.
 type ClusterNomad struct {
-	// Version of Nomad, for example 2.0.7. Empty means the version that the cluster was first built with; a new cluster
-	// gets the one that the channel recommends.
+	// Version of Nomad, for example 2.0.7. Empty means the version that the cluster is pinned to, the one that tent
+	// update cluster last applied; a new cluster gets the one that the channel recommends. tent upgrade cluster sets
+	// it.
 	Version string `json:"version,omitempty"`
 	// Region is the Nomad region. Defaults to global.
 	Region string `json:"region,omitempty"`
