@@ -42,8 +42,10 @@ func TestNewRunIDReportsAShortRead(t *testing.T) {
 	}
 }
 
+// nameRule is tent's rule for a cluster name, copied from api/v1alpha1/validation.go.
+var nameRule = regexp.MustCompile(`^[a-z][a-z0-9-]{0,18}[a-z0-9]$`)
+
 func TestClusterNameFollowsTentsRuleAndTheJanitorsPrefix(t *testing.T) {
-	rule := regexp.MustCompile(`^[a-z][a-z0-9-]{0,18}[a-z0-9]$`)
 	for image, want := range map[string]string{
 		"ubuntu-24.04": "e2e-ab12cd-2404",
 		"ubuntu-26.04": "e2e-ab12cd-2604",
@@ -53,7 +55,25 @@ func TestClusterNameFollowsTentsRuleAndTheJanitorsPrefix(t *testing.T) {
 		if got != want {
 			t.Errorf("clusterName(%q) = %q, want %q", image, got, want)
 		}
-		if !rule.MatchString(got) {
+		if !nameRule.MatchString(got) {
+			t.Errorf("cluster name %q breaks tent's name rule", got)
+		}
+		if !strings.HasPrefix(got, janitor.ClusterPrefix) {
+			t.Errorf("cluster name %q does not start with %q", got, janitor.ClusterPrefix)
+		}
+	}
+}
+
+func TestScenarioNameFollowsTentsRuleAndTheJanitorsPrefix(t *testing.T) {
+	for scenario, want := range map[string]string{
+		"ha":      "e2e-ab12cd-ha",
+		"upgrade": "e2e-ab12cd-upgrade",
+	} {
+		got := scenarioName("ab12cd", scenario)
+		if got != want {
+			t.Errorf("scenarioName(%q) = %q, want %q", scenario, got, want)
+		}
+		if !nameRule.MatchString(got) {
 			t.Errorf("cluster name %q breaks tent's name rule", got)
 		}
 		if !strings.HasPrefix(got, janitor.ClusterPrefix) {

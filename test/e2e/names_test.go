@@ -35,6 +35,9 @@ func clusterName(run, image string) string {
 	return "e2e-" + run + "-" + digits
 }
 
+// scenarioName names the cluster of a scenario in a run: e2e-<run>-<scenario>.
+func scenarioName(run, scenario string) string { return "e2e-" + run + "-" + scenario }
+
 // runnerCIDR turns the address of the machine that runs the suite into a CIDR of one address.
 func runnerCIDR(addr string) (string, error) {
 	ip, err := netip.ParseAddr(strings.TrimSpace(addr))

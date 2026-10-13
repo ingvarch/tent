@@ -36,9 +36,11 @@ test:
 
 # e2e runs the E2E suite on Vultr from this machine (test/e2e/README.md). It runs dev-upload, which needs the R2 keys
 # and TENT_DEV_S3_URL, so the nodes get the tent-node of the same build as bin/tent, and it needs VULTR_API_KEY.
+# E2E_RUN, when set, is the -run pattern, for example make e2e E2E_RUN='TestHA|TestUpgrade'.
 e2e:
 	@lines="$$(SHELL=/bin/sh $(MAKE) -s --no-print-directory dev-upload)" && eval "$$lines" && \
-		E2E_TENT="$(CURDIR)/bin/tent" go test -tags e2e -count=1 -v -timeout 90m ./test/e2e
+		E2E_TENT="$(CURDIR)/bin/tent" go test -tags e2e -count=1 -v -timeout 180m \
+			$(if $(E2E_RUN),-run "$(E2E_RUN)") ./test/e2e
 
 golangci-lint-version:
 	@command -v golangci-lint >/dev/null 2>&1 || { \
