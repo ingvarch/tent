@@ -37,8 +37,8 @@ type Service struct {
 	OnTakeover func(previous statestore.Lease)
 	// OnWarning, when set, is called with each warning about the cluster that a change goes ahead with, such as a Nomad
 	// API that the whole internet may reach: after a create, replace, save or upgrade, and before an update applies
-	// its changes. A validation of a cluster calls it with the warnings of its result. One change never calls it
-	// concurrently.
+	// its changes. A validation of a cluster calls it with the warnings of its result, and a backup calls it once
+	// when Nomad cannot take its snapshot yet. One change never calls it concurrently.
 	OnWarning func(warning string)
 	// Channels, when set, returns the release channel called name, which a cluster's spec names; it defaults to the
 	// channels embedded in tent.
@@ -71,9 +71,9 @@ type Service struct {
 	// and returns that error.
 	OnRollPlan func(RollPlan) error
 	// Now, when set, returns the current time for new CA, node and operator certificates, for the mark of the Nomad
-	// bootstrap, for the age of a client's machine that has not joined, for the certificate checks of a validation, for
-	// the time that the rollout decisions see and, unless Assets.Now is set, for the signature check of the downloaded
-	// files; it defaults to time.Now.
+	// bootstrap, for the name of a backup, for the age of a client's machine that has not joined, for the certificate
+	// checks of a validation, for the time that the rollout decisions see and, unless Assets.Now is set, for the
+	// signature check of the downloaded files; it defaults to time.Now.
 	Now func() time.Time
 }
 
