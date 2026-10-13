@@ -28,13 +28,14 @@ func TestReadSettingsDefaults(t *testing.T) {
 		t.Fatalf("readSettings: %v", err)
 	}
 	want := settings{
-		Key:     "key-value-for-tests",
-		NodeURL: "https://node.example/tent-node",
-		NodeSHA: "0123abcd",
-		Tent:    "/repo/bin/tent",
-		Region:  "ams",
-		Plan:    "vc2-1c-1gb",
-		Images:  []string{"ubuntu-24.04", "ubuntu-26.04"},
+		Key:         "key-value-for-tests",
+		NodeURL:     "https://node.example/tent-node",
+		NodeSHA:     "0123abcd",
+		Tent:        "/repo/bin/tent",
+		Region:      "ams",
+		Plan:        "vc2-1c-1gb",
+		Images:      []string{"ubuntu-24.04", "ubuntu-26.04"},
+		UpgradeFrom: "2.0.6",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("settings = %+v, want %+v", got, want)
@@ -47,21 +48,23 @@ func TestReadSettingsOverrides(t *testing.T) {
 	vars["E2E_PLAN"] = "vc2-2c-4gb"
 	vars["E2E_IMAGES"] = "ubuntu-22.04"
 	vars["E2E_KEEP"] = "1"
+	vars["E2E_UPGRADE_FROM"] = "2.0.5"
 	vars["RUNNER_ADDR"] = "203.0.113.7"
 	got, err := readSettings(envOf(vars))
 	if err != nil {
 		t.Fatalf("readSettings: %v", err)
 	}
 	want := settings{
-		Key:     "key-value-for-tests",
-		NodeURL: "https://node.example/tent-node",
-		NodeSHA: "0123abcd",
-		Tent:    "/repo/bin/tent",
-		Region:  "fra",
-		Plan:    "vc2-2c-4gb",
-		Images:  []string{"ubuntu-22.04"},
-		Keep:    true,
-		Runner:  "203.0.113.7",
+		Key:         "key-value-for-tests",
+		NodeURL:     "https://node.example/tent-node",
+		NodeSHA:     "0123abcd",
+		Tent:        "/repo/bin/tent",
+		Region:      "fra",
+		Plan:        "vc2-2c-4gb",
+		Images:      []string{"ubuntu-22.04"},
+		Keep:        true,
+		Runner:      "203.0.113.7",
+		UpgradeFrom: "2.0.5",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("settings = %+v, want %+v", got, want)
@@ -170,9 +173,10 @@ func TestSettingsNeverPrintTheKey(t *testing.T) {
 	}
 }
 
-func TestSettingsStringNamesRegionPlanImagesAndKeep(t *testing.T) {
+func TestSettingsStringNamesRegionPlanImagesUpgradeVersionAndKeep(t *testing.T) {
 	s := settings{Key: "k", Region: "ams", Plan: "vc2-1c-1gb", Images: []string{"ubuntu-24.04", "ubuntu-26.04"}}
-	want := "region ams, plan vc2-1c-1gb, images ubuntu-24.04,ubuntu-26.04, keep false"
+	s.UpgradeFrom = "2.0.6"
+	want := "region ams, plan vc2-1c-1gb, images ubuntu-24.04,ubuntu-26.04, upgrade from 2.0.6, keep false"
 	if got := s.String(); got != want {
 		t.Errorf("String() = %q, want %q", got, want)
 	}
@@ -182,5 +186,59 @@ func TestParseImagesRefusesAnImageNamedTwice(t *testing.T) {
 	_, err := parseImages("ubuntu-24.04, ubuntu-26.04,ubuntu-24.04")
 	if err == nil || err.Error() != `E2E_IMAGES: "ubuntu-24.04" is named twice` {
 		t.Errorf("parseImages error = %v, want the image named twice", err)
+	}
+}
+
+func TestReadSettingsUpgradeFrom(t *testing.T) {
+	for _, tt := range []struct {
+		value   string
+		want    string
+		wantErr bool
+	}{
+		{"", "2.0.6", false},
+		{"2.0.5", "2.0.5", false},
+		{"10.20.30", "10.20.30", false},
+		{"2.0", "", true},
+		{"2.0.6.1", "", true},
+		{"v2.0.6", "", true},
+		{"2.0.6-rc1", "", true},
+		{"2.0.x", "", true},
+		{" 2.0.6", "", true},
+		{"2.0.6\n", "", true},
+	} {
+		vars := requiredEnv()
+		vars["E2E_UPGRADE_FROM"] = tt.value
+		got, err := readSettings(envOf(vars))
+		if tt.wantErr {
+			if err == nil || !strings.Contains(err.Error(), "E2E_UPGRADE_FROM") ||
+				!strings.Contains(err.Error(), fmt.Sprintf("%q", tt.value)) {
+				t.Errorf("E2E_UPGRADE_FROM=%q: error = %v, want one naming the variable and the value", tt.value, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("E2E_UPGRADE_FROM=%q: %v", tt.value, err)
+		} else if got.UpgradeFrom != tt.want {
+			t.Errorf("E2E_UPGRADE_FROM=%q: UpgradeFrom = %q, want %q", tt.value, got.UpgradeFrom, tt.want)
+		}
+	}
+}
+
+func TestHAImageIsTheFirstAndUpgradeImageTheLast(t *testing.T) {
+	for _, tt := range []struct {
+		images         []string
+		wantHA, wantUp string
+	}{
+		{[]string{"ubuntu-24.04", "ubuntu-26.04"}, "ubuntu-24.04", "ubuntu-26.04"},
+		{[]string{"ubuntu-22.04"}, "ubuntu-22.04", "ubuntu-22.04"},
+		{[]string{"ubuntu-22.04", "ubuntu-24.04", "ubuntu-26.04"}, "ubuntu-22.04", "ubuntu-26.04"},
+	} {
+		s := settings{Images: tt.images}
+		if got := s.haImage(); got != tt.wantHA {
+			t.Errorf("haImage() of %q = %q, want %q", tt.images, got, tt.wantHA)
+		}
+		if got := s.upgradeImage(); got != tt.wantUp {
+			t.Errorf("upgradeImage() of %q = %q, want %q", tt.images, got, tt.wantUp)
+		}
 	}
 }

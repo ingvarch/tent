@@ -274,14 +274,29 @@ func TestMakeE2ERunsTheSuiteWithTheTentOfTheUpload(t *testing.T) {
 	if root, err = filepath.EvalSymlinks(root); err != nil {
 		t.Fatal(err)
 	}
-	stdout, stderr, err := runMake(t, map[string]string{"go": fakeGo}, "e2e")
-	want := "tested test -tags e2e -count=1 -v -timeout 90m ./test/e2e url=https://u sha=abc tent=" +
-		filepath.Join(root, "bin", "tent") + "\n"
-	if err != nil || stdout != want {
-		t.Errorf("make e2e: err %v, stdout %q, want %q\nstderr:\n%s", err, stdout, want, stderr)
-	}
-	if !strings.Contains(stderr, "built build") || !strings.Contains(stderr, "shell=/bin/sh") {
-		t.Errorf("make e2e: stderr lacks the build or the upload for sh:\n%s", stderr)
+	for _, tc := range []struct {
+		name, run, flags string
+	}{
+		{"every scenario", "", ""},
+		// E2E_RUN reaches go test as one -run pattern, alternatives included.
+		{"the scenarios of E2E_RUN", "TestHA|TestUpgrade", "-run TestHA|TestUpgrade "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"e2e"}
+			if tc.run != "" {
+				args = append(args, "E2E_RUN="+tc.run)
+			}
+			stdout, stderr, err := runMake(t, map[string]string{"go": fakeGo}, args...)
+			want := "tested test -tags e2e -count=1 -v -timeout 180m " + tc.flags +
+				"./test/e2e url=https://u sha=abc tent=" + filepath.Join(root, "bin", "tent") + "\n"
+			if err != nil || stdout != want {
+				t.Errorf("make %s: err %v, stdout %q, want %q\nstderr:\n%s", strings.Join(args, " "), err, stdout,
+					want, stderr)
+			}
+			if !strings.Contains(stderr, "built build") || !strings.Contains(stderr, "shell=/bin/sh") {
+				t.Errorf("make e2e: stderr lacks the build or the upload for sh:\n%s", stderr)
+			}
+		})
 	}
 }
 

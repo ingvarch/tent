@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -112,6 +113,61 @@ func TestStepContextEndsWhenTheSuiteIsInterruptedAndTheCleanupOfTheTestStillRuns
 	})
 	if !stepEnded || !cleanupRan {
 		t.Errorf("step ended %t, cleanup ran %t, want both after the interrupt", stepEnded, cleanupRan)
+	}
+}
+
+func TestStepEndIsTheDeadlineMinusTheCleanupReserve(t *testing.T) {
+	deadline := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	got, ok := stepEnd(deadline, true)
+	if want := deadline.Add(-20 * time.Minute); !ok || !got.Equal(want) {
+		t.Errorf("stepEnd = %v, %t, want %v, true", got, ok, want)
+	}
+	if _, ok := stepEnd(deadline, false); ok {
+		t.Error("a test without a deadline got an end")
+	}
+}
+
+// deadlineTB is a test whose deadline the unit test chooses.
+type deadlineTB struct {
+	testing.TB
+	deadline time.Time
+}
+
+func (d deadlineTB) Deadline() (time.Time, bool) { return d.deadline, true }
+
+func TestStepContextEndsBeforeTheDeadlineOfTheTest(t *testing.T) {
+	deadline := time.Now().Add(time.Hour)
+	var got time.Time
+	var ok bool
+	t.Run("step", func(t *testing.T) {
+		ctx := stepContext(newWatchedContext(), deadlineTB{TB: t, deadline: deadline})
+		got, ok = ctx.Deadline()
+	})
+	if want := deadline.Add(-cleanupReserve); !ok || !got.Equal(want) {
+		t.Errorf("deadline of the step = %v, %t, want %v, true", got, ok, want)
+	}
+}
+
+func TestStepContextEndsWhenItsEndHasPassed(t *testing.T) {
+	t.Run("step", func(t *testing.T) {
+		ctx := stepContext(newWatchedContext(), deadlineTB{TB: t, deadline: time.Now().Add(cleanupReserve / 2)})
+		waitDone(ctx, t)
+		if err := ctx.Err(); !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("the step's context ended with %v, want %v", err, context.DeadlineExceeded)
+		}
+	})
+}
+
+// plainTB hides the Deadline method of a *testing.T, which a TB does not have.
+type plainTB struct{ testing.TB }
+
+func TestStepContextOfATestWithoutADeadlineHasNone(t *testing.T) {
+	var ok bool
+	t.Run("step", func(t *testing.T) {
+		_, ok = stepContext(newWatchedContext(), plainTB{t}).Deadline()
+	})
+	if ok {
+		t.Error("the step's context has a deadline although the test has none")
 	}
 }
 

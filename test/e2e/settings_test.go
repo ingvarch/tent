@@ -19,15 +19,26 @@ type settings struct {
 	Plan   string
 	Runner string
 	Images []string
-	Keep   bool
+	// UpgradeFrom is the Nomad version that the upgrade scenario builds its cluster on.
+	UpgradeFrom string
+	Keep        bool
 }
 
 // String describes the run without the key, the node URL or its digest.
 func (s settings) String() string {
-	return fmt.Sprintf("region %s, plan %s, images %s, keep %t", s.Region, s.Plan, strings.Join(s.Images, ","), s.Keep)
+	return fmt.Sprintf("region %s, plan %s, images %s, upgrade from %s, keep %t",
+		s.Region, s.Plan, strings.Join(s.Images, ","), s.UpgradeFrom, s.Keep)
 }
 
+// haImage is the image of the HA scenario: the first of the list.
+func (s settings) haImage() string { return s.Images[0] }
+
+// upgradeImage is the image of the upgrade scenario: the last of the list.
+func (s settings) upgradeImage() string { return s.Images[len(s.Images)-1] }
+
 var imageForm = regexp.MustCompile(`^ubuntu-\d\d\.\d\d$`)
+
+var versionForm = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
 // makeE2EHint ends the error about missing variables.
 const makeE2EHint = "; make e2e sets all but VULTR_API_KEY"
@@ -60,6 +71,10 @@ func readSettings(getenv func(string) string) (settings, error) {
 		return settings{}, err
 	}
 	s.Images = images
+	s.UpgradeFrom = valueOr(getenv("E2E_UPGRADE_FROM"), "2.0.6")
+	if !versionForm.MatchString(s.UpgradeFrom) {
+		return settings{}, fmt.Errorf("E2E_UPGRADE_FROM: %q is not of the form N.N.N", s.UpgradeFrom)
+	}
 	return s, nil
 }
 
