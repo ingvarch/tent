@@ -252,7 +252,7 @@ func (w *nomadWorld) raftView(servers []machine, want func() int) raftView {
 		lingers := r.lingers(now, d)
 		entry := nomadops.ServerHealth{
 			ID: raftIDOf(r.id), Name: r.memberName(), Address: netip.AddrPortFrom(r.private, 4647), Serf: "alive",
-			Healthy: healthy || lingers, Voter: voter, Leader: r.id == c.leader, Version: w.pinned(),
+			Healthy: healthy || lingers, Voter: voter, Leader: r.id == c.leader, Version: w.versionOf(r.id),
 			StableSince: r.stable.Truncate(time.Second),
 		}
 		if !counted && !lingers {
@@ -334,24 +334,35 @@ func (w *nomadWorld) syncServers(now time.Time, servers []machine, want func() i
 	}
 }
 
+// createdConfig returns the NodeConfig in the user data of the create request of the instance id, which stays after
+// tent replaces the instance's user data with the stub. It returns nil for an instance with no request, no user data or
+// no NodeConfig. The fake forgets the request of a deleted instance.
+func (w *nomadWorld) createdConfig(id string) *nodeconfig.NodeConfig {
+	req, ok := w.cloud.CreateRequest(id)
+	if !ok {
+		return nil
+	}
+	data, err := base64.StdEncoding.DecodeString(req.UserData)
+	if err != nil {
+		return nil
+	}
+	payload, err := app.PayloadFrom(data)
+	if err != nil {
+		return nil
+	}
+	nc, err := nodeconfig.Decode(payload)
+	if err != nil {
+		return nil
+	}
+	return nc
+}
+
 // bootstrapsAlone reports whether the create request of the instance id carried a NodeConfig with bootstrap_expect = 1
 // in its 10-node.hcl: a server that starts with it and an empty data directory leads a cluster of its own. An
 // instance with no request or no NodeConfig does not.
 func (w *nomadWorld) bootstrapsAlone(id string) bool {
-	req, ok := w.cloud.CreateRequest(id)
-	if !ok {
-		return false
-	}
-	data, err := base64.StdEncoding.DecodeString(req.UserData)
-	if err != nil {
-		return false
-	}
-	payload, err := app.PayloadFrom(data)
-	if err != nil {
-		return false
-	}
-	nc, err := nodeconfig.Decode(payload)
-	if err != nil {
+	nc := w.createdConfig(id)
+	if nc == nil {
 		return false
 	}
 	f := fileOf(nc, nodeHCL)
