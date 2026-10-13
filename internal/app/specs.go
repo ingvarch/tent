@@ -581,7 +581,9 @@ func (s *Service) writerPin(ctx context.Context, l statestore.Layout) (string, e
 // replace, and the input. A Cluster that replaces a stored one keeps its provider and region, and the stored one must
 // decode to show them. A node group of a stored cluster keeps its role: without cluster.yaml tent has made no machine.
 // A Cluster that sets a Nomad version moves it at most one minor version above pinned, the version of the completed
-// spec, when there is one. It returns the warnings about the resulting cluster.
+// spec, when there is one. When the input holds no Cluster and the stored one fails the check with a Nomad version
+// older than its channel's minimum, the problem carries the advice to run tent upgrade cluster. It returns the
+// warnings about the resulting cluster.
 func (s *Service) validate(st map[string]entry, in input, pinned string) ([]string, error) {
 	replaced := make(map[string]bool, len(in.docs))
 	for _, d := range in.docs {
@@ -610,6 +612,10 @@ func (s *Service) validate(st map[string]entry, in input, pinned string) ([]stri
 	warnings, err := check(objs, s.Validate, s.channel)
 	if in.cluster != nil {
 		moves = append(moves, versionMoves(in.cluster, pinned, err)...)
+	} else if err != nil {
+		if c, _, derr := defaulted(objs); derr == nil && c != nil {
+			err = s.adviseUpgrade(c, err)
+		}
 	}
 	return warnings, withProblems(moves, err)
 }
@@ -618,7 +624,7 @@ func (s *Service) validate(st map[string]entry, in input, pinned string) ([]stri
 // pinned. It returns none when checked, the error of Check for c, already has a problem with that version: the
 // channel's alone is reported.
 func versionMoves(c *v1alpha1.Cluster, pinned string, checked error) v1alpha1.Errors {
-	const path = "spec.nomad.version"
+	const path = nomadVersionPath
 	if problems, ok := errors.AsType[v1alpha1.Errors](checked); ok && slices.ContainsFunc(problems,
 		func(p v1alpha1.FieldError) bool { return p.Object == clusterObject(c) && p.Path == path }) {
 		return nil
@@ -771,6 +777,9 @@ func checkCluster(c *v1alpha1.Cluster, groups []*v1alpha1.NodeGroup, opts v1alph
 	return ch, nil
 }
 
+// nomadVersionPath is the path of the Nomad version in a Cluster's problems.
+const nomadVersionPath = "spec.nomad.version"
+
 // channelProblems returns the channel of the cluster c, which has its defaults, and the problems with it: tent must
 // know the channel, and the channel must allow the Nomad version that c sets. A channel name that has a problem among
 // problems already is not looked up, and then there is no channel.
@@ -790,7 +799,7 @@ func channelProblems(c *v1alpha1.Cluster, problems v1alpha1.Errors, lookup chann
 	}
 	if v := c.Spec.Nomad.Version; v != "" {
 		if err := ch.Allows(v); err != nil {
-			return ch, v1alpha1.Errors{{Object: object, Path: "spec.nomad.version", Detail: err.Error()}}
+			return ch, v1alpha1.Errors{{Object: object, Path: nomadVersionPath, Detail: err.Error()}}
 		}
 	}
 	return ch, nil

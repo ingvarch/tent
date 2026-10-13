@@ -129,7 +129,7 @@ func (s *Service) checkForUpgrade(objs spec.Objects) (*channels.Channel, error) 
 	if err != nil {
 		return nil, err
 	}
-	if ch, err := s.channel(c.Spec.Channel); err == nil && ch.OlderThanMinimum(c.Spec.Nomad.Version) {
+	if s.setsOlderThanMinimum(c) {
 		c.Spec.Nomad.Version = ""
 	}
 	return checkCluster(c, groups, s.Validate, s.channel)
