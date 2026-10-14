@@ -68,7 +68,7 @@ type haScenario struct {
 }
 
 func (h *haScenario) createHA(t *testing.T) {
-	args := haCreateArgs(suite.Settings, h.name, suite.SSHKey+".pub", suite.Runner)
+	args := haCreateArgs(suite.Settings, h.name, h.image, suite.SSHKey+".pub", suite.Runner)
 	h.tent(t, createTimeout, "create", args...)
 }
 
@@ -106,7 +106,7 @@ func (h *haScenario) update(t *testing.T) {
 // rollServers rolls the servers alone while the probe runs, and waits until Vultr lists only new servers and still
 // lists the old workers.
 func (h *haScenario) rollServers(t *testing.T) {
-	h.rollWithProbe(t, "server", "servers", "roll-servers", rollServersTimeout,
+	h.rollWithProbe(t, "server", "servers", "roll-servers", defaultProbeLimits, rollServersTimeout,
 		"rolling-update", "cluster", h.name, "--yes", "--nodegroups", "servers")
 	h.waitMachines(t, "the servers rolled and the workers kept", func(instances []vultrapi.Instance) error {
 		if err := checkRolled(h.servers, instances); err != nil {
@@ -201,7 +201,7 @@ func (h *haScenario) restartClient(t *testing.T) {
 		if err != nil {
 			return err.Error()
 		}
-		return registeredProblem(e.Registrations, nodes, e.NodeID)
+		return registeredProblem(e.Registrations, nodes, worker.Label, e.NodeID)
 	})
 	e.RegisterWait = time.Since(start).Round(time.Second)
 	e.JoinFile = h.joinFile(ctx, worker)
@@ -229,7 +229,7 @@ func (h *haScenario) joinFile(ctx context.Context, worker vultrapi.Instance) str
 // rollWorkers rolls the workers, which are the only outdated machines now, and checks that each new worker carries
 // the run's node meta value.
 func (h *haScenario) rollWorkers(t *testing.T) {
-	h.rollWithProbe(t, "server", "workers", "roll-workers", rollWorkersTimeout,
+	h.rollWithProbe(t, "server", "workers", "roll-workers", workerProbeLimits, rollWorkersTimeout,
 		"rolling-update", "cluster", h.name, "--yes")
 	h.rollDue(t, "roll-done", 0)
 	h.waitMachines(t, "the workers rolled", func(instances []vultrapi.Instance) error {
@@ -399,7 +399,7 @@ func (h *haScenario) forceWorkers(t *testing.T) {
 	t.Helper()
 	h.tent(t, rollWorkersTimeout, "roll-workers-forced", "rolling-update", "cluster", h.name, "--yes", "--force",
 		"--nodegroups", "workers")
-	h.tent(t, validateTimeout, "validate-forced", validateArgs(h.name)...)
+	h.validate(t, "validate-forced")
 	h.export(t, "export-forced")
 }
 

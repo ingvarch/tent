@@ -14,10 +14,10 @@ import (
 
 var sweepNow = time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
 
-func TestSweepDeletesOnlyClustersOlderThanThreeHours(t *testing.T) {
+func TestSweepDeletesOnlyClustersOlderThanFourHours(t *testing.T) {
 	api := &janitortest.API{Machines: []vultrapi.Instance{
-		{ID: "i-old", Tags: []string{"tent/cluster=e2e-old000-2404"}, Created: sweepNow.Add(-3*time.Hour - time.Minute)},
-		{ID: "i-new", Tags: []string{"tent/cluster=e2e-new000-2404"}, Created: sweepNow.Add(-2*time.Hour - 59*time.Minute)},
+		{ID: "i-old", Tags: []string{"tent/cluster=e2e-old000-2404"}, Created: sweepNow.Add(-4*time.Hour - time.Minute)},
+		{ID: "i-new", Tags: []string{"tent/cluster=e2e-new000-2404"}, Created: sweepNow.Add(-3*time.Hour - 59*time.Minute)},
 	}}
 	if err := sweepLeftovers(t.Context(), api, &bytes.Buffer{}, sweepNow); err != nil {
 		t.Fatalf("sweepLeftovers: %v", err)
@@ -50,7 +50,7 @@ func TestSweepReportsAFailedDelete(t *testing.T) {
 	boom := errors.New("boom")
 	api := &janitortest.API{
 		Keys: []vultrapi.SSHKey{{
-			ID: "k1", Name: "tent:cluster=e2e-old000-2404;kind=ssh", Created: sweepNow.Add(-4 * time.Hour),
+			ID: "k1", Name: "tent:cluster=e2e-old000-2404;kind=ssh", Created: sweepNow.Add(-5 * time.Hour),
 		}},
 		Err: map[string]error{"delete-ssh-key k1": boom},
 	}

@@ -10,7 +10,7 @@ import (
 )
 
 // leftoverAge is how old a cluster must be for the sweep before a run to delete it.
-const leftoverAge = 3 * time.Hour
+const leftoverAge = 4 * time.Hour
 
 // sweepLeftovers deletes the clusters of earlier runs that are older than leftoverAge at now.
 func sweepLeftovers(ctx context.Context, api janitor.API, out io.Writer, now time.Time) error {

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -118,26 +119,88 @@ func listOrNone(items []string) string {
 	return strings.Join(items, ", ")
 }
 
-// readServiceAnswers asks Nomad for the allocations of job, the checks of each running one and the registrations of
-// service. On an error it returns what it had read until then.
-func readServiceAnswers(ctx context.Context, n *nomadAPI, job, service string) (serviceAnswers, error) {
-	var a serviceAnswers
-	if err := n.get(ctx, "/v1/job/"+url.PathEscape(job)+"/allocations", &a.Allocations); err != nil {
-		return a, err
+// serviceReads is what the reads of a service's answers returned: the answers that were read and the error of each
+// read that failed.
+type serviceReads struct {
+	answers serviceAnswers
+	// allocationsErr is the error of the read of the job's allocations; no check is read then.
+	allocationsErr   error
+	registrationsErr error
+	// checkErrs holds the error of the checks read of each running allocation that failed, by allocation ID.
+	checkErrs map[string]error
+}
+
+// readServiceReads reads the allocations of job, then the checks of each running allocation and the registrations of
+// service at once. Each read ends at timeout; a timeout of 0 sets none. answers holds only what was read.
+func readServiceReads(ctx context.Context, n *nomadAPI, job, service string, timeout time.Duration) serviceReads {
+	var r serviceReads
+	within := func(read func(context.Context) error) error {
+		readCtx := ctx
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			readCtx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+		return read(readCtx)
 	}
-	a.Checks = map[string]map[string]allocationCheck{}
-	for _, alloc := range a.Allocations {
-		if alloc.ClientStatus != "running" {
+	if r.allocationsErr = within(func(ctx context.Context) error {
+		return n.get(ctx, "/v1/job/"+url.PathEscape(job)+"/allocations", &r.answers.Allocations)
+	}); r.allocationsErr != nil {
+		return r
+	}
+	var running []string
+	for _, alloc := range r.answers.Allocations {
+		if alloc.ClientStatus == "running" {
+			running = append(running, alloc.ID)
+		}
+	}
+	checks := make([]map[string]allocationCheck, len(running))
+	errs := make([]error, len(running))
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		r.registrationsErr = within(func(ctx context.Context) error {
+			return n.get(ctx, "/v1/service/"+url.PathEscape(service), &r.answers.Registrations)
+		})
+	})
+	for i, id := range running {
+		wg.Go(func() {
+			errs[i] = within(func(ctx context.Context) error {
+				return n.get(ctx, "/v1/allocation/"+url.PathEscape(id)+"/checks", &checks[i])
+			})
+		})
+	}
+	wg.Wait()
+	r.answers.Checks = map[string]map[string]allocationCheck{}
+	r.checkErrs = map[string]error{}
+	for i, id := range running {
+		if errs[i] != nil {
+			r.checkErrs[id] = errs[i]
 			continue
 		}
-		var checks map[string]allocationCheck
-		if err := n.get(ctx, "/v1/allocation/"+url.PathEscape(alloc.ID)+"/checks", &checks); err != nil {
-			return a, err
-		}
-		a.Checks[alloc.ID] = checks
+		r.answers.Checks[id] = checks[i]
 	}
-	err := n.get(ctx, "/v1/service/"+url.PathEscape(service), &a.Registrations)
-	return a, err
+	return r
+}
+
+// err returns the first error in this order: the allocations, the checks in the order of the allocations, then the
+// registrations.
+func (r serviceReads) err() error {
+	if r.allocationsErr != nil {
+		return r.allocationsErr
+	}
+	for _, alloc := range r.answers.Allocations {
+		if err := r.checkErrs[alloc.ID]; err != nil {
+			return err
+		}
+	}
+	return r.registrationsErr
+}
+
+// readServiceAnswers asks Nomad for the allocations of job, the checks of each running one and the registrations of
+// service. On an error it returns what it had read.
+func readServiceAnswers(ctx context.Context, n *nomadAPI, job, service string) (serviceAnswers, error) {
+	r := readServiceReads(ctx, n, job, service, 0)
+	return r.answers, r.err()
 }
 
 // waitService reads the answers about service every `every` until it is ready or timeout has passed.

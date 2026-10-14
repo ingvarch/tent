@@ -11,8 +11,13 @@ import (
 	"github.com/ingvarch/tent/test/e2e/vultrapi"
 )
 
-// upgradeRollTimeout bounds the roll of the combined group, one new node first for each of its nodes.
-const upgradeRollTimeout = 60 * time.Minute
+const (
+	// upgradeRollTimeout bounds the roll of the combined group, one new node first for each of its nodes.
+	upgradeRollTimeout = 60 * time.Minute
+	// upgradeTimeout bounds tent upgrade cluster, which downloads and verifies the signed checksums of a Nomad
+	// release.
+	upgradeTimeout = 5 * time.Minute
+)
 
 // TestUpgrade builds a combined cluster of three nodes on the old Nomad version, has tent upgrade cluster move the
 // spec to the version that the channel recommends, and rolls the nodes while a probe asks for a leader and a healthy
@@ -50,7 +55,7 @@ type upgradeScenario struct {
 // create builds the cluster on the old version. When tent warns that the version is untested, the step logs the
 // warning and goes on.
 func (u *upgradeScenario) create(t *testing.T) {
-	args := upgradeCreateArgs(suite.Settings, u.name, suite.SSHKey+".pub", suite.Runner)
+	args := upgradeCreateArgs(suite.Settings, u.name, u.image, suite.SSHKey+".pub", suite.Runner)
 	res := u.tent(t, createTimeout, "create", args...)
 	if warning := untestedVersionWarning(res.Stderr); warning != "" {
 		t.Logf("tent warns about the old version: %s", warning)
@@ -85,11 +90,17 @@ func (u *upgradeScenario) versionsBefore(t *testing.T) {
 // upgrade moves the spec to the version that the channel recommends, applies it to the infrastructure, which leaves
 // every node outdated, and checks that a roll is due.
 func (u *upgradeScenario) upgrade(t *testing.T) {
-	u.tent(t, specTimeout, "upgrade", "upgrade", "cluster", u.name, "--yes")
-	res := u.tent(t, specTimeout, "get-cluster", "get", "clusters", u.name, "-o", "json")
-	var err error
+	res := u.tent(t, upgradeTimeout, "upgrade", "upgrade", "cluster", u.name, "--yes")
+	said, err := upgradedVersion(res.Stdout, u.name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res = u.tent(t, specTimeout, "get-cluster", "get", "clusters", u.name, "-o", "json")
 	if u.target, err = upgradeTarget(res.Stdout, suite.Settings.UpgradeFrom); err != nil {
 		t.Fatal(err)
+	}
+	if u.target != said {
+		t.Fatalf("tent upgrade says the spec has Nomad %s now, get clusters gives %s", said, u.target)
 	}
 	t.Logf("%s upgrades from Nomad %s to %s", u.name, suite.Settings.UpgradeFrom, u.target)
 	u.tent(t, updateTimeout, "update", "update", "cluster", u.name, "--yes")
@@ -98,7 +109,7 @@ func (u *upgradeScenario) upgrade(t *testing.T) {
 
 // roll rolls the combined group while the probe runs and checks that no roll is due afterwards.
 func (u *upgradeScenario) roll(t *testing.T) {
-	u.rollWithProbe(t, "combined", "nodes", "roll", upgradeRollTimeout,
+	u.rollWithProbe(t, "combined", "nodes", "roll", defaultProbeLimits, upgradeRollTimeout,
 		"rolling-update", "cluster", u.name, "--yes")
 	u.rollDue(t, "roll-done", 0)
 }

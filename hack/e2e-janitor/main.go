@@ -38,7 +38,7 @@ func run(
 ) int {
 	flags := flag.NewFlagSet("e2e-janitor", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	olderThan := flags.Duration("older-than", 3*time.Hour, "act on the clusters whose oldest object is older than this")
+	olderThan := flags.Duration("older-than", 4*time.Hour, "act on the clusters whose oldest object is older than this")
 	yes := flags.Bool("yes", false, "delete; without it the command only lists what it would delete")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
