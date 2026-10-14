@@ -68,6 +68,18 @@ func TestStableIsEmbedded(t *testing.T) {
 	}
 }
 
+func TestStableTestsTheVersionsOfTheUpgradeRun(t *testing.T) {
+	c, err := Load("stable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []string{"2.0.6", "2.0.7"} {
+		if !c.Tested(v) {
+			t.Errorf("stable.nomad.tested = %v, want %s among them", c.Nomad.Tested, v)
+		}
+	}
+}
+
 func TestNamesAreSorted(t *testing.T) {
 	if names := Names(); !slices.IsSorted(names) {
 		t.Errorf("Names() = %v, want them sorted", names)
