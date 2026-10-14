@@ -11,6 +11,7 @@ const nameRule = "must be 2 to 20 lowercase letters, digits or dashes, starting 
 
 // TestNamesOutsideTheRuleAreRefused keeps PROD from naming prod's state on a disk that ignores case.
 func TestNamesOutsideTheRuleAreRefused(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	const invalid = "Error: invalid cluster name \"PROD\": " + nameRule + "\n"
 	for _, args := range [][]string{
@@ -31,6 +32,7 @@ func TestNamesOutsideTheRuleAreRefused(t *testing.T) {
 
 // TestSpecNamesOutsideTheRuleAreRefused before tent reads the store under them: PROD is no copy of prod.
 func TestSpecNamesOutsideTheRuleAreRefused(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	const invalid = "Error: invalid spec:\n  Cluster PROD: metadata.name: " + nameRule + "\n"
 	upper := strings.ReplaceAll(prodYAML, "prod", "PROD")
@@ -46,6 +48,7 @@ func TestSpecNamesOutsideTheRuleAreRefused(t *testing.T) {
 
 // TestMistypedSubcommands fail instead of printing help.
 func TestMistypedSubcommands(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	for _, tc := range []struct {
 		args []string
@@ -63,6 +66,7 @@ func TestMistypedSubcommands(t *testing.T) {
 
 // TestGroupCommandsShowHelp without a subcommand.
 func TestGroupCommandsShowHelp(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"state", "delete", "create", "rolling-update", "upgrade", "backup"} {
 		got := runIn(t, "", name)
 		if want := "Usage:\n  tent " + name + " [flags]\n  tent " + name + " [command]\n"; got.code != 0 ||
@@ -75,6 +79,7 @@ func TestGroupCommandsShowHelp(t *testing.T) {
 
 // TestNameAndNameFlag refuses a NAME and a --name that differ.
 func TestNameAndNameFlag(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	const differ = "Error: NAME prod and --name dev differ; give one\n"
 	for _, args := range [][]string{
@@ -93,11 +98,12 @@ func TestNameAndNameFlag(t *testing.T) {
 	s.want(t, prodObjects)
 
 	wantOK(t, runIn(t, "", "get", "prod", "--name", "prod", "--state", s.url), prodYAML)
-	t.Setenv(envCluster, "dev") // a default, which NAME overrides
+	setenv(t, envCluster, "dev") // a default, which NAME overrides
 	wantOK(t, runIn(t, "", "get", "prod", "--state", s.url), prodYAML)
 }
 
 func TestNoNameSaysHowToGiveOne(t *testing.T) {
+	t.Parallel()
 	path := configFile(t)
 	const how = "Error: no cluster name: give NAME or set --name, TENT_CLUSTER or \"cluster\" in "
 	for _, args := range [][]string{{"get"}, {"delete", "cluster"}, {"state", "unlock"}, {"rolling-update", "cluster"},

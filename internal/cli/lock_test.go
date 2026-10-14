@@ -24,6 +24,7 @@ func waitNotice(holder statestore.Lease, timeout string) string {
 }
 
 func TestReplaceStopsWaitingForTheLock(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s := withCluster(t)
 		held := holdLock(t, s)
@@ -36,6 +37,7 @@ func TestReplaceStopsWaitingForTheLock(t *testing.T) {
 }
 
 func TestReplaceWaitsForTheLock(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s := withCluster(t)
 		held := holdLock(t, s)
@@ -58,6 +60,7 @@ func TestReplaceWaitsForTheLock(t *testing.T) {
 }
 
 func TestWeakLockWarning(t *testing.T) {
+	t.Parallel()
 	opts, _, err := resolve(t, "--state", newState(t).url)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -80,6 +83,7 @@ func TestWeakLockWarning(t *testing.T) {
 
 // TestReplaceTakesOverALockLeftBehind warns when it takes the lock from a tent that died holding it.
 func TestReplaceTakesOverALockLeftBehind(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	leaveLease(t, s)
 	got := runIn(t, biggerWorkers(t), "replace", "-f", "-", "--state", s.url)
@@ -93,6 +97,7 @@ func TestReplaceTakesOverALockLeftBehind(t *testing.T) {
 var errSaved = errors.New("the change is saved, but the lock of cluster prod was lost before tent released it")
 
 func TestReport(t *testing.T) {
+	t.Parallel()
 	failed := errors.New("failed")
 	for _, tc := range []struct {
 		name    string
@@ -124,6 +129,7 @@ func TestReport(t *testing.T) {
 }
 
 func TestWriteObjectsPrintsAChangeSavedWithoutItsLock(t *testing.T) {
+	t.Parallel()
 	opts, _, err := resolve(t, "--state", newState(t).url)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -145,6 +151,7 @@ func TestWriteObjectsPrintsAChangeSavedWithoutItsLock(t *testing.T) {
 
 // TestWaitForAHolderWithoutALease names the holder in the same words while it waits and when it gives up.
 func TestWaitForAHolderWithoutALease(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	holdLock(t, s)
 	if err := os.Remove(filepath.Join(s.root, ".tent-locks", "prod.lease")); err != nil {

@@ -15,6 +15,7 @@ import (
 
 // TestServiceInterruptedWhileOpening says interrupted, as the use cases do, when Ctrl-C comes before the store opens.
 func TestServiceInterruptedWhileOpening(t *testing.T) {
+	t.Parallel()
 	opts, _, err := resolve(t, "--state", newState(t).url)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -32,6 +33,7 @@ func TestServiceInterruptedWhileOpening(t *testing.T) {
 // TestServiceGivesAssetsAndNomad passes the options WithAssets and WithNomad on to the service, and leaves the Nomad
 // factory unset without WithNomad.
 func TestServiceGivesAssetsAndNomad(t *testing.T) {
+	t.Parallel()
 	errNomad := errors.New("no Nomad in this test")
 	nomad := func(nomadops.Config) (nomadops.API, error) { return nil, errNomad }
 	assetOpts := assets.Options{DevURL: "https://example.test/tent-node", DevSHA256: strings.Repeat("ab", 32)}

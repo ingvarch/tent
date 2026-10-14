@@ -38,6 +38,7 @@ const (
 
 // TestUpgradeClusterPrintsThePlanAndChangesNothing without --yes, and says how to write it.
 func TestUpgradeClusterPrintsThePlanAndChangesNothing(t *testing.T) {
+	t.Parallel()
 	s := onNomad(t, "2.0.6")
 	before := s.objects(t)
 	wantResult(t, runWith(t, upgradeOptions(), upgradeArgs(s)...), 0, upgradeDue, upgradeHint)
@@ -47,6 +48,7 @@ func TestUpgradeClusterPrintsThePlanAndChangesNothing(t *testing.T) {
 // TestUpgradeClusterWritesTheVersion with --yes: the text, the warning about the open API, and a get that shows
 // 2.0.7.
 func TestUpgradeClusterWritesTheVersion(t *testing.T) {
+	t.Parallel()
 	s := onNomad(t, "2.0.6")
 	wantResult(t, runWith(t, upgradeOptions(), upgradeArgs(s, "--yes")...), 0, upgradeApplied, openAPIWarning)
 	got := runIn(t, "", "get", "cluster", "prod", "-o", "yaml", "--state", s.url)
@@ -57,6 +59,7 @@ func TestUpgradeClusterWritesTheVersion(t *testing.T) {
 
 // TestUpgradeClusterTakesNameOrFlag like the other commands that name a cluster.
 func TestUpgradeClusterTakesNameOrFlag(t *testing.T) {
+	t.Parallel()
 	s := onNomad(t, "2.0.6")
 	wantResult(t, runWith(t, upgradeOptions(), "upgrade", "cluster", "--name", "prod", "--state", s.url), 0,
 		upgradeDue, upgradeHint)
@@ -64,6 +67,7 @@ func TestUpgradeClusterTakesNameOrFlag(t *testing.T) {
 
 // TestUpgradeClusterPrintsThePlanAsData with -o json and -o yaml, before and after the write.
 func TestUpgradeClusterPrintsThePlanAsData(t *testing.T) {
+	t.Parallel()
 	const (
 		planJSON = "{\n  \"cluster\": \"prod\",\n  \"channel\": \"stable\",\n  \"recommended\": \"2.0.7\",\n" +
 			"  \"spec\": \"2.0.6\",\n  \"current\": \"2.0.6\",\n  \"target\": \"2.0.7\"\n}\n"
@@ -93,6 +97,7 @@ func TestUpgradeClusterPrintsThePlanAsData(t *testing.T) {
 // TestUpgradeClusterHasNothingToUpgrade prints why, exits with 0, writes nothing and warns of nothing, also with
 // --yes.
 func TestUpgradeClusterHasNothingToUpgrade(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		make func(t *testing.T) state
@@ -125,6 +130,7 @@ func TestUpgradeClusterHasNothingToUpgrade(t *testing.T) {
 // TestUpgradeClusterFailsForAMissingClusterOrName prints the error, exits with 1 and writes nothing, also for two
 // names.
 func TestUpgradeClusterFailsForAMissingClusterOrName(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	before := s.objects(t)
 	path := configFile(t)
@@ -139,6 +145,7 @@ func TestUpgradeClusterFailsForAMissingClusterOrName(t *testing.T) {
 
 // TestUpgradeClusterNeedsAllowSingleServer for a cluster of one server, as every spec writer does.
 func TestUpgradeClusterNeedsAllowSingleServer(t *testing.T) {
+	t.Parallel()
 	s := onNomad(t, "2.0.6", "--servers", "1", "--allow-single-server")
 	before := s.objects(t)
 	wantError(t, runWith(t, upgradeOptions(), upgradeArgs(s, "--yes")...),
@@ -150,6 +157,7 @@ func TestUpgradeClusterNeedsAllowSingleServer(t *testing.T) {
 
 // TestUpgradeClusterPrintsWhatItWroteWhenTheLockIsLost and then the error, as replace does.
 func TestUpgradeClusterPrintsWhatItWroteWhenTheLockIsLost(t *testing.T) {
+	t.Parallel()
 	s := onNomad(t, "2.0.6")
 	losing := func(st statestore.Store) statestore.Store { return losingStore{Store: st, after: clusterPath} }
 	opts := upgradeOptions()
@@ -160,6 +168,7 @@ func TestUpgradeClusterPrintsWhatItWroteWhenTheLockIsLost(t *testing.T) {
 
 // TestUpgradeClusterTakesNoExitCodeAndNoTarget has no flag for either.
 func TestUpgradeClusterTakesNoExitCodeAndNoTarget(t *testing.T) {
+	t.Parallel()
 	s := onNomad(t, "2.0.6")
 	for _, flag := range []string{"--exit-code", "--nomad-version"} {
 		got := runWith(t, upgradeOptions(), upgradeArgs(s, flag, "2.0.7")...)
@@ -171,6 +180,7 @@ func TestUpgradeClusterTakesNoExitCodeAndNoTarget(t *testing.T) {
 
 // TestUpgradeClusterHelp tells what the command does and which flags it takes.
 func TestUpgradeClusterHelp(t *testing.T) {
+	t.Parallel()
 	got := runIn(t, "", "upgrade", "cluster", "--help")
 	for _, want := range []string{"tent upgrade cluster [NAME] [flags]", "spec.nomad.version", "at most one minor version",
 		"--yes", "--allow-single-server", "needs no cloud credentials"} {

@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/spf13/cobra"
 
 	"github.com/ingvarch/tent/api/v1alpha1"
 	"github.com/ingvarch/tent/internal/assets"
@@ -103,7 +104,7 @@ func newState(t *testing.T) state {
 
 func (s state) open(t *testing.T) statestore.Store {
 	t.Helper()
-	store, err := statestore.Open(t.Context(), s.url)
+	store, err := openWithoutSync(t.Context(), s.url)
 	if err != nil {
 		t.Fatalf("open the store: %v", err)
 	}
@@ -196,7 +197,7 @@ type started struct {
 func executeTest(ctx context.Context, t *testing.T, args []string, s Streams, opts ...Option) int {
 	t.Helper()
 	return executeWithSignals(ctx, args, s, nil, func(code int) { t.Errorf("tent exited with %d on a signal", code) },
-		opts...)
+		append([]Option{testOptions(t)}, opts...)...)
 }
 
 // onVultr returns providers that reach the Vultr fake f and log to the command's logger. Every provider other than
@@ -517,7 +518,7 @@ func runWithStore(t *testing.T, wrap func(statestore.Store) statestore.Store, ar
 // wrapped returns an openStore that opens the store at a URL and wraps it with wrap.
 func wrapped(wrap func(statestore.Store) statestore.Store) func(context.Context, string) (statestore.Store, error) {
 	return func(ctx context.Context, u string) (statestore.Store, error) {
-		s, err := statestore.Open(ctx, u)
+		s, err := openWithoutSync(ctx, u)
 		if err != nil {
 			return nil, err
 		}
@@ -525,11 +526,18 @@ func wrapped(wrap func(statestore.Store) statestore.Store) func(context.Context,
 	}
 }
 
+// newTestRoot returns the root command over opts, which the environment and the store of t complete.
+func newTestRoot(t *testing.T, s Streams, opts *globalOptions) *cobra.Command {
+	t.Helper()
+	testOptions(t)(opts)
+	return newRootCommand(s, opts)
+}
+
 // runWith executes tent with args, starting from opts, which the flags and the config file complete.
 func runWith(t *testing.T, opts *globalOptions, args ...string) result {
 	t.Helper()
 	var out, errOut syncBuffer
-	root := newRootCommand(Streams{In: strings.NewReader(""), Out: &out, Err: &errOut}, opts)
+	root := newTestRoot(t, Streams{In: strings.NewReader(""), Out: &out, Err: &errOut}, opts)
 	code := execute(t.Context(), root, args, &errOut)
 	return result{code, out.String(), errOut.String()}
 }

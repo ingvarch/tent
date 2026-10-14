@@ -16,8 +16,8 @@ import (
 	"github.com/ingvarch/tent/api/v1alpha1"
 )
 
-// TestMain points every test at an empty config directory and clears the variables tent reads, so the user's own
-// settings never reach a test. A test that needs a config file or a variable sets its own with t.Setenv.
+// TestMain makes the empty config directory that the tests share, and keeps a race-enabled fake editor from waiting
+// a second before it exits. The commands under test read their own environment (see setenv), not the process's.
 func TestMain(m *testing.M) {
 	os.Exit(runIsolated(m))
 }
@@ -29,15 +29,10 @@ func runIsolated(m *testing.M) int {
 		return 1
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
-	for _, err := range []error{
-		os.Setenv("XDG_CONFIG_HOME", dir),
-		os.Unsetenv(envState),
-		os.Unsetenv(envCluster),
-	} {
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 1
-		}
+	emptyConfigDir = dir
+	if err := os.Setenv("GORACE", "atexit_sleep_ms=0"); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
 	}
 	return m.Run()
 }
@@ -46,7 +41,7 @@ func runIsolated(m *testing.M) int {
 func configFile(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+	setenv(t, "XDG_CONFIG_HOME", dir)
 	return filepath.Join(dir, "tent", "config.yaml")
 }
 
@@ -69,7 +64,7 @@ func resolve(t *testing.T, args ...string) (*globalOptions, *bytes.Buffer, error
 	t.Helper()
 	var errOut bytes.Buffer
 	opts := &globalOptions{}
-	root := newRootCommand(Streams{Out: io.Discard, Err: &errOut}, opts)
+	root := newTestRoot(t, Streams{Out: io.Discard, Err: &errOut}, opts)
 	root.AddCommand(&cobra.Command{Use: "probe", RunE: func(*cobra.Command, []string) error { return nil }})
 	root.SetArgs(append([]string{"probe"}, args...))
 	return opts, &errOut, root.Execute()
@@ -84,6 +79,7 @@ func run(t *testing.T, args ...string) (int, string, string) {
 }
 
 func TestInvalidOutputFormat(t *testing.T) {
+	t.Parallel()
 	code, out, errOut := run(t, "version", "-o", "xml")
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1", code)
@@ -98,6 +94,7 @@ func TestInvalidOutputFormat(t *testing.T) {
 }
 
 func TestExecuteWritesErrors(t *testing.T) {
+	t.Parallel()
 	invalid := v1alpha1.Errors{
 		{Object: "Cluster prod", Path: "spec.cloud.region", Detail: "required"},
 		{Object: "NodeGroup servers", Path: "spec.size", Detail: "must be 1, 3 or 5 for role=server"},
@@ -118,7 +115,7 @@ func TestExecuteWritesErrors(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var errOut bytes.Buffer
-			root := newRootCommand(Streams{Out: io.Discard, Err: io.Discard}, &globalOptions{})
+			root := newTestRoot(t, Streams{Out: io.Discard, Err: io.Discard}, &globalOptions{})
 			root.AddCommand(&cobra.Command{Use: "probe", RunE: func(*cobra.Command, []string) error { return tc.err }})
 			if code := execute(t.Context(), root, []string{"probe"}, &errOut); code != 1 {
 				t.Errorf("exit code = %d, want 1", code)
@@ -132,6 +129,7 @@ func TestExecuteWritesErrors(t *testing.T) {
 
 // A suggestion from cobra keeps its blank line and its indented command.
 func TestUnknownCommandSuggests(t *testing.T) {
+	t.Parallel()
 	code, out, errOut := run(t, "creat")
 	want := "Error: unknown command \"creat\" for \"tent\"\n\n  Did you mean this?\n\tcreate\n"
 	if code != 1 || out != "" || errOut != want {
@@ -140,10 +138,11 @@ func TestUnknownCommandSuggests(t *testing.T) {
 }
 
 func TestExecutePassesTheContext(t *testing.T) {
+	t.Parallel()
 	type key struct{}
 	ctx := context.WithValue(t.Context(), key{}, "value")
 	var got any
-	root := newRootCommand(Streams{Out: io.Discard, Err: io.Discard}, &globalOptions{})
+	root := newTestRoot(t, Streams{Out: io.Discard, Err: io.Discard}, &globalOptions{})
 	root.AddCommand(&cobra.Command{Use: "probe", RunE: func(cmd *cobra.Command, _ []string) error {
 		got = cmd.Context().Value(key{})
 		return nil
@@ -159,6 +158,7 @@ func TestExecutePassesTheContext(t *testing.T) {
 // Only the root resolves the options: cobra runs just the nearest PersistentPreRun(E), so a subcommand with its own
 // would run without a config file and a logger.
 func TestOnlyTheRootHasPersistentHooks(t *testing.T) {
+	t.Parallel()
 	var walk func(*cobra.Command)
 	walk = func(cmd *cobra.Command) {
 		for _, c := range cmd.Commands() {
@@ -168,10 +168,11 @@ func TestOnlyTheRootHasPersistentHooks(t *testing.T) {
 			walk(c)
 		}
 	}
-	walk(newRootCommand(Streams{Out: io.Discard, Err: io.Discard}, &globalOptions{}))
+	walk(newTestRoot(t, Streams{Out: io.Discard, Err: io.Discard}, &globalOptions{}))
 }
 
 func TestInvalidOutputFormatStopsTheCommand(t *testing.T) {
+	t.Parallel()
 	_, _, err := resolve(t, "-o", "xml")
 	want := `invalid output format "xml": want table, yaml or json`
 	if err == nil || err.Error() != want {
@@ -181,6 +182,7 @@ func TestInvalidOutputFormatStopsTheCommand(t *testing.T) {
 
 // cobra's own commands need no settings, so a broken config file does not break them.
 func TestCobraCommandsIgnoreTheConfigFile(t *testing.T) {
+	t.Parallel()
 	for _, args := range [][]string{
 		{"help"},
 		{"help", "version"},
@@ -199,6 +201,7 @@ func TestCobraCommandsIgnoreTheConfigFile(t *testing.T) {
 }
 
 func TestCommandsReportABrokenConfigFile(t *testing.T) {
+	t.Parallel()
 	path := writeConfig(t, "stat: x\n")
 	code, _, errOut := run(t, "version")
 	want := "Error: " + path + `: line 1: unknown key "stat": want state, cluster, output or logFormat` + "\n"
@@ -208,6 +211,7 @@ func TestCommandsReportABrokenConfigFile(t *testing.T) {
 }
 
 func TestGlobalFlagsHelp(t *testing.T) {
+	t.Parallel()
 	code, out, errOut := run(t, "version", "--help")
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr %q)", code, errOut)
@@ -240,6 +244,7 @@ func TestNoArgsIgnoresProcessArgs(t *testing.T) {
 }
 
 func TestUnknownCommand(t *testing.T) {
+	t.Parallel()
 	code, _, errOut := run(t, "frobnicate")
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1", code)

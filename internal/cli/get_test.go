@@ -10,6 +10,7 @@ import (
 var prodYAML = docs(clusterYAML, serversYAML, workersYAML)
 
 func TestGet(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	for _, args := range [][]string{
 		{"get", "prod"},
@@ -18,12 +19,13 @@ func TestGet(t *testing.T) {
 	} {
 		wantOK(t, runIn(t, "", append(args, "--state", s.url)...), prodYAML)
 	}
-	t.Setenv(envCluster, "prod")
+	setenv(t, envCluster, "prod")
 	wantOK(t, runIn(t, "", "get", "--state", s.url), prodYAML)
 }
 
 // TestGetRoundTrip prints what create -f read.
 func TestGetRoundTrip(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	spec := docs(replaced(t, clusterYAML, "    vultr: {}\n", "    vultr: {}\n  nomad:\n    version: 2.0.7\n"),
 		serversYAML, replaced(t, workersYAML, "size: 3\n", "size: 3\n  nomad:\n    drivers:\n      - docker\n"))
@@ -91,6 +93,7 @@ spec:
 )
 
 func TestGetFull(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	wantOK(t, runIn(t, "", "get", "prod", "--full", "--state", s.url),
 		docs(fullClusterYAML, fullServersYAML, fullWorkersYAML))
@@ -101,6 +104,7 @@ func TestGetFull(t *testing.T) {
 }
 
 func TestGetJSON(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	s.put(t, clusterPath, clusterYAML+"  nomad:\n    extraConfig:\n      server: a <b> & c\n")
 	s.put(t, serversPath, serversYAML)
@@ -143,12 +147,14 @@ func TestGetJSON(t *testing.T) {
 
 // TestGetTakesOneName says how to list several clusters. A mistyped subcommand is TestMistypedSubcommands.
 func TestGetTakesOneName(t *testing.T) {
+	t.Parallel()
 	s := withTwoClusters(t)
 	wantError(t, runIn(t, "", "get", "prod", "dev", "--state", s.url),
 		"Error: get takes one NAME; list several clusters with get clusters prod dev\n")
 }
 
 func TestGetMissingCluster(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	notFound := "Error: cluster dev not found in " + s.url + "\n"
 	wantError(t, runIn(t, "", "get", "dev", "--state", s.url), notFound)
@@ -157,6 +163,7 @@ func TestGetMissingCluster(t *testing.T) {
 }
 
 func TestGetWithoutStateOrName(t *testing.T) {
+	t.Parallel()
 	path := configFile(t)
 	wantError(t, runIn(t, "", "get", "prod"),
 		"Error: no state store: set --state, TENT_STATE or \"state\" in "+path+"\n")
@@ -205,6 +212,7 @@ spec:
 `
 
 func TestGetClusters(t *testing.T) {
+	t.Parallel()
 	s := withTwoClusters(t)
 	const header = "NAME   PROVIDER   REGION       NOMAD   SERVERS   WORKERS\n"
 	const dev = "dev    hetzner    eu-central   2.0.7   1         0\n"
@@ -235,6 +243,7 @@ func TestGetClusters(t *testing.T) {
 
 // TestGetClustersOfEmptyStore says on stderr that there are none, so that a mistyped --state shows.
 func TestGetClustersOfEmptyStore(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	none := "no clusters in " + s.url + "\n"
 	check := func() {
@@ -253,6 +262,7 @@ func TestGetClustersOfEmptyStore(t *testing.T) {
 }
 
 func TestGetNodeGroups(t *testing.T) {
+	t.Parallel()
 	s := withTwoClusters(t)
 	wantOK(t, runIn(t, "", "get", "nodegroups", "--name", "prod", "--state", s.url), ""+
 		"NAME      ROLE     MACHINE-TYPE   SIZE   ZONES\n"+
@@ -270,6 +280,7 @@ func TestGetNodeGroups(t *testing.T) {
 }
 
 func TestGetNodeGroupsYAMLAndJSON(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	wantOK(t, runIn(t, "", "get", "nodegroups", "--name", "prod", "-o", "yaml", "--state", s.url),
 		docs(serversYAML, workersYAML))
@@ -310,6 +321,7 @@ func TestGetNodeGroupsYAMLAndJSON(t *testing.T) {
 
 // TestGetJSONRoundTrip feeds what get -o json prints to create -f and replace -f.
 func TestGetJSONRoundTrip(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	j := runIn(t, "", "get", "prod", "-o", "json", "--state", s.url).out
 	wantResult(t, runIn(t, j, "replace", "-f", "-", "--state", s.url), 0,
@@ -320,6 +332,7 @@ func TestGetJSONRoundTrip(t *testing.T) {
 }
 
 func TestGetNamedNodeGroups(t *testing.T) {
+	t.Parallel()
 	s := withTwoClusters(t)
 	wantOK(t, runIn(t, "", "get", "nodegroups", "workers", "batch", "--name", "prod", "--state", s.url), ""+
 		"NAME      ROLE     MACHINE-TYPE   SIZE   ZONES\n"+
@@ -332,6 +345,7 @@ func TestGetNamedNodeGroups(t *testing.T) {
 }
 
 func TestGetHelpNamesTheSubcommandNames(t *testing.T) {
+	t.Parallel()
 	got := runIn(t, "", "get", "--help")
 	const want = "For a cluster named cluster, clusters, nodegroup or nodegroups, use --name."
 	if got.code != 0 || !strings.Contains(got.out, want) {

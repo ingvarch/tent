@@ -408,6 +408,7 @@ var progressCases = []progressCase{
 
 // TestProgress prints each step on a line of its own: text for -o table and -o yaml, a JSON object for -o json.
 func TestProgress(t *testing.T) {
+	t.Parallel()
 	for _, format := range []string{outputTable, outputYAML, outputJSON} {
 		t.Run(format, func(t *testing.T) {
 			for _, tc := range progressCases {
@@ -429,6 +430,7 @@ func TestProgress(t *testing.T) {
 
 // TestProgressJSONKeepsHTMLCharacters leaves < and & in an error as they are.
 func TestProgressJSONKeepsHTMLCharacters(t *testing.T) {
+	t.Parallel()
 	var b strings.Builder
 	printProgress(&b, outputJSON)(app.Progress{Node: createNode, Step: app.NodeFailed,
 		Err: errors.New("plan <vc2> & more")})

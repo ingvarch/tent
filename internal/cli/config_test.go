@@ -8,6 +8,7 @@ import (
 )
 
 func TestConfigFileReads(t *testing.T) {
+	t.Parallel()
 	defaults := fileConfig{"", "", "table", "text"}
 	tests := []struct {
 		name string
@@ -40,6 +41,7 @@ func TestConfigFileReads(t *testing.T) {
 }
 
 func TestConfigFileErrors(t *testing.T) {
+	t.Parallel()
 	const keys = "want state, cluster, output or logFormat"
 	tests := []struct {
 		name string
@@ -78,6 +80,7 @@ func TestConfigFileErrors(t *testing.T) {
 }
 
 func TestUnreadableConfigFile(t *testing.T) {
+	t.Parallel()
 	path := configFile(t)
 	if err := os.MkdirAll(path, 0o755); err != nil { // a directory where the file belongs
 		t.Fatal(err)
@@ -94,12 +97,12 @@ func TestUnreadableConfigFile(t *testing.T) {
 // setHome sets the home directory, on every operating system, and XDG_CONFIG_HOME.
 func setHome(t *testing.T, home, xdgConfigHome string) {
 	t.Helper()
-	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home) // the home directory on Windows
+	setenv(t, "XDG_CONFIG_HOME", xdgConfigHome)
+	setenv(t, "HOME", home)
 }
 
 func TestNoHomeMeansNoConfigFile(t *testing.T) {
+	t.Parallel()
 	setHome(t, "", "")
 	code, out, errOut := run(t, "version")
 	if code != 0 {
@@ -111,18 +114,20 @@ func TestNoHomeMeansNoConfigFile(t *testing.T) {
 }
 
 func TestNoHomeIsLoggedAtDebug(t *testing.T) {
+	t.Parallel()
 	setHome(t, "", "")
 	_, errOut, err := resolve(t, "-vv")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 	if got := errOut.String(); !strings.Contains(got, ` level=DEBUG msg="no config file" reason=`) ||
-		!strings.Contains(got, " is not defined") {
+		!strings.Contains(got, errNoHome.Error()) {
 		t.Errorf("stderr = %q, want a debug line that says why there is no config file", got)
 	}
 }
 
 func TestRequireWithoutAConfigFile(t *testing.T) {
+	t.Parallel()
 	setHome(t, "", "")
 	opts, _, err := resolve(t)
 	if err != nil {
@@ -137,6 +142,7 @@ func TestRequireWithoutAConfigFile(t *testing.T) {
 }
 
 func TestConfigFileUnderTheHome(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
 	setHome(t, home, "")
 	opts, _, err := resolve(t)
@@ -152,6 +158,7 @@ func TestConfigFileUnderTheHome(t *testing.T) {
 }
 
 func TestRelativeXDGConfigHomeIsIgnored(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
 	setHome(t, home, filepath.Join("relative", "config"))
 	dir := filepath.Join(home, ".config", "tent")
@@ -173,6 +180,7 @@ func TestRelativeXDGConfigHomeIsIgnored(t *testing.T) {
 // TestCachePath is $XDG_CACHE_HOME/tent when that is absolute, else tent under .cache in the home directory, and an
 // error without a home directory; a relative XDG_CACHE_HOME is ignored, as XDG_CONFIG_HOME is.
 func TestCachePath(t *testing.T) {
+	t.Parallel()
 	home, xdg := t.TempDir(), t.TempDir()
 	for _, tc := range []struct{ name, home, xdg, want string }{
 		{"XDG_CACHE_HOME", home, xdg, filepath.Join(xdg, "tent")},
@@ -182,8 +190,8 @@ func TestCachePath(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setHome(t, tc.home, "")
-			t.Setenv("XDG_CACHE_HOME", tc.xdg)
-			got, err := cachePath()
+			setenv(t, "XDG_CACHE_HOME", tc.xdg)
+			got, err := optionsOf(t).cachePath()
 			if err != nil || got != tc.want {
 				t.Errorf("cachePath() = %q, %v, want %q", got, err, tc.want)
 			}
@@ -191,8 +199,8 @@ func TestCachePath(t *testing.T) {
 	}
 	t.Run("no home and no XDG_CACHE_HOME", func(t *testing.T) {
 		setHome(t, "", "")
-		t.Setenv("XDG_CACHE_HOME", "")
-		if got, err := cachePath(); err == nil {
+		setenv(t, "XDG_CACHE_HOME", "")
+		if got, err := optionsOf(t).cachePath(); err == nil {
 			t.Errorf("cachePath() = %q, want an error", got)
 		}
 	})

@@ -151,6 +151,7 @@ func builtBackups(t *testing.T) (state, *vultrfake.Fake, time.Time) {
 
 // TestBackupCreateStoresTheSnapshot prints the line of the stored backup and keeps Nomad's bytes under the mark.
 func TestBackupCreateStoresTheSnapshot(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f, mark := builtBackups(t)
 
@@ -166,6 +167,7 @@ func TestBackupCreateStoresTheSnapshot(t *testing.T) {
 
 // TestBackupCreatePrintsTheBackupAsData with -o json and -o yaml.
 func TestBackupCreatePrintsTheBackupAsData(t *testing.T) {
+	t.Parallel()
 	for _, format := range []string{"json", "yaml"} {
 		t.Run(format, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -195,6 +197,7 @@ func TestBackupCreatePrintsTheBackupAsData(t *testing.T) {
 
 // TestBackupCreateWarnsOfTheWait tells on stderr, once, that Nomad cannot take a snapshot yet, and then stores it.
 func TestBackupCreateWarnsOfTheWait(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f, _ := builtBackups(t)
 		nomad, factory := nomadWorld("servers", "workers", 6)
@@ -219,6 +222,7 @@ func TestBackupCreateWarnsOfTheWait(t *testing.T) {
 
 // TestBackupCommandsNeedTheCloud fail with the provider's error before they store anything.
 func TestBackupCommandsNeedTheCloud(t *testing.T) {
+	t.Parallel()
 	for _, args := range [][]string{{"create"}, {"restore", "--yes"}} {
 		t.Run(args[0], func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -240,6 +244,7 @@ func TestBackupCommandsNeedTheCloud(t *testing.T) {
 
 // TestBackupCommandsTakeNameOrFlag like the other commands that name a cluster.
 func TestBackupCommandsTakeNameOrFlag(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f, mark := builtBackups(t)
 		earlier := earlierBackup(t, s, mark)
@@ -261,6 +266,7 @@ func TestBackupCommandsTakeNameOrFlag(t *testing.T) {
 // TestBackupListPrintsTheTable of an earlier and a current backup, oldest first, reading the state store alone: no
 // cloud and no Nomad.
 func TestBackupListPrintsTheTable(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	mark := putMark(t, s, time.Date(2026, 10, 5, 8, 0, 0, 0, time.UTC))
 	putBackup(t, s, time.Date(2026, 10, 10, 9, 0, 0, 0, time.UTC), mark, "current")
@@ -275,6 +281,7 @@ func TestBackupListPrintsTheTable(t *testing.T) {
 
 // TestBackupListPrintsTheBackupsAsData with -o json and -o yaml.
 func TestBackupListPrintsTheBackupsAsData(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	mark := putMark(t, s, time.Date(2026, 10, 5, 8, 0, 0, 0, time.UTC))
 	current := putBackup(t, s, time.Date(2026, 10, 10, 9, 0, 0, 0, time.UTC), mark, "current")
@@ -304,6 +311,7 @@ func TestBackupListPrintsTheBackupsAsData(t *testing.T) {
 // TestBackupListWithoutBackups prints the header alone on stdout, as get clusters does, and says on stderr that the
 // cluster has none; the data formats print an empty list.
 func TestBackupListWithoutBackups(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	const none = "cluster prod has no backups\n"
 	for _, tc := range []struct{ format, out string }{
@@ -317,6 +325,7 @@ func TestBackupListWithoutBackups(t *testing.T) {
 
 // TestBackupListFailsForAMissingCluster like the other commands that read a cluster.
 func TestBackupListFailsForAMissingCluster(t *testing.T) {
+	t.Parallel()
 	got := runIn(t, "", "backup", "list", "prod", "--state", newState(t).url)
 	if got.code != 1 || got.out != "" || !strings.HasPrefix(got.errOut, "Error: ") {
 		t.Errorf("exit code %d, stdout %q, stderr %q, want 1, nothing and an error", got.code, got.out, got.errOut)
@@ -325,6 +334,7 @@ func TestBackupListFailsForAMissingCluster(t *testing.T) {
 
 // TestBackupRestorePrintsThePlan without --yes: the plan with the node count and the hint, and no change.
 func TestBackupRestorePrintsThePlan(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f, mark := builtBackups(t)
 		earlier := earlierBackup(t, s, mark)
@@ -342,6 +352,7 @@ func TestBackupRestorePrintsThePlan(t *testing.T) {
 
 // TestBackupRestoreRestores with --yes: the summary and the notice, the backup in Nomad, and the record in the store.
 func TestBackupRestoreRestores(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f, mark := builtBackups(t)
 		earlier := earlierBackup(t, s, mark)
@@ -362,6 +373,7 @@ func TestBackupRestoreRestores(t *testing.T) {
 // TestBackupRestoreTakesTheBackupOfFrom restores the older of two backups when --from names it, and the newer one by
 // default.
 func TestBackupRestoreTakesTheBackupOfFrom(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f, mark := builtBackups(t)
 		older := putBackup(t, s, mark.Add(-30*time.Hour), mark.Add(-48*time.Hour), olderSnapshot)
@@ -379,6 +391,7 @@ func TestBackupRestoreTakesTheBackupOfFrom(t *testing.T) {
 
 // TestBackupRestoreRefusesABadFromBeforeAnyCall reaches neither the cloud nor Nomad for a name that is none.
 func TestBackupRestoreRefusesABadFromBeforeAnyCall(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f, mark := builtBackups(t)
 		earlierBackup(t, s, mark)
@@ -398,6 +411,7 @@ func TestBackupRestoreRefusesABadFromBeforeAnyCall(t *testing.T) {
 // TestBackupRestoreRefuses exits with 1 and an error, and changes nothing, when a rule does not let the restore go
 // ahead: only current backups, a job that runs, no backup at all.
 func TestBackupRestoreRefuses(t *testing.T) {
+	t.Parallel()
 	jobs := []nomadops.Job{{Namespace: "default", ID: "web"}}
 	for _, tc := range []struct {
 		name  string
@@ -442,6 +456,7 @@ func TestBackupRestoreRefuses(t *testing.T) {
 // TestBackupRestoreRefusesAnotherBackupAfterARestore names the backup that the servers were restored from, and the
 // way out.
 func TestBackupRestoreRefusesAnotherBackupAfterARestore(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f, mark := builtBackups(t)
 		first := earlierBackup(t, s, mark)
@@ -463,6 +478,7 @@ func TestBackupRestoreRefusesAnotherBackupAfterARestore(t *testing.T) {
 // TestBackupRestoreIsDoneOnce prints only the line of a plan that is restored already, with no hint and no notice,
 // exits with 0 and asks Nomad nothing, with and without --yes.
 func TestBackupRestoreIsDoneOnce(t *testing.T) {
+	t.Parallel()
 	for _, yes := range []string{"--yes=false", "--yes"} {
 		t.Run(yes, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -487,6 +503,7 @@ func TestBackupRestoreIsDoneOnce(t *testing.T) {
 // plan says so, and says that Nomad did not take the backup, since a record without an accessor cannot tell it did; the
 // hint stays and --yes ends it with the summary and the notice.
 func TestBackupRestoreResumes(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f, mark := builtBackups(t)
 		earlier := earlierBackup(t, s, mark)
@@ -507,6 +524,7 @@ func TestBackupRestoreResumes(t *testing.T) {
 // TestBackupRestorePrintsThePlanAsData with -o json and -o yaml, with "applied": true after --yes and the notice on
 // stderr; the plan before --yes carries the hint.
 func TestBackupRestorePrintsThePlanAsData(t *testing.T) {
+	t.Parallel()
 	for _, format := range []string{"json", "yaml"} {
 		for _, yes := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s yes=%t", format, yes), func(t *testing.T) {
@@ -549,6 +567,7 @@ func TestBackupRestorePrintsThePlanAsData(t *testing.T) {
 // TestBackupCommandsWaitForTheLock prints the wait line of the lock and fails at the limit for the commands that
 // write; with --lock-timeout 0 they fail at once.
 func TestBackupCommandsWaitForTheLock(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		args []string
@@ -585,6 +604,7 @@ func TestBackupCommandsWaitForTheLock(t *testing.T) {
 
 // TestBackupListTakesNoLock reads while another tent holds the lock.
 func TestBackupListTakesNoLock(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s := withCluster(t)
 		holdLock(t, s)
@@ -597,6 +617,7 @@ func TestBackupListTakesNoLock(t *testing.T) {
 // TestBackupCommandsShowNoSnapshot checks stdout, stderr and the debug log of every command, in each format, against
 // the bytes of the snapshots that the run handled.
 func TestBackupCommandsShowNoSnapshot(t *testing.T) {
+	t.Parallel()
 	for _, format := range []string{"table", "json", "yaml"} {
 		t.Run(format, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -632,6 +653,7 @@ func TestBackupCommandsShowNoSnapshot(t *testing.T) {
 
 // TestBackupHelp tells what each command does and which flags it takes.
 func TestBackupHelp(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		args []string
 		want []string
@@ -708,6 +730,7 @@ func (s losingAfterBackup) Put(ctx context.Context, p string, data []byte, opts 
 // TestBackupCommandsPrintWhatTheyDidWhenTheLockIsLost prints the result and then the error, as the other commands that
 // write do: the backup is stored and the restore is done.
 func TestBackupCommandsPrintWhatTheyDidWhenTheLockIsLost(t *testing.T) {
+	t.Parallel()
 	const lost = "Error: the change is saved, but the lock of cluster prod was lost before tent released it\n"
 	for _, tc := range []struct {
 		name string

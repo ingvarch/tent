@@ -192,7 +192,7 @@ func (e *uiEnv) startArgs(args ...string) *uiRun {
 	}
 	go func() {
 		defer close(r.finished)
-		root := newRootCommand(Streams{In: strings.NewReader(""), Out: r.out, Err: r.err}, opts)
+		root := newTestRoot(e.t, Streams{In: strings.NewReader(""), Out: r.out, Err: r.err}, opts)
 		r.code = execute(ctx, root, args, r.err)
 	}()
 	e.t.Cleanup(func() {
@@ -282,13 +282,18 @@ func hostOf(url string) string {
 	return strings.TrimSuffix(strings.TrimPrefix(url, "http://"), "/ui/")
 }
 
-// wantRefused fails the test when something still accepts connections at address.
-func wantRefused(t *testing.T, address string) {
-	t.Helper()
-	conn, err := net.DialTimeout("tcp", address, uiGuard)
-	if err == nil {
-		_ = conn.Close()
-		t.Errorf("%s still accepts connections", address)
+// wantClosed fails the test unless the run opened its listener (watch must be called first) and closed it. A dial of
+// the port would not do: another parallel test may have taken it after it was freed.
+func (e *uiEnv) wantClosed() {
+	e.t.Helper()
+	w := e.watched.Load()
+	if w == nil {
+		e.t.Fatal("the run opened no listener")
+	}
+	select {
+	case <-w.closed:
+	default:
+		e.t.Errorf("the listener at %s is still open", w.Listener.Addr())
 	}
 }
 
@@ -329,7 +334,9 @@ func wantUILines(t *testing.T, got result) (url string, ends time.Time) {
 // TestUIServesTheProxyAndStopsOnCtrlC prints the URL and the notice, serves the proxy's handler on the printed port,
 // and on Ctrl-C ends with code 0 and closes the port. The session ends a day from now.
 func TestUIServesTheProxyAndStopsOnCtrlC(t *testing.T) {
+	t.Parallel()
 	e := newUIEnv(t)
+	e.watch()
 	r := e.start()
 	base := r.ready()
 
@@ -349,13 +356,14 @@ func TestUIServesTheProxyAndStopsOnCtrlC(t *testing.T) {
 	if left := time.Until(ends); left > 24*time.Hour || left < 24*time.Hour-time.Minute {
 		t.Errorf("the session ends in %s, want about 24h", left)
 	}
-	wantRefused(t, hostOf(base))
+	e.wantClosed()
 }
 
 // TestUIGivesTheProxyItsConfig builds the proxy with every server, the region, the CA, a certificate pair, a token
 // that is not the bootstrap secret, the listener's real address and the command's logger; Nomad made one token of
 // 24h for the purpose ui, and the state store is as it was.
 func TestUIGivesTheProxyItsConfig(t *testing.T) {
+	t.Parallel()
 	e := newUIEnv(t)
 	before := e.s.objects(t)
 	r := e.start()
@@ -405,6 +413,7 @@ func TestUIGivesTheProxyItsConfig(t *testing.T) {
 // TestUIListensOnLocalhostAndPrintsTheRealAddress accepts the name localhost with port 0 and prints the address that
 // the system gave, not the name.
 func TestUIListensOnLocalhostAndPrintsTheRealAddress(t *testing.T) {
+	t.Parallel()
 	e := newUIEnv(t)
 	r := e.startArgs("ui", "prod", "--state", e.s.url, "--listen", "localhost:0")
 	base := r.ready()
@@ -422,6 +431,7 @@ func TestUIListensOnLocalhostAndPrintsTheRealAddress(t *testing.T) {
 // TestUIPrintsOneObjectWithJSONAndYAML prints the keys cluster, url and expires once on stdout, in whole seconds of
 // UTC, and still tells the notice on stderr.
 func TestUIPrintsOneObjectWithJSONAndYAML(t *testing.T) {
+	t.Parallel()
 	for _, format := range []string{"json", "yaml"} {
 		t.Run(format, func(t *testing.T) {
 			e := newUIEnv(t)
@@ -456,7 +466,9 @@ func TestUIPrintsOneObjectWithJSONAndYAML(t *testing.T) {
 // TestUISessionEndsWhenItsTimeComes stops like Ctrl-C when the end of the session comes, with exit code 0, the line
 // that says so after the two lines, and the port closed.
 func TestUISessionEndsWhenItsTimeComes(t *testing.T) {
+	t.Parallel()
 	e := newUIEnv(t)
+	e.watch()
 	var late atomic.Bool
 	fire := make(chan time.Time)
 	e.ui.now = func() time.Time {
@@ -483,12 +495,13 @@ func TestUISessionEndsWhenItsTimeComes(t *testing.T) {
 	if !strings.HasSuffix(got.errOut, "UTC\n"+line) {
 		t.Errorf("stderr = %q, want the notice and then %q", got.errOut, line)
 	}
-	wantRefused(t, hostOf(base))
+	e.wantClosed()
 }
 
 // TestUICtrlCSaysNothingMoreThanTheTwoLines leaves stderr as the two lines were: the line about the session's end is
 // for the end alone.
 func TestUICtrlCSaysNothingMoreThanTheTwoLines(t *testing.T) {
+	t.Parallel()
 	e := newUIEnv(t)
 	r := e.start()
 	r.ready()
@@ -512,6 +525,7 @@ func (a pastToken) CreateToken(ctx context.Context, req nomadops.TokenRequest) (
 // TestUISessionEndsByItsOwnTimer ends by the timer that the command sets when no test replaces it: the token's end
 // has gone, so the session ends at once.
 func TestUISessionEndsByItsOwnTimer(t *testing.T) {
+	t.Parallel()
 	e := newUIEnv(t)
 	inner := e.factory
 	e.factory = func(cfg nomadops.Config) (nomadops.API, error) {
@@ -531,6 +545,7 @@ func TestUISessionEndsByItsOwnTimer(t *testing.T) {
 // TestUISessionEndsAtTheNextClockCheck ends within one check after the wall clock passes the end, while the wait of
 // the whole time has not fired: a timer does not count the time that the machine sleeps.
 func TestUISessionEndsAtTheNextClockCheck(t *testing.T) {
+	t.Parallel()
 	until := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
 	var wall atomic.Pointer[time.Time]
 	setWall := func(w time.Time) { wall.Store(&w) }
@@ -587,6 +602,7 @@ func TestUISessionEndsAtTheNextClockCheck(t *testing.T) {
 
 // TestUISessionEndFollowsTheClock ends at the time it is given and not before, and at once for a time that has gone.
 func TestUISessionEndFollowsTheClock(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		until := time.Now().Add(time.Hour)
 		ctx, cancel := context.WithCancel(t.Context())
@@ -619,6 +635,7 @@ func TestUISessionEndFollowsTheClock(t *testing.T) {
 // TestUILoopbackListen accepts the loopback addresses and refuses every other host, including another name, a mapped
 // address, a zone, an empty host and anything that is not host:port with a port number.
 func TestUILoopbackListen(t *testing.T) {
+	t.Parallel()
 	for _, ok := range []string{"127.0.0.1:4646", "127.0.0.1:0", "127.1.2.3:80", "[::1]:4646", "[::1]:0", "localhost:4646",
 		"LocalHost:0", "127.0.0.1:65535"} {
 		if err := checkLoopbackListen(ok); err != nil {
@@ -654,6 +671,7 @@ func TestUILoopbackListen(t *testing.T) {
 // TestUIRefusesAnAddressBeforeAnyCall stops at once for an address that is not loopback or not host:port, before it
 // opens a listener, asks Nomad or builds the proxy.
 func TestUIRefusesAnAddressBeforeAnyCall(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ listen, want string }{
 		{"0.0.0.0:4646", "Error: --listen 0.0.0.0:4646: tent ui listens on a loopback address only\n"},
 		{"192.0.2.1:80", "Error: --listen 192.0.2.1:80: tent ui listens on a loopback address only\n"},
@@ -679,6 +697,7 @@ func TestUIRefusesAnAddressBeforeAnyCall(t *testing.T) {
 // TestUIChecksTheAddressBeforeTheName refuses a bad address with no cluster name given, before it says that a name
 // is missing.
 func TestUIChecksTheAddressBeforeTheName(t *testing.T) {
+	t.Parallel()
 	e := newUIEnv(t)
 	r := e.startArgs("ui", "--state", e.s.url, "--listen", "0.0.0.0:4646")
 
@@ -690,6 +709,7 @@ func TestUIChecksTheAddressBeforeTheName(t *testing.T) {
 // TestUIPrintsTheEndInWholeSeconds cuts the fraction of a second off the end of the session, which is the token's when
 // that ends before the certificate.
 func TestUIPrintsTheEndInWholeSeconds(t *testing.T) {
+	t.Parallel()
 	e := newUIEnv(t)
 	inner := e.factory
 	e.factory = func(cfg nomadops.Config) (nomadops.API, error) {
@@ -717,6 +737,7 @@ func TestUIPrintsTheEndInWholeSeconds(t *testing.T) {
 // TestUIRefusesAListenerThatIsNotLoopback closes a listener whose real address is not loopback, as localhost may be
 // resolved to another, and fails before it asks Nomad for anything.
 func TestUIRefusesAListenerThatIsNotLoopback(t *testing.T) {
+	t.Parallel()
 	for name, addr := range map[string]net.Addr{
 		"another address": &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 4646},
 		"no TCP address":  &net.UnixAddr{Name: "ui.sock", Net: "unix"},
@@ -730,11 +751,7 @@ func TestUIRefusesAListenerThatIsNotLoopback(t *testing.T) {
 			got := r.exited()
 
 			wantError(t, got, "Error: --listen localhost:0: tent ui listens on a loopback address only\n")
-			select {
-			case <-e.watched.Load().closed:
-			default:
-				t.Error("the listener was not closed")
-			}
+			e.wantClosed()
 			e.wantNoAccess()
 		})
 	}
@@ -742,6 +759,7 @@ func TestUIRefusesAListenerThatIsNotLoopback(t *testing.T) {
 
 // TestUIFailsOnABusyPortWithoutAToken says what the system said, and the way out, and asks Nomad for nothing.
 func TestUIFailsOnABusyPortWithoutAToken(t *testing.T) {
+	t.Parallel()
 	e := newUIEnv(t)
 	busy, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -765,6 +783,7 @@ func TestUIFailsOnABusyPortWithoutAToken(t *testing.T) {
 // TestUIClosesTheListenerWhenAccessFails leaves no open port when the operator's access cannot be made: here the
 // cluster has no secrets yet.
 func TestUIClosesTheListenerWhenAccessFails(t *testing.T) {
+	t.Parallel()
 	e := newUIEnv(t)
 	e.s = withCluster(t) // specs only
 	e.watch()
@@ -775,7 +794,7 @@ func TestUIClosesTheListenerWhenAccessFails(t *testing.T) {
 	if got.code != 1 || !strings.Contains(got.errOut, "run tent update cluster --yes first") || got.out != "" {
 		t.Errorf("exit code %d, stdout %q, stderr %q, want an error that says to run update", got.code, got.out, got.errOut)
 	}
-	wantRefused(t, e.watched.Load().Listener.Addr().String())
+	e.wantClosed()
 	if cfgs := e.proxy.configs(); len(cfgs) != 0 {
 		t.Errorf("the proxy factory got %d configs", len(cfgs))
 	}
@@ -783,6 +802,7 @@ func TestUIClosesTheListenerWhenAccessFails(t *testing.T) {
 
 // TestUIClosesTheListenerWhenTheProxyFails ends with the factory's error and no open port.
 func TestUIClosesTheListenerWhenTheProxyFails(t *testing.T) {
+	t.Parallel()
 	e := newUIEnv(t)
 	e.proxy.err = errors.New("no good")
 	e.watch()
@@ -791,12 +811,13 @@ func TestUIClosesTheListenerWhenTheProxyFails(t *testing.T) {
 	got := r.exited()
 
 	wantError(t, got, "Error: set up the proxy: no good\n")
-	wantRefused(t, e.watched.Load().Listener.Addr().String())
+	e.wantClosed()
 }
 
 // TestUIEndsAsInterruptedBeforeTheServerStarts says interrupted, with exit code 1, prints no line and leaves no open
 // port when the command's context ends after the proxy is built and before the server starts.
 func TestUIEndsAsInterruptedBeforeTheServerStarts(t *testing.T) {
+	t.Parallel()
 	e := newUIEnv(t)
 	e.watch()
 	started := make(chan *uiRun, 1)
@@ -807,12 +828,13 @@ func TestUIEndsAsInterruptedBeforeTheServerStarts(t *testing.T) {
 	got := r.exited()
 
 	wantError(t, got, "Error: interrupted\n")
-	wantRefused(t, e.watched.Load().Listener.Addr().String())
+	e.wantClosed()
 }
 
 // TestUIFailsWithoutAProxy fails with the sentence of a missing Nomad factory's kind, before it opens a listener or
 // asks Nomad for a token.
 func TestUIFailsWithoutAProxy(t *testing.T) {
+	t.Parallel()
 	e := newUIEnv(t)
 	e.noProxy = true
 	e.ui.listen = func(context.Context, string) (net.Listener, error) {
@@ -829,6 +851,7 @@ func TestUIFailsWithoutAProxy(t *testing.T) {
 
 // TestUIOptionGivesTheProxyFactory builds the proxy with the factory that WithNomadProxy gives.
 func TestUIOptionGivesTheProxyFactory(t *testing.T) {
+	t.Parallel()
 	e := newUIEnv(t)
 	var out, errOut syncBuffer
 	proxy := func(nomadops.ProxyConfig) (http.Handler, error) { return nil, errors.New("no good") }
@@ -842,6 +865,7 @@ func TestUIOptionGivesTheProxyFactory(t *testing.T) {
 
 // TestUIFailsWithoutAClusterName tells how to name the cluster, before it opens a listener.
 func TestUIFailsWithoutAClusterName(t *testing.T) {
+	t.Parallel()
 	e := newUIEnv(t)
 	e.ui.listen = func(context.Context, string) (net.Listener, error) {
 		t.Error("tent ui opened a listener")
@@ -861,6 +885,7 @@ func TestUIFailsWithoutAClusterName(t *testing.T) {
 // TestUIFailsWhenTheServerFails ends with exit code 1 and the error of the server, after the two lines, and closes the
 // listener.
 func TestUIFailsWhenTheServerFails(t *testing.T) {
+	t.Parallel()
 	e := newUIEnv(t)
 	e.acceptErr = errors.New("accept failed")
 	e.watch()
@@ -872,16 +897,13 @@ func TestUIFailsWhenTheServerFails(t *testing.T) {
 	if got.code != 1 || !strings.HasSuffix(got.errOut, "UTC\nError: serve on "+address+": accept failed\n") {
 		t.Errorf("exit code %d, stderr %q, want the notice and then the server's error", got.code, got.errOut)
 	}
-	select {
-	case <-e.watched.Load().closed:
-	default:
-		t.Error("the listener was not closed")
-	}
+	e.wantClosed()
 }
 
 // TestUIFinishesAnOpenRequestAtTheEnd stops accepting at once and still answers a request that is open, then ends with
 // code 0.
 func TestUIFinishesAnOpenRequestAtTheEnd(t *testing.T) {
+	t.Parallel()
 	e := newUIEnv(t)
 	started, release := make(chan struct{}), make(chan struct{})
 	e.proxy.handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -915,6 +937,7 @@ func TestUIFinishesAnOpenRequestAtTheEnd(t *testing.T) {
 // TestUIClosesWhatStaysOpenAfterTheLimit ends with code 0 after the limit, when a request does not finish, and closes
 // its connection.
 func TestUIClosesWhatStaysOpenAfterTheLimit(t *testing.T) {
+	t.Parallel()
 	e := newUIEnv(t)
 	e.ui.grace = 50 * time.Millisecond
 	started, ended := make(chan struct{}), make(chan struct{})
@@ -946,6 +969,7 @@ func TestUIClosesWhatStaysOpenAfterTheLimit(t *testing.T) {
 
 // TestUIWaitsFiveSecondsForOpenRequests waits 5 seconds at the end, unless a test sets another limit.
 func TestUIWaitsFiveSecondsForOpenRequests(t *testing.T) {
+	t.Parallel()
 	if got := (uiSettings{}).shutdownGrace(); got != 5*time.Second {
 		t.Errorf("the default limit is %s, want 5s", got)
 	}
@@ -957,6 +981,7 @@ func TestUIWaitsFiveSecondsForOpenRequests(t *testing.T) {
 // TestUIServerLimits gives the server a limit for the headers of a request and none that would cut a stream, and
 // sends the server's own error lines to the log as warnings.
 func TestUIServerLimits(t *testing.T) {
+	t.Parallel()
 	var logged strings.Builder
 	srv := newUIServer(http.NotFoundHandler(), slog.New(slog.NewTextHandler(&logged, nil)))
 
@@ -980,6 +1005,7 @@ func TestUIServerLimits(t *testing.T) {
 // shows the token, the key or the bootstrap secret, and the proxy's request lines show in the command's log, with the
 // path and the status and nothing of the headers.
 func TestUIHidesTheSecretsAndLogsRequestLines(t *testing.T) {
+	t.Parallel()
 	for _, verbose := range []string{"-v", "-vv"} {
 		t.Run(verbose, func(t *testing.T) {
 			e := newUIEnv(t)
@@ -1011,6 +1037,7 @@ func TestUIHidesTheSecretsAndLogsRequestLines(t *testing.T) {
 // TestUIHelpSaysWhatTheCommandDoes names in the long help the risk of the port, NOMAD_ADDR, the token's end and what
 // the command needs.
 func TestUIHelpSaysWhatTheCommandDoes(t *testing.T) {
+	t.Parallel()
 	got := runIn(t, "", "ui", "--help")
 
 	for _, want := range []string{

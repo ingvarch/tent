@@ -33,6 +33,7 @@ const deleteHint = "run with --yes to delete them\n"
 const stateDeleted = stateOnly + "\nDeleted: 3 state objects.\n"
 
 func TestDeleteClusterPreview(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	f := vultrfake.New()
 	wantResult(t, runOn(t, f, "delete", "cluster", "prod", "--state", s.url), 0, stateOnly, deleteHint)
@@ -45,6 +46,7 @@ func TestDeleteClusterPreview(t *testing.T) {
 }
 
 func TestDeleteCluster(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	f := vultrfake.New()
 	wantOK(t, runOn(t, f, "delete", "cluster", "prod", "--yes", "--state", s.url), stateDeleted)
@@ -56,6 +58,7 @@ func TestDeleteCluster(t *testing.T) {
 
 // TestDeleteClusterWithoutTheKey fails before it deletes anything: the cloud may hold objects of the cluster.
 func TestDeleteClusterWithoutTheKey(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	noKey := func(v1alpha1.Provider, *slog.Logger) (cloud.Provider, error) {
 		return nil, errors.New("VULTR_API_KEY is not set")
@@ -70,6 +73,7 @@ func TestDeleteClusterWithoutTheKey(t *testing.T) {
 // TestDeleteClusterOnAnUnsupportedProvider deletes the state alone of a cluster on a provider that tent cannot manage
 // yet, and warns.
 func TestDeleteClusterOnAnUnsupportedProvider(t *testing.T) {
+	t.Parallel()
 	s := hetznerCluster(t)
 	f := vultrfake.New()
 	const (
@@ -167,6 +171,7 @@ func teardownOf(t *testing.T, f *vultrfake.Fake, n int) string {
 // TestDeleteClusterPlansTwice plans once without the lock and once under it before it deletes the first node: each
 // plan reads the inventory once.
 func TestDeleteClusterPlansTwice(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		want := teardown(t, f) + "\nDeleted: 6 nodes, 3 infrastructure objects, 10 state objects.\n"
@@ -186,6 +191,7 @@ func TestDeleteClusterPlansTwice(t *testing.T) {
 // TestDeleteClusterPrintsThePlanItApplies prints the plan made under the lock when the cloud changes after the plan
 // without the lock: a node goes once the first plan has listed the nodes.
 func TestDeleteClusterPrintsThePlanItApplies(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		want := teardownOf(t, f, 5) + "\nDeleted: 5 nodes, 3 infrastructure objects, 10 state objects.\n"
@@ -212,6 +218,7 @@ func TestDeleteClusterPrintsThePlanItApplies(t *testing.T) {
 // TestDeleteClusterWithItsCloud previews the delete of a built cluster, then deletes its nodes, its infrastructure
 // and its state, and prints each step on stderr and the plan it applied on stdout.
 func TestDeleteClusterWithItsCloud(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		want := teardown(t, f)
@@ -259,6 +266,7 @@ func TestDeleteClusterWithItsCloud(t *testing.T) {
 
 // TestDeleteClusterJSON prints the plan as JSON, and after the delete the plan it applied.
 func TestDeleteClusterJSON(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	const want = `{
   "nodes": [],
@@ -287,6 +295,7 @@ func TestDeleteClusterJSON(t *testing.T) {
 
 // TestDeleteClusterProgressJSON prints the steps of the delete as JSON objects with -o json.
 func TestDeleteClusterProgressJSON(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		got := runOn(t, f, "delete", "cluster", "prod", "--yes", "-o", "json", "--state", s.url)
@@ -312,6 +321,7 @@ func TestDeleteClusterProgressJSON(t *testing.T) {
 
 // TestDeleteClusterWithoutItsSpec deletes the state alone of a cluster without cluster.yaml, and warns.
 func TestDeleteClusterWithoutItsSpec(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	s.put(t, serversPath, serversYAML)
 	s.put(t, workersPath, workersYAML)
@@ -333,6 +343,7 @@ func TestDeleteClusterWithoutItsSpec(t *testing.T) {
 }
 
 func TestDeleteClusterUnknownObjects(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	s.put(t, "prod/notes.txt", "mine")
 	const refused = "Error: cluster prod holds objects tent does not know: prod/notes.txt; delete them yourself or " +
@@ -356,6 +367,7 @@ func TestDeleteClusterUnknownObjects(t *testing.T) {
 }
 
 func TestDeleteClusterMissing(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	wantError(t, runOnCloud(t, "delete", "cluster", "dev", "--yes", "--state", s.url),
 		"Error: cluster dev not found in "+s.url+"\n")
@@ -363,6 +375,7 @@ func TestDeleteClusterMissing(t *testing.T) {
 }
 
 func TestDeleteClusterHelpSaysItDeletesTheCloud(t *testing.T) {
+	t.Parallel()
 	got := runOnCloud(t, "delete", "cluster", "--help")
 	const want = "Delete the cloud objects of the cluster named by NAME or --name, then its state"
 	if got.code != 0 || !strings.Contains(got.out, want) {
@@ -371,6 +384,7 @@ func TestDeleteClusterHelpSaysItDeletesTheCloud(t *testing.T) {
 }
 
 func TestDeleteClusterHelpSaysItDeletesTheBackups(t *testing.T) {
+	t.Parallel()
 	got := runOnCloud(t, "delete", "cluster", "--help")
 	const want = "The state holds the cluster's backups, which are deleted with it."
 	if got.code != 0 || !strings.Contains(got.out, want) {
@@ -407,6 +421,7 @@ func (s losingStore) lose(ctx context.Context, p string, err error) error {
 
 // TestDeleteClusterLosesItsLock prints what it deleted, and fails with an error that says the delete is saved.
 func TestDeleteClusterLosesItsLock(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	losing := func(st statestore.Store) statestore.Store { return losingStore{Store: st, after: clusterPath} }
 	opts := &globalOptions{openStore: wrapped(losing), providers: onVultr(vultrfake.New())}

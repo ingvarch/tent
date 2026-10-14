@@ -115,6 +115,7 @@ func notValidYet(count, wait string) string {
 
 // TestValidateClusterValid prints that the built cluster is valid, with the warnings that every run prints on stderr.
 func TestValidateClusterValid(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		before := len(f.Calls())
@@ -128,6 +129,7 @@ func TestValidateClusterValid(t *testing.T) {
 
 // TestValidateClusterNotValid prints the table of the failures and exits with 2, without an error line.
 func TestValidateClusterNotValid(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		withoutWorker(t, f)
@@ -140,6 +142,7 @@ func TestValidateClusterNotValid(t *testing.T) {
 
 // TestValidateClusterNomadFailure exits with 2 for a failure that only Nomad shows.
 func TestValidateClusterNomadFailure(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 
@@ -152,6 +155,7 @@ func TestValidateClusterNomadFailure(t *testing.T) {
 // TestValidateClusterJSON prints the result as the use case encodes it, for a valid and for a failing cluster; the
 // exit code does not depend on the format.
 func TestValidateClusterJSON(t *testing.T) {
+	t.Parallel()
 	type failure struct {
 		Check  string `json:"check"`
 		Node   string `json:"node"`
@@ -212,6 +216,7 @@ func TestValidateClusterJSON(t *testing.T) {
 
 // TestValidateClusterYAML prints the result as YAML and exits with 2 for a cluster that is not valid.
 func TestValidateClusterYAML(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 
@@ -238,6 +243,7 @@ func TestValidateClusterYAML(t *testing.T) {
 // with code 0, after one notice, and the result that stdout shows is the last round's. Each warning is printed once
 // although every round tells it.
 func TestValidateClusterWaitsUntilValid(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		start := time.Now()
@@ -257,6 +263,7 @@ func TestValidateClusterWaitsUntilValid(t *testing.T) {
 // are left. The notice counts the two failures of the first round: prod-workers-2 has no machine, and Nomad does not
 // list prod-workers-1.
 func TestValidateClusterWaitTimesOut(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		withoutWorker(t, f)
@@ -282,6 +289,7 @@ func TestValidateClusterWaitTimesOut(t *testing.T) {
 
 // TestValidateClusterWithoutWaitChecksOnce checks once and prints no notice, with no --wait and with --wait 0s.
 func TestValidateClusterWithoutWaitChecksOnce(t *testing.T) {
+	t.Parallel()
 	for name, more := range map[string][]string{"no flag": nil, "wait 0s": {"--wait", "0s"}} {
 		t.Run(name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -311,6 +319,7 @@ func (closedWriter) Write([]byte) (int, error) { return 0, errClosedStdout }
 // TestValidateClusterFailsWhenTheResultCannotBeWritten exits with 1, and not with 0 or 2, when stdout fails, for a
 // valid and for a not valid cluster, in each output format, and ends stderr with the error of that format's writer.
 func TestValidateClusterFailsWhenTheResultCannotBeWritten(t *testing.T) {
+	t.Parallel()
 	for format, failed := range map[string]string{
 		"table": "writing the result", "json": "encoding JSON", "yaml": "writing YAML",
 	} {
@@ -363,6 +372,7 @@ func (s lateReads) see(ctx context.Context) {
 // TestValidateClusterInterruptedWhileWaiting ends a wait on Ctrl-C at once, with the error interrupted and code 1. It
 // prints no result and starts no round after the Ctrl-C: the store gets no read then.
 func TestValidateClusterInterruptedWhileWaiting(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		start := time.Now()
@@ -378,7 +388,7 @@ func TestValidateClusterInterruptedWhileWaiting(t *testing.T) {
 			openStore: wrapped(counting), providers: onVultr(f), assets: testAssets(), nomad: notRegistered(),
 		}
 
-		code := execute(ctx, newRootCommand(Streams{Out: &out, Err: &errOut}, opts), validateArgs(s, "--wait", "10m"),
+		code := execute(ctx, newTestRoot(t, Streams{Out: &out, Err: &errOut}, opts), validateArgs(s, "--wait", "10m"),
 			&errOut)
 
 		if code != 1 || out.String() != "" ||
@@ -396,6 +406,7 @@ func TestValidateClusterInterruptedWhileWaiting(t *testing.T) {
 // TestValidateClusterWaitStopsOnAnError ends a wait with code 1 and an error line, and no result, when a later round
 // cannot check: the Nomad client of the second round cannot be made.
 func TestValidateClusterWaitStopsOnAnError(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		inner, calls := notRegistered(), 0
@@ -416,6 +427,7 @@ func TestValidateClusterWaitStopsOnAnError(t *testing.T) {
 // TestValidateClusterPrintsTheCombinedWarning warns of a combined group on every run, after the warning of the open
 // API.
 func TestValidateClusterPrintsTheCombinedWarning(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := newState(t), vultrfake.New()
 		if got := runWithNomad(t, onVultr(f), combinedNomad(), createProd(s, "--combined", "--yes")...); got.code != 0 {
@@ -431,6 +443,7 @@ func TestValidateClusterPrintsTheCombinedWarning(t *testing.T) {
 // TestValidateClusterNoticesTheLock says who holds the lock, on stderr, and the lock is no failure: the result is
 // valid and the code 0. The lock stays held.
 func TestValidateClusterNoticesTheLock(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		lock := holdLock(t, s)
@@ -448,6 +461,7 @@ func TestValidateClusterNoticesTheLock(t *testing.T) {
 // TestValidateClusterNoticesTheLastLock tells of the lock that the last round found: a lock held at the first round and
 // released before the last is not told.
 func TestValidateClusterNoticesTheLastLock(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		lock := holdLock(t, s)
@@ -466,6 +480,7 @@ func TestValidateClusterNoticesTheLastLock(t *testing.T) {
 
 // TestValidateClusterErrors fails with code 1 and an error line, and prints no result, when tent could not check.
 func TestValidateClusterErrors(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		noKey := errors.New("VULTR_API_KEY is not set")
@@ -483,6 +498,7 @@ func TestValidateClusterErrors(t *testing.T) {
 
 // TestValidateClusterRejectsANegativeWait fails before it opens the store, as --lock-timeout does.
 func TestValidateClusterRejectsANegativeWait(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		before := len(f.Calls())
@@ -496,6 +512,7 @@ func TestValidateClusterRejectsANegativeWait(t *testing.T) {
 
 // TestValidateClusterRejectsASingleServer fails the specs as update does, unless --allow-single-server is given.
 func TestValidateClusterRejectsASingleServer(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		s.put(t, serversPath, replaced(t, serversYAML, "size: 3", "size: 1"))
@@ -515,6 +532,7 @@ func TestValidateClusterRejectsASingleServer(t *testing.T) {
 
 // TestValidateClusterNeedsAStateAndAName fails without a state store and without a cluster name.
 func TestValidateClusterNeedsAStateAndAName(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 
 	if got := runOnCloud(t, "validate", "cluster", "prod"); got.code != 1 ||
@@ -529,12 +547,14 @@ func TestValidateClusterNeedsAStateAndAName(t *testing.T) {
 
 // TestValidateClusterTakesOneName fails for two names.
 func TestValidateClusterTakesOneName(t *testing.T) {
+	t.Parallel()
 	wantError(t, runOnCloud(t, "validate", "cluster", "prod", "dev"), "Error: accepts at most 1 arg(s), received 2\n")
 }
 
 // TestValidateClusterShowsNoSecrets prints no secret that the update wrote, in any format, with debug logs, for a valid
 // and a failing cluster.
 func TestValidateClusterShowsNoSecrets(t *testing.T) {
+	t.Parallel()
 	for _, format := range []string{"table", "json", "yaml"} {
 		t.Run(format, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -557,6 +577,7 @@ func TestValidateClusterShowsNoSecrets(t *testing.T) {
 
 // TestValidateHelp says what is checked, the exit codes and what the command needs.
 func TestValidateHelp(t *testing.T) {
+	t.Parallel()
 	got := runOnCloud(t, "validate", "cluster", "--help")
 	for _, want := range []string{
 		"Usage:\n  tent validate cluster [NAME] [flags]\n", "--wait", "--allow-single-server", "VULTR_API_KEY",
@@ -581,6 +602,7 @@ func TestValidateHelp(t *testing.T) {
 // TestValidateClusterWarnsAboutOutdatedNodes warns on stderr about the nodes that tent rolling-update cluster replaces,
 // and finds the cluster valid.
 func TestValidateClusterWarnsAboutOutdatedNodes(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := outdatedCluster(t)
 

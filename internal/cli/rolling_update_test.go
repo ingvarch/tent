@@ -68,6 +68,7 @@ const (
 )
 
 func TestRollingUpdateClusterPlan(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := outdatedCluster(t)
 		tent := rollRunner(t, f)
@@ -81,6 +82,7 @@ func TestRollingUpdateClusterPlan(t *testing.T) {
 }
 
 func TestRollingUpdateClusterPlanJSON(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := outdatedCluster(t)
 		tent := rollRunner(t, f)
@@ -134,6 +136,7 @@ func TestRollingUpdateClusterPlanJSON(t *testing.T) {
 }
 
 func TestRollingUpdateClusterPlanYAML(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := outdatedCluster(t)
 		tent := rollRunner(t, f)
@@ -174,6 +177,7 @@ next:
 // TestRollingUpdateClusterWithNothingToRoll prints the groups and that nothing is left, with no hint, with and
 // without --yes; --yes takes no lock, which the test holds.
 func TestRollingUpdateClusterWithNothingToRoll(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		tent := rollRunner(t, f)
@@ -250,6 +254,7 @@ const rolledSummary = "\nRolled: 3 created, 3 drained, 0 stopped, 3 deleted, 3 p
 // TestRollingUpdateClusterApply prints the plan made under the lock, each step on stderr and the summary, replaces
 // the machines, and then finds nothing to roll.
 func TestRollingUpdateClusterApply(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := outdatedCluster(t)
 		tent := rollRunner(t, f)
@@ -267,6 +272,7 @@ func TestRollingUpdateClusterApply(t *testing.T) {
 // TestRollingUpdateClusterApplyJSON prints each step as a JSON object on stderr and the plan that it applied on
 // stdout.
 func TestRollingUpdateClusterApplyJSON(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := outdatedCluster(t)
 		tent := rollRunner(t, f)
@@ -307,6 +313,7 @@ func TestRollingUpdateClusterApplyJSON(t *testing.T) {
 // TestRollingUpdateClusterSelectsNodeGroups takes the groups of --nodegroups: separated by commas or given more than
 // once, each once, by name.
 func TestRollingUpdateClusterSelectsNodeGroups(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		args []string
@@ -330,6 +337,7 @@ func TestRollingUpdateClusterSelectsNodeGroups(t *testing.T) {
 
 // TestRollingUpdateClusterRefusesAnUnknownNodeGroup before any call to the cloud.
 func TestRollingUpdateClusterRefusesAnUnknownNodeGroup(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	f := vultrfake.New()
 	tent := rollRunner(t, f)
@@ -344,6 +352,7 @@ func TestRollingUpdateClusterRefusesAnUnknownNodeGroup(t *testing.T) {
 
 // TestRollingUpdateClusterForce marks every machine of the selected groups forced, whatever its hash.
 func TestRollingUpdateClusterForce(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		tent := rollRunner(t, f)
@@ -376,6 +385,7 @@ func combinedRollRunner(t *testing.T) (state, *vultrfake.Fake, *nomadfake.Fake, 
 // TestRollingUpdateClusterPlansTheRollOfServers prints the plan of outdated servers with the creation of a new server
 // as the first step, and, with --force and the default selection, of every group, servers first.
 func TestRollingUpdateClusterPlansTheRollOfServers(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		tent := rollRunner(t, f)
@@ -407,6 +417,7 @@ func TestRollingUpdateClusterPlansTheRollOfServers(t *testing.T) {
 // never changes, so a run with --yes would wait for a node that never joins; the roll itself is proven in
 // internal/app.
 func TestRollingUpdateClusterPlansTheRollOfCombinedGroups(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f, _, tent := combinedRollRunner(t)
 		const first = "\nNext: create node prod-nodes-3 (combined of nodes, ams).\n"
@@ -436,6 +447,7 @@ func TestRollingUpdateClusterPlansTheRollOfCombinedGroups(t *testing.T) {
 // TestRollingUpdateClusterRefusesWhatTheDecisionsRefuse prints the plan, then the refusal of the decisions, and exits
 // with 1, with and without --yes and without a lock.
 func TestRollingUpdateClusterRefusesWhatTheDecisionsRefuse(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := outdatedCluster(t)
 		world, nomad := followedNomad(f)
@@ -456,6 +468,7 @@ func TestRollingUpdateClusterRefusesWhatTheDecisionsRefuse(t *testing.T) {
 // TestRollingUpdateClusterAllowsASingleServer takes --allow-single-server as update does: without it the specs of a
 // cluster of one server are invalid, with it the command goes on to its next check.
 func TestRollingUpdateClusterAllowsASingleServer(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	s.put(t, clusterPath, clusterYAML)
 	s.put(t, serversPath, replaced(t, serversYAML, "size: 3", "size: 1"))
@@ -469,6 +482,7 @@ func TestRollingUpdateClusterAllowsASingleServer(t *testing.T) {
 
 // TestRollingUpdateClusterFailsBeforeItPlans prints only the error for a check that fails, as update does.
 func TestRollingUpdateClusterFailsBeforeItPlans(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	tent := rollRunner(t, vultrfake.New())
 
@@ -480,6 +494,7 @@ func TestRollingUpdateClusterFailsBeforeItPlans(t *testing.T) {
 
 // TestRollingUpdateClusterWaitsForTheLock prints update's notice and waits, as every change does.
 func TestRollingUpdateClusterWaitsForTheLock(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := outdatedCluster(t)
 		tent := rollRunner(t, f)
@@ -501,6 +516,7 @@ func TestRollingUpdateClusterWaitsForTheLock(t *testing.T) {
 // the steps so far, the wait that failed and the error interrupted, exits with 1, deletes no machine and releases the
 // lock.
 func TestRollingUpdateClusterStopsOnCtrlC(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := outdatedCluster(t)
 		world, nomad := followedNomad(f)
@@ -549,6 +565,7 @@ func (a lastPurgeLosesTheLock) Purge(ctx context.Context, nodeID string) error {
 // TestRollingUpdateClusterLosesItsLock prints what the roll did, with -o table and with -o json, and fails with the
 // error that says the roll is saved, when the lock is lost after the last step.
 func TestRollingUpdateClusterLosesItsLock(t *testing.T) {
+	t.Parallel()
 	for _, format := range []string{"table", "json"} {
 		t.Run(format, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -586,6 +603,7 @@ func TestRollingUpdateClusterLosesItsLock(t *testing.T) {
 
 // TestRollingUpdateClusterHelp tells what the command does and which flags it takes.
 func TestRollingUpdateClusterHelp(t *testing.T) {
+	t.Parallel()
 	got := runOnCloud(t, "rolling-update", "cluster", "--help")
 	for _, want := range []string{
 		"Usage:\n  tent rolling-update cluster [NAME] [flags]\n",
@@ -614,6 +632,7 @@ func TestRollingUpdateClusterHelp(t *testing.T) {
 // TestRollingUpdateClusterExitCode exits with 2 under --exit-code while a roll is due, and with 0 when nothing is left
 // to roll; the plan prints as without the flag.
 func TestRollingUpdateClusterExitCode(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := outdatedCluster(t)
 		tent := rollRunner(t, f)
@@ -628,6 +647,7 @@ func TestRollingUpdateClusterExitCode(t *testing.T) {
 
 // TestRollingUpdateClusterExitCodeKeepsTheRefusalAnError exits with 1, not 2, when the decisions refuse the roll.
 func TestRollingUpdateClusterExitCodeKeepsTheRefusalAnError(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, _, world, tent := combinedRollRunner(t)
 		health, err := world.Client(nomadops.Config{}).Health(t.Context())
@@ -649,6 +669,7 @@ func TestRollingUpdateClusterExitCodeKeepsTheRefusalAnError(t *testing.T) {
 
 // TestRollingUpdateClusterExitCodeNeedsAPlan refuses --exit-code with --yes before it calls the cloud, as update does.
 func TestRollingUpdateClusterExitCodeNeedsAPlan(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	f := vultrfake.New()
 
@@ -662,6 +683,7 @@ func TestRollingUpdateClusterExitCodeNeedsAPlan(t *testing.T) {
 // TestRollingUpdateClusterLogsItsObservationsWithDebugOnly gives the debug lines of the loop to the logger that -v and
 // -vv configure: -vv passes them to stderr, -v does not. Stderr shows no secret of the cluster.
 func TestRollingUpdateClusterLogsItsObservationsWithDebugOnly(t *testing.T) {
+	t.Parallel()
 	const line = `level=DEBUG msg="rolling update observed" cluster=prod `
 	for _, tc := range []struct {
 		name     string

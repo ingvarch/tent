@@ -17,10 +17,10 @@ type fileConfig struct {
 	state, cluster, output, logFormat string
 }
 
-// configPath returns where the config file is: $XDG_CONFIG_HOME/tent/config.yaml, else ~/.config/tent/config.yaml on
-// every operating system. The error says why there is no home directory.
-func configPath() (string, error) {
-	dir, err := xdgDir("XDG_CONFIG_HOME", ".config")
+// defaultConfigPath returns where the config file is: $XDG_CONFIG_HOME/tent/config.yaml, else
+// ~/.config/tent/config.yaml on every operating system. The error says why there is no home directory.
+func (o *globalOptions) defaultConfigPath() (string, error) {
+	dir, err := o.xdgDir("XDG_CONFIG_HOME", ".config")
 	if err != nil {
 		return "", err
 	}
@@ -29,14 +29,14 @@ func configPath() (string, error) {
 
 // cachePath returns tent's cache directory: $XDG_CACHE_HOME/tent, else ~/.cache/tent on every operating system. The
 // error says why there is no home directory.
-func cachePath() (string, error) { return xdgDir("XDG_CACHE_HOME", ".cache") }
+func (o *globalOptions) cachePath() (string, error) { return o.xdgDir("XDG_CACHE_HOME", ".cache") }
 
 // xdgDir returns tent's directory in the XDG directory that the variable env names, else in fallback under the home
 // directory.
-func xdgDir(env, fallback string) (string, error) {
-	dir := os.Getenv(env)
+func (o *globalOptions) xdgDir(env, fallback string) (string, error) {
+	dir := o.env(env)
 	if !filepath.IsAbs(dir) { // unset or relative, which the XDG spec says to ignore
-		home, err := os.UserHomeDir()
+		home, err := o.home()
 		if err != nil {
 			return "", err
 		}

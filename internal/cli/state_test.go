@@ -12,6 +12,7 @@ import (
 )
 
 func TestStateUnlockNotLocked(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	for _, args := range [][]string{{"prod"}, {"--name", "prod"}, {"prod", "--force"}} {
 		wantOK(t, runIn(t, "", append([]string{"state", "unlock", "--state", s.url}, args...)...),
@@ -21,6 +22,7 @@ func TestStateUnlockNotLocked(t *testing.T) {
 
 // TestStateUnlockMissingCluster says that the cluster is missing, rather than that it is not locked.
 func TestStateUnlockMissingCluster(t *testing.T) {
+	t.Parallel()
 	for _, s := range []state{newState(t), withCluster(t)} {
 		for _, args := range [][]string{{"dev"}, {"dev", "--force"}} {
 			wantError(t, runIn(t, "", append([]string{"state", "unlock", "--state", s.url}, args...)...),
@@ -31,6 +33,7 @@ func TestStateUnlockMissingCluster(t *testing.T) {
 
 // TestStateUnlockRunningHolder is refused even with --force: the OS holds a file store's lock for its holder.
 func TestStateUnlockRunningHolder(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	held := holdLock(t, s)
 	want := "Error: " + (&statestore.LockedError{Cluster: "prod", Holder: held.Lease()}).Error() +
@@ -71,6 +74,7 @@ func leaveLease(t *testing.T, s state) string {
 }
 
 func TestStateUnlockDeadHolder(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	lease := leaveLease(t, s)
 	wantOK(t, runIn(t, "", "state", "unlock", "prod", "--state", s.url),
@@ -82,6 +86,7 @@ func TestStateUnlockDeadHolder(t *testing.T) {
 }
 
 func TestStateUnlockJSON(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	leaveLease(t, s)
 	wantOK(t, runIn(t, "", "state", "unlock", "prod", "-o", "json", "--state", s.url), `{
@@ -105,6 +110,7 @@ func TestStateUnlockJSON(t *testing.T) {
 }
 
 func TestStateUnlockForce(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	now := time.Now().UTC()
 	live := statestore.Lease{

@@ -21,6 +21,7 @@ const createdProd = "cluster prod created\nnode group servers created\nnode grou
 var prodObjects = map[string]string{clusterPath: clusterYAML, serversPath: serversYAML, workersPath: workersYAML}
 
 func TestCreateFromFile(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	file := writeFile(t, "prod.yaml", docs(clusterYAML, serversYAML, workersYAML))
 	wantDone(t, runIn(t, "", "create", "-f", file, "--state", s.url), createdProd)
@@ -28,6 +29,7 @@ func TestCreateFromFile(t *testing.T) {
 }
 
 func TestCreateFromStdin(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	spec := docs(workersYAML, clusterYAML, serversYAML)
 	wantDone(t, runIn(t, spec, "create", "-f", "-", "--state", s.url), createdProd)
@@ -35,6 +37,7 @@ func TestCreateFromStdin(t *testing.T) {
 }
 
 func TestCreatePrintsChangesAsJSONAndYAML(t *testing.T) {
+	t.Parallel()
 	spec := docs(clusterYAML, serversYAML)
 	for _, tc := range []struct {
 		format string
@@ -69,6 +72,7 @@ func TestCreatePrintsChangesAsJSONAndYAML(t *testing.T) {
 }
 
 func TestCreateDecodeError(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	spec := docs(clusterYAML, replaced(t, serversYAML, "size: 3", "sizee: 3"))
 	wantError(t, runIn(t, spec, "create", "-f", "-", "--state", s.url),
@@ -77,6 +81,7 @@ func TestCreateDecodeError(t *testing.T) {
 }
 
 func TestCreateFromMissingFile(t *testing.T) {
+	t.Parallel()
 	missing := filepath.Join(t.TempDir(), "nope.yaml")
 	_, err := os.ReadFile(missing)
 	wantError(t, runIn(t, "", "create", "-f", missing, "--state", newState(t).url),
@@ -84,6 +89,7 @@ func TestCreateFromMissingFile(t *testing.T) {
 }
 
 func TestCreateWithoutFileShowsUsage(t *testing.T) {
+	t.Parallel()
 	got := runIn(t, "", "create")
 	if got.code != 0 || got.errOut != "" {
 		t.Errorf("exit code = %d, stderr = %q; want 0 and nothing", got.code, got.errOut)
@@ -105,12 +111,14 @@ func createProd(s state, more ...string) []string {
 }
 
 func TestCreateCluster(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	wantDone(t, runIn(t, "", createProd(s)...), createdProd)
 	s.want(t, prodObjects)
 }
 
 func TestCreateClusterNamedByFlag(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	args := []string{"create", "cluster", "--name", "prod", "--provider", "vultr", "--region", "ams",
 		"--machine-type", "vc2-2c-4gb", "--state", s.url}
@@ -119,6 +127,7 @@ func TestCreateClusterNamedByFlag(t *testing.T) {
 }
 
 func TestCreateClusterCombined(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	wantResult(t, runIn(t, "", createProd(s, "--combined")...), 0, "cluster prod created\nnode group nodes created\n",
 		openAPIWarning+combinedWarning)
@@ -135,6 +144,7 @@ spec:
 }
 
 func TestCreateClusterCombinedTakesItsSizeFromServers(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	five := runIn(t, "", createProd(s, "--combined", "--servers", "5", "--dry-run")...)
 	wantOK(t, five, docs(clusterYAML, `apiVersion: tent/v1alpha1
@@ -150,6 +160,7 @@ spec:
 }
 
 func TestCreateClusterWorkerMachineType(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	wantDone(t, runIn(t, "", createProd(s, "--worker-machine-type", "vc2-4c-8gb")...), createdProd)
 	s.want(t, map[string]string{
@@ -159,6 +170,7 @@ func TestCreateClusterWorkerMachineType(t *testing.T) {
 }
 
 func TestCreateClusterEveryFlag(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	key := writeFile(t, "id_ed25519.pub", testSSHKey+"\n")
 	wantOK(t, runIn(t, "", "create", "cluster", "prod", "--state", s.url,
@@ -219,6 +231,7 @@ spec:
 }
 
 func TestCreateClusterDryRun(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	want := docs(clusterYAML, serversYAML, workersYAML)
 	wantOK(t, runIn(t, "", createProd(s, "--dry-run")...), want)
@@ -228,6 +241,7 @@ func TestCreateClusterDryRun(t *testing.T) {
 
 // TestCreateClusterDryRunChecksTheSpecs fails as create would, and writes nothing.
 func TestCreateClusterDryRunChecksTheSpecs(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	wantError(t, runIn(t, "", createProd(s, "--dry-run", "--servers", "2")...),
 		"Error: invalid spec:\n  NodeGroup servers: spec.size: must be 1, 3 or 5 for role=server\n")
@@ -241,6 +255,7 @@ func TestCreateClusterDryRunChecksTheSpecs(t *testing.T) {
 
 // TestCreateClusterDryRunWithoutState checks the specs on their own.
 func TestCreateClusterDryRunWithoutState(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	wantOK(t, runIn(t, "", createProd(s, "--dry-run", "--state", "")...), prodYAML)
 	wantError(t, runIn(t, "", createProd(s, "--dry-run", "--state", "", "--servers", "2")...),
@@ -252,6 +267,7 @@ func TestCreateClusterDryRunWithoutState(t *testing.T) {
 
 // TestCreateClusterDryRunJSON prints what get prints once the cluster is created.
 func TestCreateClusterDryRunJSON(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	dry := runIn(t, "", createProd(s, "--dry-run", "-o", "json")...)
 	s.wantEmpty(t)
@@ -260,6 +276,7 @@ func TestCreateClusterDryRunJSON(t *testing.T) {
 }
 
 func TestCreateClusterMissingFlags(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	wantError(t, runIn(t, "", "create", "cluster", "prod", "--state", s.url),
 		"Error: required flag(s) \"machine-type\", \"provider\", \"region\" not set\n")
@@ -269,6 +286,7 @@ func TestCreateClusterMissingFlags(t *testing.T) {
 }
 
 func TestCreateClusterWithoutName(t *testing.T) {
+	t.Parallel()
 	path := configFile(t)
 	wantError(t, runIn(t, "", "create", "cluster", "--provider", "vultr", "--region", "ams",
 		"--machine-type", "vc2-2c-4gb", "--dry-run"),
@@ -276,6 +294,7 @@ func TestCreateClusterWithoutName(t *testing.T) {
 }
 
 func TestCreateClusterCombinedTakesNoWorkers(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	const refused = "Error: --combined makes one group of --servers nodes; it takes no --workers or " +
 		"--worker-machine-type\n"
@@ -285,6 +304,7 @@ func TestCreateClusterCombinedTakesNoWorkers(t *testing.T) {
 }
 
 func TestCreateClusterHelp(t *testing.T) {
+	t.Parallel()
 	got := runIn(t, "", "create", "cluster", "--help")
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, stderr %q", got.code, got.errOut)
@@ -322,6 +342,7 @@ func helpHas(help, flag, usage string) bool {
 }
 
 func TestCreateClusterInvalid(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	args := []string{"create", "cluster", "prod", "--provider", "aws", "--region", "ams", "--machine-type", "m7i",
 		"--servers", "2", "--state", s.url}
@@ -333,6 +354,7 @@ func TestCreateClusterInvalid(t *testing.T) {
 }
 
 func TestCreateClusterSingleServer(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	wantError(t, runIn(t, "", createProd(s, "--servers", "1")...),
 		"Error: invalid spec:\n  NodeGroup servers: spec.size: size 1 needs --allow-single-server\n")
@@ -344,6 +366,7 @@ func TestCreateClusterSingleServer(t *testing.T) {
 }
 
 func TestCreateClusterTwice(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	wantDone(t, runIn(t, "", createProd(s)...), createdProd)
 	wantDone(t, runIn(t, "", createProd(s)...),
@@ -357,6 +380,7 @@ func TestCreateClusterTwice(t *testing.T) {
 }
 
 func TestCreateClusterSSHKeyFiles(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	missing := filepath.Join(t.TempDir(), "nope.pub")
 	_, err := os.ReadFile(missing)
@@ -371,12 +395,14 @@ func TestCreateClusterSSHKeyFiles(t *testing.T) {
 
 // TestCreateWithoutStateReadsNoSpec fails before it reads standard input, where a person may be typing.
 func TestCreateWithoutStateReadsNoSpec(t *testing.T) {
+	t.Parallel()
 	path := configFile(t)
 	wantError(t, runIn(t, "not: [yaml", "create", "-f", "-"),
 		"Error: no state store: set --state, TENT_STATE or \"state\" in "+path+"\n")
 }
 
 func TestCreateNodeGroupWithoutCluster(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	wantError(t, runIn(t, replaced(t, workersYAML, "  cluster: prod\n", ""), "create", "-f", "-", "--state", s.url),
 		"Error: invalid spec:\n  NodeGroup workers: metadata.cluster: required\n")
@@ -384,6 +410,7 @@ func TestCreateNodeGroupWithoutCluster(t *testing.T) {
 }
 
 func TestCreateClusterSSHKeyFileOfTwoKeys(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	two := writeFile(t, "keys.pub", testSSHKey+"\n\n"+testSSHKey+"2\n")
 	wantError(t, runIn(t, "", createProd(s, "--ssh-key", two)...),
@@ -399,6 +426,7 @@ func TestCreateClusterSSHKeyFileOfTwoKeys(t *testing.T) {
 // TestCreateClusterChecksTheNomadVersion refuses a Nomad version that the channel does not allow, against the state
 // store and without one.
 func TestCreateClusterChecksTheNomadVersion(t *testing.T) {
+	t.Parallel()
 	const want = "Error: invalid spec:\n  Cluster prod: spec.nomad.version: 3.0.0 is newer than this tent knows; " +
 		"channel stable allows 2.x from 2.0.0\n"
 	s := newState(t)
@@ -424,6 +452,7 @@ func untestedChannel(t *testing.T) func(string) (*channels.Channel, error) {
 // TestCreateClusterCombinedYesWarnsOnce prints the warning about a combined group once, after the open API's and
 // before the first line of the build.
 func TestCreateClusterCombinedYesWarnsOnce(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s := newState(t)
 
@@ -439,6 +468,7 @@ func TestCreateClusterCombinedYesWarnsOnce(t *testing.T) {
 // TestCreateClusterYesWarnsOfAnUntestedNomad warns once of a Nomad version that the channel allows but has not
 // tested, although both the create and the update find it.
 func TestCreateClusterYesWarnsOfAnUntestedNomad(t *testing.T) {
+	t.Parallel()
 	const untested = "WARNING: Nomad 2.0.7 is not tested by this tent; channel stable tests 2.0.6"
 	synctest.Test(t, func(t *testing.T) {
 		s := newState(t)
@@ -457,6 +487,7 @@ func TestCreateClusterYesWarnsOfAnUntestedNomad(t *testing.T) {
 // TestCreateClusterYes stores the specs, then builds the cluster as update cluster --yes does: the create's lines,
 // then the plan it applied.
 func TestCreateClusterYes(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s := newState(t)
 		f := vultrfake.New()
@@ -475,6 +506,7 @@ func TestCreateClusterYes(t *testing.T) {
 }
 
 func TestCreateFromFileYes(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s := newState(t)
 		f := vultrfake.New()
@@ -492,6 +524,7 @@ func TestCreateFromFileYes(t *testing.T) {
 
 // TestCreateNodeGroupYes adds a node group to a stored cluster and updates that cluster.
 func TestCreateNodeGroupYes(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s := newState(t)
 		s.put(t, clusterPath, clusterYAML)
@@ -509,6 +542,7 @@ func TestCreateNodeGroupYes(t *testing.T) {
 
 // TestCreateClusterYesJSON prints one document: the changes of the create and the plan that the update applied.
 func TestCreateClusterYesJSON(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s := newState(t)
 		f := vultrfake.New()
@@ -548,6 +582,7 @@ func TestCreateClusterYesJSON(t *testing.T) {
 }
 
 func TestCreateClusterYesYAML(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s := newState(t)
 		got := runOn(t, vultrfake.New(), createProd(s, "--yes", "-o", "yaml")...)
@@ -559,6 +594,7 @@ func TestCreateClusterYesYAML(t *testing.T) {
 }
 
 func TestCreateClusterYesStopsAtAnInvalidSpec(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	f := vultrfake.New()
 	wantError(t, runOn(t, f, createProd(s, "--servers", "2", "--yes")...),
@@ -570,6 +606,7 @@ func TestCreateClusterYesStopsAtAnInvalidSpec(t *testing.T) {
 }
 
 func TestCreateClusterDryRunTakesNoYes(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	const refused = "Error: --dry-run writes nothing, so it takes no --yes\n"
 	wantError(t, runOnCloud(t, createProd(s, "--dry-run", "--yes")...), refused)
@@ -578,6 +615,7 @@ func TestCreateClusterDryRunTakesNoYes(t *testing.T) {
 }
 
 func TestCreateHelpSaysWhatYesDoes(t *testing.T) {
+	t.Parallel()
 	const usage = "then build the cluster in the cloud, as update cluster --yes does"
 	for _, args := range [][]string{{"create", "--help"}, {"create", "cluster", "--help"}} {
 		got := runIn(t, "", args...)
