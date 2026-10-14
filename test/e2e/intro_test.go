@@ -164,8 +164,8 @@ func nonEmptyLines(out string) []string {
 
 // listNodeNames returns the names of the nodes /v1/nodes lists.
 func listNodeNames(ctx context.Context, n *nomadAPI) ([]string, error) {
-	var nodes []struct{ Name string }
-	if err := n.get(ctx, "/v1/nodes", &nodes); err != nil {
+	nodes, err := listNodes(ctx, n)
+	if err != nil {
 		return nil, err
 	}
 	names := make([]string, 0, len(nodes))
