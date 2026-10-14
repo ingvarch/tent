@@ -8,6 +8,7 @@ func biggerWorkers(t *testing.T) string { return replaced(t, workersYAML, "size:
 const replacedWorkers = "cluster prod unchanged\nnode group workers replaced\n"
 
 func TestReplaceFromFile(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	file := writeFile(t, "prod.yaml", docs(clusterYAML, biggerWorkers(t)))
 	wantDone(t, runIn(t, "", "replace", "-f", file, "--state", s.url), replacedWorkers)
@@ -18,17 +19,20 @@ func TestReplaceFromFile(t *testing.T) {
 }
 
 func TestReplaceFromStdin(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	wantDone(t, runIn(t, docs(clusterYAML, biggerWorkers(t)), "replace", "-f", "-", "--state", s.url), replacedWorkers)
 	s.want(t, map[string]string{clusterPath: clusterYAML, serversPath: serversYAML, workersPath: biggerWorkers(t)})
 }
 
 func TestReplaceNeedsAFile(t *testing.T) {
+	t.Parallel()
 	wantError(t, runIn(t, "", "replace", "--state", withCluster(t).url),
 		"Error: required flag(s) \"filename\" not set\n")
 }
 
 func TestReplaceMissing(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	web := replaced(t, workersYAML, "name: workers", "name: web")
 	wantError(t, runIn(t, web, "replace", "-f", "-", "--state", s.url),
@@ -37,6 +41,7 @@ func TestReplaceMissing(t *testing.T) {
 }
 
 func TestReplaceDecodeError(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	wantError(t, runIn(t, "kind: NodeGroup\napiVersion: tent/v1alpha2\n", "replace", "-f", "-", "--state", s.url),
 		"Error: document 1 (NodeGroup): line 2: unsupported apiVersion \"tent/v1alpha2\", want tent/v1alpha1\n")
@@ -44,6 +49,7 @@ func TestReplaceDecodeError(t *testing.T) {
 }
 
 func TestReplaceSingleServer(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	single := replaced(t, serversYAML, "size: 3", "size: 1")
 	wantError(t, runIn(t, single, "replace", "-f", "-", "--state", s.url),
@@ -55,6 +61,7 @@ func TestReplaceSingleServer(t *testing.T) {
 
 // TestReplaceKeepsTheCloud refuses a Cluster on another provider or in another region.
 func TestReplaceKeepsTheCloud(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	hetzner := replaced(t, replaced(t, clusterYAML, "provider: vultr", "provider: hetzner"),
 		"region: ams\n    vultr: {}", "region: eu-central\n    zones: [fsn1, nbg1, hel1]\n    hetzner: {}")
@@ -67,6 +74,7 @@ func TestReplaceKeepsTheCloud(t *testing.T) {
 
 // TestReplaceKeepsTheRole refuses a node group of another role than the stored one.
 func TestReplaceKeepsTheRole(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	combined := replaced(t, serversYAML, "role: server", "role: combined")
 	wantError(t, runIn(t, combined, "replace", "-f", "-", "--state", s.url), "Error: invalid spec:\n"+
@@ -90,6 +98,7 @@ const moveError = "Cluster prod: spec.nomad.version: 2.2.0 is more than one mino
 // TestReplaceHoldsTheNomadVersionToThePin refuses a Nomad version more than one minor version above the pin, and
 // accepts the next minor version.
 func TestReplaceHoldsTheNomadVersionToThePin(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	s.put(t, completedPath, pinnedCluster(t, "2.0.7"))
 	want := map[string]string{
@@ -107,6 +116,7 @@ func TestReplaceHoldsTheNomadVersionToThePin(t *testing.T) {
 }
 
 func TestSpecFileFlagHelp(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"create", "replace"} {
 		got := runIn(t, "", name, "--help")
 		if !helpHas(got.out, "-f, --filename FILE", "spec FILE, or - for standard input") {
@@ -116,6 +126,7 @@ func TestSpecFileFlagHelp(t *testing.T) {
 }
 
 func TestEmptySpecFileFlag(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	for _, name := range []string{"create", "replace"} {
 		wantError(t, runIn(t, "", name, "-f", "", "--state", s.url),
@@ -127,6 +138,7 @@ func TestEmptySpecFileFlag(t *testing.T) {
 // TestBrokenClusterSaysHowToRepairIt refuses every change of a cluster whose stored cluster.yaml does not decode, and
 // says how to repair the file.
 func TestBrokenClusterSaysHowToRepairIt(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	s.put(t, clusterPath, "kind: Cluster\n")
 	stored := s.objects(t)

@@ -14,6 +14,7 @@ func fileValues(o *globalOptions) fileConfig {
 }
 
 func TestPrecedence(t *testing.T) {
+	t.Parallel()
 	const file = "state: file:///from-file\ncluster: from-file\noutput: yaml\nlogFormat: json\n"
 	env := map[string]string{envState: "file:///from-env", envCluster: "from-env"}
 	tests := []struct {
@@ -51,7 +52,7 @@ func TestPrecedence(t *testing.T) {
 				writeConfig(t, tt.file)
 			}
 			for k, v := range tt.env {
-				t.Setenv(k, v)
+				setenv(t, k, v)
 			}
 			opts, _, err := resolve(t, tt.args...)
 			if err != nil {
@@ -65,6 +66,7 @@ func TestPrecedence(t *testing.T) {
 }
 
 func TestVerbosity(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		args []string
 		want slog.Level
@@ -89,6 +91,7 @@ func TestVerbosity(t *testing.T) {
 }
 
 func TestLogsAreTextOnStderr(t *testing.T) {
+	t.Parallel()
 	opts, errOut, err := resolve(t)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -100,6 +103,7 @@ func TestLogsAreTextOnStderr(t *testing.T) {
 }
 
 func TestLogFormatJSON(t *testing.T) {
+	t.Parallel()
 	opts, errOut, err := resolve(t, "--log-format", "json")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -115,6 +119,7 @@ func TestLogFormatJSON(t *testing.T) {
 }
 
 func TestInvalidLogFormat(t *testing.T) {
+	t.Parallel()
 	code, out, errOut := run(t, "version", "--log-format", "xml")
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1", code)
@@ -129,6 +134,7 @@ func TestInvalidLogFormat(t *testing.T) {
 }
 
 func TestLockTimeout(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		args []string
 		want time.Duration
@@ -152,6 +158,7 @@ func TestLockTimeout(t *testing.T) {
 }
 
 func TestInvalidLockTimeout(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		arg  string
 		want string
@@ -179,6 +186,7 @@ func TestInvalidLockTimeout(t *testing.T) {
 }
 
 func TestRequireStateSaysHowToSetIt(t *testing.T) {
+	t.Parallel()
 	path := configFile(t)
 	opts, _, err := resolve(t)
 	if err != nil {
@@ -192,6 +200,7 @@ func TestRequireStateSaysHowToSetIt(t *testing.T) {
 }
 
 func TestRequireClusterSaysHowToSetIt(t *testing.T) {
+	t.Parallel()
 	path := configFile(t)
 	opts, _, err := resolve(t)
 	if err != nil {
@@ -205,6 +214,7 @@ func TestRequireClusterSaysHowToSetIt(t *testing.T) {
 }
 
 func TestRequireReturnsTheValues(t *testing.T) {
+	t.Parallel()
 	opts, _, err := resolve(t, "--state", "file:///state", "--name", "prod")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)

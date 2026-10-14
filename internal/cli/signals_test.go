@@ -50,6 +50,7 @@ func wantCancelled(ctx context.Context, t *testing.T) {
 }
 
 func TestWatchInterrupts(t *testing.T) {
+	t.Parallel()
 	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM} {
 		t.Run(sig.String()+" cancels, a second exits", func(t *testing.T) {
 			sigs, ex := make(chan os.Signal), make(exits, 1)
@@ -105,7 +106,7 @@ func startWithSignalsAndOptions(t *testing.T, sigs <-chan os.Signal, ex exits, s
 	r := &started{code: make(chan int, 1)}
 	go func() {
 		r.code <- executeWithSignals(t.Context(), args, Streams{In: stdin, Out: &r.out, Err: &r.errOut}, sigs, ex.exit,
-			opts...)
+			append([]Option{testOptions(t)}, opts...)...)
 	}()
 	return r
 }
@@ -122,6 +123,7 @@ func letTheEditorGo(t *testing.T, e fakeEditor, meanwhile func()) {
 
 // TestEditKeepsGoingAfterCtrlCInTheEditor, which the terminal sends to the editor too.
 func TestEditKeepsGoingAfterCtrlCInTheEditor(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "", editStep{Old: "size: 3", New: "size: 5", Wait: true})
 	sigs, ex := make(chan os.Signal), make(exits, 1)
@@ -134,6 +136,7 @@ func TestEditKeepsGoingAfterCtrlCInTheEditor(t *testing.T) {
 }
 
 func TestEditCtrlCAtTheQuestion(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "", editStep{Old: "size: 3", New: "size: 5"})
 	in, noAnswer, err := os.Pipe()
@@ -154,6 +157,7 @@ func TestEditCtrlCAtTheQuestion(t *testing.T) {
 
 // TestEditSecondSignalExits while the editor runs, which tent leaves running.
 func TestEditSecondSignalExits(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "", editStep{Old: "size: 3", New: "size: 5", Wait: true})
 	sigs, ex := make(chan os.Signal), make(exits, 1)
@@ -206,7 +210,9 @@ func TestExecuteStopsOnARealCtrlC(t *testing.T) {
 func startExecute(t *testing.T, stdin *os.File, args ...string) *started {
 	t.Helper()
 	r := &started{code: make(chan int, 1)}
-	go func() { r.code <- Execute(t.Context(), args, Streams{In: stdin, Out: &r.out, Err: &r.errOut}) }()
+	go func() {
+		r.code <- Execute(t.Context(), args, Streams{In: stdin, Out: &r.out, Err: &r.errOut}, testOptions(t))
+	}()
 	return r
 }
 

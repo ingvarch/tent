@@ -7,6 +7,7 @@ import (
 )
 
 func TestPrintObjectJSONKeepsHTMLCharacters(t *testing.T) {
+	t.Parallel()
 	var out bytes.Buffer
 	if err := printObject(&out, outputJSON, map[string]string{"name": "<a & b>"}, nil); err != nil {
 		t.Fatalf("printObject: %v", err)
@@ -18,6 +19,7 @@ func TestPrintObjectJSONKeepsHTMLCharacters(t *testing.T) {
 }
 
 func TestPrintObjectRejectsAnUnknownFormat(t *testing.T) {
+	t.Parallel()
 	// cobra skips the root's -o check when a subcommand has its own PersistentPreRunE.
 	var out bytes.Buffer
 	err := printObject(&out, "xml", struct{}{}, func(w io.Writer) error {

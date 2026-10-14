@@ -20,6 +20,7 @@ func numbered(n int, changes map[int]string) string {
 }
 
 func TestUnifiedDiff(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, a, b, want string
 	}{

@@ -70,7 +70,7 @@ func newExportNomadCommand(opts *globalOptions) *cobra.Command {
 				return err
 			}
 			if !cmd.Flags().Changed("shell") {
-				shell = shellenv.Login(os.Getenv("SHELL"))
+				shell = shellenv.Login(opts.env("SHELL"))
 			} else if !shellenv.Valid(shell) {
 				return fmt.Errorf("invalid --shell %q: want %s or %s", shell, shellenv.Sh, shellenv.Fish)
 			}
@@ -80,7 +80,7 @@ func newExportNomadCommand(opts *globalOptions) *cobra.Command {
 			if err := v1alpha1.ValidateName(v1alpha1.KindCluster, name); err != nil {
 				return err
 			}
-			dir, err = exportDir(dir, name)
+			dir, err = opts.exportDir(dir, name)
 			if err != nil {
 				return err
 			}
@@ -121,9 +121,9 @@ func newExportNomadCommand(opts *globalOptions) *cobra.Command {
 
 // exportDir returns the absolute directory that holds the files of the cluster's access: dir, or tent's cache
 // directory of the cluster when dir is empty.
-func exportDir(dir, cluster string) (string, error) {
+func (o *globalOptions) exportDir(dir, cluster string) (string, error) {
 	if dir == "" {
-		cache, err := cachePath()
+		cache, err := o.cachePath()
 		if err != nil {
 			return "", fmt.Errorf("the default directory: %w; give --dir", err)
 		}

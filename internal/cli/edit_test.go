@@ -17,10 +17,12 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
+	"github.com/ingvarch/tent/internal/app"
 	"github.com/ingvarch/tent/internal/statestore"
 )
 
 func TestEditorCommand(t *testing.T) {
+	t.Parallel()
 	fallback := "vi"
 	if runtime.GOOS == "windows" {
 		fallback = "notepad"
@@ -36,10 +38,10 @@ func TestEditorCommand(t *testing.T) {
 		{"else the fallback", "", "", "", fallback},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("TENT_EDITOR", tc.tentEditor)
-			t.Setenv("VISUAL", tc.visual)
-			t.Setenv("EDITOR", tc.env)
-			if got := editorCommand(); got != tc.want {
+			setenv(t, "TENT_EDITOR", tc.tentEditor)
+			setenv(t, "VISUAL", tc.visual)
+			setenv(t, "EDITOR", tc.env)
+			if got := optionsOf(t).editorCommand(); got != tc.want {
 				t.Errorf("editorCommand() = %q, want %q", got, tc.want)
 			}
 		})
@@ -47,6 +49,7 @@ func TestEditorCommand(t *testing.T) {
 }
 
 func TestSplitCommand(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		line string
 		want []string
@@ -72,9 +75,6 @@ func TestSplitCommand(t *testing.T) {
 		t.Errorf("splitCommand(%q) returned %v, want %q", unterminated, err, want)
 	}
 }
-
-// editorDirEnv names the directory of the fake editor: its steps and the record of its runs.
-const editorDirEnv = "TENT_TEST_EDITOR_DIR"
 
 // editStep is what the fake editor does on one run. The zero step saves the file unchanged.
 type editStep struct {
@@ -123,27 +123,30 @@ func newFakeEditor(t *testing.T, args string, steps ...editStep) fakeEditor {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("TENT_EDITOR", `"`+exe+`" -test.run=^TestEditorHelper$ --`+args)
-	t.Setenv(editorDirEnv, e.dir)
-	t.Setenv("GORACE", "atexit_sleep_ms=0") // a race-enabled editor would wait a second before it exits
-	for _, env := range []string{"TMPDIR", "TMP", "TEMP"} {
-		t.Setenv(env, e.tmp)
-	}
+	setenv(t, "TENT_EDITOR", `"`+exe+`" -test.run=^TestEditorHelper$ -- `+fakeEditorArg+` "`+e.dir+`"`+args)
+	setTempDir(t, e.tmp)
 	return e
 }
 
-// TestEditorHelper is the fake editor of the edit tests, not a test: they run the test binary again as the editor.
+// fakeEditorArg is the first argument after -- of the test binary that acts as the editor, so that a run of the
+// binary with other arguments (go test -args x) does not.
+const fakeEditorArg = "fake-editor"
+
+// TestEditorHelper is the fake editor of the edit tests, not a test: they run the test binary again as the editor,
+// with fakeEditorArg and the directory of its steps and runs as the arguments after --.
 func TestEditorHelper(t *testing.T) {
-	dir := os.Getenv(editorDirEnv)
-	if dir == "" {
+	t.Parallel()
+	if flag.NArg() < 2 || flag.Arg(0) != fakeEditorArg {
 		t.Skip("the fake editor of the edit tests")
 	}
-	code, err := fakeEdit(dir, flag.Args())
+	code, err := fakeEdit(flag.Arg(1), flag.Args()[2:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "fake editor:", err)
 		code = 3
 	}
-	os.Exit(code) // before the test binary writes PASS to the output of tent
+	// os.Exit skips the cleanup of TestMain, and ends the run before the test binary writes PASS to the output of tent.
+	_ = os.RemoveAll(emptyConfigDir)
+	os.Exit(code)
 }
 
 // fakeEdit records its run in dir, does the step for it on the file, the last of args, and returns the step's exit
@@ -196,7 +199,7 @@ func fakeEdit(dir string, args []string) (int, error) {
 		}
 	}
 	if p := step.Put; p != nil {
-		store, err := statestore.Open(context.Background(), p.URL)
+		store, err := openWithoutSync(context.Background(), p.URL)
 		if err != nil {
 			return 0, err
 		}
@@ -378,6 +381,7 @@ const biggerWorkersDiff = `--- stored
 `
 
 func TestEditNodeGroup(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "", editStep{Old: "size: 3", New: "size: 5"})
 	got := runEdit(t, "y\n", "edit", "nodegroup", "workers", "--name", "prod", "--state", s.url)
@@ -391,6 +395,7 @@ func TestEditNodeGroup(t *testing.T) {
 }
 
 func TestEditClusterWithYes(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	const cidr = "    vultr: {}\n  networking:\n    cidr: 10.65.0.0/16\n"
 	e := newFakeEditor(t, "", editStep{Old: "    vultr: {}\n", New: cidr})
@@ -416,6 +421,7 @@ cluster prod replaced
 // TestEditKeepsTheCloud opens the editor again when the edit moves the cluster to another region, and changes nothing
 // when the operator reverts it.
 func TestEditKeepsTheCloud(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "", editStep{Old: "region: ams", New: "region: fra"},
 		editStep{Old: "region: fra", New: "region: ams"})
@@ -430,6 +436,7 @@ func TestEditKeepsTheCloud(t *testing.T) {
 // TestEditKeepsTheRole opens the editor again when the edit changes a node group's role, and changes nothing when the
 // operator reverts it.
 func TestEditKeepsTheRole(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "", editStep{Old: "role: server", New: "role: combined"},
 		editStep{Old: "role: combined", New: "role: server"})
@@ -445,6 +452,7 @@ func TestEditKeepsTheRole(t *testing.T) {
 // TestEditHoldsTheNomadVersionToThePin opens the editor again when the edit sets a Nomad version more than one minor
 // version above the pin, and changes nothing when the operator reverts it.
 func TestEditHoldsTheNomadVersionToThePin(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	s.put(t, completedPath, pinnedCluster(t, "2.0.7"))
 	e := newFakeEditor(t, "", editStep{Old: "spec:\n", New: "spec:\n  nomad:\n    version: 2.2.0\n"},
@@ -460,6 +468,7 @@ func TestEditHoldsTheNomadVersionToThePin(t *testing.T) {
 }
 
 func TestEditAnswers(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		answer string
 		saved  bool
@@ -491,6 +500,7 @@ func TestEditAnswers(t *testing.T) {
 }
 
 func TestEditCancelled(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		step editStep
@@ -519,6 +529,7 @@ func TestEditCancelled(t *testing.T) {
 const fixErrorsHeader = "# Please fix the errors below and save, or save it unchanged to cancel; your edit is kept.\n"
 
 func TestEditReopensOnADecodeError(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "", editStep{Old: "size: 3", New: "size: [3"}, editStep{Old: "size: [3", New: "size: 5"})
 	got := runEdit(t, "y\n", "edit", "nodegroup", "workers", "--name", "prod", "--state", s.url)
@@ -532,6 +543,7 @@ func TestEditReopensOnADecodeError(t *testing.T) {
 }
 
 func TestEditReopensOnAnInvalidSpec(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "", editStep{Old: "size: 3", New: "size: 2"}, editStep{Old: "size: 2", New: "size: 5"})
 	got := runEdit(t, "y\n", "edit", "nodegroup", "servers", "--name", "prod", "--state", s.url)
@@ -561,6 +573,7 @@ func sizeeWorkers(t *testing.T) string { return replaced(t, workersYAML, "size: 
 
 // TestEditCancelledWithErrors keeps the operator's text, which was never saved.
 func TestEditCancelledWithErrors(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "", editStep{Old: "size: 3", New: "sizee: 3"}, editStep{})
 	got := runEdit(t, "y\n", "edit", "nodegroup", "workers", "--name", "prod", "--state", s.url)
@@ -572,6 +585,7 @@ func TestEditCancelledWithErrors(t *testing.T) {
 
 // TestEditRevertedAfterErrors removes the file, which holds the stored spec again.
 func TestEditRevertedAfterErrors(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "", editStep{Old: "size: 3", New: "sizee: 3"}, editStep{Content: new(workersYAML)})
 	wantOK(t, runEdit(t, "y\n", "edit", "nodegroup", "workers", "--name", "prod", "--state", s.url),
@@ -598,6 +612,7 @@ func (e fakeEditor) wantKept(t *testing.T, content string) string {
 }
 
 func TestEditRename(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "", editStep{Old: "name: workers", New: "name: web"})
 	got := runEdit(t, "y\n", "edit", "nodegroup", "workers", "--name", "prod", "--state", s.url)
@@ -608,6 +623,7 @@ func TestEditRename(t *testing.T) {
 }
 
 func TestEditChangedMeanwhile(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	meanwhile := replaced(t, workersYAML, "size: 3", "size: 4")
 	e := newFakeEditor(t, "", editStep{Old: "size: 3", New: "size: 5",
@@ -620,6 +636,7 @@ func TestEditChangedMeanwhile(t *testing.T) {
 }
 
 func TestEditLocked(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	held := holdLock(t, s)
 	e := newFakeEditor(t, "", editStep{Old: "size: 3", New: "size: 5"})
@@ -632,6 +649,7 @@ func TestEditLocked(t *testing.T) {
 }
 
 func TestEditorFails(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "", editStep{Exit: 1})
 	wantError(t, runEdit(t, "y\n", "edit", "cluster", "prod", "--state", s.url),
@@ -642,6 +660,7 @@ func TestEditorFails(t *testing.T) {
 }
 
 func TestEditorFailsAfterErrors(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "", editStep{Old: "size: 3", New: "sizee: 3"}, editStep{Exit: 1})
 	got := runEdit(t, "y\n", "edit", "nodegroup", "workers", "--name", "prod", "--state", s.url)
@@ -652,6 +671,7 @@ func TestEditorFailsAfterErrors(t *testing.T) {
 }
 
 func TestEditWarnsWhenItCannotRemoveTheFile(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("a read-only directory keeps its files only on Unix, and not from root")
 	}
@@ -666,6 +686,7 @@ func TestEditWarnsWhenItCannotRemoveTheFile(t *testing.T) {
 }
 
 func TestEditorArguments(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, ` --wait "a b"`, editStep{Print: "the editor is running"})
 	// The editor writes on the streams of tent, as a terminal editor needs.
@@ -678,14 +699,16 @@ func TestEditorArguments(t *testing.T) {
 }
 
 func TestEditNodeGroupOfTENTCLUSTER(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
-	t.Setenv(envCluster, "prod")
+	setenv(t, envCluster, "prod")
 	newFakeEditor(t, "", editStep{Old: "size: 3", New: "size: 5"})
 	wantDone(t, runEdit(t, "", "edit", "nodegroup", "workers", "--yes", "--state", s.url),
 		biggerWorkersDiff+"node group workers replaced\n")
 }
 
 func TestEditAllowSingleServer(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	newFakeEditor(t, "", editStep{Old: "size: 3", New: "size: 1"})
 	got := runEdit(t, "", "edit", "nodegroup", "servers", "--yes", "--allow-single-server", "--name", "prod",
@@ -696,6 +719,7 @@ func TestEditAllowSingleServer(t *testing.T) {
 }
 
 func TestEditRefusesBeforeTheEditor(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "")
 	for _, tc := range []struct {
@@ -715,6 +739,7 @@ func TestEditRefusesBeforeTheEditor(t *testing.T) {
 }
 
 func TestEditRefusesMachineOutput(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "")
 	commands := [][]string{{"edit", "cluster", "prod"}, {"edit", "nodegroup", "workers", "--name", "prod"}}
@@ -730,6 +755,7 @@ func TestEditRefusesMachineOutput(t *testing.T) {
 }
 
 func TestEditWithANarrowAPIDoesNotWarn(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	narrow := "    vultr: {}\n  access:\n    api:\n      - 10.0.0.0/8\n"
 	e := newFakeEditor(t, "", editStep{Old: "    vultr: {}\n", New: narrow})
@@ -748,6 +774,7 @@ cluster prod replaced
 }
 
 func TestEditNames(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	path := configFile(t)
 	e := newFakeEditor(t, "")
@@ -780,6 +807,7 @@ var marks = []struct {
 }
 
 func TestEditIgnoresLineEndsAndByteOrderMarks(t *testing.T) {
+	t.Parallel()
 	for _, m := range marks {
 		t.Run(m.name+" unchanged", func(t *testing.T) {
 			s := withCluster(t)
@@ -812,6 +840,7 @@ func TestEditIgnoresLineEndsAndByteOrderMarks(t *testing.T) {
 
 // TestEditIgnoresTheOutputOfTheConfigFile, a default for the commands that print data.
 func TestEditIgnoresTheOutputOfTheConfigFile(t *testing.T) {
+	t.Parallel()
 	writeConfig(t, "output: json\n")
 	s := withCluster(t)
 	newFakeEditor(t, "", editStep{Old: "size: 3", New: "size: 5"}, editStep{})
@@ -822,6 +851,7 @@ func TestEditIgnoresTheOutputOfTheConfigFile(t *testing.T) {
 }
 
 func TestEditInterruptedAtTheQuestion(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "", editStep{Old: "size: 3", New: "size: 5"})
 	in, noAnswer, err := os.Pipe()
@@ -843,6 +873,7 @@ func TestEditInterruptedAtTheQuestion(t *testing.T) {
 
 // TestEditInterruptedWhileTheEditorRuns waits for the editor, which it does not kill, and keeps what it wrote.
 func TestEditInterruptedWhileTheEditorRuns(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "", editStep{Old: "size: 3", New: "size: 5", Wait: true})
 	ctx, cancel := context.WithCancel(t.Context())
@@ -860,6 +891,7 @@ func TestEditInterruptedWhileTheEditorRuns(t *testing.T) {
 }
 
 func TestEditorFailsAfterAChange(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "", editStep{Old: "size: 3", New: "size: 5", Exit: 1})
 	got := runEdit(t, "y\n", "edit", "nodegroup", "workers", "--name", "prod", "--state", s.url)
@@ -869,6 +901,7 @@ func TestEditorFailsAfterAChange(t *testing.T) {
 }
 
 func TestEditSeveralObjects(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	two := "size: 5\n---\n" + serversYAML
 	e := newFakeEditor(t, "", editStep{Old: "size: 3\n", New: two})
@@ -897,6 +930,7 @@ func (s losingPutStore) Put(ctx context.Context, p string, data []byte, opts sta
 
 // TestEditSavedButTheLockLost prints what it saved, and fails.
 func TestEditSavedButTheLockLost(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "", editStep{Old: "size: 3", New: "size: 5"})
 	losing := func(st statestore.Store) statestore.Store { return losingPutStore{Store: st, after: workersPath} }
@@ -908,6 +942,7 @@ func TestEditSavedButTheLockLost(t *testing.T) {
 }
 
 func TestEditHelp(t *testing.T) {
+	t.Parallel()
 	const waits = "The editor must not return until the file is closed, as with code --wait."
 	for _, tc := range []struct{ command, want string }{
 		{"cluster", waits},
@@ -923,6 +958,7 @@ func TestEditHelp(t *testing.T) {
 }
 
 func TestEditEmptiedAfterErrors(t *testing.T) {
+	t.Parallel()
 	for _, empty := range []string{"", " \n\n"} {
 		s := withCluster(t)
 		e := newFakeEditor(t, "", editStep{Old: "size: 3", New: "sizee: 3"}, editStep{Content: new(empty)})
@@ -934,6 +970,7 @@ func TestEditEmptiedAfterErrors(t *testing.T) {
 
 // TestEditorReadsStdin, which tent reads the answer from after the editor exits.
 func TestEditorReadsStdin(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "", editStep{Old: "size: 3", New: "size: 5", ReadLine: true})
 	got := runEdit(t, "for the editor\ny\n", "edit", "nodegroup", "workers", "--name", "prod", "--state", s.url)
@@ -945,6 +982,7 @@ func TestEditorReadsStdin(t *testing.T) {
 
 // TestEditInterruptedWhileTheEditorFails says that it was interrupted: the editor fails for that.
 func TestEditInterruptedWhileTheEditorFails(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	e := newFakeEditor(t, "", editStep{Old: "size: 3", New: "size: 5", Wait: true, Exit: 1})
 	ctx, cancel := context.WithCancel(t.Context())
@@ -958,4 +996,22 @@ func TestEditInterruptedWhileTheEditorFails(t *testing.T) {
 	got := waitBounded(t, r)
 	kept := e.wantKept(t, biggerWorkers(t))
 	wantError(t, got, "Error: interrupted; nothing saved\n  your edit is in "+kept+"\n")
+}
+
+// TestNewEditingMakesItsFileInTheSystemTempDirByDefault checks that the file to edit is made under os.TempDir() when
+// the options name no temporary directory, with the stored object in it.
+func TestNewEditingMakesItsFileInTheSystemTempDirByDefault(t *testing.T) {
+	t.Parallel()
+	stored := []byte("kind: Cluster\n")
+	e, err := newEditing(nil, &globalOptions{}, nil, app.Ref{}, stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(e.path) })
+	if dir, want := filepath.Dir(e.path), filepath.Clean(os.TempDir()); dir != want {
+		t.Errorf("the file %s is in %s, want %s", e.path, dir, want)
+	}
+	if got, err := os.ReadFile(e.path); err != nil || !bytes.Equal(got, stored) {
+		t.Errorf("the file holds %q, %v, want %q", got, err, stored)
+	}
 }

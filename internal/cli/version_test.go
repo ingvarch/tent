@@ -11,6 +11,7 @@ import (
 )
 
 func TestVersionTable(t *testing.T) {
+	t.Parallel()
 	code, out, errOut := run(t, "version")
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
@@ -25,6 +26,7 @@ func TestVersionTable(t *testing.T) {
 }
 
 func TestVersionJSON(t *testing.T) {
+	t.Parallel()
 	code, out, errOut := run(t, "version", "-o", "json")
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
@@ -42,6 +44,7 @@ func TestVersionJSON(t *testing.T) {
 }
 
 func TestVersionTakesTheOutputFromTheConfigFile(t *testing.T) {
+	t.Parallel()
 	writeConfig(t, "output: json\n")
 	code, out, errOut := run(t, "version")
 	if code != 0 {
@@ -54,6 +57,7 @@ func TestVersionTakesTheOutputFromTheConfigFile(t *testing.T) {
 }
 
 func TestVersionYAML(t *testing.T) {
+	t.Parallel()
 	code, out, errOut := run(t, "version", "-o", "yaml")
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)

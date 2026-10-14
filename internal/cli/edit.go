@@ -101,7 +101,7 @@ func editSpec(cmd *cobra.Command, opts *globalOptions, f editFlags, cluster, kin
 	if err != nil {
 		return err
 	}
-	e, err := newEditing(cmd, svc, ref, stored)
+	e, err := newEditing(cmd, opts, svc, ref, stored)
 	if err != nil {
 		return err
 	}
@@ -111,6 +111,7 @@ func editSpec(cmd *cobra.Command, opts *globalOptions, f editFlags, cluster, kin
 // editing is one run of edit: the object loaded and the file that the operator edits.
 type editing struct {
 	cmd    *cobra.Command
+	opts   *globalOptions
 	svc    *app.Service
 	ref    app.Ref
 	path   string
@@ -122,8 +123,10 @@ type editing struct {
 }
 
 // newEditing writes the stored object to a new temporary file for the operator to edit.
-func newEditing(cmd *cobra.Command, svc *app.Service, ref app.Ref, stored []byte) (*editing, error) {
-	f, err := os.CreateTemp("", "tent-edit-*.yaml")
+func newEditing(cmd *cobra.Command, opts *globalOptions, svc *app.Service, ref app.Ref,
+	stored []byte,
+) (*editing, error) {
+	f, err := os.CreateTemp(opts.tempDir, "tent-edit-*.yaml")
 	if err != nil {
 		return nil, fmt.Errorf("creating the file to edit: %w", err)
 	}
@@ -131,7 +134,7 @@ func newEditing(cmd *cobra.Command, svc *app.Service, ref app.Ref, stored []byte
 	if err = errors.Join(err, f.Close()); err != nil {
 		return nil, errors.Join(fmt.Errorf("writing the file to edit: %w", err), os.Remove(f.Name()))
 	}
-	return &editing{cmd: cmd, svc: svc, ref: ref, path: f.Name(), stored: stored, text: stored}, nil
+	return &editing{cmd: cmd, opts: opts, svc: svc, ref: ref, path: f.Name(), stored: stored, text: stored}, nil
 }
 
 // run opens the editor until the file holds a valid object, prints the diff, asks and saves the object.
@@ -173,7 +176,7 @@ func (e *editing) run(yes bool) error {
 func (e *editing) edit(ctx context.Context) (spec.Objects, []byte, error) {
 	for {
 		// The file may hold the operator's work even when the editor failed or tent was interrupted.
-		edErr := runEditor(e.cmd, e.path)
+		edErr := runEditor(e.cmd, e.opts, e.path)
 		text, err := e.read()
 		if err != nil {
 			return spec.Objects{}, nil, errors.Join(edErr, err)
@@ -322,8 +325,8 @@ func confirm(ctx context.Context, cmd *cobra.Command) (bool, error) {
 
 // runEditor opens the file at path in the editor, on the streams of cmd, and waits for the editor to exit. Ctrl-C
 // meanwhile belongs to the editor, and tent never kills it: that could lose the operator's work.
-func runEditor(cmd *cobra.Command, path string) error {
-	args, err := splitCommand(editorCommand())
+func runEditor(cmd *cobra.Command, opts *globalOptions, path string) error {
+	args, err := splitCommand(opts.editorCommand())
 	if err != nil {
 		return err
 	}
@@ -340,9 +343,9 @@ var editorEnvs = []string{"TENT_EDITOR", "VISUAL", "EDITOR"}
 
 // editorCommand returns the command line of the editor: the first of TENT_EDITOR, VISUAL and EDITOR that is set, else
 // vi, or notepad on Windows.
-func editorCommand() string {
+func (o *globalOptions) editorCommand() string {
 	for _, env := range editorEnvs {
-		if line := strings.TrimSpace(os.Getenv(env)); line != "" {
+		if line := strings.TrimSpace(o.env(env)); line != "" {
 			return line
 		}
 	}

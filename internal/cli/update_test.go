@@ -160,6 +160,7 @@ func wantBuildProgress(t *testing.T, errOut string, before ...string) {
 }
 
 func TestUpdateClusterPlan(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	f := vultrfake.New()
 	wantResult(t, runOn(t, f, update(s)...), 0, updatePlan, applyHint)
@@ -247,6 +248,7 @@ func wantPlanJSONOf(t *testing.T, p planJSON, names []string) {
 }
 
 func TestUpdateClusterPlanJSON(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	f := vultrfake.New()
 	got := runOn(t, f, update(s, "-o", "json")...)
@@ -261,6 +263,7 @@ func TestUpdateClusterPlanJSON(t *testing.T) {
 }
 
 func TestUpdateClusterPlanYAML(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	got := runOnCloud(t, update(s, "-o", "yaml")...)
 	if got.code != 0 || got.errOut != applyHint {
@@ -276,15 +279,17 @@ func TestUpdateClusterPlanYAML(t *testing.T) {
 // TestUpdateClusterExitCode exits with 2 through Execute when the plan has changes, and prints the plan without an
 // error.
 func TestUpdateClusterExitCode(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	var out, errOut syncBuffer
 	code := Execute(t.Context(), update(s, "--exit-code"), Streams{In: strings.NewReader(""), Out: &out, Err: &errOut},
-		WithProviders(onVultr(vultrfake.New())), WithAssets(testAssets()), WithNomad(staticNomad()))
+		testOptions(t), WithProviders(onVultr(vultrfake.New())), WithAssets(testAssets()), WithNomad(staticNomad()))
 	wantResult(t, result{code, out.String(), errOut.String()}, 2, updatePlan, applyHint)
 }
 
 // TestUpdateClusterExitCodeWithoutChanges exits with 0 once the cluster is up to date.
 func TestUpdateClusterExitCodeWithoutChanges(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s := withCluster(t)
 		f := vultrfake.New()
@@ -296,6 +301,7 @@ func TestUpdateClusterExitCodeWithoutChanges(t *testing.T) {
 }
 
 func TestUpdateClusterExitCodeNeedsAPlan(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	f := vultrfake.New()
 	wantError(t, runOn(t, f, update(s, "--yes", "--exit-code")...),
@@ -307,6 +313,7 @@ func TestUpdateClusterExitCodeNeedsAPlan(t *testing.T) {
 }
 
 func TestUpdateClusterApply(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s := withCluster(t)
 		f := vultrfake.New()
@@ -348,6 +355,7 @@ func wantNoSecrets(t *testing.T, s state, what, text string) {
 // TestUpdateClusterShowsNoSecrets builds the test cluster in each output format with debug logs, then plans an update
 // and a delete of it: neither stdout nor stderr shows a secret that the build wrote.
 func TestUpdateClusterShowsNoSecrets(t *testing.T) {
+	t.Parallel()
 	for _, format := range []string{"table", "json", "yaml"} {
 		t.Run(format, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -374,6 +382,7 @@ func TestUpdateClusterShowsNoSecrets(t *testing.T) {
 
 // TestUpdateClusterExitCodeSeesAMissingSecret exits with 2 when the plan writes only a secret that the store lacks.
 func TestUpdateClusterExitCodeSeesAMissingSecret(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		if err := s.open(t).Delete(t.Context(), "prod/secrets/gossip.key"); err != nil {
@@ -442,6 +451,7 @@ func withCombinedCluster(t *testing.T) state {
 // TestUpdateClusterCombined warns about a combined group once, before the first change, when it applies the plan,
 // and not at all for a plan.
 func TestUpdateClusterCombined(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s := withCombinedCluster(t)
 		f := vultrfake.New()
@@ -461,6 +471,7 @@ func TestUpdateClusterCombined(t *testing.T) {
 }
 
 func TestUpdateClusterApplyJSON(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s := withCluster(t)
 		f := vultrfake.New()
@@ -579,6 +590,7 @@ func TestUpdateClusterApplyJSON(t *testing.T) {
 // TestUpdateClusterFails stops at a node that fails to create: the progress says so, the error follows, and stdout
 // holds the plan alone.
 func TestUpdateClusterFails(t *testing.T) {
+	t.Parallel()
 	const cause = "create node prod-servers-0 of cluster prod: vultr: POST /v2/instances: 400 Bad Request: " +
 		"Invalid plan."
 	synctest.Test(t, func(t *testing.T) {
@@ -640,6 +652,7 @@ const waitPlan = "~ node prod-workers-2 (ID instance-7, wait until it joins, scr
 // TestUpdateClusterWaits waits for a node that an interrupted update created, and prints its address once it is
 // ready.
 func TestUpdateClusterWaits(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s := withCluster(t)
 		f := vultrfake.New()
@@ -655,6 +668,7 @@ func TestUpdateClusterWaits(t *testing.T) {
 // TestUpdateClusterFailedWait prints the provider's error in the progress, and the error with the node it waited for
 // last.
 func TestUpdateClusterFailedWait(t *testing.T) {
+	t.Parallel()
 	const cause = "create node prod-workers-2 of cluster prod: wait for instance instance-7: vultr: GET " +
 		"/v2/instances/instance-7: 400 Bad Request: Invalid instance."
 	synctest.Test(t, func(t *testing.T) {
@@ -687,6 +701,7 @@ func countBefore(calls []vultrfake.Call, name, first string) int {
 // TestUpdateClusterPlansTwice plans once without the lock and once under it, and prints the plan made under the
 // lock: each plan checks the specs against the cloud once.
 func TestUpdateClusterPlansTwice(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		if err := f.DeleteInstance(t.Context(), "instance-6"); err != nil {
@@ -706,6 +721,7 @@ func TestUpdateClusterPlansTwice(t *testing.T) {
 // TestUpdateClusterPrintsThePlanItApplies prints the plan made under the lock when the cloud changes after the plan
 // without the lock: another node goes as the second plan starts.
 func TestUpdateClusterPrintsThePlanItApplies(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		if err := f.DeleteInstance(t.Context(), "instance-6"); err != nil {
@@ -744,6 +760,7 @@ func TestUpdateClusterPrintsThePlanItApplies(t *testing.T) {
 // exits with 2 under --exit-code and changes nothing; with --yes it prints each step of the removal on stderr and the
 // summary on stdout, and leaves the node group at its size.
 func TestUpdateClusterScalesDown(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		_, nomad := followedNomad(f)
@@ -802,6 +819,7 @@ const replacePlan = "- node prod-workers-2 (ID instance-6, not registered)\n" +
 // TestUpdateClusterReplacesAClientThatNeverRegistered prints the delete of a client that did not register within 31
 // minutes of its creation before the create of its name, and applies both.
 func TestUpdateClusterReplacesAClientThatNeverRegistered(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 		neverRegisteredWorker(t, f)
@@ -843,6 +861,7 @@ func withoutWorkers(text string) string {
 // is saved, when the lock is lost after the update has written the mark of the Nomad bootstrap. The cluster has no
 // workers: the mark is then the last write, and a node created after the lock was lost would stop the run.
 func TestBuildLosesItsLock(t *testing.T) {
+	t.Parallel()
 	serversOnly := nodeNames[:3]
 	builtServers := withoutWorkers(built)
 	for _, tc := range []struct {
@@ -928,6 +947,7 @@ func counting(f *vultrfake.Fake, n map[v1alpha1.Provider]int) Providers {
 
 // TestCommandsAskForTheProviderOnce builds one provider for each command, however often it plans.
 func TestCommandsAskForTheProviderOnce(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s := newState(t)
 		f := vultrfake.New()
@@ -950,6 +970,7 @@ func TestCommandsAskForTheProviderOnce(t *testing.T) {
 }
 
 func TestUpdateClusterInvalidSpec(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	s.put(t, clusterPath, clusterYAML)
 	s.put(t, serversPath, replaced(t, serversYAML, "size: 3", "size: 1"))
@@ -964,6 +985,7 @@ func TestUpdateClusterInvalidSpec(t *testing.T) {
 
 // TestUpdateClusterPreflight prints the problems that the provider finds as an invalid spec.
 func TestUpdateClusterPreflight(t *testing.T) {
+	t.Parallel()
 	s := newState(t)
 	s.put(t, clusterPath, clusterYAML)
 	s.put(t, serversPath, replaced(t, serversYAML, "vc2-2c-4gb", "vc2-99c-1tb"))
@@ -975,6 +997,7 @@ func TestUpdateClusterPreflight(t *testing.T) {
 }
 
 func TestUpdateClusterProviderErrors(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	noKey := func(v1alpha1.Provider, *slog.Logger) (cloud.Provider, error) {
 		return nil, errors.New("VULTR_API_KEY is not set")
@@ -998,6 +1021,7 @@ func hetznerCluster(t *testing.T) state {
 
 // TestUpdateClusterLogsToTheCommandsLogger gives the providers the logger of -v and --log-format.
 func TestUpdateClusterLogsToTheCommandsLogger(t *testing.T) {
+	t.Parallel()
 	s := withCluster(t)
 	probe := func(name v1alpha1.Provider, log *slog.Logger) (cloud.Provider, error) {
 		log.Info("probe", "provider", string(name))
@@ -1010,6 +1034,7 @@ func TestUpdateClusterLogsToTheCommandsLogger(t *testing.T) {
 }
 
 func TestUpdateClusterHelp(t *testing.T) {
+	t.Parallel()
 	got := runOnCloud(t, "update", "cluster", "--help")
 	for _, want := range []string{
 		"Usage:\n  tent update cluster [NAME] [flags]\n",
@@ -1048,6 +1073,7 @@ const outdatedLine = "Outdated: prod-workers-0, prod-workers-1 and prod-workers-
 // TestUpdateClusterReportsOutdatedNodesWithoutChanges prints the outdated nodes as a line of the plan and a field of
 // its JSON, and exits with 0 under --exit-code, since they are no change of the update.
 func TestUpdateClusterReportsOutdatedNodesWithoutChanges(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		s, f := outdatedCluster(t)
 

@@ -63,6 +63,28 @@ type globalOptions struct {
 	ui uiSettings
 	// channels returns the release channel called name; the channels embedded in tent when nil.
 	channels func(name string) (*channels.Channel, error)
+	// getenv reads an environment variable; os.Getenv when nil.
+	getenv func(key string) string
+	// homeDir returns the home directory; os.UserHomeDir when nil.
+	homeDir func() (string, error)
+	// tempDir is where tent edit makes its file; the system's temporary directory when empty.
+	tempDir string
+}
+
+// env returns the value of the environment variable key.
+func (o *globalOptions) env(key string) string {
+	if o.getenv != nil {
+		return o.getenv(key)
+	}
+	return os.Getenv(key)
+}
+
+// home returns the home directory.
+func (o *globalOptions) home() (string, error) {
+	if o.homeDir != nil {
+		return o.homeDir()
+	}
+	return os.UserHomeDir()
 }
 
 // addFlags adds the global flags to cmd and its subcommands.
@@ -78,7 +100,7 @@ func (o *globalOptions) addFlags(cmd *cobra.Command) {
 
 // resolve fills in what cmd's command line leaves unset, checks the values and creates the logger on cmd's stderr.
 func (o *globalOptions) resolve(cmd *cobra.Command) error {
-	path, homeErr := configPath()
+	path, homeErr := o.defaultConfigPath()
 	var file fileConfig
 	if homeErr == nil {
 		var err error
@@ -94,8 +116,8 @@ func (o *globalOptions) resolve(cmd *cobra.Command) error {
 			*value = cmp.Or(append(fallbacks, *value)...) // *value holds the flag's default
 		}
 	}
-	fill("state", &o.state, os.Getenv(envState), file.state)
-	fill("name", &o.cluster, os.Getenv(envCluster), file.cluster)
+	fill("state", &o.state, o.env(envState), file.state)
+	fill("name", &o.cluster, o.env(envCluster), file.cluster)
 	o.clusterFlag = flags.Changed("name")
 	fill("output", &o.output, file.output)
 	fill("log-format", &o.logFormat, file.logFormat)

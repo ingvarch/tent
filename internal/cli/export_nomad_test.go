@@ -37,10 +37,9 @@ var exportFiles = []string{"ca.pem", "cli.pem", "cli-key.pem", "token"}
 func exportEnv(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home) // the home directory on Windows
-	t.Setenv("XDG_CACHE_HOME", "")
-	t.Setenv("SHELL", "/bin/sh")
+	setenv(t, "HOME", home)
+	setenv(t, "XDG_CACHE_HOME", "")
+	setenv(t, "SHELL", "/bin/sh")
 	return home
 }
 
@@ -158,6 +157,7 @@ var wroteNotice = regexp.MustCompile(
 // TestExportNomadPrintsTheLinesForSh writes the four files and prints the six lines for sh on stdout, and the notice
 // with the end of the access and the token's accessor on stderr.
 func TestExportNomadPrintsTheLinesForSh(t *testing.T) {
+	t.Parallel()
 	exportEnv(t)
 	dir := filepath.Join(t.TempDir(), "access")
 	synctest.Test(t, func(t *testing.T) {
@@ -184,6 +184,7 @@ func TestExportNomadPrintsTheLinesForSh(t *testing.T) {
 
 // TestExportNomadPrintsTheLinesForFish prints the lines for fish when --shell says so.
 func TestExportNomadPrintsTheLinesForFish(t *testing.T) {
+	t.Parallel()
 	exportEnv(t)
 	dir := filepath.Join(t.TempDir(), "access")
 	synctest.Test(t, func(t *testing.T) {
@@ -199,6 +200,7 @@ func TestExportNomadPrintsTheLinesForFish(t *testing.T) {
 
 // TestExportNomadShellFromTheLogin takes the shell from $SHELL when --shell is not given, and lets the flag win.
 func TestExportNomadShellFromTheLogin(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, login string
 		args        []string
@@ -211,7 +213,7 @@ func TestExportNomadShellFromTheLogin(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			exportEnv(t)
-			t.Setenv("SHELL", tc.login)
+			setenv(t, "SHELL", tc.login)
 			dir := filepath.Join(t.TempDir(), "access")
 			synctest.Test(t, func(t *testing.T) {
 				s, f := builtCluster(t)
@@ -232,6 +234,7 @@ func TestExportNomadShellFromTheLogin(t *testing.T) {
 
 // TestExportNomadRefusesAnUnknownShell fails before it makes the directory or asks Nomad for a token.
 func TestExportNomadRefusesAnUnknownShell(t *testing.T) {
+	t.Parallel()
 	exportEnv(t)
 	dir := filepath.Join(t.TempDir(), "access")
 	synctest.Test(t, func(t *testing.T) {
@@ -258,6 +261,7 @@ func wantNothingExported(t *testing.T, dir string, nomad *nomadfake.Fake) {
 // TestExportNomadLinesSetTheVariablesInARealShell runs the printed lines in sh and in fish: they set the six
 // variables, and NOMAD_TOKEN reads the token file.
 func TestExportNomadLinesSetTheVariablesInARealShell(t *testing.T) {
+	t.Parallel()
 	for _, shell := range shellenvtest.Shells {
 		t.Run(shell, func(t *testing.T) {
 			exportEnv(t)
@@ -287,6 +291,7 @@ func TestExportNomadLinesSetTheVariablesInARealShell(t *testing.T) {
 // TestExportNomadFiles checks what each file holds: the stored CA bundle, a client certificate of the cluster's CA
 // that pairs with the key, and a token of one line that is not the bootstrap secret. Modes are 0700 and 0600.
 func TestExportNomadFiles(t *testing.T) {
+	t.Parallel()
 	exportEnv(t)
 	dir := filepath.Join(t.TempDir(), "access")
 	synctest.Test(t, func(t *testing.T) {
@@ -357,6 +362,7 @@ func wantClientCertificate(t *testing.T, files map[string]string) {
 
 // TestExportNomadKeepsTheModeOfAnExistingDirectory leaves a directory that exists as it is, and writes 0600 files.
 func TestExportNomadKeepsTheModeOfAnExistingDirectory(t *testing.T) {
+	t.Parallel()
 	exportEnv(t)
 	dir := filepath.Join(t.TempDir(), "access")
 	if err := os.Mkdir(dir, 0o755); err != nil {
@@ -383,6 +389,7 @@ func TestExportNomadKeepsTheModeOfAnExistingDirectory(t *testing.T) {
 // TestExportNomadReplacesTheFilesOfAnEarlierRun gives the second run's files in the place of the first run's, with no
 // temporary file left.
 func TestExportNomadReplacesTheFilesOfAnEarlierRun(t *testing.T) {
+	t.Parallel()
 	exportEnv(t)
 	dir := filepath.Join(t.TempDir(), "access")
 	synctest.Test(t, func(t *testing.T) {
@@ -413,6 +420,7 @@ func TestExportNomadReplacesTheFilesOfAnEarlierRun(t *testing.T) {
 // TestExportNomadReplacesAFileWithAWiderMode gives each file the mode 0600 when a file with a wider mode is in its
 // place, and renames the new file over the old one: another name of the old token file keeps the old content.
 func TestExportNomadReplacesAFileWithAWiderMode(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows has no permission bits")
 	}
@@ -459,6 +467,7 @@ func TestExportNomadReplacesAFileWithAWiderMode(t *testing.T) {
 // TestExportNomadFailedRenameLeavesTheFilesBeforeIt stops at the first file it cannot rename into place, names its
 // final path, replaces no file after it, leaves the files before it replaced and no temporary file.
 func TestExportNomadFailedRenameLeavesTheFilesBeforeIt(t *testing.T) {
+	t.Parallel()
 	for i, blocked := range exportFiles {
 		t.Run(blocked, func(t *testing.T) {
 			exportEnv(t)
@@ -494,6 +503,7 @@ func TestExportNomadFailedRenameLeavesTheFilesBeforeIt(t *testing.T) {
 // TestWriteFilesKeepsTheEarlierRunWhenALaterFileCannotBeWritten fails on the third file, whose temporary file cannot
 // be created, and leaves the four files of the earlier run as they were, with no temporary file.
 func TestWriteFilesKeepsTheEarlierRunWhenALaterFileCannotBeWritten(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	var files []exportFile
 	old := map[string]string{}
@@ -519,6 +529,7 @@ func TestWriteFilesKeepsTheEarlierRunWhenALaterFileCannotBeWritten(t *testing.T)
 
 // TestExportNomadMakesTheDirectoryBeforeAskingNomad fails when the directory cannot be made, and Nomad got no call.
 func TestExportNomadMakesTheDirectoryBeforeAskingNomad(t *testing.T) {
+	t.Parallel()
 	exportEnv(t)
 	file := writeFile(t, "a file", "")
 	dir := filepath.Join(file, "access") // below a file
@@ -540,6 +551,7 @@ func TestExportNomadMakesTheDirectoryBeforeAskingNomad(t *testing.T) {
 // TestExportNomadWritesNothingWhenTheAccessFails passes on the error of the use case and leaves no directory that
 // this run made, though the directory is made before the access is: the cluster was never built.
 func TestExportNomadWritesNothingWhenTheAccessFails(t *testing.T) {
+	t.Parallel()
 	exportEnv(t)
 	parent := filepath.Join(t.TempDir(), "new parent")
 	dir := filepath.Join(parent, "access")
@@ -562,6 +574,7 @@ func TestExportNomadWritesNothingWhenTheAccessFails(t *testing.T) {
 // TestExportNomadKeepsADirectoryThatExistedWhenTheAccessFails leaves an empty directory that existed, and one with a
 // file, as they were.
 func TestExportNomadKeepsADirectoryThatExistedWhenTheAccessFails(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		file bool
@@ -598,6 +611,7 @@ func TestExportNomadKeepsADirectoryThatExistedWhenTheAccessFails(t *testing.T) {
 // TestExportNomadKeepsADirectoryItMadeOnceItHoldsAFile leaves the directory that this run made when the access fails
 // and the directory is no longer empty: another run wrote its token there meanwhile.
 func TestExportNomadKeepsADirectoryItMadeOnceItHoldsAFile(t *testing.T) {
+	t.Parallel()
 	exportEnv(t)
 	dir := filepath.Join(t.TempDir(), "access")
 	synctest.Test(t, func(t *testing.T) {
@@ -624,9 +638,10 @@ func TestExportNomadKeepsADirectoryItMadeOnceItHoldsAFile(t *testing.T) {
 // TestExportNomadRefusesAClusterNameThatIsNotAClusterName follows the rule of the use case before it makes the
 // default directory: PROD names the state of prod on a disk that ignores case.
 func TestExportNomadRefusesAClusterNameThatIsNotAClusterName(t *testing.T) {
+	t.Parallel()
 	exportEnv(t)
 	cache := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", cache)
+	setenv(t, "XDG_CACHE_HOME", cache)
 	s := withCluster(t)
 
 	got, nomad := runExport(t, vultrfake.New(), "export", "nomad", "PROD", "--state", s.url)
@@ -644,6 +659,7 @@ func TestExportNomadRefusesAClusterNameThatIsNotAClusterName(t *testing.T) {
 
 // TestExportNomadRefusesATTLNotAboveZero fails in the form of --wait and --shell before it makes the directory.
 func TestExportNomadRefusesATTLNotAboveZero(t *testing.T) {
+	t.Parallel()
 	for ttl, shown := range map[string]string{"0": "0s", "-1h": "-1h0m0s"} {
 		t.Run(ttl, func(t *testing.T) {
 			exportEnv(t)
@@ -662,6 +678,7 @@ func TestExportNomadRefusesATTLNotAboveZero(t *testing.T) {
 
 // TestExportNomadTTLOutsideNomadsLimits says what Nomad says, and leaves no file and no directory.
 func TestExportNomadTTLOutsideNomadsLimits(t *testing.T) {
+	t.Parallel()
 	exportEnv(t)
 	dir := filepath.Join(t.TempDir(), "access")
 	synctest.Test(t, func(t *testing.T) {
@@ -684,6 +701,7 @@ func TestExportNomadTTLOutsideNomadsLimits(t *testing.T) {
 // TestExportNomadDefaultDirectory writes to $XDG_CACHE_HOME/tent/<cluster> when it is absolute, else under the home
 // directory in .cache/tent/<cluster>.
 func TestExportNomadDefaultDirectory(t *testing.T) {
+	t.Parallel()
 	xdg := t.TempDir()
 	for _, tc := range []struct {
 		name, xdg string
@@ -697,8 +715,7 @@ func TestExportNomadDefaultDirectory(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := exportEnv(t)
-			t.Setenv("XDG_CACHE_HOME", tc.xdg)
-			t.Chdir(t.TempDir()) // where a relative XDG_CACHE_HOME would point
+			setenv(t, "XDG_CACHE_HOME", tc.xdg)
 			synctest.Test(t, func(t *testing.T) {
 				s, f := builtCluster(t)
 
@@ -723,9 +740,9 @@ func TestExportNomadDefaultDirectory(t *testing.T) {
 // TestExportNomadWithoutAHomeAsksForDir fails before it reaches anything when there is no place for the default
 // directory.
 func TestExportNomadWithoutAHomeAsksForDir(t *testing.T) {
+	t.Parallel()
 	exportEnv(t)
-	t.Setenv("HOME", "")
-	t.Setenv("USERPROFILE", "")
+	setenv(t, "HOME", "")
 	synctest.Test(t, func(t *testing.T) {
 		s, f := builtCluster(t)
 
@@ -771,6 +788,7 @@ func TestExportNomadMakesRelativeDirectoryAbsolute(t *testing.T) {
 // TestExportNomadStructuredOutput prints one object in JSON and in YAML: the cluster, the directory, the address, the
 // paths, the server name, the accessor and the end, and no shell line; the notice stays on stderr.
 func TestExportNomadStructuredOutput(t *testing.T) {
+	t.Parallel()
 	for _, format := range []string{"json", "yaml"} {
 		t.Run(format, func(t *testing.T) {
 			exportEnv(t)
@@ -820,6 +838,7 @@ func TestExportNomadStructuredOutput(t *testing.T) {
 // TestExportNomadShowsNoSecrets keeps the token's secret and the key out of both streams, also with -vv and in each
 // format, and keeps the bootstrap secret and the CA key out of the files.
 func TestExportNomadShowsNoSecrets(t *testing.T) {
+	t.Parallel()
 	for _, format := range []string{"table", "json", "yaml"} {
 		t.Run(format, func(t *testing.T) {
 			exportEnv(t)
@@ -850,9 +869,10 @@ func TestExportNomadShowsNoSecrets(t *testing.T) {
 
 // TestExportNomadChecksTheClusterName refuses a name that is no path segment before it makes a directory.
 func TestExportNomadChecksTheClusterName(t *testing.T) {
+	t.Parallel()
 	exportEnv(t)
 	cache := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", cache)
+	setenv(t, "XDG_CACHE_HOME", cache)
 	s := withCluster(t)
 
 	got, nomad := runExport(t, vultrfake.New(), "export", "nomad", "../x", "--state", s.url)
@@ -870,9 +890,10 @@ func TestExportNomadChecksTheClusterName(t *testing.T) {
 
 // TestExportNomadNeedsAState fails before it makes the directory when no state store is set.
 func TestExportNomadNeedsAState(t *testing.T) {
+	t.Parallel()
 	exportEnv(t)
-	t.Setenv(envState, "")
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	setenv(t, envState, "")
+	setenv(t, "XDG_CONFIG_HOME", t.TempDir())
 	dir := filepath.Join(t.TempDir(), "access")
 
 	got, _ := runExport(t, vultrfake.New(), "export", "nomad", "prod", "--dir", dir)
@@ -887,6 +908,7 @@ func TestExportNomadNeedsAState(t *testing.T) {
 
 // TestExportAloneShowsItsHelp lists nomad.
 func TestExportAloneShowsItsHelp(t *testing.T) {
+	t.Parallel()
 	got := runIn(t, "", "export")
 
 	if got.code != 0 || !strings.Contains(got.out, "nomad") || got.errOut != "" {
@@ -896,6 +918,7 @@ func TestExportAloneShowsItsHelp(t *testing.T) {
 
 // TestExportNomadNamesTheTokenAfterTheOperator asks Nomad for a token named "tent export nomad <owner>@<host>".
 func TestExportNomadNamesTheTokenAfterTheOperator(t *testing.T) {
+	t.Parallel()
 	exportEnv(t)
 	dir := filepath.Join(t.TempDir(), "access")
 	synctest.Test(t, func(t *testing.T) {
@@ -913,6 +936,7 @@ func TestExportNomadNamesTheTokenAfterTheOperator(t *testing.T) {
 // TestExportNomadNamesTheServerAfterTheRegion sets NOMAD_TLS_SERVER_NAME to the name that the servers' certificate
 // has in the cluster's Nomad region, and the operator certificate is for that region.
 func TestExportNomadNamesTheServerAfterTheRegion(t *testing.T) {
+	t.Parallel()
 	exportEnv(t)
 	dir := filepath.Join(t.TempDir(), "access")
 	synctest.Test(t, func(t *testing.T) {
@@ -947,6 +971,7 @@ func (a earlyToken) CreateToken(ctx context.Context, req nomadops.TokenRequest) 
 // TestExportNomadPrintsTheEndInWholeSeconds cuts the fraction of a second off the end of the access, which is the
 // token's when that ends before the certificate.
 func TestExportNomadPrintsTheEndInWholeSeconds(t *testing.T) {
+	t.Parallel()
 	exportEnv(t)
 	dir := filepath.Join(t.TempDir(), "access")
 	synctest.Test(t, func(t *testing.T) {
@@ -972,6 +997,7 @@ func TestExportNomadPrintsTheEndInWholeSeconds(t *testing.T) {
 // TestExportNomadNamesTheFileItCannotCreate names the final path of the first file when the directory takes no new
 // file, and leaves nothing in it.
 func TestExportNomadNamesTheFileItCannotCreate(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("needs a directory that refuses a new file: no permission bits on Windows, and root ignores them")
 	}

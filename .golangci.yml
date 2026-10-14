@@ -232,6 +232,9 @@ linters:
       forbid:
         - pattern: ^panic$
           msg: library code returns errors instead of panicking
+        # The tests of internal/cli run in parallel, so they leave the process's state alone; see the exclusions.
+        - pattern: ^(os\.(Setenv|Unsetenv|Chdir|Args)|signal\.Notify)$
+          msg: process state is shared by the parallel tests of internal/cli
     nolintlint:
       require-explanation: true
       require-specific: true
@@ -239,6 +242,16 @@ linters:
     rules:
       - path: _test\.go
         linters: [forbidigo]
+        text: library code returns errors
+      # Process state is forbidden in the tests of internal/cli only, except on the lines of root_test.go where
+      # TestMain sets GORACE and the serial TestNoArgsIgnoresProcessArgs sets os.Args.
+      - path-except: ^internal/cli/.+_test\.go$
+        linters: [forbidigo]
+        text: shared by the parallel tests
+      - path: ^internal/cli/root_test\.go$
+        linters: [forbidigo]
+        text: shared by the parallel tests
+        source: os\.Setenv\("GORACE"|os\.Args\b
       - path: ^cmd/
         linters: [forbidigo]
 
