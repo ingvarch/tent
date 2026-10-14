@@ -61,6 +61,11 @@ type Store interface {
 	String() string
 }
 
+// Checked returns backend behind the checks that Open puts before its own backends: it rejects invalid paths,
+// prefixes and conditions and done contexts before backend sees the call, and names the operation and the path in
+// every error. It is for backends outside this package, whose tests need a store that behaves as Open's.
+func Checked(backend Store) Store { return checkedStore{backend} }
+
 // checkedStore is the Store that Open returns. It rejects invalid calls before the backend sees them, so backends
 // trust their input, and it names the operation and the path in every error.
 type checkedStore struct{ backend Store }
