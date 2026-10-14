@@ -46,11 +46,68 @@ func haCreateArgs(cfg settings, cluster, sshPub, runner string) []string {
 		"--servers", strconv.Itoa(haServers), "--workers", strconv.Itoa(haWorkers))
 }
 
+// upgradeNodes is the size of the combined group of the upgrade scenario.
+const upgradeNodes = 3
+
 // upgradeCreateArgs are the arguments of tent that create the cluster of the upgrade scenario: a combined group of
 // three nodes on the old Nomad version and the last image.
 func upgradeCreateArgs(cfg settings, cluster, sshPub, runner string) []string {
 	return scenarioCreateArgs(cfg, cluster, cfg.upgradeImage(), sshPub, runner,
-		"--combined", "--servers", "3", "--nomad-version", cfg.UpgradeFrom)
+		"--combined", "--servers", strconv.Itoa(upgradeNodes), "--nomad-version", cfg.UpgradeFrom)
+}
+
+// upgradeTarget takes the output of `tent get clusters <name> -o json`, an array of one cluster, and returns its
+// spec.nomad.version, which must differ from the version that the cluster was built on.
+func upgradeTarget(clustersJSON []byte, from string) (string, error) {
+	var clusters []struct {
+		Spec struct {
+			Nomad struct {
+				Version string
+			}
+		}
+	}
+	if err := json.Unmarshal(clustersJSON, &clusters); err != nil {
+		return "", fmt.Errorf("read the clusters: %w", err)
+	}
+	if len(clusters) != 1 {
+		return "", fmt.Errorf("got %d clusters, want 1", len(clusters))
+	}
+	version := clusters[0].Spec.Nomad.Version
+	if version == "" {
+		return "", errors.New("the cluster has no spec.nomad.version")
+	}
+	if version == from {
+		return "", fmt.Errorf("spec.nomad.version is still %s", from)
+	}
+	return version, nil
+}
+
+// untestedVersionPhrase is what tent's warning says about a Nomad version that its channel has not tested.
+const untestedVersionPhrase = "is not tested by this tent"
+
+// untestedVersionWarning returns the line of stderr that warns about an untested Nomad version, or "" when there is
+// none.
+func untestedVersionWarning(stderr []byte) string {
+	for line := range strings.Lines(string(stderr)) {
+		if strings.Contains(line, untestedVersionPhrase) {
+			return strings.TrimSpace(line)
+		}
+	}
+	return ""
+}
+
+// checkValidVersion checks that the output of tent validate cluster has the line "cluster <name> is valid: ... run
+// Nomad <version>".
+func checkValidVersion(stdout []byte, cluster, version string) error {
+	prefix := "cluster " + cluster + " is valid: "
+	suffix := " run Nomad " + version
+	for line := range strings.Lines(string(stdout)) {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, prefix) && strings.HasSuffix(line, suffix) {
+			return nil
+		}
+	}
+	return fmt.Errorf("validate does not say %q ... %q:\n%s", prefix, suffix, lastLines(string(stdout), stderrTailLines))
 }
 
 // withRollChange takes the output of `tent get clusters <name> -o json`, an array of one cluster, and returns that

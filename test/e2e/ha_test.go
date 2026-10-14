@@ -15,11 +15,8 @@ import (
 )
 
 const (
-	updateTimeout       = 25 * time.Minute
 	rollServersTimeout  = 60 * time.Minute
 	rollWorkersTimeout  = 45 * time.Minute
-	rolledEvery         = 10 * time.Second
-	rolledTimeout       = 2 * time.Minute
 	bootEvery           = 5 * time.Second
 	bootTimeout         = 6 * time.Minute
 	registrationEvery   = 5 * time.Second
@@ -31,8 +28,6 @@ const (
 	// they answer or not.
 	restoreSettle   = 6 * time.Minute
 	pairBackTimeout = 10 * time.Minute
-	// specTimeout bounds a command that reads or writes the specs in the state store and reaches no cloud.
-	specTimeout = time.Minute
 )
 
 // TestHA builds a cluster of three servers and two workers, changes its specs so that every machine is outdated, and

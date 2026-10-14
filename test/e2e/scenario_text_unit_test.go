@@ -800,3 +800,60 @@ func TestSleepContextWaitsTheTimeAndEndsWithTheContext(t *testing.T) {
 		t.Errorf("sleepContext kept waiting for the time after the context ended")
 	}
 }
+
+func TestUpgradeTargetReadsTheNomadVersionOfTheSpec(t *testing.T) {
+	got, err := upgradeTarget([]byte(`[{"spec":{"nomad":{"version":"2.0.7"}}}]`), "2.0.6")
+	if err != nil || got != "2.0.7" {
+		t.Errorf("upgradeTarget = %q, %v; want 2.0.7", got, err)
+	}
+}
+
+func TestUpgradeTargetRefusesWhatIsNotANewVersion(t *testing.T) {
+	for name, in := range map[string]string{
+		"the old version":            `[{"spec":{"nomad":{"version":"2.0.6"}}}]`,
+		"no version":                 `[{"spec":{"nomad":{}}}]`,
+		"no nomad":                   `[{"spec":{}}]`,
+		"a version that is a number": `[{"spec":{"nomad":{"version":2}}}]`,
+		"an empty array":             `[]`,
+		"two clusters":               `[{"spec":{}},{"spec":{}}]`,
+		"not JSON":                   `spec: {}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, err := upgradeTarget([]byte(in), "2.0.6"); err == nil {
+				t.Errorf("upgradeTarget = %q, want an error", got)
+			}
+		})
+	}
+}
+
+func TestUntestedVersionWarningFindsTheLineOfTheWarning(t *testing.T) {
+	stderr := "WARNING: another warning\nWARNING: Nomad 2.0.6 is not tested by this tent; channel stable tests 2.0.7\n"
+	want := "WARNING: Nomad 2.0.6 is not tested by this tent; channel stable tests 2.0.7"
+	if got := untestedVersionWarning([]byte(stderr)); got != want {
+		t.Errorf("warning = %q, want %q", got, want)
+	}
+	if got := untestedVersionWarning([]byte("WARNING: another warning\n")); got != "" {
+		t.Errorf("warning = %q for stderr without one, want none", got)
+	}
+}
+
+func TestCheckValidVersionWantsTheVersionOnTheValidLine(t *testing.T) {
+	ok := "cluster e2e-a-upgrade is valid: 3 servers and 0 clients run Nomad 2.0.7\n"
+	if err := checkValidVersion([]byte(ok), "e2e-a-upgrade", "2.0.7"); err != nil {
+		t.Errorf("checkValidVersion: %v", err)
+	}
+	for name, out := range map[string]string{
+		"another version":       "cluster e2e-a-upgrade is valid: 3 servers and 0 clients run Nomad 2.0.6\n",
+		"a longer version":      "cluster e2e-a-upgrade is valid: 3 servers and 0 clients run Nomad 2.0.70\n",
+		"another cluster":       "cluster other is valid: 3 servers and 0 clients run Nomad 2.0.7\n",
+		"no valid line":         "cluster e2e-a-upgrade has problems\n",
+		"the version elsewhere": "Nomad 2.0.7 cluster e2e-a-upgrade is valid: 3 servers and 0 clients\n",
+		"empty":                 "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := checkValidVersion([]byte(out), "e2e-a-upgrade", "2.0.7"); err == nil {
+				t.Errorf("checkValidVersion accepted %q", out)
+			}
+		})
+	}
+}

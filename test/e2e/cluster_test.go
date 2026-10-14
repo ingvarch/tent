@@ -27,6 +27,12 @@ const (
 	previewTimeout = 5 * time.Minute
 	// pairAllocations is the number of allocations of the job in testdata/web-pair.nomad.hcl.
 	pairAllocations = 2
+	updateTimeout   = 25 * time.Minute
+	// rolledEvery and rolledTimeout bound the poll for what a roll changes in Vultr's and Nomad's lists.
+	rolledEvery   = 10 * time.Second
+	rolledTimeout = 2 * time.Minute
+	// specTimeout bounds a command that reads or writes the specs in the state store and reaches no cloud.
+	specTimeout = time.Minute
 )
 
 // cluster is a cluster of a scenario and what its steps hand to each other.
