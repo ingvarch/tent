@@ -15,7 +15,7 @@ Providers, in order:
 **Status:** M0 Foundation (2026-09-27), M1 Vultr infrastructure (2026-09-28), M2 Nomad bootstrap (2026-10-07) and M3
 Day-2 operations (2026-10-14) are complete. v0.1.0, the first release that builds a Nomad cluster, was tagged on
 2026-10-07: archives, `.deb` and `.rpm` packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries
-that its nodes download.
+that its nodes download. v0.2.0, with the day-2 operations of M3, was tagged on 2026-10-14.
 - The skeleton is in place: Go module, `tent version`, Makefile, lint rules, CI on Linux, macOS and Windows, and a
   GoReleaser release pipeline. The repository is public, the release secrets are set, and the archives and packages
   ship third-party licence notices (ADR-0020). Renovate updates the Go modules and GitHub Actions.
