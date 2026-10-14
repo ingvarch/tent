@@ -5,17 +5,19 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 )
 
 // The outcomes of a poll. The leader outcome is led, leaderless or unreached; the service outcome is served,
-// unserved or unreached.
+// unserved, unchecked or unreached.
 const (
 	probeLed        = "led"
 	probeLeaderless = "leaderless"
 	probeUnreached  = "unreached"
+	probeUnchecked  = "unchecked"
 	probeServed     = "served"
 	probeUnserved   = "unserved"
 )
@@ -42,9 +44,13 @@ type probeLimits struct {
 	Leaderless time.Duration
 	// Unserved is the longest time without a healthy allocation: two check intervals of the job.
 	Unserved time.Duration
-	// Unreached is the longest time that a read can fail, for the leader and for the service each: a client whose
-	// server was stopped fails its checks reads for 5 to 15 s.
+	// Unreached is the longest time that no server answers the leader read, or that the allocations or the
+	// registrations read fails.
 	Unreached time.Duration
+	// Unchecked is the longest time that every checks read can fail while the allocations and the registrations
+	// answer: a client keeps its connection to a stopped server until its keepalive fails and its next heartbeat
+	// reaches another one, which took 37 s on a real run.
+	Unchecked time.Duration
 	// Gap is the longest time between the starts of two polls; a longer one means the probe saw nothing.
 	Gap time.Duration
 	// MinPolls is the fewest polls that make a run worth judging.
@@ -56,6 +62,7 @@ var defaultProbeLimits = probeLimits{
 	Leaderless: 10 * time.Second,
 	Unserved:   10 * time.Second,
 	Unreached:  30 * time.Second,
+	Unchecked:  60 * time.Second,
 	Gap:        30 * time.Second,
 	MinPolls:   10,
 }
@@ -67,7 +74,7 @@ type probeRecord struct {
 	// Leader is led, leaderless or unreached; LeaderAddr is the leader that a server named, if any.
 	Leader     string
 	LeaderAddr string
-	// Service is served, unserved or unreached.
+	// Service is served, unserved, unchecked or unreached.
 	Service string
 	// Detail holds the errors of the reads, and the answers about the service when it is not served.
 	Detail string
@@ -341,8 +348,8 @@ func (p *probe) readService(ctx context.Context, n *nomadAPI) (outcome, detail s
 		return probeUnreached, strings.Join(errs, "; ")
 	case a.missing(p.cfg.Service) == nil:
 		return probeServed, strings.Join(errs, "; ")
-	case len(running) > 0 && failed == len(running):
-		return probeUnreached, strings.Join(errs, "; ")
+	case len(running) > 0 && failed == len(running) && slices.ContainsFunc(running, a.hasRegistration):
+		return probeUnchecked, strings.Join(errs, "; ")
 	default:
 		return probeUnserved, strings.Join(append(errs, a.String()), "; ")
 	}
@@ -376,6 +383,7 @@ func (l probeLimits) serviceKinds() map[string]probeKind {
 		probeServed:    {name: "served"},
 		probeUnserved:  {name: "unserved", limit: l.Unserved, checked: true},
 		probeUnreached: {name: "service unreached", limit: l.Unreached, checked: true},
+		probeUnchecked: {name: "service unchecked", limit: l.Unchecked, checked: true},
 	}
 }
 
@@ -388,10 +396,13 @@ type probeSummary struct {
 
 func (s probeSummary) String() string {
 	var counts, longest []string
-	for _, kind := range []string{"led", "leaderless", "leader unreached", "served", "unserved", "service unreached"} {
+	counted := []string{"led", "leaderless", "leader unreached", "served", "unserved", "service unreached",
+		"service unchecked"}
+	stretched := []string{"leaderless", "leader unreached", "unserved", "service unreached", "service unchecked"}
+	for _, kind := range counted {
 		counts = append(counts, fmt.Sprintf("%s %d", kind, s.counts[kind]))
 	}
-	for _, kind := range []string{"leaderless", "leader unreached", "unserved", "service unreached"} {
+	for _, kind := range stretched {
 		longest = append(longest, fmt.Sprintf("%s %s", kind, s.longest[kind]))
 	}
 	return fmt.Sprintf("polls: %s; longest stretch: %s; longest gap %s", strings.Join(counts, ", "),

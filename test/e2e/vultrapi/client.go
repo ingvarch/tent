@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+	_ "time/tzdata" // the zone of a zoneless date must load on Windows too
 )
 
 const (
@@ -171,13 +172,24 @@ func (c *Client) DeleteSSHKey(ctx context.Context, id string) error {
 	return c.delete(ctx, "/ssh-keys/"+url.PathEscape(id))
 }
 
-// parseCreated reads the creation date of an object; Vultr writes RFC 3339 with an offset.
+// zonelessCreated is the form of a creation date without a zone.
+const zonelessCreated = "2006-01-02 15:04:05"
+
+// parseCreated reads the creation date of an object. Vultr writes RFC 3339 with an offset. On 2026-10-14 its
+// firewall list gave a group made at 00:46:46 UTC the date "2026-10-13 20:46:46": no zone, in US Eastern time.
 func parseCreated(kind, id, value string) (time.Time, error) {
 	t, err := time.Parse(time.RFC3339, value)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("vultr: %s %s: creation date %q: %w", kind, id, value, err)
+	if err == nil {
+		return t, nil
 	}
-	return t, nil
+	eastern, zoneErr := time.LoadLocation("America/New_York")
+	if zoneErr != nil {
+		return time.Time{}, fmt.Errorf("vultr: %s %s: creation date %q: %w", kind, id, value, zoneErr)
+	}
+	if t, zonelessErr := time.ParseInLocation(zonelessCreated, value, eastern); zonelessErr == nil {
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("vultr: %s %s: creation date %q: %w", kind, id, value, err)
 }
 
 // listAll reads every page of a list and turns each element of the array under key into a T. It fails when a

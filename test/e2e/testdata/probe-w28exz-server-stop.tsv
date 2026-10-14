@@ -1,0 +1,17 @@
+start	took_ms	leader	leader_address	service	detail
+2026-10-14T01:07:20.471Z	185	led	10.64.0.8:4647	served	
+2026-10-14T01:07:21.469Z	192	led	10.64.0.8:4647	served	
+2026-10-14T01:07:22.471Z	271	led	10.64.0.8:4647	served	
+2026-10-14T01:07:23.471Z	186	led	10.64.0.8:4647	served	
+2026-10-14T01:07:24.471Z	224	led	10.64.0.8:4647	served	
+2026-10-14T01:07:25.469Z	196	led	10.64.0.8:4647	served	
+2026-10-14T01:07:26.471Z	211	led	10.64.0.8:4647	served	
+2026-10-14T01:07:27.471Z	199	led	10.64.0.8:4647	served	
+2026-10-14T01:07:28.471Z	203	led	10.64.0.8:4647	served	
+2026-10-14T01:07:29.471Z	7063	led	10.64.0.8:4647	unreached	nomad: GET /v1/job/e2e-web/allocations: Get "https://199.247.24.188:4646/v1/job/e2e-web/allocations": context deadline exceeded
+2026-10-14T01:07:36.534Z	10053	led	10.64.0.8:4647	unchecked	https://199.247.24.188:4646: nomad: GET /v1/status/leader?stale=true: Get "https://199.247.24.188:4646/v1/status/leader?stale=true": context deadline exceeded; nomad: GET /v1/allocation/0456946b-2847-41bb-c71f-1e89ed879f67/checks: Get "https://136.244.110.51:4646/v1/allocation/0456946b-2847-41bb-c71f-1e89ed879f67/checks": context deadline exceeded; nomad: GET /v1/allocation/19d8eebe-0749-7cfa-681e-55d16102ee2a/checks: Get "https://136.244.110.51:4646/v1/allocation/19d8eebe-0749-7cfa-681e-55d16102ee2a/checks": context deadline exceeded
+2026-10-14T01:07:46.588Z	10059	led	10.64.0.8:4647	unchecked	https://199.247.24.188:4646: nomad: GET /v1/status/leader?stale=true: Get "https://199.247.24.188:4646/v1/status/leader?stale=true": context deadline exceeded; nomad: GET /v1/allocation/0456946b-2847-41bb-c71f-1e89ed879f67/checks: Get "https://136.244.110.51:4646/v1/allocation/0456946b-2847-41bb-c71f-1e89ed879f67/checks": context deadline exceeded; nomad: GET /v1/allocation/19d8eebe-0749-7cfa-681e-55d16102ee2a/checks: Get "https://136.244.110.51:4646/v1/allocation/19d8eebe-0749-7cfa-681e-55d16102ee2a/checks": context deadline exceeded
+2026-10-14T01:07:56.648Z	10055	led	10.64.0.8:4647	unchecked	https://199.247.24.188:4646: nomad: GET /v1/status/leader?stale=true: Get "https://199.247.24.188:4646/v1/status/leader?stale=true": context deadline exceeded; nomad: GET /v1/allocation/0456946b-2847-41bb-c71f-1e89ed879f67/checks: Get "https://136.244.110.51:4646/v1/allocation/0456946b-2847-41bb-c71f-1e89ed879f67/checks": context deadline exceeded; nomad: GET /v1/allocation/19d8eebe-0749-7cfa-681e-55d16102ee2a/checks: Get "https://136.244.110.51:4646/v1/allocation/19d8eebe-0749-7cfa-681e-55d16102ee2a/checks": context deadline exceeded
+2026-10-14T01:08:06.704Z	3201	led	10.64.0.8:4647	served	https://199.247.24.188:4646: nomad: GET /v1/status/leader?stale=true: Get "https://199.247.24.188:4646/v1/status/leader?stale=true": context deadline exceeded
+2026-10-14T01:08:09.906Z	3142	led	10.64.0.8:4647	served	https://199.247.24.188:4646: nomad: GET /v1/status/leader?stale=true: Get "https://199.247.24.188:4646/v1/status/leader?stale=true": context deadline exceeded
+2026-10-14T01:08:13.048Z	187	led	10.64.0.8:4647	served	

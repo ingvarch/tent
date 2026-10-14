@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +33,7 @@ func TestDefaultProbeLimitsAreThoseOfTheScenarios(t *testing.T) {
 		Leaderless: 10 * time.Second,
 		Unserved:   10 * time.Second,
 		Unreached:  30 * time.Second,
+		Unchecked:  60 * time.Second,
 		Gap:        30 * time.Second,
 		MinPolls:   10,
 	}
@@ -44,8 +47,9 @@ func TestProbeVerdictPassesASteadyRunAndCountsIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("probeVerdict: %v", err)
 	}
-	want := "polls: led 20, leaderless 0, leader unreached 0, served 20, unserved 0, service unreached 0; " +
-		"longest stretch: leaderless 0s, leader unreached 0s, unserved 0s, service unreached 0s; longest gap 1s"
+	want := "polls: led 20, leaderless 0, leader unreached 0, served 20, unserved 0, service unreached 0, " +
+		"service unchecked 0; longest stretch: leaderless 0s, leader unreached 0s, unserved 0s, service unreached 0s, " +
+		"service unchecked 0s; longest gap 1s"
 	if got := summary.String(); got != want {
 		t.Errorf("summary =\n%s\nwant\n%s", got, want)
 	}
@@ -63,12 +67,16 @@ func TestProbeVerdictSummaryNamesTheLongestStretchOfEachKind(t *testing.T) {
 		records[i].Leader = probeUnreached
 		records[i].Service = probeUnreached
 	}
+	for i := 26; i < 28; i++ {
+		records[i].Service = probeUnchecked
+	}
 	summary, err := probeVerdict(records, defaultProbeLimits)
 	if err != nil {
 		t.Fatalf("probeVerdict: %v", err)
 	}
-	want := "polls: led 22, leaderless 3, leader unreached 5, served 21, unserved 4, service unreached 5; " +
-		"longest stretch: leaderless 3s, leader unreached 5s, unserved 4s, service unreached 5s; longest gap 1s"
+	want := "polls: led 22, leaderless 3, leader unreached 5, served 19, unserved 4, service unreached 5, " +
+		"service unchecked 2; longest stretch: leaderless 3s, leader unreached 5s, unserved 4s, " +
+		"service unreached 5s, service unchecked 2s; longest gap 1s"
 	if got := summary.String(); got != want {
 		t.Errorf("summary =\n%s\nwant\n%s", got, want)
 	}
@@ -86,6 +94,7 @@ func TestProbeVerdictStretchLimits(t *testing.T) {
 		{"leader unreached", defaultProbeLimits.Unreached, func(r *probeRecord) { r.Leader = probeUnreached }},
 		{"unserved", defaultProbeLimits.Unserved, func(r *probeRecord) { r.Service = probeUnserved }},
 		{"service unreached", defaultProbeLimits.Unreached, func(r *probeRecord) { r.Service = probeUnreached }},
+		{"service unchecked", defaultProbeLimits.Unchecked, func(r *probeRecord) { r.Service = probeUnchecked }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -112,6 +121,69 @@ func TestProbeVerdictStretchLimits(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// readProbeRecords reads a records file as probeLine writes it.
+func readProbeRecords(t *testing.T, path string) []probeRecord {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	if lines[0]+"\n" != probeHeader {
+		t.Fatalf("header = %q, want %q", lines[0], probeHeader)
+	}
+	var records []probeRecord
+	for _, line := range lines[1:] {
+		columns := strings.SplitN(line, "\t", 6)
+		if len(columns) != 6 {
+			t.Fatalf("line %q has %d columns, want 6", line, len(columns))
+		}
+		start, err := time.Parse(time.RFC3339Nano, columns[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		took, err := strconv.Atoi(columns[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		records = append(records, probeRecord{Start: start, Took: time.Duration(took) * time.Millisecond,
+			Leader: columns[2], LeaderAddr: columns[3], Service: columns[4], Detail: columns[5]})
+	}
+	return records
+}
+
+// TestProbeVerdictPassesTheServerStopOfRunW28exz judges the records of a hard stop of a server: an allocations read
+// through it timed out, then the clients kept their connection to it and every checks read timed out, 37 s in all.
+// The file is the run's records from 01:07:20 to 01:08:13, with the service column of the three polls whose
+// allocations and registrations reads answered set to unchecked, as the probe now writes it: one unreached poll of
+// 7 s and three unchecked polls of 30 s.
+func TestProbeVerdictPassesTheServerStopOfRunW28exz(t *testing.T) {
+	records := readProbeRecords(t, "testdata/probe-w28exz-server-stop.tsv")
+	summary, err := probeVerdict(records, defaultProbeLimits)
+	if err != nil {
+		t.Fatalf("probeVerdict: %v", err)
+	}
+	if got := summary.counts["service unreached"]; got != 1 {
+		t.Errorf("service unreached polls = %d, want 1", got)
+	}
+	if got := summary.counts["service unchecked"]; got != 3 {
+		t.Errorf("service unchecked polls = %d, want 3", got)
+	}
+	if got := summary.longest["service unreached"]; got < 7*time.Second || got > 8*time.Second {
+		t.Errorf("longest unreached stretch = %s, want about 7 s", got)
+	}
+	if got := summary.longest["service unchecked"]; got < 30*time.Second || got > 31*time.Second {
+		t.Errorf("longest unchecked stretch = %s, want about 30 s", got)
+	}
+	// A limit just under the stretch fails the same records.
+	tight := defaultProbeLimits
+	tight.Unchecked = 29 * time.Second
+	if _, err := probeVerdict(records, tight); err == nil ||
+		!strings.Contains(err.Error(), "service unchecked for") {
+		t.Errorf("verdict with a 29 s limit = %v, want a service unchecked breach", err)
 	}
 }
 
@@ -468,7 +540,24 @@ func TestPollServiceOutcomes(t *testing.T) {
 			a["GET /v1/service/e2e-web"] = fixed(200, registered)
 			a[checksPath(allocRunning)] = fixed(500, "no route to client")
 			a[checksPath(allocOther)] = fixed(500, "no route to client")
-		}, probeUnreached, "no route to client"},
+		}, probeUnchecked, "no route to client"},
+		{"checks reads of every allocation fail, one of them registered", func(a map[string]func() (int, string)) {
+			a["GET /v1/job/e2e-web/allocations"] = allocationsOf(allocRunning, allocOther)
+			a["GET /v1/service/e2e-web"] = fixed(200, `[{"AllocID":"`+allocOther+`"}]`)
+			a[checksPath(allocRunning)] = fixed(500, "no route to client")
+			a[checksPath(allocOther)] = fixed(500, "no route to client")
+		}, probeUnchecked, "no route to client"},
+		{"checks reads of every allocation fail, no registration", func(a map[string]func() (int, string)) {
+			a["GET /v1/job/e2e-web/allocations"] = allocationsOf(allocRunning, allocOther)
+			a["GET /v1/service/e2e-web"] = fixed(200, `[]`)
+			a[checksPath(allocRunning)] = fixed(500, "no route to client")
+			a[checksPath(allocOther)] = fixed(500, "no route to client")
+		}, probeUnserved, "no route to client"},
+		{"checks reads fail and only a stopped allocation is registered", func(a map[string]func() (int, string)) {
+			a["GET /v1/job/e2e-web/allocations"] = allocationsOf(allocRunning)
+			a["GET /v1/service/e2e-web"] = fixed(200, `[{"AllocID":"`+allocOther+`"}]`)
+			a[checksPath(allocRunning)] = fixed(500, "no route to client")
+		}, probeUnserved, "no route to client"},
 		{"allocations read fails", func(a map[string]func() (int, string)) {
 			a["GET /v1/job/e2e-web/allocations"] = fixed(500, "allocations down")
 		}, probeUnreached, "allocations down"},
