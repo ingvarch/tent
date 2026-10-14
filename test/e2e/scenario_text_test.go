@@ -7,10 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"net"
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ingvarch/tent/test/e2e/janitor"
 	"github.com/ingvarch/tent/test/e2e/vultrapi"
@@ -29,10 +33,17 @@ func scenarioCreateArgs(cfg settings, cluster, image, sshPub, runner string, sha
 		"--ssh-access", runner, "--api-access", runner, "--yes")
 }
 
-// haCreateArgs are the arguments of tent that create the cluster of the HA scenario: three servers and two workers
-// on the first image.
+// haServers and haWorkers are the sizes of the node groups of the HA scenario.
+const (
+	haServers = 3
+	haWorkers = 2
+)
+
+// haCreateArgs are the arguments of tent that create the cluster of the HA scenario: haServers servers and haWorkers
+// workers on the first image.
 func haCreateArgs(cfg settings, cluster, sshPub, runner string) []string {
-	return scenarioCreateArgs(cfg, cluster, cfg.haImage(), sshPub, runner, "--servers", "3", "--workers", "2")
+	return scenarioCreateArgs(cfg, cluster, cfg.haImage(), sshPub, runner,
+		"--servers", strconv.Itoa(haServers), "--workers", strconv.Itoa(haWorkers))
 }
 
 // upgradeCreateArgs are the arguments of tent that create the cluster of the upgrade scenario: a combined group of
@@ -96,8 +107,11 @@ func registrationScript() string {
 	return "journalctl -b -u nomad --no-pager -o cat | grep '" + registrationPhrase + "' || true"
 }
 
-// joinFileScript prints the file that tells the agent which servers to join.
-func joinFileScript() string { return "cat /etc/nomad.d/05-join.hcl" }
+// joinFilePath is the file that tells the agent which servers to join.
+const joinFilePath = "/etc/nomad.d/05-join.hcl"
+
+// joinFileScript prints joinFilePath.
+func joinFileScript() string { return "cat " + joinFilePath }
 
 var bootIDForm = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
@@ -322,4 +336,125 @@ func serversToDelete(instances []vultrapi.Instance, cluster string) ([]vultrapi.
 		return nil, fmt.Errorf("cluster %s has no server machine", cluster)
 	}
 	return servers, nil
+}
+
+// nomadPort is the port of a server's HTTP API.
+const nomadPort = "4646"
+
+// serverAddresses returns the API address, "https://<ip>:4646", of each machine of a role in a cluster that has a
+// public address.
+func serverAddresses(instances []vultrapi.Instance, cluster, role string) []string {
+	var out []string
+	for _, m := range machinesOf(instances, cluster, role) {
+		if m.MainIP != "" && m.MainIP != "0.0.0.0" {
+			out = append(out, "https://"+net.JoinHostPort(m.MainIP, nomadPort))
+		}
+	}
+	return out
+}
+
+// lowestLabel returns the machine whose label sorts first.
+func lowestLabel(machines []vultrapi.Instance) (vultrapi.Instance, error) {
+	if len(machines) == 0 {
+		return vultrapi.Instance{}, errors.New("no machine to choose from")
+	}
+	return slices.MinFunc(machines, func(a, b vultrapi.Instance) int { return strings.Compare(a.Label, b.Label) }), nil
+}
+
+// nodeNamed returns the one node that has name; tent names a node after its machine.
+func nodeNamed(nodes []nomadNode, name string) (nomadNode, error) {
+	var found []nomadNode
+	for _, n := range nodes {
+		if n.Name == name {
+			found = append(found, n)
+		}
+	}
+	if len(found) != 1 {
+		return nomadNode{}, fmt.Errorf("%d nodes are named %s, want 1", len(found), name)
+	}
+	return found[0], nil
+}
+
+// rollMetaKey is the node meta key that the roll change gives every worker.
+const rollMetaKey = "e2e_roll"
+
+// checkRollMeta checks that there are want nodes and that each of them, by name, has the run's value in its meta.
+func checkRollMeta(metas map[string]map[string]string, run string, want int) error {
+	var problems []string
+	if len(metas) != want {
+		problems = append(problems, fmt.Sprintf("%d nodes, want %d", len(metas), want))
+	}
+	for _, name := range slices.Sorted(maps.Keys(metas)) {
+		if got := metas[name][rollMetaKey]; got != run {
+			problems = append(problems, fmt.Sprintf("node %s has %s %q, want %q", name, rollMetaKey, got, run))
+		}
+	}
+	if len(problems) > 0 {
+		return errors.New(strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// bootProblem is "" when the answer of bootIDScript shows a boot ID other than before; otherwise it says why not.
+func bootProblem(out string, err error, before string) string {
+	if err != nil {
+		return err.Error()
+	}
+	id, err := parseBootID(out)
+	switch {
+	case err != nil:
+		return err.Error()
+	case id == before:
+		return "the machine still has the boot ID " + before
+	}
+	return ""
+}
+
+// registeredProblem is "" when the journal of this boot holds a registration line and Nomad lists the node with id as
+// ready and eligible; otherwise it says what is missing.
+func registeredProblem(lines []string, nodes []nomadNode, id string) string {
+	if len(lines) == 0 {
+		return "the journal of this boot holds no registration"
+	}
+	i := slices.IndexFunc(nodes, func(n nomadNode) bool { return n.ID == id })
+	switch {
+	case i < 0:
+		return "Nomad does not list the node " + id
+	case nodes[i].Status != "ready":
+		return "the node " + id + " is " + nodes[i].Status
+	case nodes[i].SchedulingEligibility != "eligible":
+		return "the node " + id + " is " + nodes[i].SchedulingEligibility
+	}
+	return ""
+}
+
+// restartEvidence is what the restart of a client leaves to read.
+type restartEvidence struct {
+	Machine, NodeID        string
+	BootBefore, BootAfter  string
+	BootWait, RegisterWait time.Duration
+	Registrations          []string
+	JoinFile               string
+}
+
+// restartRecord writes the evidence as the text of the step's record file.
+func restartRecord(e restartEvidence) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "machine: %s\nnode ID: %s\nboot ID before: %s\nboot ID after: %s\n", e.Machine, e.NodeID,
+		e.BootBefore, e.BootAfter)
+	fmt.Fprintf(&b, "wait for the new boot: %s\nwait for the registration: %s\n", e.BootWait, e.RegisterWait)
+	b.WriteString("registration lines of this boot:\n")
+	for _, line := range e.Registrations {
+		b.WriteString(line + "\n")
+	}
+	b.WriteString(joinFilePath + ":\n" + e.JoinFile)
+	return b.String()
+}
+
+// allocationsProblem is "" when running is the wanted number of running allocations of job.
+func allocationsProblem(running int, job string, want int) string {
+	if running == want {
+		return ""
+	}
+	return fmt.Sprintf("%d running allocations of %s, want %d", running, job, want)
 }

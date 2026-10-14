@@ -4,11 +4,14 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ingvarch/tent/test/e2e/vultrapi"
 )
 
 const (
@@ -20,6 +23,10 @@ const (
 	leftoversEvery   = 10 * time.Second
 	leftoversTimeout = 2 * time.Minute
 	noClustersText   = "no clusters in"
+	// previewTimeout bounds a run of a command that reads the cloud and Nomad and changes nothing.
+	previewTimeout = 5 * time.Minute
+	// pairAllocations is the number of allocations of the job in testdata/web-pair.nomad.hcl.
+	pairAllocations = 2
 )
 
 // cluster is a cluster of a scenario and what its steps hand to each other.
@@ -147,6 +154,92 @@ func (c *cluster) service(t *testing.T) {
 	c.runJob(ctx, t, "web.nomad.hcl", webJob)
 	if err := waitService(ctx, c.nomad, webJob, webService, serviceEvery, serviceTimeout); err != nil {
 		t.Fatalf("service %s: %v", webService, err)
+	}
+}
+
+// pairService submits the job of two allocations, leaves it in the cluster, and waits until both run and the service
+// is healthy.
+func (c *cluster) pairService(t *testing.T) {
+	ctx := stepContext(suite.Ctx, t)
+	c.submitJob(ctx, t, "web-pair.nomad.hcl")
+	err := pollUntil(ctx, serviceEvery, serviceTimeout, func(ctx context.Context) string {
+		running, err := runningAllocations(ctx, c.nomad, webJob)
+		if err != nil {
+			return err.Error()
+		}
+		if problem := allocationsProblem(running, webJob, pairAllocations); problem != "" {
+			return problem
+		}
+		return serviceProblem(ctx, c.nomad, webJob, webService)
+	})
+	if err != nil {
+		t.Fatalf("service %s: %v", webService, err)
+	}
+}
+
+// machines lists every machine of the Vultr account; machinesOf picks those of a cluster.
+func (c *cluster) machines(ctx context.Context) ([]vultrapi.Instance, error) {
+	return suite.Vultr.Instances(ctx)
+}
+
+// addresses returns the function that lists the API addresses of the cluster's machines of a role.
+func (c *cluster) addresses(role string) func(context.Context) ([]string, error) {
+	return func(ctx context.Context) ([]string, error) {
+		instances, err := c.machines(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list the machines: %w", err)
+		}
+		return serverAddresses(instances, c.name, role), nil
+	}
+}
+
+// rollWithProbe runs tent with args as the step while a probe polls the machines of a role, and writes the probe's
+// records to <cluster>-probe-<roll>.tsv. The step fails when tent does not exit with 0 or when the probe's verdict
+// is an error.
+func (c *cluster) rollWithProbe(t *testing.T, role, roll, step string, timeout time.Duration, args ...string) {
+	t.Helper()
+	ctx := stepContext(suite.Ctx, t)
+	addresses := c.addresses(role)
+	first, err := addresses(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) == 0 {
+		t.Fatalf("no %s machine of %s has an address to probe", role, c.name)
+	}
+	path := filepath.Join(suite.Dir, c.name+"-probe-"+roll+".tsv")
+	out, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatalf("open the probe's records: %v", err)
+	}
+	defer func() {
+		if err := out.Close(); err != nil {
+			t.Errorf("close the probe's records %s: %v", path, err)
+		}
+	}()
+	p := startProbe(ctx, newProbeConfig(c.nomad, addresses, webJob, webService, out))
+	defer p.stop()
+
+	res := c.tentCode(t, timeout, step, args...)
+	summary, verr := probeVerdict(p.stop(), defaultProbeLimits)
+	t.Logf("%s probe during %s: %s\nrecords: %s", c.name, roll, summary, path)
+	if verr != nil {
+		t.Errorf("%s: %v", roll, verr)
+	}
+	if res.Code != 0 {
+		t.Fatal(tentFailure(step, res, suite.Tent.logPath(c.name, step)))
+	}
+	if verr != nil {
+		t.FailNow()
+	}
+}
+
+// rollDue checks that tent rolling-update without --yes exits with want: 2 while a roll is due, 0 when none is.
+func (c *cluster) rollDue(t *testing.T, step string, want int) {
+	t.Helper()
+	res := c.tentCode(t, previewTimeout, step, "rolling-update", "cluster", c.name, "--exit-code")
+	if res.Code != want {
+		t.Fatalf("tent %s: want exit code %d\n%s", step, want, tentFailure(step, res, suite.Tent.logPath(c.name, step)))
 	}
 }
 

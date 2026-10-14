@@ -3,11 +3,13 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ingvarch/tent/test/e2e/vultrapi"
 )
@@ -532,5 +534,141 @@ func TestServersToDeleteRefusesAnEmptyResult(t *testing.T) {
 	got, err := serversToDelete(machines, "e2e-abc123-ha")
 	if err == nil || !strings.Contains(err.Error(), "e2e-abc123-ha") {
 		t.Errorf("serversToDelete = %v, %v, want an error that names the cluster", got, err)
+	}
+}
+
+func TestServerAddressesListsTheUsableAddressesOfTheRoleInTheCluster(t *testing.T) {
+	all := []vultrapi.Instance{
+		instance("s1", "server", "192.0.2.1", "e2e-a"),
+		instance("s2", "server", "0.0.0.0", "e2e-a"),
+		instance("s3", "server", "", "e2e-a"),
+		instance("s4", "server", "192.0.2.4", "e2e-a"),
+		instance("c1", "client", "192.0.2.5", "e2e-a"),
+		instance("s5", "server", "192.0.2.6", "e2e-b"),
+	}
+	want := []string{"https://192.0.2.1:4646", "https://192.0.2.4:4646"}
+	if got := serverAddresses(all, "e2e-a", "server"); !slices.Equal(got, want) {
+		t.Errorf("serverAddresses = %v, want %v", got, want)
+	}
+	if got := serverAddresses(all, "e2e-c", "server"); len(got) != 0 {
+		t.Errorf("serverAddresses of a cluster without machines = %v, want none", got)
+	}
+}
+
+func TestLowestLabelPicksTheMachineThatSortsFirst(t *testing.T) {
+	got, err := lowestLabel([]vultrapi.Instance{{Label: "ha-workers-2"}, {Label: "ha-workers-1"}, {Label: "ha-workers-3"}})
+	if err != nil || got.Label != "ha-workers-1" {
+		t.Errorf("lowestLabel = %q, %v; want ha-workers-1", got.Label, err)
+	}
+	if _, err := lowestLabel(nil); err == nil {
+		t.Error("lowestLabel passed with no machine")
+	}
+}
+
+func TestNodeNamedFindsTheNodeOfAMachine(t *testing.T) {
+	nodes := []nomadNode{{ID: "n1", Name: "ha-workers-1"}, {ID: "n2", Name: "ha-workers-2"}}
+	got, err := nodeNamed(nodes, "ha-workers-2")
+	if err != nil || got.ID != "n2" {
+		t.Errorf("nodeNamed = %+v, %v; want n2", got, err)
+	}
+	if _, err := nodeNamed(nodes, "ha-workers-3"); err == nil || !strings.Contains(err.Error(), "ha-workers-3") {
+		t.Errorf("nodeNamed of a missing node = %v, want an error that names it", err)
+	}
+	twin := append(slices.Clone(nodes), nomadNode{ID: "n3", Name: "ha-workers-1"})
+	if _, err := nodeNamed(twin, "ha-workers-1"); err == nil {
+		t.Error("nodeNamed passed with two nodes of one name")
+	}
+}
+
+func TestCheckRollMetaNamesTheNodesWithoutTheRunsValue(t *testing.T) {
+	good := map[string]map[string]string{"w-1": {"e2e_roll": "abc123"}, "w-2": {"e2e_roll": "abc123", "x": "y"}}
+	if err := checkRollMeta(good, "abc123", 2); err != nil {
+		t.Errorf("checkRollMeta: %v", err)
+	}
+	bad := map[string]map[string]string{"w-1": {"e2e_roll": "old"}, "w-2": {}, "w-3": {"e2e_roll": "abc123"}}
+	err := checkRollMeta(bad, "abc123", 3)
+	if err == nil || !strings.Contains(err.Error(), "w-1") || !strings.Contains(err.Error(), "w-2") ||
+		strings.Contains(err.Error(), "w-3") {
+		t.Errorf("checkRollMeta = %v, want an error that names w-1 and w-2 alone", err)
+	}
+	if err := checkRollMeta(good, "abc123", 3); err == nil {
+		t.Error("checkRollMeta passed with fewer nodes than wanted")
+	}
+}
+
+func TestBootProblemWaitsForAnotherBootID(t *testing.T) {
+	const before = "0f8fad5b-d9cb-469f-a165-70867728950e"
+	const after = "1f8fad5b-d9cb-469f-a165-70867728950e"
+	for _, tc := range []struct {
+		name    string
+		out     string
+		err     error
+		wantErr bool
+	}{
+		{"another boot", after + "\n", nil, false},
+		{"the same boot", before + "\n", nil, true},
+		{"ssh fails", "", errors.New("connection refused"), true},
+		{"garbage", "hello", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := bootProblem(tc.out, tc.err, before)
+			if (got != "") != tc.wantErr {
+				t.Errorf("bootProblem = %q, want a problem: %t", got, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestRegisteredProblemNeedsALineAndTheSameNodeReadyAndEligible(t *testing.T) {
+	lines := []string{"2026-10-13T10:00:00Z client: node registration complete"}
+	ready := []nomadNode{{ID: "n1", Status: "ready", SchedulingEligibility: "eligible"}}
+	if got := registeredProblem(lines, ready, "n1"); got != "" {
+		t.Errorf("registeredProblem = %q, want none", got)
+	}
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		nodes []nomadNode
+		want  string
+	}{
+		{"no line", nil, ready, "registration"},
+		{"another node ID", lines, []nomadNode{{ID: "n2", Status: "ready", SchedulingEligibility: "eligible"}}, "n1"},
+		{"down", lines, []nomadNode{{ID: "n1", Status: "down", SchedulingEligibility: "eligible"}}, "down"},
+		{"ineligible", lines, []nomadNode{{ID: "n1", Status: "ready", SchedulingEligibility: "ineligible"}}, "ineligible"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := registeredProblem(tc.lines, tc.nodes, "n1"); !strings.Contains(got, tc.want) {
+				t.Errorf("registeredProblem = %q, want it to hold %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRestartRecordHoldsTheEvidenceOfTheRestart(t *testing.T) {
+	got := restartRecord(restartEvidence{
+		Machine: "ha-workers-1", NodeID: "n1", BootBefore: "b1", BootAfter: "b2",
+		BootWait: 90 * time.Second, RegisterWait: 30 * time.Second,
+		Registrations: []string{"line one", "line two"}, JoinFile: "retry_join = [\"10.0.0.9\"]\n",
+	})
+	for _, want := range []string{
+		"machine: ha-workers-1", "node ID: n1", "boot ID before: b1", "boot ID after: b2",
+		"wait for the new boot: 1m30s", "wait for the registration: 30s",
+		"line one\nline two\n", "retry_join = [\"10.0.0.9\"]\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("record does not hold %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestAllocationsProblemNeedsExactlyTheWantedRunningAllocations(t *testing.T) {
+	if got := allocationsProblem(2, "e2e-web", 2); got != "" {
+		t.Errorf("allocationsProblem(2, 2) = %q, want none", got)
+	}
+	for _, running := range []int{0, 1, 3} {
+		got := allocationsProblem(running, "e2e-web", 2)
+		if !strings.Contains(got, "e2e-web") || !strings.Contains(got, "want 2") {
+			t.Errorf("allocationsProblem(%d, 2) = %q, want a problem that names the job and the count", running, got)
+		}
 	}
 }
