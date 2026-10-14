@@ -97,8 +97,8 @@ linters:
             - $gostd
             - github.com/ingvarch/tent/internal/secret$
             - github.com/ingvarch/tent/api/v1alpha1$
-        # internal/secrettest, nomadfake, nodeuptest, s3urltest, assetstest, shellenvtest, janitortest and memstore
-        # are for tests: no code that tent, tent-node or a development tool runs imports them.
+        # internal/secrettest, nomadfake, nodeuptest, s3urltest, assetstest, shellenvtest, janitortest, memstore and
+        # paralleltest are for tests: no code that tent, tent-node or a development tool runs imports them.
         secrettest-only-in-tests:
           files: ["$all", "!$test"]
           deny:
@@ -118,6 +118,8 @@ linters:
               desc: memstore is for tests only
             - pkg: github.com/ingvarch/tent/test/e2e/janitor/janitortest
               desc: janitortest is for tests only
+            - pkg: github.com/ingvarch/tent/internal/paralleltest
+              desc: paralleltest is for tests only
         # Tests read the rendered Nomad configuration back with HCL1; no code that tent runs parses HCL.
         hcl-only-in-tests:
           files: ["$all", "!$test"]
