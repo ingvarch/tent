@@ -217,6 +217,54 @@ func TestUnparsableDateNamesTheObject(t *testing.T) {
 	}
 }
 
+// TestParseCreatedReadsAZonelessDateAsUSEastern checks the date that Vultr's firewall list gave without a zone: it
+// is US Eastern time, UTC-4 in summer and UTC-5 in winter. A date with an offset keeps it.
+func TestParseCreatedReadsAZonelessDateAsUSEastern(t *testing.T) {
+	cases := []struct {
+		name, value string
+		want        time.Time
+	}{
+		{"summer", "2026-10-13 20:46:46", time.Date(2026, 10, 14, 0, 46, 46, 0, time.UTC)},
+		{"winter", "2026-01-15 20:46:46", time.Date(2026, 1, 16, 1, 46, 46, 0, time.UTC)},
+		{"rfc 3339", "2022-10-19T12:15:38+00:00", time.Date(2022, 10, 19, 12, 15, 38, 0, time.UTC)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseCreated("firewall group", "f-1", tc.value)
+			if err != nil {
+				t.Fatalf("parseCreated(%q): %v", tc.value, err)
+			}
+			if !got.Equal(tc.want) {
+				t.Errorf("parseCreated(%q) = %s, want %s", tc.value, got.UTC().Format(time.RFC3339),
+					tc.want.Format(time.RFC3339))
+			}
+		})
+	}
+}
+
+func TestParseCreatedRefusesAnotherFormWithTheKindTheIDAndTheValue(t *testing.T) {
+	_, err := parseCreated("firewall group", "f-1", "13/10/2026 20:46")
+	if err == nil {
+		t.Fatal("parseCreated accepted another form, want an error")
+	}
+	for _, want := range []string{"firewall group", "f-1", `"13/10/2026 20:46"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q", err, want)
+		}
+	}
+}
+
+func TestFirewallGroupsListTakesAZonelessDate(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, 200, `{"firewall_groups": [{"id": "f-1", "date_created": "2026-10-13 20:46:46"}],
+			"meta": {"links": {"next": ""}}}`)
+	})
+	got, err := c.FirewallGroups(context.Background())
+	if err != nil || len(got) != 1 || !got[0].Created.Equal(time.Date(2026, 10, 14, 0, 46, 46, 0, time.UTC)) {
+		t.Errorf("FirewallGroups = %+v, %v, want one group made at 2026-10-14T00:46:46Z", got, err)
+	}
+}
+
 func TestMalformedJSONIsAnError(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, `{"instances": [`) })
 	_, err := c.Instances(context.Background())
