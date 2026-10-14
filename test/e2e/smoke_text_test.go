@@ -58,7 +58,8 @@ func createArgs(cfg settings, cluster, image, sshPub, runner string) []string {
 // validateWait is how long the validate steps let tent wait for a valid cluster.
 const validateWait = "5m"
 
-// validateArgs are the arguments of tent that check a cluster of this suite, which has one server, until it is valid.
+// validateArgs are the arguments of tent that check a cluster of this suite until it is valid. The flag
+// --allow-single-server matters only to the clusters of one server and changes nothing for the others.
 func validateArgs(cluster string) []string {
 	return []string{"validate", "cluster", cluster, "--wait", validateWait, "--allow-single-server"}
 }

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/url"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -30,6 +30,9 @@ const (
 	probeLeaderTimeout = 3 * time.Second
 	// probeServiceTimeout is above Nomad's 5 s hold of a forwarded read.
 	probeServiceTimeout = 7 * time.Second
+
+	// probeTotalFactor times a bad outcome's stretch limit is how long its stretches may last together in one roll.
+	probeTotalFactor = 2
 
 	// noLeaderAnswer ends the error of the read of a server that has no leader to forward to.
 	noLeaderAnswer = ": 500: No cluster leader"
@@ -67,6 +70,20 @@ var defaultProbeLimits = probeLimits{
 	MinPolls:   10,
 }
 
+// workerProbeLimits are the limits of a roll that stops no server. Every checks read can fail only when no client
+// that runs an allocation answers while Nomad still lists them, which is an outage, so a stretch of unchecked polls
+// may last as long as one of unserved polls.
+var workerProbeLimits = func() probeLimits {
+	l := defaultProbeLimits
+	l.Unchecked = l.Unserved
+	return l
+}()
+
+// longest returns the longest of the stretch limits.
+func (l probeLimits) longest() time.Duration {
+	return max(l.Leaderless, l.Unserved, l.Unreached, l.Unchecked)
+}
+
 // probeRecord is the result of one poll.
 type probeRecord struct {
 	Start time.Time
@@ -98,8 +115,10 @@ type probeConfig struct {
 	// Addresses returns the current server addresses, each as "https://<ip>:4646". It must end when its context
 	// ends.
 	Addresses func(ctx context.Context) ([]string, error)
-	Job       string
-	Service   string
+	// First is the list of addresses of the first poll; Addresses replaces it every Refresh.
+	First   []string
+	Job     string
+	Service string
 	// Every is the time between the starts of two polls, Refresh the time between two calls of Addresses.
 	Every, Refresh time.Duration
 	// RefreshTimeout bounds a call of Addresses, LeaderTimeout a leader read, ServiceTimeout a read of the service.
@@ -130,23 +149,21 @@ type probe struct {
 	cfg    probeConfig
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
-	// ready closes when the first call of Addresses has ended.
-	ready chan struct{}
+	outMu  sync.Mutex
 
-	outMu sync.Mutex
-
+	// mu guards addresses and records.
 	mu        sync.Mutex
 	addresses []string
-
-	// records is written by the polling goroutine and read after it has ended.
-	records []probeRecord
+	records   []probeRecord
+	// recorded gets a value after each record, for settle.
+	recorded chan struct{}
 }
 
-// startProbe starts a probe and writes the header. The first poll waits for the first list of addresses; a slow list
-// after that never holds up a poll.
+// startProbe starts a probe and writes the header. The first poll uses cfg.First; a slow list of addresses never
+// holds up a poll.
 func startProbe(ctx context.Context, cfg probeConfig) *probe {
 	ctx, cancel := context.WithCancel(ctx)
-	p := &probe{cfg: cfg, cancel: cancel, ready: make(chan struct{})}
+	p := &probe{cfg: cfg, cancel: cancel, addresses: cfg.First, recorded: make(chan struct{}, 1)}
 	p.write(probeHeader)
 	p.wg.Go(func() { p.refreshLoop(ctx) })
 	p.wg.Go(func() { p.pollLoop(ctx) })
@@ -158,7 +175,49 @@ func startProbe(ctx context.Context, cfg probeConfig) *probe {
 func (p *probe) stop() []probeRecord {
 	p.cancel()
 	p.wg.Wait()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.records
+}
+
+// settle waits until the latest poll is led and served, for at most limit and until ctx ends, and returns how long it
+// waited. The probe goes on polling meanwhile.
+func (p *probe) settle(ctx context.Context, limit time.Duration) time.Duration {
+	start := time.Now()
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	for !p.lastIsGood() {
+		select {
+		case <-p.recorded:
+		case <-timer.C:
+			return time.Since(start)
+		case <-ctx.Done():
+			return time.Since(start)
+		}
+	}
+	return time.Since(start)
+}
+
+func (p *probe) lastIsGood() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.records) == 0 {
+		return false
+	}
+	last := p.records[len(p.records)-1]
+	return last.Leader == probeLed && last.Service == probeServed
+}
+
+// addRecord keeps a record, tells settle about it and writes it to the records file.
+func (p *probe) addRecord(r probeRecord) {
+	p.mu.Lock()
+	p.records = append(p.records, r)
+	p.mu.Unlock()
+	select {
+	case p.recorded <- struct{}{}:
+	default:
+	}
+	p.write(probeLine(r))
 }
 
 // write sends text to the records file. A lost line costs nothing: stop returns the records as well.
@@ -169,8 +228,6 @@ func (p *probe) write(text string) {
 }
 
 func (p *probe) refreshLoop(ctx context.Context) {
-	p.refresh(ctx)
-	close(p.ready)
 	ticker := time.NewTicker(p.cfg.Refresh)
 	defer ticker.Stop()
 	for {
@@ -201,11 +258,6 @@ func (p *probe) refresh(ctx context.Context) {
 }
 
 func (p *probe) pollLoop(ctx context.Context) {
-	select {
-	case <-p.ready:
-	case <-ctx.Done():
-		return
-	}
 	ticker := time.NewTicker(p.cfg.Every)
 	defer ticker.Stop()
 	for {
@@ -213,8 +265,7 @@ func (p *probe) pollLoop(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		p.records = append(p.records, record)
-		p.write(probeLine(record))
+		p.addRecord(record)
 		select {
 		case <-ctx.Done():
 			return
@@ -299,103 +350,79 @@ func (p *probe) readLeader(ctx context.Context, address string) leaderAnswer {
 // readService reads the allocations of the job, the checks of each running one and the registrations of the
 // service, each read under its own timeout, and returns the outcome with what to write about it.
 func (p *probe) readService(ctx context.Context, n *nomadAPI) (outcome, detail string) {
-	var a serviceAnswers
-	if err := p.within(ctx, func(ctx context.Context) error {
-		return n.get(ctx, "/v1/job/"+url.PathEscape(p.cfg.Job)+"/allocations", &a.Allocations)
-	}); err != nil {
-		return probeUnreached, err.Error()
+	r := readServiceReads(ctx, n, p.cfg.Job, p.cfg.Service, p.cfg.ServiceTimeout)
+	if r.allocationsErr != nil {
+		return probeUnreached, r.allocationsErr.Error()
+	}
+	var errs []string
+	if r.registrationsErr != nil {
+		errs = append(errs, r.registrationsErr.Error())
 	}
 	var running []string
-	for _, alloc := range a.Allocations {
-		if alloc.ClientStatus == "running" {
-			running = append(running, alloc.ID)
-		}
-	}
-	checks := make([]map[string]allocationCheck, len(running))
-	checkErrs := make([]error, len(running))
-	var registrationErr error
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		registrationErr = p.within(ctx, func(ctx context.Context) error {
-			return n.get(ctx, "/v1/service/"+url.PathEscape(p.cfg.Service), &a.Registrations)
-		})
-	})
-	for i, id := range running {
-		wg.Go(func() {
-			checkErrs[i] = p.within(ctx, func(ctx context.Context) error {
-				return n.get(ctx, "/v1/allocation/"+url.PathEscape(id)+"/checks", &checks[i])
-			})
-		})
-	}
-	wg.Wait()
-
-	var errs []string
-	if registrationErr != nil {
-		errs = append(errs, registrationErr.Error())
-	}
-	a.Checks = map[string]map[string]allocationCheck{}
-	failed := 0
-	for i, id := range running {
-		if checkErrs[i] != nil {
-			failed++
-			errs = append(errs, checkErrs[i].Error())
+	for _, alloc := range r.answers.Allocations {
+		if alloc.ClientStatus != "running" {
 			continue
 		}
-		a.Checks[id] = checks[i]
+		running = append(running, alloc.ID)
+		if err := r.checkErrs[alloc.ID]; err != nil {
+			errs = append(errs, err.Error())
+		}
 	}
 	switch {
-	case registrationErr != nil:
+	case r.registrationsErr != nil:
 		return probeUnreached, strings.Join(errs, "; ")
-	case a.missing(p.cfg.Service) == nil:
+	case r.answers.missing(p.cfg.Service) == nil:
 		return probeServed, strings.Join(errs, "; ")
-	case len(running) > 0 && failed == len(running) && slices.ContainsFunc(running, a.hasRegistration):
+	case len(running) > 0 && len(r.checkErrs) == len(running) &&
+		slices.ContainsFunc(running, r.answers.hasRegistration):
 		return probeUnchecked, strings.Join(errs, "; ")
 	default:
-		return probeUnserved, strings.Join(append(errs, a.String()), "; ")
+		return probeUnserved, strings.Join(append(errs, r.answers.String()), "; ")
 	}
-}
-
-// within runs read under the timeout of a service read.
-func (p *probe) within(ctx context.Context, read func(context.Context) error) error {
-	ctx, cancel := context.WithTimeout(ctx, p.cfg.ServiceTimeout)
-	defer cancel()
-	return read(ctx)
 }
 
 // probeKind is a kind of stretch: a run of polls with the same outcome.
 type probeKind struct {
 	name string
-	// limit is the longest time the kind may last; it counts only when checked is set.
-	limit   time.Duration
-	checked bool
+	// limit is the longest time one stretch of the kind may last and total the longest time that all its stretches
+	// may last together; they count only when checked is set.
+	limit, total time.Duration
+	checked      bool
+}
+
+// bad returns the kind of a bad outcome with its limits.
+func bad(name string, limit time.Duration) probeKind {
+	return probeKind{name: name, limit: limit, total: limit * probeTotalFactor, checked: true}
 }
 
 func (l probeLimits) leaderKinds() map[string]probeKind {
 	return map[string]probeKind{
 		probeLed:        {name: "led"},
-		probeLeaderless: {name: "leaderless", limit: l.Leaderless, checked: true},
-		probeUnreached:  {name: "leader unreached", limit: l.Unreached, checked: true},
+		probeLeaderless: bad("leaderless", l.Leaderless),
+		probeUnreached:  bad("leader unreached", l.Unreached),
 	}
 }
 
 func (l probeLimits) serviceKinds() map[string]probeKind {
 	return map[string]probeKind{
 		probeServed:    {name: "served"},
-		probeUnserved:  {name: "unserved", limit: l.Unserved, checked: true},
-		probeUnreached: {name: "service unreached", limit: l.Unreached, checked: true},
-		probeUnchecked: {name: "service unchecked", limit: l.Unchecked, checked: true},
+		probeUnserved:  bad("unserved", l.Unserved),
+		probeUnreached: bad("service unreached", l.Unreached),
+		probeUnchecked: bad("service unchecked", l.Unchecked),
 	}
 }
 
-// probeSummary counts the polls of each kind and names the longest stretch of each kind and the longest gap.
+// probeSummary counts the polls of each kind and names the longest stretch and the total time of each kind and the
+// longest gap.
 type probeSummary struct {
 	counts  map[string]int
 	longest map[string]time.Duration
+	totals  map[string]time.Duration
 	gap     time.Duration
 }
 
 func (s probeSummary) String() string {
-	var counts, longest []string
+	var counts, longest, totals []string
 	counted := []string{"led", "leaderless", "leader unreached", "served", "unserved", "service unreached",
 		"service unchecked"}
 	stretched := []string{"leaderless", "leader unreached", "unserved", "service unreached", "service unchecked"}
@@ -404,16 +431,17 @@ func (s probeSummary) String() string {
 	}
 	for _, kind := range stretched {
 		longest = append(longest, fmt.Sprintf("%s %s", kind, s.longest[kind]))
+		totals = append(totals, fmt.Sprintf("%s %s", kind, s.totals[kind]))
 	}
-	return fmt.Sprintf("polls: %s; longest stretch: %s; longest gap %s", strings.Join(counts, ", "),
-		strings.Join(longest, ", "), s.gap)
+	return fmt.Sprintf("polls: %s; longest stretch: %s; longest gap %s; total: %s", strings.Join(counts, ", "),
+		strings.Join(longest, ", "), s.gap, strings.Join(totals, ", "))
 }
 
 // probeVerdict judges the records against the limits. A stretch lasts from the first poll of an outcome to the start
-// of the next poll with another outcome, or to the last poll. The error names every breach; the summary is returned
-// in both cases.
+// of the next poll with another outcome, or to the last poll. A bad outcome also fails when its stretches add up to
+// more than its total limit. The error names every breach; the summary is returned in both cases.
 func probeVerdict(records []probeRecord, limits probeLimits) (probeSummary, error) {
-	s := probeSummary{counts: map[string]int{}, longest: map[string]time.Duration{}}
+	s := probeSummary{counts: map[string]int{}, longest: map[string]time.Duration{}, totals: map[string]time.Duration{}}
 	var breaches []string
 	if len(records) < limits.MinPolls {
 		breaches = append(breaches, fmt.Sprintf("%d polls, at least %d are needed", len(records), limits.MinPolls))
@@ -447,8 +475,9 @@ func probeVerdict(records []probeRecord, limits probeLimits) (probeSummary, erro
 	return s, nil
 }
 
-// addStretches walks the runs of equal outcomes, adds them to the counts and the longest stretches and returns a
-// breach for each run that is longer than its kind allows.
+// addStretches walks the runs of equal outcomes, adds them to the counts, the longest stretches and the totals, and
+// returns a breach for each run that is longer than its kind allows and for each kind whose runs add up to more than
+// its total limit.
 func (s *probeSummary) addStretches(records []probeRecord, outcome func(probeRecord) string,
 	kinds map[string]probeKind) []string {
 	var breaches []string
@@ -465,11 +494,18 @@ func (s *probeSummary) addStretches(records []probeRecord, outcome func(probeRec
 		length := end.Sub(records[i].Start)
 		s.counts[kind.name] += j - i
 		s.longest[kind.name] = max(s.longest[kind.name], length)
+		s.totals[kind.name] += length
 		if kind.checked && length > kind.limit {
 			breaches = append(breaches, fmt.Sprintf("%s for %s from %s, want at most %s", kind.name, length,
 				clock(records[i].Start), kind.limit))
 		}
 		i = j
+	}
+	for _, outcome := range slices.Sorted(maps.Keys(kinds)) {
+		if kind := kinds[outcome]; kind.checked && s.totals[kind.name] > kind.total {
+			breaches = append(breaches, fmt.Sprintf("%s for %s in all, want at most %s", kind.name,
+				s.totals[kind.name], kind.total))
+		}
 	}
 	return breaches
 }

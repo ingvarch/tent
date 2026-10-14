@@ -49,7 +49,8 @@ func TestProbeVerdictPassesASteadyRunAndCountsIt(t *testing.T) {
 	}
 	want := "polls: led 20, leaderless 0, leader unreached 0, served 20, unserved 0, service unreached 0, " +
 		"service unchecked 0; longest stretch: leaderless 0s, leader unreached 0s, unserved 0s, service unreached 0s, " +
-		"service unchecked 0s; longest gap 1s"
+		"service unchecked 0s; longest gap 1s; total: leaderless 0s, leader unreached 0s, unserved 0s, " +
+		"service unreached 0s, service unchecked 0s"
 	if got := summary.String(); got != want {
 		t.Errorf("summary =\n%s\nwant\n%s", got, want)
 	}
@@ -76,7 +77,8 @@ func TestProbeVerdictSummaryNamesTheLongestStretchOfEachKind(t *testing.T) {
 	}
 	want := "polls: led 22, leaderless 3, leader unreached 5, served 19, unserved 4, service unreached 5, " +
 		"service unchecked 2; longest stretch: leaderless 3s, leader unreached 5s, unserved 4s, " +
-		"service unreached 5s, service unchecked 2s; longest gap 1s"
+		"service unreached 5s, service unchecked 2s; longest gap 1s; total: leaderless 3s, leader unreached 5s, " +
+		"unserved 4s, service unreached 5s, service unchecked 2s"
 	if got := summary.String(); got != want {
 		t.Errorf("summary =\n%s\nwant\n%s", got, want)
 	}
@@ -121,6 +123,96 @@ func TestProbeVerdictStretchLimits(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestProbeVerdictTotalLimits runs bad stretches of each kind that add up to twice the kind's stretch limit and to one
+// second more: the first passes, the second fails and the error names the kind and the total. No single stretch of
+// either breaches its own limit.
+func TestProbeVerdictTotalLimits(t *testing.T) {
+	cases := []struct {
+		name  string
+		limit time.Duration
+		set   func(*probeRecord)
+	}{
+		{"leaderless", defaultProbeLimits.Leaderless, func(r *probeRecord) { r.Leader = probeLeaderless }},
+		{"leader unreached", defaultProbeLimits.Unreached, func(r *probeRecord) { r.Leader = probeUnreached }},
+		{"unserved", defaultProbeLimits.Unserved, func(r *probeRecord) { r.Service = probeUnserved }},
+		{"service unreached", defaultProbeLimits.Unreached, func(r *probeRecord) { r.Service = probeUnreached }},
+		{"service unchecked", defaultProbeLimits.Unchecked, func(r *probeRecord) { r.Service = probeUnchecked }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			polls := int(tc.limit / time.Second)
+			// Each stretch of n polls ends with a good poll, so it lasts n seconds.
+			at := func(stretches ...int) error {
+				records := steadyRecords(5 + 3*polls + len(stretches) + 20)
+				i := 5
+				for _, n := range stretches {
+					for range n {
+						tc.set(&records[i])
+						i++
+					}
+					i++
+				}
+				_, err := probeVerdict(records, defaultProbeLimits)
+				return err
+			}
+			if err := at(polls, polls); err != nil {
+				t.Errorf("two stretches of %s: %v, want a pass", tc.limit, err)
+			}
+			err := at(polls, polls, 1)
+			if err == nil {
+				t.Fatalf("stretches that add up to %s passed, want a failure", 2*tc.limit+time.Second)
+			}
+			want := tc.name + " for " + (2*tc.limit + time.Second).String() + " in all, want at most " +
+				(2 * tc.limit).String()
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want it to contain %q", err, want)
+			}
+		})
+	}
+}
+
+// TestProbeVerdictFailsALeaderThatIsLostEveryOtherSecond is the case that the longest stretch alone lets pass.
+func TestProbeVerdictFailsALeaderThatIsLostEveryOtherSecond(t *testing.T) {
+	records := steadyRecords(600)
+	for i := 1; i < 599; i += 2 {
+		records[i].Leader = probeLeaderless
+		records[i].Service = probeUnserved
+	}
+	_, err := probeVerdict(records, defaultProbeLimits)
+	if err == nil || !strings.Contains(err.Error(), "leaderless for 4m59s in all") ||
+		!strings.Contains(err.Error(), "unserved for 4m59s in all") {
+		t.Errorf("verdict = %v, want the totals of leaderless and unserved named", err)
+	}
+}
+
+func TestProbeLimitsOfAWorkerRollTakeTheUncheckedStretchFromTheUnservedOne(t *testing.T) {
+	want := defaultProbeLimits
+	want.Unchecked = defaultProbeLimits.Unserved
+	if workerProbeLimits != want {
+		t.Errorf("workerProbeLimits = %+v, want %+v", workerProbeLimits, want)
+	}
+	records := steadyRecords(40)
+	for i := 5; i < 16; i++ {
+		records[i].Service = probeUnchecked
+	}
+	if _, err := probeVerdict(records, workerProbeLimits); err == nil ||
+		!strings.Contains(err.Error(), "service unchecked for 11s") {
+		t.Errorf("11 s unchecked with the worker limits: %v, want a breach", err)
+	}
+	if _, err := probeVerdict(records, defaultProbeLimits); err != nil {
+		t.Errorf("11 s unchecked with the default limits: %v, want a pass", err)
+	}
+}
+
+func TestProbeLimitsLongestIsTheLongestStretchLimit(t *testing.T) {
+	if got := defaultProbeLimits.longest(); got != 60*time.Second {
+		t.Errorf("default longest = %s, want 60s", got)
+	}
+	if got := workerProbeLimits.longest(); got != 30*time.Second {
+		t.Errorf("worker longest = %s, want 30s", got)
 	}
 }
 
@@ -375,6 +467,7 @@ func deadAddress(t *testing.T) string {
 func testProbeConfig(n *nomadAPI, addresses ...string) probeConfig {
 	return probeConfig{
 		Nomad: n,
+		First: addresses,
 		Addresses: func(context.Context) ([]string, error) {
 			return addresses, nil
 		},
@@ -700,32 +793,35 @@ func TestProbeStopDropsThePollItInterrupted(t *testing.T) {
 	}
 }
 
-func TestProbeFirstPollWaitsForTheFirstList(t *testing.T) {
+// TestProbeFirstPollUsesTheFirstAddressesWhateverTheListDoes has the first list that Addresses returns fail: the first
+// poll still reaches the server that First names.
+func TestProbeFirstPollUsesTheFirstAddressesWhateverTheListDoes(t *testing.T) {
 	address := newNode(t, leaderAnswers("10.0.0.1:4647")).srv.URL
-	cfg := testProbeConfig(&nomadAPI{token: "t", client: &http.Client{}})
+	cfg := testProbeConfig(&nomadAPI{token: "t", client: &http.Client{}}, address)
+	cfg.Refresh = time.Hour
+	var calls atomic.Int32
 	cfg.Addresses = func(context.Context) ([]string, error) {
-		time.Sleep(50 * time.Millisecond)
-		return []string{address}, nil
+		calls.Add(1)
+		return nil, errors.New("vultr: 503")
 	}
 	p := startProbe(t.Context(), cfg)
 	eventually(t, "a record", func() bool { return strings.Count(cfg.Out.(*syncBuffer).String(), "\n") >= 2 })
 	records := p.stop()
-	if records[0].Leader != probeLed {
-		t.Errorf("first record = %+v, want led: the poll came before the first list", records[0])
+	if records[0].Leader != probeLed || records[0].Service != probeServed {
+		t.Errorf("first record = %+v, want led and served from the first addresses", records[0])
+	}
+	if got := calls.Load(); got != 0 {
+		t.Errorf("Addresses was called %d times, want none before the first refresh", got)
 	}
 }
 
 func TestProbeRefreshThatBlocksDoesNotDelayThePolls(t *testing.T) {
 	address := newNode(t, leaderAnswers("10.0.0.1:4647")).srv.URL
-	cfg := testProbeConfig(&nomadAPI{token: "t", client: &http.Client{}})
+	cfg := testProbeConfig(&nomadAPI{token: "t", client: &http.Client{}}, address)
 	cfg.RefreshTimeout = time.Hour
-	var calls atomic.Int32
 	blocked := make(chan struct{})
 	var once sync.Once
 	cfg.Addresses = func(ctx context.Context) ([]string, error) {
-		if calls.Add(1) == 1 {
-			return []string{address}, nil
-		}
 		once.Do(func() { close(blocked) })
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -734,7 +830,7 @@ func TestProbeRefreshThatBlocksDoesNotDelayThePolls(t *testing.T) {
 	select {
 	case <-blocked:
 	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for the second list")
+		t.Fatal("timed out waiting for the list")
 	}
 	out := cfg.Out.(*syncBuffer)
 	before := strings.Count(out.String(), "\tserved\t")
@@ -781,14 +877,8 @@ func TestProbeRefreshEndsAtItsTimeoutAndIsWrittenAsALine(t *testing.T) {
 
 func TestProbeKeepsTheLastAddressesWhenAListFails(t *testing.T) {
 	address := newNode(t, leaderAnswers("10.0.0.1:4647")).srv.URL
-	cfg := testProbeConfig(&nomadAPI{token: "t", client: &http.Client{}})
-	var calls atomic.Int32
-	cfg.Addresses = func(context.Context) ([]string, error) {
-		if calls.Add(1) == 1 {
-			return []string{address}, nil
-		}
-		return nil, errors.New("vultr is down")
-	}
+	cfg := testProbeConfig(&nomadAPI{token: "t", client: &http.Client{}}, address)
+	cfg.Addresses = func(context.Context) ([]string, error) { return nil, errors.New("vultr is down") }
 	p := startProbe(t.Context(), cfg)
 	out := cfg.Out.(*syncBuffer)
 	eventually(t, "a failed list", func() bool { return strings.Contains(out.String(), "vultr is down") })
@@ -804,10 +894,10 @@ func TestProbeKeepsTheLastAddressesWhenAListFails(t *testing.T) {
 func TestProbeListThatSucceedsReplacesTheAddresses(t *testing.T) {
 	gone := deadAddress(t)
 	address := newNode(t, leaderAnswers("10.0.0.1:4647")).srv.URL
-	cfg := testProbeConfig(&nomadAPI{token: "t", client: &http.Client{}})
+	cfg := testProbeConfig(&nomadAPI{token: "t", client: &http.Client{}}, gone)
 	out := cfg.Out.(*syncBuffer)
 	cfg.Addresses = func(context.Context) ([]string, error) {
-		// The lists name the dead server until a poll has asked it.
+		// The lists name the dead server until a poll has asked it, so a list before the first poll changes nothing.
 		if !strings.Contains(out.String(), "\tunreached\t") {
 			return []string{gone}, nil
 		}
@@ -817,7 +907,7 @@ func TestProbeListThatSucceedsReplacesTheAddresses(t *testing.T) {
 	eventually(t, "a served poll", func() bool { return strings.Contains(out.String(), "\tserved\t") })
 	records := p.stop()
 	if records[0].Leader != probeUnreached {
-		t.Errorf("first record = %+v, want unreached: the first list names a dead server", records[0])
+		t.Errorf("first record = %+v, want unreached: the first addresses name a dead server", records[0])
 	}
 }
 
@@ -847,5 +937,98 @@ func TestPollAsksTheServersForTheLeaderAtOnce(t *testing.T) {
 	got := p.poll(t.Context())
 	if got.Leader != probeLed || got.Detail != "" {
 		t.Errorf("leader = %q (%s), want led with no failed read", got.Leader, got.Detail)
+	}
+}
+
+// settleConfig returns the configuration of a probe whose servers name a leader only while led is set.
+func settleConfig(t *testing.T, led *atomic.Bool) probeConfig {
+	t.Helper()
+	answers := leaderAnswers("10.0.0.1:4647")
+	answers["GET /v1/status/leader?stale=true"] = func() (int, string) {
+		if led.Load() {
+			return 200, `"10.0.0.1:4647"`
+		}
+		return 200, `""`
+	}
+	return testProbeConfig(&nomadAPI{token: "t", client: &http.Client{}}, newNode(t, answers).srv.URL)
+}
+
+// TestProbeSettleKeepsPollingUntilAPollIsLedAndServed starts with a leaderless probe that gets its leader back 30 ms
+// later: settle returns after that, and the last record is good.
+func TestProbeSettleKeepsPollingUntilAPollIsLedAndServed(t *testing.T) {
+	var led atomic.Bool
+	cfg := settleConfig(t, &led)
+	p := startProbe(t.Context(), cfg)
+	eventually(t, "a leaderless poll", func() bool {
+		return strings.Contains(cfg.Out.(*syncBuffer).String(), "\tleaderless\t")
+	})
+	time.AfterFunc(30*time.Millisecond, func() { led.Store(true) })
+	waited := p.settle(t.Context(), time.Minute)
+	records := p.stop()
+	if len(records) == 0 {
+		t.Fatal("no records")
+	}
+	last := records[len(records)-1]
+	if last.Leader != probeLed || last.Service != probeServed {
+		t.Errorf("last record = %+v, want led and served", last)
+	}
+	if waited >= time.Minute {
+		t.Errorf("settle waited %s, want it to end when the leader came back", waited)
+	}
+}
+
+func TestProbeSettleGivesUpAfterItsLimit(t *testing.T) {
+	var led atomic.Bool
+	p := startProbe(t.Context(), settleConfig(t, &led))
+	waited := p.settle(t.Context(), 50*time.Millisecond)
+	records := p.stop()
+	if waited < 50*time.Millisecond {
+		t.Errorf("settle waited %s, want the whole 50ms", waited)
+	}
+	if len(records) == 0 {
+		t.Fatal("no records")
+	}
+	if last := records[len(records)-1]; last.Leader != probeLeaderless {
+		t.Errorf("last record = %+v, want the leaderless poll that settle could not improve", last)
+	}
+}
+
+func TestProbeSettleEndsWithItsContext(t *testing.T) {
+	var led atomic.Bool
+	p := startProbe(t.Context(), settleConfig(t, &led))
+	defer p.stop()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
+	defer cancel()
+	if waited := p.settle(ctx, time.Hour); waited >= time.Hour {
+		t.Errorf("settle waited %s, want it to end with its context", waited)
+	}
+	if ctx.Err() == nil {
+		t.Error("settle returned before its context ended and before a good poll")
+	}
+}
+
+func TestProbeSettleReturnsAtOnceWhenTheLastPollIsGood(t *testing.T) {
+	cfg := leadingProbeConfig(t)
+	p := startProbe(t.Context(), cfg)
+	eventually(t, "a record", func() bool { return strings.Count(cfg.Out.(*syncBuffer).String(), "\n") >= 2 })
+	if waited := p.settle(t.Context(), time.Hour); waited > time.Second {
+		t.Errorf("settle waited %s on a probe whose last poll was good", waited)
+	}
+	p.stop()
+}
+
+// TestProbeSettleWantsTheServiceServedAsWellAsALeader has a leader and no running allocation.
+func TestProbeSettleWantsTheServiceServedAsWellAsALeader(t *testing.T) {
+	answers := leaderAnswers("10.0.0.1:4647")
+	answers["GET /v1/job/e2e-web/allocations"] = fixed(200, `[]`)
+	cfg := testProbeConfig(&nomadAPI{token: "t", client: &http.Client{}}, newNode(t, answers).srv.URL)
+	p := startProbe(t.Context(), cfg)
+	waited := p.settle(t.Context(), 50*time.Millisecond)
+	records := p.stop()
+	if waited < 50*time.Millisecond {
+		t.Errorf("settle waited %s, want the whole 50ms for a service that is not served", waited)
+	}
+	if len(records) == 0 || records[len(records)-1].Service != probeUnserved {
+		t.Errorf("records = %+v, want unserved polls", records)
 	}
 }

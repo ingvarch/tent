@@ -204,9 +204,11 @@ func (c *cluster) addresses(role string) func(context.Context) ([]string, error)
 }
 
 // rollWithProbe runs tent with args as the step while a probe polls the machines of a role, and writes the probe's
-// records to <cluster>-probe-<roll>.tsv. The step fails when tent does not exit with 0 or when the probe's verdict
-// is an error.
-func (c *cluster) rollWithProbe(t *testing.T, role, roll, step string, timeout time.Duration, args ...string) {
+// records to <cluster>-probe-<roll>.tsv. When tent exits with 0 the probe goes on polling until a poll is led and
+// served, for at most the longest stretch limit, since tent can exit while the checks are still unreadable. The step
+// fails when tent does not exit with 0 or when the verdict on the limits is an error.
+func (c *cluster) rollWithProbe(t *testing.T, role, roll, step string, limits probeLimits, timeout time.Duration,
+	args ...string) {
 	t.Helper()
 	ctx := stepContext(suite.Ctx, t)
 	addresses := c.addresses(role)
@@ -227,11 +229,16 @@ func (c *cluster) rollWithProbe(t *testing.T, role, roll, step string, timeout t
 			t.Errorf("close the probe's records %s: %v", path, err)
 		}
 	}()
-	p := startProbe(ctx, newProbeConfig(c.nomad, addresses, webJob, webService, out))
+	cfg := newProbeConfig(c.nomad, addresses, webJob, webService, out)
+	cfg.First = first
+	p := startProbe(ctx, cfg)
 	defer p.stop()
 
 	res := c.tentCode(t, timeout, step, args...)
-	summary, verr := probeVerdict(p.stop(), defaultProbeLimits)
+	if res.Code == 0 {
+		t.Logf("%s probe polled %s after tent exited", c.name, p.settle(ctx, limits.longest()).Round(time.Second))
+	}
+	summary, verr := probeVerdict(p.stop(), limits)
 	t.Logf("%s probe during %s: %s\nrecords: %s", c.name, roll, summary, path)
 	if verr != nil {
 		t.Errorf("%s: %v", roll, verr)

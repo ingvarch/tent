@@ -20,8 +20,8 @@ func scenarioSettings() settings {
 	}
 }
 
-func TestHACreateArgsBuildThreeServersAndTwoWorkersOnTheFirstImage(t *testing.T) {
-	args := haCreateArgs(scenarioSettings(), "e2e-abc123-ha", "/k/id.pub", "203.0.113.7/32")
+func TestHACreateArgsBuildThreeServersAndTwoWorkersOnTheImage(t *testing.T) {
+	args := haCreateArgs(scenarioSettings(), "e2e-abc123-ha", "ubuntu-24.04", "/k/id.pub", "203.0.113.7/32")
 	want := []string{
 		"create", "cluster", "e2e-abc123-ha",
 		"--provider", "vultr", "--region", "ams", "--machine-type", "vc2-1c-1gb",
@@ -37,8 +37,8 @@ func TestHACreateArgsBuildThreeServersAndTwoWorkersOnTheFirstImage(t *testing.T)
 	}
 }
 
-func TestUpgradeCreateArgsBuildACombinedGroupOfThreeOnTheOldVersionAndTheLastImage(t *testing.T) {
-	args := upgradeCreateArgs(scenarioSettings(), "e2e-abc123-upgrade", "/k/id.pub", "203.0.113.7/32")
+func TestUpgradeCreateArgsBuildACombinedGroupOfThreeOnTheOldVersionAndTheImage(t *testing.T) {
+	args := upgradeCreateArgs(scenarioSettings(), "e2e-abc123-upgrade", "ubuntu-26.04", "/k/id.pub", "203.0.113.7/32")
 	want := []string{
 		"create", "cluster", "e2e-abc123-upgrade",
 		"--provider", "vultr", "--region", "ams", "--machine-type", "vc2-1c-1gb",
@@ -619,10 +619,13 @@ func TestBootProblemWaitsForAnotherBootID(t *testing.T) {
 	}
 }
 
-func TestRegisteredProblemNeedsALineAndTheSameNodeReadyAndEligible(t *testing.T) {
+func TestRegisteredProblemNeedsALineAndTheNodeOfTheMachineReadyAndEligibleWithTheSameID(t *testing.T) {
 	lines := []string{"2026-10-13T10:00:00Z client: node registration complete"}
-	ready := []nomadNode{{ID: "n1", Status: "ready", SchedulingEligibility: "eligible"}}
-	if got := registeredProblem(lines, ready, "n1"); got != "" {
+	node := func(id, name, status, eligibility string) nomadNode {
+		return nomadNode{ID: id, Name: name, Status: status, SchedulingEligibility: eligibility}
+	}
+	ready := []nomadNode{node("n1", "w-0", "ready", "eligible")}
+	if got := registeredProblem(lines, ready, "w-0", "n1"); got != "" {
 		t.Errorf("registeredProblem = %q, want none", got)
 	}
 	for _, tc := range []struct {
@@ -632,12 +635,17 @@ func TestRegisteredProblemNeedsALineAndTheSameNodeReadyAndEligible(t *testing.T)
 		want  string
 	}{
 		{"no line", nil, ready, "registration"},
-		{"another node ID", lines, []nomadNode{{ID: "n2", Status: "ready", SchedulingEligibility: "eligible"}}, "n1"},
-		{"down", lines, []nomadNode{{ID: "n1", Status: "down", SchedulingEligibility: "eligible"}}, "down"},
-		{"ineligible", lines, []nomadNode{{ID: "n1", Status: "ready", SchedulingEligibility: "ineligible"}}, "ineligible"},
+		{"another node ID", lines, []nomadNode{node("n2", "w-0", "ready", "eligible")}, "n1"},
+		{"down", lines, []nomadNode{node("n1", "w-0", "down", "eligible")}, "down"},
+		{"ineligible", lines, []nomadNode{node("n1", "w-0", "ready", "ineligible")}, "ineligible"},
+		{"the old ID is listed under another name", lines, []nomadNode{node("n1", "w-9", "ready", "eligible")}, "w-0"},
+		{"the machine's node has another ID", lines, []nomadNode{
+			node("n1", "w-1", "ready", "eligible"), node("n2", "w-0", "ready", "eligible")}, "n2"},
+		{"two nodes are named after the machine", lines, []nomadNode{
+			node("n1", "w-0", "ready", "eligible"), node("n2", "w-0", "down", "eligible")}, "2 nodes"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := registeredProblem(tc.lines, tc.nodes, "n1"); !strings.Contains(got, tc.want) {
+			if got := registeredProblem(tc.lines, tc.nodes, "w-0", "n1"); !strings.Contains(got, tc.want) {
 				t.Errorf("registeredProblem = %q, want it to hold %q", got, tc.want)
 			}
 		})
@@ -853,6 +861,28 @@ func TestCheckValidVersionWantsTheVersionOnTheValidLine(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if err := checkValidVersion([]byte(out), "e2e-a-upgrade", "2.0.7"); err == nil {
 				t.Errorf("checkValidVersion accepted %q", out)
+			}
+		})
+	}
+}
+
+func TestUpgradedVersionReadsTheVersionOfTheLineThatUpgradeClusterPrints(t *testing.T) {
+	out := "cluster e2e-a-upgrade: spec.nomad.version is now 2.0.7; the cluster was on Nomad 2.0.6.\n" +
+		"Next: tent update cluster, then tent rolling-update cluster.\n"
+	if got, err := upgradedVersion([]byte(out), "e2e-a-upgrade"); err != nil || got != "2.0.7" {
+		t.Errorf("upgradedVersion = %q, %v; want 2.0.7", got, err)
+	}
+	for name, in := range map[string]string{
+		"another cluster": "cluster other: spec.nomad.version is now 2.0.7; the cluster was on Nomad 2.0.6.\n",
+		"the plan, not the result": "cluster e2e-a-upgrade: upgrade Nomad from 2.0.6 to 2.0.7, " +
+			"which channel stable recommends.\n",
+		"nothing to upgrade": "cluster e2e-a-upgrade: nothing to upgrade: its Nomad version is 2.0.7.\n",
+		"no version":         "cluster e2e-a-upgrade: spec.nomad.version is now ; the cluster was on Nomad 2.0.6.\n",
+		"empty":              "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, err := upgradedVersion([]byte(in), "e2e-a-upgrade"); err == nil {
+				t.Errorf("upgradedVersion = %q, want an error", got)
 			}
 		})
 	}

@@ -356,3 +356,26 @@ func TestWebJobFileDefinesTheJobAndTheServiceTheStepWaitsFor(t *testing.T) {
 		t.Errorf("resources = %v, want cpu 50 and memory 32", res)
 	}
 }
+
+func TestReadServiceReadsKeepsTheErrorOfEachReadAndBoundsEachByTheTimeout(t *testing.T) {
+	gate := make(chan struct{})
+	answers := readyAnswers()
+	answers["GET /v1/job/e2e-web/allocations"] = allocationsOf(allocRunning, allocOther)
+	answers["GET /v1/service/e2e-web"] = fixed(200, `[{"AllocID":"`+allocRunning+`"}]`)
+	answers[checksPath(allocOther)] = func() (int, string) { <-gate; return 200, `{}` }
+	_, n := newFakeNomad(t, answers)
+	openOnCleanup(t, gate)
+	got := readServiceReads(t.Context(), n, "e2e-web", "e2e-web", 40*time.Millisecond)
+	if got.allocationsErr != nil || got.registrationsErr != nil {
+		t.Errorf("errors = %v, %v; want none for the reads that answered", got.allocationsErr, got.registrationsErr)
+	}
+	if err := got.checkErrs[allocOther]; err == nil || !strings.Contains(err.Error(), "deadline exceeded") {
+		t.Errorf("check error of the slow allocation = %v, want the timeout", err)
+	}
+	if err := got.checkErrs[allocRunning]; err != nil {
+		t.Errorf("check error of the fast allocation = %v, want none", err)
+	}
+	if got.answers.missing("e2e-web") != nil {
+		t.Errorf("answers = %v, want the fast allocation ready", got.answers)
+	}
+}

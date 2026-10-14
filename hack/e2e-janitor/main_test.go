@@ -115,13 +115,28 @@ func TestRunWithoutYesListsAndDeletesNothing(t *testing.T) {
 		line("instance", "i1", "e2e-a-servers-0", "e2e-a"),
 		line("vpc", "v1", "tent:cluster=e2e-a;kind=vpc", "e2e-a"),
 		line("vpc", "v2", "tent:cluster=e2e-b;kind=vpc", "e2e-b"),
-		"would delete 3 objects of 2 clusters older than 3h0m0s; run again with --yes",
+		"would delete 3 objects of 2 clusters older than 4h0m0s; run again with --yes",
 	}, "\n") + "\n"
 	if res.code != 0 || res.stdout != want || res.stderr != "" {
 		t.Errorf("got exit %d, stdout\n%q\nstderr %q\nwant stdout\n%q", res.code, res.stdout, res.stderr, want)
 	}
 	if got := deletes(api); len(got) != 0 {
 		t.Errorf("run deleted without --yes: %q", got)
+	}
+}
+
+// TestRunActsOnClustersOlderThanFourHoursByDefault: the run of make e2e may last 3 hours, so a cluster that is 3 hours
+// and 59 minutes old is left alone and one a minute past 4 hours is listed.
+func TestRunActsOnClustersOlderThanFourHoursByDefault(t *testing.T) {
+	api := &janitortest.API{Machines: []vultrapi.Instance{
+		{ID: "i-old", Label: "e2e-old-servers-0", Tags: []string{"tent/cluster=e2e-old"},
+			Created: time.Now().Add(-4*time.Hour - time.Minute)},
+		{ID: "i-new", Label: "e2e-new-servers-0", Tags: []string{"tent/cluster=e2e-new"},
+			Created: time.Now().Add(-3*time.Hour - 59*time.Minute)},
+	}}
+	res := runWith(t, api, withKey())
+	if !strings.Contains(res.stdout, "e2e-old") || strings.Contains(res.stdout, "e2e-new") {
+		t.Errorf("stdout = %q, want the cluster of 4h1m and not that of 3h59m", res.stdout)
 	}
 }
 

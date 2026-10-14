@@ -40,9 +40,9 @@ const (
 )
 
 // haCreateArgs are the arguments of tent that create the cluster of the HA scenario: haServers servers and haWorkers
-// workers on the first image.
-func haCreateArgs(cfg settings, cluster, sshPub, runner string) []string {
-	return scenarioCreateArgs(cfg, cluster, cfg.haImage(), sshPub, runner,
+// workers on the image.
+func haCreateArgs(cfg settings, cluster, image, sshPub, runner string) []string {
+	return scenarioCreateArgs(cfg, cluster, image, sshPub, runner,
 		"--servers", strconv.Itoa(haServers), "--workers", strconv.Itoa(haWorkers))
 }
 
@@ -50,9 +50,9 @@ func haCreateArgs(cfg settings, cluster, sshPub, runner string) []string {
 const upgradeNodes = 3
 
 // upgradeCreateArgs are the arguments of tent that create the cluster of the upgrade scenario: a combined group of
-// three nodes on the old Nomad version and the last image.
-func upgradeCreateArgs(cfg settings, cluster, sshPub, runner string) []string {
-	return scenarioCreateArgs(cfg, cluster, cfg.upgradeImage(), sshPub, runner,
+// three nodes on the old Nomad version and the image.
+func upgradeCreateArgs(cfg settings, cluster, image, sshPub, runner string) []string {
+	return scenarioCreateArgs(cfg, cluster, image, sshPub, runner,
 		"--combined", "--servers", strconv.Itoa(upgradeNodes), "--nomad-version", cfg.UpgradeFrom)
 }
 
@@ -80,6 +80,22 @@ func upgradeTarget(clustersJSON []byte, from string) (string, error) {
 		return "", fmt.Errorf("spec.nomad.version is still %s", from)
 	}
 	return version, nil
+}
+
+// upgradedVersion returns the version that the line of `tent upgrade cluster --yes` says the spec has now: "cluster
+// <name>: spec.nomad.version is now <version>; the cluster was on Nomad <old>."
+func upgradedVersion(stdout []byte, cluster string) (string, error) {
+	prefix := "cluster " + cluster + ": spec.nomad.version is now "
+	for line := range strings.Lines(string(stdout)) {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), prefix)
+		if !ok {
+			continue
+		}
+		if version, _, found := strings.Cut(rest, ";"); found && version != "" {
+			return version, nil
+		}
+	}
+	return "", fmt.Errorf("upgrade does not say %q <version>:\n%s", prefix, lastLines(string(stdout), stderrTailLines))
 }
 
 // untestedVersionPhrase is what tent's warning says about a Nomad version that its channel has not tested.
@@ -467,9 +483,9 @@ func bootProblem(out string, err error, before string) string {
 	return ""
 }
 
-// registeredProblem is "" when the journal of this boot holds a registration line and Nomad lists the node with id as
-// ready and eligible; otherwise it says what is missing.
-func registeredProblem(lines []string, nodes []nomadNode, id string) string {
+// registeredProblem is "" when the journal of this boot holds a registration line, Nomad lists the node with id as
+// ready and eligible, and the node named after the machine is that node; otherwise it says what is missing.
+func registeredProblem(lines []string, nodes []nomadNode, machine, id string) string {
 	if len(lines) == 0 {
 		return "the journal of this boot holds no registration"
 	}
@@ -481,6 +497,13 @@ func registeredProblem(lines []string, nodes []nomadNode, id string) string {
 		return "the node " + id + " is " + nodes[i].Status
 	case nodes[i].SchedulingEligibility != "eligible":
 		return "the node " + id + " is " + nodes[i].SchedulingEligibility
+	}
+	named, err := nodeNamed(nodes, machine)
+	switch {
+	case err != nil:
+		return err.Error()
+	case named.ID != id:
+		return fmt.Sprintf("the node named %s has the ID %s, want %s", machine, named.ID, id)
 	}
 	return ""
 }
