@@ -1,0 +1,16 @@
+[
+  {
+    "apiVersion": "tent/v1alpha1",
+    "kind": "Cluster",
+    "metadata": {
+      "name": "e2e-abc123-ha"
+    },
+    "spec": {
+      "cloud": {
+        "provider": "vultr",
+        "region": "ams",
+        "vultr": {}
+      }
+    }
+  }
+]

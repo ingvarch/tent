@@ -51,13 +51,8 @@ func (r tentRunner) deleteCommand(cluster string) string {
 
 // createArgs are the arguments of tent that create a cluster of one server and one worker, open to the runner alone.
 func createArgs(cfg settings, cluster, image, sshPub, runner string) []string {
-	return []string{
-		"create", "cluster", cluster,
-		"--provider", "vultr", "--region", cfg.Region, "--machine-type", cfg.Plan,
-		"--servers", "1", "--allow-single-server", "--workers", "1",
-		"--image", image, "--ssh-key", sshPub,
-		"--ssh-access", runner, "--api-access", runner, "--yes",
-	}
+	return scenarioCreateArgs(cfg, cluster, image, sshPub, runner,
+		"--servers", "1", "--allow-single-server", "--workers", "1")
 }
 
 // validateWait is how long the validate steps let tent wait for a valid cluster.
