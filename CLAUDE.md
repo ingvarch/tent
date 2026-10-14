@@ -272,7 +272,8 @@ that its nodes download. v0.2.0, with the day-2 operations of M3, was tagged on 
     exempt (ADR-0027).
   - Only tests import `internal/secrettest`, `internal/nomadops/nomadfake`, `internal/nodeup/nodeuptest`,
     `internal/s3url/s3urltest`, `internal/assets/assetstest`, `internal/shellenv/shellenvtest`,
-    `test/e2e/janitor/janitortest` and `github.com/hashicorp/hcl`.
+    `internal/statestore/memstore`, `internal/paralleltest`, `test/e2e/janitor/janitortest` and
+    `github.com/hashicorp/hcl`.
   - Only `internal/assets` imports `github.com/ProtonMail/go-crypto`, tests included (ADR-0026).
   - `internal/nodeup`, `internal/nodeconfig` and `cmd/tent-node`, tests included, import neither `internal/assets`
     nor `internal/channels`; tent-node gets its assets in NodeConfig (ADR-0026).
@@ -296,9 +297,15 @@ that its nodes download. v0.2.0, with the day-2 operations of M3, was tagged on 
 - **Tests.**
   - Unit tests sit next to the code, with golden files under `testdata/`.
   - Every engine task needs an "apply → re-plan → no-op" test.
-  - Every top-level test of `internal/app` calls `t.Parallel()` first (`TestEveryTestRunsInParallel` checks it), and
-    its tests open a file store with `statestore.OpenWith(..., statestore.WithoutSync())`. Production code calls
-    `statestore.Open`.
+  - Every top-level test of `internal/app` and `internal/cli` calls `t.Parallel()` first. Each package's
+    `TestEveryTestRunsInParallel` checks it through `internal/paralleltest`; a test that changes state the whole
+    process shares (arguments, working directory, signals) is listed in the package's `serialTests` with the reason.
+  - The tests of `internal/app` open a store in memory (`memstore.New`, through `newService`); a test that checks the
+    store's files, their modes, syncs or `flock` opens a file store (`newFileService`). Tests that need a file store
+    open it with `statestore.OpenWith(..., statestore.WithoutSync())`, as those of `internal/cli` do. Production code
+    calls `statestore.Open`.
+  - The tests of `internal/cli` read the environment and the home directory through `globalOptions` (`setenv`,
+    `testOptions`), never through `t.Setenv`.
   - E2E tests use the `e2e` build tag and never run by default. `make e2e` runs them from the maintainer's machine
     and needs `VULTR_API_KEY`, the R2 keys and `TENT_DEV_S3_URL` (`test/e2e/README.md`).
 - **Checks.** `make check` runs fmt, lint, licenses, test and build; `make fmt` and `make lint` need golangci-lint at

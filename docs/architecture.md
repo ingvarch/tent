@@ -1820,6 +1820,14 @@ store then skips the sync of each written file and of its directory, and a bucke
 no URL, flag, environment variable or config key reaches it, and `TestOnlyTestsUseWithoutSync` fails when a Go file
 that is not a test names it.
 
+`statestore.Checked(backend)` wraps a backend from outside the package in the same check. The one such backend is
+`memstore.New`, a store in memory for tests: it keeps the objects in a map, gives each write a new version (a counter,
+so a write of the same content gets a new version, which a file store's digest does not), enforces conditional puts
+and so locks with the lease of [10.4](#104-locking), and calls itself `memory://`. It refuses a put of a path above
+or below an object, as the file store does (`"a"` while `"a/b"` exists, and the reverse), though S3 accepts both, so
+that a layout path that only an object store takes fails in the tests too. Only tests import `memstore`; `Open` takes
+no such URL.
+
 - **`file:///abs/path`** (`file:///C:/state` on Windows): local development and single-runner CI jobs (E2E uses it).
   - Local disks only. Network file systems such as NFS emulate file locks per process, so two goroutines of one
     process would not exclude each other and conditional puts would not be atomic.
@@ -5072,10 +5080,20 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
        an interruption. `TestUpdateReadsNomadsReleaseFilesOncePerRun` checks that a run reads Nomad's release files
        once.
      - **Parallel tests without syncs.** Every top-level test of `internal/app` calls `t.Parallel()` first, and
-       `TestEveryTestRunsInParallel` fails for one that does not. The tests open their file store with
-       `statestore.OpenWith` and `WithoutSync()` ([10.1](#101-backends)): the syncs of the store's writes took most of
-       the package's time. `go test -race ./internal/app/` took 36 s on the maintainer's machine on 2026-10-11; it
-       took 232 s before every test ran in parallel, and 182 s before the stores stopped syncing.
+       `TestEveryTestRunsInParallel` fails for one that does not. The tests opened their file store with
+       `statestore.OpenWith` and `WithoutSync()` ([10.1](#101-backends)) until the 2026-10-14 note below put them on
+       `memstore`: the syncs of the store's writes took most of the package's time. `go test -race ./internal/app/`
+       took 36 s on the maintainer's machine on 2026-10-11; it took 232 s before every test ran in parallel, and 182 s
+       before the stores stopped syncing.
+     - **A store in memory and parallel CLI tests** (2026-10-14). The tests of `internal/app` run on `memstore`
+       ([10.1](#101-backends)), and those that check files on a file store. With `-race` and `GOMAXPROCS=4`, as on a
+       CI runner, the package took 103 s in place of 117 s and 12 s of system time in place of 36 s: under `-race` most
+       of the CPU is the race runtime and the scheduler, and the file store was the large share only without it. Of the
+       352 top-level tests of `internal/cli`, 348 run in parallel too (through `internal/paralleltest`; the other four
+       change state the whole process shares), on file stores without syncs: 60 s became 5 to 7 s with `-race`.
+       forbidigo forbids `os.Setenv`, `os.Unsetenv`, `os.Chdir`, `os.Args` and `signal.Notify` in those tests, except on
+       the lines of `root_test.go` where `TestMain` sets `GORACE` and the serial test sets `os.Args`. The snapshot of
+       the app's tests leaves out the lock's lease, which a held lock renews.
    - **Built in M3.4** ([ADR-0038](adr/0038-rolling-update-of-server-groups.md)): tests of the server roll, on the same
      fakes.
      - **The world follows servers over time** (`roll_servers_world_*_test.go`; every delay is 0 by default, so the
@@ -5286,7 +5304,7 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
        rules. The roll creates 5 machines in both clusters, drains 2 and 5 nodes, stops 3 and deletes 5, and purges 2
        and 5 nodes.
    - **Built in M3.8** ([ADR-0042](adr/0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md)): the
-     backup commands run on `vultrfake` and `nomadfake`, with the file store and the test world of `internal/app`.
+     backup commands run on `vultrfake` and `nomadfake`, with `memstore` and the test world of `internal/app`.
      - **Units.** `statestore`'s names and their parse; `pickBackup`, `recorded`, `refuseJobs` and `tookBackup` as
        tables; the record's encode and decode, with its times in UTC. `nomadops`' `Jobs` and `TokenAccessor` on
        `httptest` servers with mTLS from `internal/pki`: the request, a null in the list, no jobs, each error class, a
