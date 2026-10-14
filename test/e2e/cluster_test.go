@@ -162,7 +162,14 @@ func (c *cluster) service(t *testing.T) {
 func (c *cluster) pairService(t *testing.T) {
 	ctx := stepContext(suite.Ctx, t)
 	c.submitJob(ctx, t, "web-pair.nomad.hcl")
-	err := pollUntil(ctx, serviceEvery, serviceTimeout, func(ctx context.Context) string {
+	if err := c.waitPair(ctx, serviceTimeout); err != nil {
+		t.Fatalf("service %s: %v", webService, err)
+	}
+}
+
+// waitPair waits until both allocations of the job run and the service is healthy.
+func (c *cluster) waitPair(ctx context.Context, timeout time.Duration) error {
+	return pollUntil(ctx, serviceEvery, timeout, func(ctx context.Context) string {
 		running, err := runningAllocations(ctx, c.nomad, webJob)
 		if err != nil {
 			return err.Error()
@@ -172,9 +179,6 @@ func (c *cluster) pairService(t *testing.T) {
 		}
 		return serviceProblem(ctx, c.nomad, webJob, webService)
 	})
-	if err != nil {
-		t.Fatalf("service %s: %v", webService, err)
-	}
 }
 
 // machines lists every machine of the Vultr account; machinesOf picks those of a cluster.

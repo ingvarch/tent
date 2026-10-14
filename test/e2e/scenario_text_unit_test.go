@@ -672,3 +672,131 @@ func TestAllocationsProblemNeedsExactlyTheWantedRunningAllocations(t *testing.T)
 		}
 	}
 }
+
+func TestParseStoredBackupReadsNameAndSize(t *testing.T) {
+	got, err := parseStoredBackup([]byte(`{"cluster":"c","name":"b-1","time":"t","path":"p","size":2048}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (storedBackup{Name: "b-1", Size: 2048}); got != want {
+		t.Errorf("parseStoredBackup = %+v, want %+v", got, want)
+	}
+}
+
+func TestParseStoredBackupRefusesWhatIsNoBackup(t *testing.T) {
+	for name, in := range map[string]string{
+		"not JSON":   `Backup stored`,
+		"no name":    `{"size":10}`,
+		"empty file": `{"name":"b-1","size":0}`,
+		"no size":    `{"name":"b-1"}`,
+	} {
+		if _, err := parseStoredBackup([]byte(in)); err == nil {
+			t.Errorf("%s: parseStoredBackup(%s) passed", name, in)
+		}
+	}
+}
+
+func TestCheckBackupListNeedsOneBackupOfTheNameWithTheServers(t *testing.T) {
+	one := `[{"name":"b-1","servers":"current"}]`
+	if err := checkBackupList([]byte(one), "b-1", "current"); err != nil {
+		t.Errorf("checkBackupList(one current backup) = %v", err)
+	}
+	for name, tc := range map[string]struct{ in, servers, want string }{
+		"another servers": {one, "earlier", "current"},
+		"another name":    {`[{"name":"b-2","servers":"current"}]`, "current", "b-2"},
+		"two backups": {
+			`[{"name":"b-1","servers":"current"},{"name":"b-2","servers":"current"}]`, "current", "2 backups",
+		},
+		"no backup": {`[]`, "current", "0 backups"},
+		"not JSON":  {`no backups`, "current", "read the backups"},
+	} {
+		err := checkBackupList([]byte(tc.in), "b-1", tc.servers)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: checkBackupList = %v, want an error that holds %q", name, err, tc.want)
+		}
+	}
+}
+
+func TestCheckRestoredNeedsTheLineOfTheBackupAndTheCluster(t *testing.T) {
+	line := "Restored: backup b-1 into cluster e2e-x-ha.\n"
+	if err := checkRestored([]byte(line), "b-1", "e2e-x-ha"); err != nil {
+		t.Errorf("checkRestored(%q) = %v", line, err)
+	}
+	for _, in := range []string{
+		"", "Restored: backup b-2 into cluster e2e-x-ha.\n", "Restored: backup b-1 into cluster e2e-y-ha.\n",
+		"Would restore: backup b-1 into cluster e2e-x-ha.\n",
+	} {
+		if err := checkRestored([]byte(in), "b-1", "e2e-x-ha"); err == nil {
+			t.Errorf("checkRestored(%q) passed", in)
+		}
+	}
+}
+
+func TestAddressesOfMembersAndNodesAreSortedAndComplete(t *testing.T) {
+	members := []agentMember{{Name: "s2.global", Addr: "10.0.0.9"}, {Name: "s1.global", Addr: "10.0.0.3"}}
+	if got, want := memberAddresses(members), []string{"10.0.0.3", "10.0.0.9"}; !slices.Equal(got, want) {
+		t.Errorf("memberAddresses = %v, want %v", got, want)
+	}
+	nodes := []nomadNode{{Name: "w2", Address: "10.0.0.8"}, {Name: "w1", Address: "10.0.0.4"}}
+	if got, want := nodeAddresses(nodes), []string{"10.0.0.4", "10.0.0.8"}; !slices.Equal(got, want) {
+		t.Errorf("nodeAddresses = %v, want %v", got, want)
+	}
+	if got := memberAddresses(nil); len(got) != 0 {
+		t.Errorf("memberAddresses(nil) = %v, want none", got)
+	}
+}
+
+func TestBackupRecordHoldsTheBackupTheTimesTheAddressesAndTheForcedRoll(t *testing.T) {
+	e := backupEvidence{
+		Backup:        storedBackup{Name: "b-1", Size: 4096},
+		Times:         []stepTime{{"create", 20 * time.Second}, {"rebuild", 9*time.Minute + 30*time.Second}},
+		ServersBefore: []string{"10.0.0.3", "10.0.0.9"}, WorkersBefore: []string{"10.0.0.4"},
+		ServersAfter: []string{"10.0.0.5"}, WorkersAfter: []string{"10.0.0.4"},
+	}
+	got := backupRecord(e)
+	for _, want := range []string{
+		"backup: b-1\nsize: 4096\n", "create: 20s\n", "rebuild: 9m30s\n",
+		"servers before: 10.0.0.3 10.0.0.9\n", "workers before: 10.0.0.4\n",
+		"servers after: 10.0.0.5\n", "workers after: 10.0.0.4\n", "forced roll of the workers: no\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("record does not hold %q:\n%s", want, got)
+		}
+	}
+	e.Forced = true
+	if got := backupRecord(e); !strings.Contains(got, "forced roll of the workers: yes\n") {
+		t.Errorf("record of a forced roll:\n%s", got)
+	}
+}
+
+func TestBackupRecordOfAnEmptyEvidenceSaysNoneForEveryList(t *testing.T) {
+	got := backupRecord(backupEvidence{})
+	for _, want := range []string{
+		"servers before: none\n", "workers before: none\n", "servers after: none\n", "workers after: none\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("record does not hold %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestSleepContextWaitsTheTimeAndEndsWithTheContext(t *testing.T) {
+	const d = 20 * time.Millisecond
+	begin := time.Now()
+	if err := sleepContext(context.Background(), d); err != nil {
+		t.Errorf("sleepContext = %v, want nil after the time", err)
+	}
+	if took := time.Since(begin); took < d {
+		t.Errorf("sleepContext returned after %s, want at least %s", took, d)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	err := sleepContext(ctx, time.Hour)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("sleepContext of an ended context = %v, want context.Canceled", err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("sleepContext kept waiting for the time after the context ended")
+	}
+}
