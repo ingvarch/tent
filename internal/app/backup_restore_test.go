@@ -61,7 +61,7 @@ func accessorOf(t *testing.T, svc *app.Service, w *nomadWorld) string {
 // ones. It stops the test when update does not write a newer mark.
 func rebuiltWorld(t *testing.T) rebuilt {
 	t.Helper()
-	svc, f, w, _ := builtWorld(t)
+	svc, f, w := builtWorld(t)
 	earlier := markOf(t, svc.Store)
 	backup := mustBackup(t, svc)
 	deleteServers(t, f)
@@ -857,7 +857,7 @@ func TestBackupRestoreRefusesWhatTheStoreDoesNotAllow(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				svc, _, w, _ := builtWorld(t)
+				svc, _, w := builtWorld(t)
 				mark := markOf(t, svc.Store)
 				first := mustBackup(t, svc)
 				from := tc.from

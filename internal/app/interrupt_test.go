@@ -325,7 +325,7 @@ func TestUpdateCutAtEveryCall(t *testing.T) {
 	for _, ex := range exampleClusters {
 		t.Run(ex.name, func(t *testing.T) {
 			_, calls, want := buildExample(t, ex.docs...)
-			_, template := exampleStore(t, ex.docs...)
+			template := exampleTemplate(t, ex.docs...)
 			eachCut(t, calls, func(t *testing.T, c cutCase) {
 				svc, f, w := newExampleFrom(t, template)
 				wrote := runCut(t, f, w, svc.Store, c, func(ctx context.Context) error {
@@ -340,16 +340,16 @@ func TestUpdateCutAtEveryCall(t *testing.T) {
 }
 
 // builtTemplate builds the cluster of the specs docs in a new store, on a fake of its own, and returns the store's
-// root.
-func builtTemplate(t *testing.T, docs ...string) string {
+// objects.
+func builtTemplate(t *testing.T, docs ...string) storeCopy {
 	t.Helper()
-	svc, root := exampleStore(t, docs...)
+	svc := exampleStore(t, docs...)
 	synctest.Test(t, func(t *testing.T) {
 		f, _ := withCloud(svc)
 		withNomad(svc, f)
 		mustUpdate(t, svc)
 	})
-	return root
+	return copyOf(t, svc.Store)
 }
 
 // TestUpdateCutAtEveryCallOfARebuild rebuilds each example cluster on an empty cloud and a new Nomad, from a store
@@ -440,7 +440,7 @@ func TestUpdateCutAtEveryStateWrite(t *testing.T) {
 	t.Parallel()
 	for _, ex := range exampleClusters {
 		_, _, want := buildExample(t, ex.docs...)
-		_, template := exampleStore(t, ex.docs...)
+		template := exampleTemplate(t, ex.docs...)
 		for _, after := range []bool{false, true} {
 			when := "before"
 			if after {
@@ -514,7 +514,7 @@ func TestUpdateCutAtEveryWriteOfTheNames(t *testing.T) {
 	groups := map[string]string{"servers and workers": "servers", "combined": "all"}
 	for _, ex := range exampleClusters {
 		_, _, want := buildExample(t, ex.docs...)
-		_, template := exampleStore(t, ex.docs...)
+		template := exampleTemplate(t, ex.docs...)
 		names := "prod/names/" + groups[ex.name]
 		for _, after := range []bool{false, true} {
 			when := "before"
@@ -569,7 +569,7 @@ func TestUpdateCutAtEveryWriteOfTheNames(t *testing.T) {
 func TestDeleteCutAtEveryCall(t *testing.T) {
 	t.Parallel()
 	calls := deleteExample(t)
-	_, template := exampleStore(t)
+	template := exampleTemplate(t)
 	eachCut(t, calls, func(t *testing.T, c cutCase) {
 		svc, f, _ := newExampleFrom(t, template)
 		mustUpdate(t, svc)
@@ -665,7 +665,7 @@ var errLost = errors.New("the test lost the answer")
 func TestUpdateLosesTheAnswerOfEveryCreate(t *testing.T) {
 	t.Parallel()
 	_, calls, want := buildExample(t)
-	_, template := exampleStore(t)
+	template := exampleTemplate(t)
 	for i, call := range calls {
 		method, _, _ := strings.Cut(call, " ")
 		if !strings.HasPrefix(method, "Create") {

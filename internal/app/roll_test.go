@@ -726,7 +726,7 @@ func TestRollingUpdateRefusesWhatTheDecisionsRefuse(t *testing.T) {
 func TestRollingUpdateFailsForWhatIsNotThere(t *testing.T) {
 	t.Parallel()
 	t.Run("a cluster that the store lacks", func(t *testing.T) {
-		svc, root := newService(t)
+		svc, root := newFileService(t)
 		withCloud(svc)
 
 		_, err := rollingUpdate(svc, app.RollOptions{})
@@ -735,7 +735,7 @@ func TestRollingUpdateFailsForWhatIsNotThere(t *testing.T) {
 		wantNothingWritten(t, root)
 	})
 	t.Run("a cluster that a newer tent wrote", func(t *testing.T) {
-		svc, _ := newService(t)
+		svc := newService(t)
 		mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 		withCloud(svc)
 		put(t, svc.Store, versionPath, []byte("v0.9.0\n"))

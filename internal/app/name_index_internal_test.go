@@ -60,7 +60,7 @@ func (s *watchedStore) Capabilities(ctx context.Context) (statestore.Capabilitie
 	return s.Store.Capabilities(ctx)
 }
 
-// namesTestService returns a service over a watched file store, and the layout of cluster prod.
+// namesTestService returns a service over a watched store in memory, and the layout of cluster prod.
 func namesTestService(t *testing.T) (*Service, *watchedStore, statestore.Layout) {
 	t.Helper()
 	svc, l := secretsTestService(t)

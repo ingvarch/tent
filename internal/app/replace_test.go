@@ -12,7 +12,7 @@ import (
 
 func TestReplace(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	bigger := edit(t, workersYAML, "size: 2", "size: 4")
 	changes, err := svc.Replace(t.Context(), decode(t, clusterYAML, bigger), true)
@@ -34,7 +34,7 @@ func TestReplace(t *testing.T) {
 
 func TestReplaceCluster(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	pinned := edit(t, clusterYAML, "region: ams", "region: ams\n  nomad:\n    version: 2.0.7")
 	changes, err := svc.Replace(t.Context(), decode(t, pinned), true)
@@ -48,7 +48,7 @@ func TestReplaceCluster(t *testing.T) {
 func TestReplaceMissing(t *testing.T) {
 	t.Parallel()
 	const hint = "; create it with create -f"
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML)
 	for _, tc := range []struct {
 		name string
@@ -70,7 +70,7 @@ func TestReplaceMissing(t *testing.T) {
 
 func TestReplaceInvalid(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	_, err := svc.Replace(t.Context(), decode(t, edit(t, serversYAML, "size: 3", "size: 2")), true)
 	wantFieldErrors(t, err, v1alpha1.FieldError{
@@ -113,7 +113,7 @@ func TestReplaceKeepsTheCloud(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			svc, _ := newService(t)
+			svc := newService(t)
 			mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 			stored := snapshot(t, svc.Store)
 			for _, apply := range []bool{false, true} {
@@ -124,7 +124,7 @@ func TestReplaceKeepsTheCloud(t *testing.T) {
 		})
 	}
 
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	narrow := edit(t, clusterYAML, "region: ams", "region: ams\n  access:\n    api: [203.0.113.0/24]")
 	changes, err := svc.Replace(t.Context(), decode(t, narrow), true)
@@ -160,7 +160,7 @@ func wantBroken(t *testing.T, err error) {
 // unknown, so the change could move the cluster. The error says how to repair the file.
 func TestReplaceKeepsTheCloudOfABrokenStore(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	breakCluster(t, svc)
 	_, err := svc.Replace(t.Context(), decode(t, clusterYAML), true)
@@ -172,7 +172,7 @@ func TestReplaceKeepsTheCloudOfABrokenStore(t *testing.T) {
 // reads it, and changes nothing.
 func TestBrokenClusterSaysHowToRepairIt(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	breakCluster(t, svc)
 	svc.Providers = func(v1alpha1.Provider) (cloud.Provider, error) {
@@ -230,7 +230,7 @@ func TestReplaceKeepsTheRole(t *testing.T) {
 	for _, tc := range roleMoves {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			svc, _ := newService(t)
+			svc := newService(t)
 			mustCreate(t, svc, tc.stored...)
 			stored := snapshot(t, svc.Store)
 			for _, apply := range []bool{false, true} {
@@ -248,7 +248,7 @@ func TestReplaceKeepsTheRole(t *testing.T) {
 // at once: the problems of what must stay come first, the cluster's before the group's, and validation's follow.
 func TestReplaceNamesTheRoleAfterTheCloudAndBeforeValidation(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	stored := snapshot(t, svc.Store)
 	servers := edit(t, edit(t, serversYAML, "role: server", "role: combined"), "size: 3", "size: 2")
@@ -267,7 +267,7 @@ func TestReplaceNamesTheRoleAfterTheCloudAndBeforeValidation(t *testing.T) {
 // missing server group, and none says that the role moved.
 func TestReplaceEmptyRole(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	_, err := svc.Replace(t.Context(), decode(t, edit(t, serversYAML, "  role: server\n", "")), true)
 	wantFieldErrors(t, err, v1alpha1.FieldError{
@@ -282,7 +282,7 @@ func TestReplaceEmptyRole(t *testing.T) {
 // a group that has one: the role did not move from anything.
 func TestReplaceStoredWithoutRole(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	put(t, svc.Store, workersPath, encode(t, edit(t, workersYAML, "  role: client\n", "")))
 	changes, err := svc.Replace(t.Context(), decode(t, workersYAML), true)
@@ -297,7 +297,7 @@ func TestReplaceStoredWithoutRole(t *testing.T) {
 // machine without cluster.yaml, so the role is free to change.
 func TestCreateLeftoverMayChangeRole(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	const allPath = "prod/nodegroups/all.yaml"
 	put(t, svc.Store, allPath, encode(t, combinedYAML))
 	doc := edit(t, combinedYAML, "role: combined", "role: server")
@@ -313,7 +313,7 @@ func TestCreateLeftoverMayChangeRole(t *testing.T) {
 // can repair: its role is unknown, so it did not move.
 func TestReplaceRepairsUndecodableGroup(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	put(t, svc.Store, workersPath, []byte("kind: NodeGroup\n"))
 	changes, err := svc.Replace(t.Context(), decode(t, workersYAML), true)

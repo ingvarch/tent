@@ -55,7 +55,7 @@ func newRelease(t *testing.T, docs ...string) (*app.Service, *vultrfake.Fake, *n
 	if len(docs) == 0 {
 		docs = []string{keyedClusterYAML, serversYAML, workersYAML}
 	}
-	svc, _ := newService(t)
+	svc := newService(t)
 	svc.Validate = v1alpha1.ValidateOptions{AllowSingleServer: true}
 	mustCreate(t, svc, docs...)
 	svc.Version = "v0.5.0"
@@ -238,7 +238,7 @@ func TestUpdateBuildsANomadCluster(t *testing.T) {
 		// Each server's name is stored as the highest index of its group before the server is created.
 		wantWrites := []string{versionPath, caKeyPath, caBundlePath, gossipPath, aclPath, completedPath,
 			namesPath, namesPath, namesPath, markPath}
-		writes := slices.DeleteFunc(slices.Clone(rec.writes), func(p string) bool { return p == lockPath })
+		writes := withoutLock(rec.writes)
 		if diff := cmp.Diff(wantWrites, writes); diff != "" {
 			t.Errorf("writes to the store (-want +got):\n%s", diff)
 		}
@@ -596,7 +596,7 @@ func TestUpdateMovesToTheNextServer(t *testing.T) {
 func TestUpdateResumesAfter(t *testing.T) {
 	t.Parallel()
 	_, _, want := buildExample(t)
-	_, template := exampleStore(t)
+	template := exampleTemplate(t)
 	const leader = "nomad Leader (prod-servers-0)"
 	for _, tc := range []struct {
 		name  string
@@ -1829,7 +1829,7 @@ func TestUpdatePlanCountsTheIntroToken(t *testing.T) {
 func TestUpdateFindsTentNodeOnlyForNodes(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _ := newService(t)
+		svc := newService(t)
 		mustCreate(t, svc, keyedClusterYAML, serversYAML, workersYAML)
 		f, _ := withCloud(svc)
 		withNomad(svc, f)

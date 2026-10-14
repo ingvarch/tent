@@ -104,7 +104,7 @@ func wantAccessError(t *testing.T, err error, want string, secrets map[string][]
 func TestOperatorAccessMakesATokenAndACertificate(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, f, w, _ := builtWorld(t)
+		svc, f, w := builtWorld(t)
 		rec := &writeLog{Store: svc.Store}
 		svc.Store = rec
 		secrets := storedSecretBytes(t, svc)
@@ -198,7 +198,7 @@ func wantOperatorCertificate(t *testing.T, acc app.Access, from, end time.Time) 
 func TestOperatorAccessMovesToTheNextServer(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, f, w, _ := builtWorld(t)
+		svc, f, w := builtWorld(t)
 		w.LoseResponse(t, "CreateToken")
 		nomadBefore := len(w.Log())
 
@@ -227,7 +227,7 @@ func TestOperatorAccessMovesToTheNextServer(t *testing.T) {
 func TestOperatorAccessListsTheServersThatHaveAPublicAddress(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, f, _, _ := builtWorld(t)
+		svc, f, _ := builtWorld(t)
 		if err := f.DeleteInstance(t.Context(), "instance-3"); err != nil {
 			t.Fatal(err)
 		}
@@ -258,7 +258,7 @@ func (n reversedNodes) List(ctx context.Context, cluster string) ([]cloud.Instan
 func TestOperatorAccessOrdersTheServersByName(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, f, _, _ := builtWorld(t)
+		svc, f, _ := builtWorld(t)
 		providers := svc.Providers
 		svc.Providers = func(name v1alpha1.Provider) (cloud.Provider, error) {
 			p, err := providers(name)
@@ -308,7 +308,7 @@ func TestOperatorAccessDoesNotValidateTheSpecs(t *testing.T) {
 func TestOperatorAccessTakesNoLock(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _, _ := builtWorld(t)
+		svc, _, _ := builtWorld(t)
 		held := holdLock(t, svc.Store)
 		lease := held.Lease()
 
@@ -334,7 +334,7 @@ func TestOperatorAccessEndsWithTheEarlierEnd(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				svc, _, _, _ := builtWorld(t)
+				svc, _, _ := builtWorld(t)
 				time.Sleep(3 * time.Hour) // the service's clock must not be before the CA's start
 				svc.Now = func() time.Time { return time.Now().Add(tc.offset) }
 				nomadEnd, certEnd := time.Now().Add(accessTTL), time.Now().Add(tc.offset+accessTTL)
@@ -359,7 +359,7 @@ func TestOperatorAccessEndsWithTheEarlierEnd(t *testing.T) {
 func TestOperatorAccessEndsWithTheCA(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _, _ := builtWorld(t)
+		svc, _, _ := builtWorld(t)
 		caEnd := storedCA(t, svc.Store).Certificate().NotAfter
 		time.Sleep(time.Until(caEnd.Add(-time.Hour)))
 
@@ -398,7 +398,7 @@ func TestOperatorAccessNamesWhatIsMissing(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				svc, f, w, _ := builtWorld(t)
+				svc, f, w := builtWorld(t)
 				secrets := storedSecretBytes(t, svc)
 				for _, p := range tc.remove {
 					if err := svc.Store.Delete(t.Context(), p); err != nil {
@@ -425,7 +425,7 @@ func TestOperatorAccessNamesWhatIsMissing(t *testing.T) {
 func TestOperatorAccessFailsForAStoredSecretThatDoesNotLoad(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _, _ := builtWorld(t)
+		svc, _, _ := builtWorld(t)
 		secrets := storedSecretBytes(t, svc)
 		put(t, svc.Store, gossipPath, []byte("not a gossip key, a tale of woe\n"))
 		_, updateErr := svc.Update(t.Context(), "prod", false)
@@ -456,7 +456,7 @@ func TestOperatorAccessNeedsServerMachines(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				svc, f, w, _ := builtWorld(t)
+				svc, f, w := builtWorld(t)
 				secrets := storedSecretBytes(t, svc)
 				for _, id := range []string{"instance-1", "instance-2", "instance-3"} {
 					if err := f.DeleteInstance(t.Context(), id); err != nil {
@@ -485,7 +485,7 @@ func TestOperatorAccessRefusesATTLThatIsNotAboveZero(t *testing.T) {
 	for _, ttl := range []time.Duration{0, -time.Minute} {
 		t.Run(ttl.String(), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				svc, f, w, _ := builtWorld(t)
+				svc, f, w := builtWorld(t)
 				cloudCalls, nomadBefore := len(f.Calls()), len(w.Log())
 
 				_, err := svc.OperatorAccess(t.Context(), "prod", "export nomad", ttl)
@@ -503,7 +503,7 @@ func TestOperatorAccessRefusesATTLThatIsNotAboveZero(t *testing.T) {
 func TestOperatorAccessSaysNomadsWordsForATTLOutOfItsLimits(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, w, _ := builtWorld(t)
+		svc, _, w := builtWorld(t)
 		nomadBefore := len(w.Log())
 
 		_, err := svc.OperatorAccess(t.Context(), "prod", "export nomad", 48*time.Hour)
@@ -525,7 +525,7 @@ func TestOperatorAccessSaysNomadsWordsForATTLOutOfItsLimits(t *testing.T) {
 func TestOperatorAccessNamesAFailedCall(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, w, _ := builtWorld(t)
+		svc, _, w := builtWorld(t)
 		secrets := storedSecretBytes(t, svc)
 		w.Fail(t, "CreateToken", errPermanent)
 		nomadBefore := len(w.Log())
@@ -546,7 +546,7 @@ func TestOperatorAccessNamesAFailedCall(t *testing.T) {
 func TestOperatorAccessHintsAtTheAPIAccess(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, w, _ := builtWorld(t)
+		svc, _, w := builtWorld(t)
 		secrets := storedSecretBytes(t, svc)
 		for range 3 {
 			w.Fail(t, "CreateToken", errNotReady)
@@ -566,7 +566,7 @@ func TestOperatorAccessHintsAtTheAPIAccess(t *testing.T) {
 // TestOperatorAccessNeedsTheCluster fails for a cluster that the store does not hold, and writes nothing.
 func TestOperatorAccessNeedsTheCluster(t *testing.T) {
 	t.Parallel()
-	svc, root := newService(t)
+	svc, root := newFileService(t)
 	withCloud(svc)
 
 	_, err := svc.OperatorAccess(t.Context(), "prod", "export nomad", accessTTL)
@@ -578,7 +578,7 @@ func TestOperatorAccessNeedsTheCluster(t *testing.T) {
 // TestOperatorAccessChecksTheTentVersion fails for a cluster that a newer tent wrote.
 func TestOperatorAccessChecksTheTentVersion(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	withCloud(svc)
 	put(t, svc.Store, versionPath, []byte("v0.9.0\n"))
@@ -593,7 +593,7 @@ func TestOperatorAccessChecksTheTentVersion(t *testing.T) {
 func TestOperatorAccessIsInterrupted(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, w, _ := builtWorld(t)
+		svc, _, w := builtWorld(t)
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		w.SetHook(func(ctx context.Context, _ nomadfake.Call, _ func(context.Context) error) error {
@@ -614,7 +614,7 @@ func TestOperatorAccessIsInterrupted(t *testing.T) {
 func TestAccessPrintsNoSecret(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _, _ := builtWorld(t)
+		svc, _, _ := builtWorld(t)
 		acc := mustAccess(t, svc)
 
 		b, err := json.Marshal(acc)
@@ -634,7 +634,7 @@ func TestAccessPrintsNoSecret(t *testing.T) {
 func TestOperatorAccessFailsWhenTheCloudDoesNotAnswer(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, f, w, _ := builtWorld(t)
+		svc, f, w := builtWorld(t)
 		errDown := errors.New("the cloud is down")
 		f.Fail(t, "ListInstances", errDown, 8)
 		nomadBefore := len(w.Log())
@@ -657,7 +657,7 @@ func TestOperatorAccessFailsWhenTheCloudDoesNotAnswer(t *testing.T) {
 func TestOperatorAccessNamesTheTokenAfterThePurpose(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, w, _ := builtWorld(t)
+		svc, _, w := builtWorld(t)
 
 		if _, err := svc.OperatorAccess(t.Context(), "prod", "ui", accessTTL); err != nil {
 			t.Fatalf("OperatorAccess: %v", err)

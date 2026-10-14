@@ -30,24 +30,32 @@ import (
 // oneZoneWarning is the warning about the test cluster, whose machines all run in one region.
 const oneZoneWarning = "cluster prod runs in one failure domain, ams: an outage there takes the whole cluster down"
 
-// builtWorld returns a service over the test cluster, built by an update, the Vultr fake and the Nomad that it ran on
-// and the store's root directory.
-func builtWorld(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld, string) {
+// builtWorld returns a service over the test cluster in a store in memory, built by an update, the Vultr fake and the
+// Nomad that it ran on.
+func builtWorld(t *testing.T) (*app.Service, *vultrfake.Fake, *nomadWorld) {
 	t.Helper()
-	svc, root := newService(t)
+	svc := newService(t)
+	f, w := buildOn(t, svc)
+	return svc, f, w
+}
+
+// buildOn builds the test cluster in the store of svc by an update, and returns the Vultr fake and the Nomad that it
+// ran on.
+func buildOn(t *testing.T, svc *app.Service) (*vultrfake.Fake, *nomadWorld) {
+	t.Helper()
 	mustCreate(t, svc, keyedClusterYAML, serversYAML, workersYAML)
 	f := vultrfake.New()
 	w := withNomad(svc, f)
 	withAPI(svc, f)
 	mustUpdate(t, svc)
-	return svc, f, w, root
+	return f, w
 }
 
 // builtCluster is builtWorld without the Nomad.
-func builtCluster(t *testing.T) (*app.Service, *vultrfake.Fake, string) {
+func builtCluster(t *testing.T) (*app.Service, *vultrfake.Fake) {
 	t.Helper()
-	svc, f, _, root := builtWorld(t)
-	return svc, f, root
+	svc, f, _ := builtWorld(t)
+	return svc, f
 }
 
 // mustValidate validates the test cluster and stops the test on an error.
@@ -76,7 +84,7 @@ func wantFailures(t *testing.T, v app.Validation, want ...app.Failure) {
 func TestValidateClusterPassesTheChecks(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _ := builtCluster(t)
+		svc, _ := builtCluster(t)
 		var told []string
 		svc.OnWarning = func(w string) { told = append(told, w) }
 		stable, err := channels.Load("stable")
@@ -133,7 +141,7 @@ const (
 func TestValidateClusterWarnsAboutSpecsThatUpdateHasNotApplied(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _ := builtCluster(t)
+		svc, _ := builtCluster(t)
 		var told []string
 		svc.OnWarning = func(w string) { told = append(told, w) }
 
@@ -177,7 +185,7 @@ func TestValidateClusterWarnsBeforeTheFirstUpdate(t *testing.T) {
 func TestValidateClusterTellsTheLockWarningAfterTheUnappliedOne(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _ := builtCluster(t)
+		svc, _ := builtCluster(t)
 		mustReplace(t, svc, workersMetaYAML)
 		svc.Store = unwrapped{svc.Store}
 		put(t, svc.Store, lockPath, []byte("not a lease"))
@@ -201,7 +209,7 @@ func TestValidateClusterTellsTheLockWarningAfterTheUnappliedOne(t *testing.T) {
 func TestValidateClusterOrdersTheUnappliedWarning(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _ := builtCluster(t)
+		svc, _ := builtCluster(t)
 		time.Sleep(339*24*time.Hour + 12*time.Hour) // the bubble's clock starts at 2000-01-01, a leap year
 		mustReplace(t, svc, workersMetaYAML)
 
@@ -220,7 +228,7 @@ func TestValidateClusterOrdersTheUnappliedWarning(t *testing.T) {
 func TestValidateClusterWarnsAboutACombinedGroup(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _ := newService(t)
+		svc := newService(t)
 		svc.Validate = v1alpha1.ValidateOptions{AllowSingleServer: true}
 		mustCreate(t, svc, clusterYAML, combinedYAML)
 		withCloud(svc)
@@ -244,7 +252,7 @@ func TestValidateClusterWarnsAboutACombinedGroup(t *testing.T) {
 func TestValidateClusterFindsMachinesThatChanged(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, f, _ := builtCluster(t)
+		svc, f := builtCluster(t)
 
 		if err := f.HaltInstance(t.Context(), "instance-4"); err != nil {
 			t.Fatal(err)
@@ -275,7 +283,7 @@ func TestValidateClusterFindsMachinesThatChanged(t *testing.T) {
 func TestValidateClusterNamesAMissingServerAsUpdateDoes(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, f, _ := builtCluster(t)
+		svc, f := builtCluster(t)
 		if err := f.DeleteInstance(t.Context(), "instance-3"); err != nil {
 			t.Fatal(err)
 		}
@@ -303,7 +311,7 @@ func TestValidateClusterNamesAMissingServerAsUpdateDoes(t *testing.T) {
 func TestValidateClusterFailsForAnObjectOfNamesThatIsNoIndex(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _ := builtCluster(t)
+		svc, _ := builtCluster(t)
 		put(t, svc.Store, namesPath, []byte("x\n"))
 
 		_, err := svc.ValidateCluster(t.Context(), "prod")
@@ -317,7 +325,7 @@ func TestValidateClusterFailsForAnObjectOfNamesThatIsNoIndex(t *testing.T) {
 func TestValidateClusterShowsTheLock(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _ := builtCluster(t)
+		svc, _ := builtCluster(t)
 		held := holdLock(t, svc.Store)
 
 		v := mustValidate(t, svc)
@@ -337,7 +345,8 @@ func TestValidateClusterShowsTheLock(t *testing.T) {
 func TestValidateClusterNamesNoHolder(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, root := builtCluster(t)
+		svc, root := newFileService(t)
+		buildOn(t, svc)
 		held := holdLock(t, svc.Store)
 		if err := os.Remove(flockLease(root)); err != nil {
 			t.Fatal(err)
@@ -357,7 +366,7 @@ func TestValidateClusterNamesNoHolder(t *testing.T) {
 func TestValidateClusterReportsALeaseItCannotRead(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _ := builtCluster(t)
+		svc, _ := builtCluster(t)
 		svc.Store = unwrapped{svc.Store}
 		put(t, svc.Store, lockPath, []byte("not a lease"))
 		var told []string
@@ -383,7 +392,7 @@ func TestValidateClusterReportsALeaseItCannotRead(t *testing.T) {
 func TestValidateClusterOnlyReads(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, f, w, _ := builtWorld(t)
+		svc, f, w := builtWorld(t)
 		before, calls := snapshot(t, svc.Store), len(f.Calls())
 		nomadBefore := len(w.Log())
 
@@ -439,7 +448,7 @@ func (s readOnlyProbe) Delete(_ context.Context, p string) error {
 func TestValidateClusterReadsTheLockWithoutProbingTheStore(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _ := builtCluster(t)
+		svc, _ := builtCluster(t)
 		inner := svc.Store
 		svc.Store = readOnlyProbe{inner, t}
 		lease := statestore.Lease{ID: "other", Owner: "tester", Host: "elsewhere", PID: 7, Operation: "update",
@@ -471,7 +480,7 @@ func nomadCallNames(w *nomadWorld, n int) []string {
 // TestValidateClusterWithoutTheCluster fails for a cluster that the store does not hold, and writes nothing.
 func TestValidateClusterWithoutTheCluster(t *testing.T) {
 	t.Parallel()
-	svc, root := newService(t)
+	svc, root := newFileService(t)
 	withCloud(svc)
 
 	_, err := svc.ValidateCluster(t.Context(), "prod")
@@ -483,7 +492,7 @@ func TestValidateClusterWithoutTheCluster(t *testing.T) {
 // TestValidateClusterChecksTheTentVersion fails for a cluster that a newer tent wrote.
 func TestValidateClusterChecksTheTentVersion(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	withCloud(svc)
 	put(t, svc.Store, versionPath, []byte("v0.9.0\n"))
@@ -497,7 +506,7 @@ func TestValidateClusterChecksTheTentVersion(t *testing.T) {
 // TestValidateClusterChecksTheSpecs fails for a single server without AllowSingleServer, as an update does.
 func TestValidateClusterChecksTheSpecs(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	svc.Validate = v1alpha1.ValidateOptions{AllowSingleServer: true}
 	mustCreate(t, svc, clusterYAML, edit(t, serversYAML, "size: 3", "size: 1"), workersYAML)
 	withCloud(svc)
@@ -518,7 +527,7 @@ func TestValidateClusterChecksTheSpecs(t *testing.T) {
 // TestValidateClusterNeedsProviders fails when the service has no cloud providers.
 func TestValidateClusterNeedsProviders(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 
 	_, err := svc.ValidateCluster(t.Context(), "prod")
@@ -695,7 +704,7 @@ func TestValidationWriteTextWriteError(t *testing.T) {
 func TestValidateClusterFailsWhenTheCloudDoesNotAnswer(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, f, _ := builtCluster(t)
+		svc, f := builtCluster(t)
 		var told []string
 		svc.OnWarning = func(w string) { told = append(told, w) }
 		errDown := errors.New("the cloud is down")
@@ -736,7 +745,7 @@ func (s cancelOnGet) Get(ctx context.Context, p string) ([]byte, statestore.Vers
 func TestValidateClusterIsInterruptedWhileReadingTheLock(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _ := builtCluster(t)
+		svc, _ := builtCluster(t)
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		svc.Store = unwrapped{cancelOnGet{Store: svc.Store, cancel: cancel, ctx: ctx}}
@@ -917,7 +926,7 @@ func TestValidateClusterFindsWhatDiffersInNomad(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				svc, f, w, _ := builtWorld(t)
+				svc, f, w := builtWorld(t)
 				tc.change(w)
 
 				v := mustValidate(t, svc)
@@ -933,7 +942,7 @@ func TestValidateClusterFindsWhatDiffersInNomad(t *testing.T) {
 func TestValidateClusterNeedsNomadThatAnswers(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, w, _ := builtWorld(t)
+		svc, _, w := builtWorld(t)
 		w.NoLeader()
 		before := len(w.Log())
 
@@ -963,7 +972,7 @@ func TestValidateClusterFailsWhenAnotherNomadCallFails(t *testing.T) {
 	} {
 		t.Run(tc.call, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				svc, _, w, _ := builtWorld(t)
+				svc, _, w := builtWorld(t)
 				w.Fail(t, tc.call, errBoom)
 
 				v := mustValidate(t, svc)
@@ -1016,7 +1025,7 @@ func TestValidateClusterNeedsTheStoreToSetUpNomad(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				svc, f, w, _ := builtWorld(t)
+				svc, f, w := builtWorld(t)
 				tc.change(t, svc, f)
 				before := len(w.Log())
 
@@ -1061,7 +1070,7 @@ func (n noPublicNodes) List(ctx context.Context, cluster string) ([]cloud.Instan
 func TestValidateClusterFailsForASecretThatDoesNotLoad(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, w, _ := builtWorld(t)
+		svc, _, w := builtWorld(t)
 		stored := []byte("hunter2-is-no-gossip-key")
 		put(t, svc.Store, gossipPath, stored)
 		before := len(w.Log())
@@ -1088,7 +1097,7 @@ func TestValidateClusterFailsForASecretThatDoesNotLoad(t *testing.T) {
 func TestValidateClusterNeedsANomadClient(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _ := builtCluster(t)
+		svc, _ := builtCluster(t)
 		svc.Nomad = nil
 
 		v, err := svc.ValidateCluster(t.Context(), "prod")
@@ -1105,7 +1114,7 @@ func TestValidateClusterNeedsANomadClient(t *testing.T) {
 func TestValidateClusterNeedsANomadClientBeforeTheSecrets(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _ := newService(t)
+		svc := newService(t)
 		mustCreate(t, svc, keyedClusterYAML, serversYAML, workersYAML)
 		withCloud(svc)
 		svc.Nomad = nil
@@ -1123,7 +1132,7 @@ func TestValidateClusterNeedsANomadClientBeforeTheSecrets(t *testing.T) {
 func TestValidateClusterPassesAClusterOfOneNode(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _ := newService(t)
+		svc := newService(t)
 		svc.Validate = v1alpha1.ValidateOptions{AllowSingleServer: true}
 		mustCreate(t, svc, clusterYAML, edit(t, combinedYAML, "size: 3", "size: 1"))
 		withCloud(svc)
@@ -1169,7 +1178,7 @@ func expiredCertificates() []app.Failure {
 func TestValidateClusterWarnsAboutCertificatesThatEndSoon(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _ := builtCluster(t)
+		svc, _ := builtCluster(t)
 		time.Sleep(339*24*time.Hour + 12*time.Hour) // the bubble's clock starts at 2000-01-01, a leap year
 		var told []string
 		svc.OnWarning = func(w string) { told = append(told, w) }
@@ -1192,7 +1201,7 @@ func TestValidateClusterWarnsAboutCertificatesThatEndSoon(t *testing.T) {
 func TestValidateClusterFailsForCertificatesThatEnded(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _ := builtCluster(t)
+		svc, _ := builtCluster(t)
 		time.Sleep(11 * 366 * 24 * time.Hour)
 
 		v := mustValidate(t, svc)
@@ -1222,7 +1231,7 @@ func TestValidateClusterFailsForCertificatesBesideNomadThatCannotBeAsked(t *test
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				svc, _, w, _ := builtWorld(t)
+				svc, _, w := builtWorld(t)
 				time.Sleep(11 * 366 * 24 * time.Hour)
 				tc.change(t, svc, w)
 
@@ -1249,7 +1258,7 @@ func TestValidateClusterFailsForCertificatesBesideNomadThatCannotBeAsked(t *test
 func TestValidateClusterOrdersFailuresOfAllSources(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, f, w, _ := builtWorld(t)
+		svc, f, w := builtWorld(t)
 		time.Sleep(11 * 366 * 24 * time.Hour)
 		if err := f.HaltInstance(t.Context(), "instance-4"); err != nil {
 			t.Fatal(err)
@@ -1288,7 +1297,7 @@ func TestValidateClusterOrdersFailuresOfAllSources(t *testing.T) {
 func TestValidateClusterShowsNoSecrets(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, w, _ := builtWorld(t)
+		svc, _, w := builtWorld(t)
 		secrets := secretsOf(t, svc.Store)
 		var shown strings.Builder
 		show := func(v app.Validation, err error) {
@@ -1321,7 +1330,7 @@ func TestValidateClusterShowsNoSecrets(t *testing.T) {
 func TestValidateClusterIsInterruptedWhileAskingNomad(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, w, _ := builtWorld(t)
+		svc, _, w := builtWorld(t)
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		w.SetHook(func(ctx context.Context, c nomadfake.Call, next func(context.Context) error) error {
@@ -1470,7 +1479,7 @@ func TestValidateClusterNamesASurplusServerOnce(t *testing.T) {
 func TestValidateClusterNamesNoRowForANodeThatNoMachineHas(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, f, w, _ := builtWorld(t)
+		svc, f, w := builtWorld(t)
 		if err := f.DeleteInstance(t.Context(), "instance-5"); err != nil {
 			t.Fatal(err)
 		}
@@ -1562,7 +1571,7 @@ func (n foreignNodes) List(ctx context.Context, cluster string) ([]cloud.Instanc
 func TestValidateClusterAsksTheServersThatRunInTheCluster(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, f, w, _ := builtWorld(t)
+		svc, f, w := builtWorld(t)
 		inner := svc.Providers
 		svc.Providers = func(name v1alpha1.Provider) (cloud.Provider, error) {
 			p, err := inner(name)

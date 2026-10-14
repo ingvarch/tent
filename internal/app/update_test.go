@@ -69,7 +69,7 @@ func withAPI(svc *app.Service, api vultr.API) *bytes.Buffer {
 // nodes in real time.
 func newUpdate(t *testing.T) (*app.Service, *vultrfake.Fake) {
 	t.Helper()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, keyedClusterYAML, serversYAML, workersYAML)
 	f, _ := withCloud(svc)
 	return svc, f
@@ -527,7 +527,7 @@ func TestUpdatePlan(t *testing.T) {
 func TestUpdate(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _ := newService(t)
+		svc := newService(t)
 		svc.Version = "v0.4.0"
 		mustCreate(t, svc, keyedClusterYAML, serversYAML, workersYAML)
 		f, log := withCloud(svc)

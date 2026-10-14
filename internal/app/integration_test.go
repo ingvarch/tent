@@ -4,8 +4,6 @@ import (
 	"cmp"
 	"fmt"
 	"maps"
-	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -16,7 +14,6 @@ import (
 	"github.com/ingvarch/tent/internal/cloud/vultr"
 	"github.com/ingvarch/tent/internal/cloud/vultr/vultrfake"
 	"github.com/ingvarch/tent/internal/engine"
-	"github.com/ingvarch/tent/internal/statestore"
 )
 
 // The integration tests run whole flows of the use cases with the Vultr provider on its fake and a Nomad that follows
@@ -110,16 +107,22 @@ var exampleClusters = []exampleCluster{
 	}},
 }
 
-// exampleStore returns a service over a new file store that holds the specs docs, or the example cluster when there are
-// none, and the store's root.
-func exampleStore(t *testing.T, docs ...string) (*app.Service, string) {
+// exampleStore returns a service over a new store that holds the specs docs, or the example cluster when there are
+// none.
+func exampleStore(t *testing.T, docs ...string) *app.Service {
 	t.Helper()
 	if len(docs) == 0 {
 		docs = exampleClusters[0].docs
 	}
-	svc, root := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, docs...)
-	return svc, root
+	return svc
+}
+
+// exampleTemplate returns the objects of exampleStore, for newExampleFrom.
+func exampleTemplate(t *testing.T, docs ...string) storeCopy {
+	t.Helper()
+	return copyOf(t, exampleStore(t, docs...).Store)
 }
 
 // newExample returns a service whose store holds the specs docs, or the example cluster when there are none; the empty
@@ -127,24 +130,16 @@ func exampleStore(t *testing.T, docs ...string) (*app.Service, string) {
 // update does not wait in real time.
 func newExample(t *testing.T, docs ...string) (*app.Service, *vultrfake.Fake, *nomadWorld) {
 	t.Helper()
-	svc, _ := exampleStore(t, docs...)
+	svc := exampleStore(t, docs...)
 	f, _ := withCloud(svc)
 	return svc, f, withNomad(svc, f)
 }
 
-// newExampleFrom is newExample over a copy of the store at the root template, from exampleStore. The copy saves
-// writing the specs anew in every short test.
-func newExampleFrom(t *testing.T, template string) (*app.Service, *vultrfake.Fake, *nomadWorld) {
+// newExampleFrom is newExample over a new store that holds the objects of template, from exampleTemplate. The copy
+// saves writing the specs anew in every short test.
+func newExampleFrom(t *testing.T, template storeCopy) (*app.Service, *vultrfake.Fake, *nomadWorld) {
 	t.Helper()
-	root := filepath.Join(t.TempDir(), "state")
-	if err := os.CopyFS(root, os.DirFS(template)); err != nil {
-		t.Fatalf("copy the store: %v", err)
-	}
-	s, err := statestore.OpenWith(t.Context(), fileURL(root), statestore.WithoutSync())
-	if err != nil {
-		t.Fatalf("open the store: %v", err)
-	}
-	svc := &app.Service{Store: s, Version: "dev"}
+	svc := newServiceFrom(t, template)
 	f, _ := withCloud(svc)
 	return svc, f, withNomad(svc, f)
 }

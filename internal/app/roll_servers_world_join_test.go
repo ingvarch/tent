@@ -193,7 +193,7 @@ func TestWorldReportListsTheServersInTheReverseOrderOfThePeers(t *testing.T) {
 func TestWorldHasNoLeaderForAClusterWithoutSpecs(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _ := newService(t)
+		svc := newService(t)
 		f, _ := withCloud(svc)
 		api, err := svc.Nomad(nomadops.Config{Address: "198.51.100.1:4646"})
 		if err != nil {

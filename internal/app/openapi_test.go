@@ -15,7 +15,7 @@ const openAPIWarning = "spec.access.api lets the whole internet reach the Nomad 
 // TestOpenAPI tells OnWarning when a change leaves a cluster whose Nomad API the whole internet may reach.
 func TestOpenAPI(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	calls := 0
 	svc.OnWarning = func(w string) {
 		if w != openAPIWarning {
@@ -118,7 +118,7 @@ func TestCombinedWarning(t *testing.T) {
 	narrow := edit(t, clusterYAML, "region: ams", "region: ams\n  access:\n    api: [203.0.113.0/24]")
 	var got []string
 	newCombined := func(t *testing.T) *app.Service {
-		svc, _ := newService(t)
+		svc := newService(t)
 		svc.OnWarning = func(w string) { got = append(got, w) }
 		got = nil
 		return svc

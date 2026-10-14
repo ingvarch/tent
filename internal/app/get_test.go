@@ -13,7 +13,7 @@ import (
 
 func TestGet(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	got, err := svc.Get(t.Context(), "prod", false)
 	if err != nil {
@@ -28,7 +28,7 @@ func TestGet(t *testing.T) {
 // web.yaml.
 func TestGetSortsNodeGroups(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	web := edit(t, workersYAML, "name: workers", "name: web")
 	web2 := edit(t, workersYAML, "name: workers", "name: web-2")
 	mustCreate(t, svc, clusterYAML, serversYAML, web2, web)
@@ -47,7 +47,7 @@ func TestGetSortsNodeGroups(t *testing.T) {
 
 func TestGetFull(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	got, err := svc.Get(t.Context(), "prod", true)
 	if err != nil {
@@ -62,7 +62,7 @@ func TestGetFull(t *testing.T) {
 
 func TestGetMissing(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML)
 	_, err := svc.Get(t.Context(), "dev", false)
 	wantError(t, err, notFound(svc, "cluster dev"))
@@ -70,7 +70,7 @@ func TestGetMissing(t *testing.T) {
 
 func TestClusters(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	rename := func(doc string) string { return edit(t, doc, "prod", "dev") }
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	mustCreate(t, svc, rename(clusterYAML), rename(serversYAML))
@@ -99,7 +99,7 @@ func TestClusters(t *testing.T) {
 
 func TestClustersOfEmptyStore(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	got, err := svc.Clusters(t.Context(), false)
 	if err != nil || len(got) != 0 {
 		t.Errorf("Clusters = %v, %v; want none", got, err)
@@ -118,7 +118,7 @@ func full(t *testing.T, docs ...string) spec.Objects {
 func TestReadsCheckTheTentVersion(t *testing.T) {
 	t.Parallel()
 	const want = "cluster prod needs tent v0.9.0 or newer; this is v0.4.0"
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML)
 	put(t, svc.Store, clusterPath, []byte(clusterYAML+"  future: yes\n"))
 	put(t, svc.Store, versionPath, []byte("v0.9.0\n"))
@@ -136,7 +136,7 @@ func TestReadsCheckTheTentVersion(t *testing.T) {
 
 func TestNodeGroups(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	for _, tc := range []struct {
 		names []string

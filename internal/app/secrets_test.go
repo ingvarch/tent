@@ -433,7 +433,7 @@ func (s *sent) received(t *testing.T, path string) map[string][]byte {
 func TestUpdateShowsNoSecrets(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _ := newService(t)
+		svc := newService(t)
 		mustCreate(t, svc, keyedClusterYAML, serversYAML, workersYAML)
 		_, log := withCloud(svc)
 		var shown strings.Builder
