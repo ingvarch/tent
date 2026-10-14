@@ -11,7 +11,7 @@ import (
 
 func TestCreateCluster(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	objs := decode(t, workersYAML, clusterYAML, serversYAML)
 	changes, err := svc.Create(t.Context(), objs, true)
 	if err != nil {
@@ -30,7 +30,7 @@ func TestCreateCluster(t *testing.T) {
 
 func TestCreateNodeGroups(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML)
 	changes, err := svc.Create(t.Context(), decode(t, workersYAML), true)
 	if err != nil {
@@ -43,7 +43,7 @@ func TestCreateNodeGroups(t *testing.T) {
 
 func TestCreateAgain(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	changes, err := svc.Create(t.Context(), decode(t, clusterYAML, serversYAML, workersYAML), true)
 	if err != nil {
@@ -56,7 +56,7 @@ func TestCreateAgain(t *testing.T) {
 func TestCreateExisting(t *testing.T) {
 	t.Parallel()
 	const hint = " already exists; change it with edit or replace -f"
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	for _, tc := range []struct {
 		name string
@@ -81,7 +81,7 @@ func TestCreateExisting(t *testing.T) {
 // TestCreateInterrupted re-runs a create that stopped after writing the node groups: cluster.yaml comes last.
 func TestCreateInterrupted(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	put(t, svc.Store, serversPath, encode(t, serversYAML))
 	put(t, svc.Store, workersPath, encode(t, workersYAML))
 	changes, err := svc.Create(t.Context(), decode(t, clusterYAML, serversYAML, workersYAML), true)
@@ -94,7 +94,7 @@ func TestCreateInterrupted(t *testing.T) {
 
 func TestCreateInvalid(t *testing.T) {
 	t.Parallel()
-	svc, root := newService(t)
+	svc, root := newFileService(t)
 	_, err := svc.Create(t.Context(), decode(t, clusterYAML, edit(t, serversYAML, "size: 3", "size: 2")), true)
 	wantFieldErrors(t, err, v1alpha1.FieldError{
 		Object: "NodeGroup servers", Path: "spec.size", Detail: "must be 1, 3 or 5 for role=server",
@@ -106,7 +106,7 @@ func TestCreateInvalid(t *testing.T) {
 // is not.
 func TestCreateChecksTheWholeCluster(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML)
 	_, err := svc.Create(t.Context(), decode(t, edit(t, serversYAML, "name: servers", "name: more")), true)
 	wantFieldErrors(t, err, v1alpha1.FieldError{
@@ -119,7 +119,7 @@ func TestCreateChecksTheWholeCluster(t *testing.T) {
 func TestCreateSingleServer(t *testing.T) {
 	t.Parallel()
 	single := edit(t, serversYAML, "size: 3", "size: 1")
-	svc, _ := newService(t)
+	svc := newService(t)
 	_, err := svc.Create(t.Context(), decode(t, clusterYAML, single), true)
 	wantFieldErrors(t, err, v1alpha1.FieldError{
 		Object: "NodeGroup servers", Path: "spec.size", Detail: "size 1 needs --allow-single-server",
@@ -133,7 +133,7 @@ func TestCreateSingleServer(t *testing.T) {
 
 func TestCreateNodeGroupsOfMissingCluster(t *testing.T) {
 	t.Parallel()
-	svc, root := newService(t)
+	svc, root := newFileService(t)
 	_, err := svc.Create(t.Context(), decode(t, workersYAML), true)
 	wantError(t, err, notFound(svc, "cluster prod"))
 	wantNothingWritten(t, root)
@@ -141,7 +141,7 @@ func TestCreateNodeGroupsOfMissingCluster(t *testing.T) {
 
 func TestCreateBadInput(t *testing.T) {
 	t.Parallel()
-	svc, root := newService(t)
+	svc, root := newFileService(t)
 	for _, tc := range []struct {
 		name string
 		docs []string
@@ -168,7 +168,7 @@ func TestCreateBadInput(t *testing.T) {
 // group changed since: without cluster.yaml, the groups are leftovers of that run.
 func TestCreateReplacesLeftovers(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	put(t, svc.Store, serversPath, encode(t, serversYAML))
 	put(t, svc.Store, workersPath, encode(t, edit(t, workersYAML, "size: 2", "size: 4")))
 	changes, err := svc.Create(t.Context(), decode(t, clusterYAML, serversYAML, workersYAML), true)
@@ -182,7 +182,7 @@ func TestCreateReplacesLeftovers(t *testing.T) {
 
 func TestCreateNodeGroupWithoutCluster(t *testing.T) {
 	t.Parallel()
-	svc, root := newService(t)
+	svc, root := newFileService(t)
 	_, err := svc.Create(t.Context(), decode(t, edit(t, workersYAML, "  cluster: prod\n", "")), true)
 	wantFieldErrors(t, err, v1alpha1.FieldError{
 		Object: "NodeGroup workers", Path: "metadata.cluster", Detail: "required",
@@ -195,7 +195,7 @@ func TestCreateNodeGroupWithoutCluster(t *testing.T) {
 func TestCreateRefusesLeftoversMissingFromTheSpec(t *testing.T) {
 	t.Parallel()
 	const left = " is left from an interrupted create; add it to the spec or run delete cluster first"
-	svc, _ := newService(t)
+	svc := newService(t)
 	put(t, svc.Store, serversPath, encode(t, serversYAML))
 	put(t, svc.Store, workersPath, encode(t, workersYAML))
 	put(t, svc.Store, "prod/nodegroups/web.yaml", encode(t, edit(t, workersYAML, "name: workers", "name: web")))

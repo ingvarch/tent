@@ -130,7 +130,7 @@ func TestChangesHoldTheLock(t *testing.T) {
 	t.Parallel()
 	for _, tc := range changes {
 		t.Run(tc.name, func(t *testing.T) {
-			svc, _ := newService(t)
+			svc := newService(t)
 			mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 			if tc.prepare != nil {
 				tc.prepare(t, svc)
@@ -160,7 +160,7 @@ func TestChangesWaitForTheLock(t *testing.T) {
 	for _, tc := range changes {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				svc, _ := newService(t)
+				svc, _ := newFileService(t)
 				mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 				if tc.prepare != nil {
 					tc.prepare(t, svc)
@@ -205,7 +205,7 @@ func TestChangesDoNotWaitWithoutTimeout(t *testing.T) {
 	t.Parallel()
 	for _, tc := range changes {
 		t.Run(tc.name, func(t *testing.T) {
-			svc, _ := newService(t)
+			svc, _ := newFileService(t)
 			mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 			if tc.prepare != nil {
 				tc.prepare(t, svc)
@@ -226,7 +226,7 @@ func TestChangesDoNotWaitWithoutTimeout(t *testing.T) {
 func TestChangesStopWaitingAfterTimeout(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _ := newService(t)
+		svc := newService(t)
 		mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 		held := holdLock(t, svc.Store)
 		svc.LockTimeout = 9 * time.Second // between two tries, which come every 2 seconds
@@ -248,7 +248,7 @@ func TestChangesCheckTheTentVersion(t *testing.T) {
 	t.Parallel()
 	for _, tc := range changes {
 		t.Run(tc.name, func(t *testing.T) {
-			svc, _ := newService(t)
+			svc := newService(t)
 			mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 			if tc.prepare != nil {
 				tc.prepare(t, svc)
@@ -268,7 +268,7 @@ func TestChangesCheckTheTentVersion(t *testing.T) {
 
 func TestChangesRaiseTheTentVersion(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	svc.Version = "v0.4.0"
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	wantStored(t, svc.Store, versionPath, []byte("v0.4.0\n"))
@@ -308,7 +308,7 @@ func (b blocking) Put(
 func TestChangesStopWhenTheLockIsLost(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _ := newService(t)
+		svc := newService(t)
 		svc.Store = blocking{unwrapped{svc.Store}}
 		_, err := svc.Create(t.Context(), decode(t, clusterYAML, serversYAML), true)
 		wantError(t, err, `lost the lock of cluster prod; stopped: put "prod/cluster.yaml": context canceled`)
@@ -325,7 +325,7 @@ func TestChangesStopWhenTheLockIsLost(t *testing.T) {
 func TestWeakLock(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _ := newService(t)
+		svc := newService(t)
 		svc.Store = noConditions{svc.Store}
 		warned := 0
 		svc.OnWeakLock = func() { warned++ }
@@ -335,7 +335,7 @@ func TestWeakLock(t *testing.T) {
 		}
 		wantPaths(t, svc.Store, clusterPath, serversPath, workersPath)
 	})
-	svc, _ := newService(t)
+	svc, _ := newFileService(t)
 	svc.OnWeakLock = func() { t.Error("OnWeakLock called for a file store") }
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 }
@@ -345,7 +345,7 @@ func TestWeakLock(t *testing.T) {
 func TestChangesCheckTheTentVersionAfterWaiting(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _ := newService(t)
+		svc := newService(t)
 		mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 		held := holdLock(t, svc.Store)
 		svc.Version, svc.LockTimeout = "v0.4.0", time.Minute
@@ -391,7 +391,7 @@ func (p *puts) Put(
 // leaves no cluster.yaml.
 func TestWrites(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	rec := &puts{Store: svc.Store}
 	svc.Store, svc.Version = rec, "v0.4.0"
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
@@ -433,7 +433,7 @@ func (f *failing) Put(
 // recorded in the end, although the specs are unchanged.
 func TestCreateAgainAfterTheVersionFailed(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	svc.Store, svc.Version = &failing{Store: svc.Store, path: versionPath}, "v0.4.0"
 	objs := decode(t, clusterYAML, serversYAML, workersYAML)
 	if _, err := svc.Create(t.Context(), objs, true); err == nil {
@@ -456,7 +456,7 @@ func replaceWorkers(t *testing.T, svc *app.Service) error {
 func TestOnTakeover(t *testing.T) {
 	t.Parallel()
 	t.Run("dead flock holder", func(t *testing.T) {
-		svc, root := newService(t)
+		svc, root := newFileService(t)
 		mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 		dead := leaveFlockLease(t, root)
 		var taken []statestore.Lease
@@ -469,7 +469,7 @@ func TestOnTakeover(t *testing.T) {
 		}
 	})
 	t.Run("expired lease", func(t *testing.T) {
-		svc, _ := newService(t)
+		svc := newService(t)
 		mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 		svc.Store = unwrapped{svc.Store}
 		expired := otherLease(time.Now().Add(-time.Minute).UTC())
@@ -515,7 +515,7 @@ func TestChangesPlanAgainUnderTheLock(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				svc, _ := newService(t)
+				svc := newService(t)
 				mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 				ref := load(t, svc, v1alpha1.KindNodeGroup, "workers")
 				held := holdLock(t, svc.Store)
@@ -546,7 +546,7 @@ func TestChangesPlanAgainUnderTheLock(t *testing.T) {
 func TestChangesStopWaitingWhenInterrupted(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _ := newService(t)
+		svc := newService(t)
 		mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 		held := holdLock(t, svc.Store)
 		ctx, interrupt := context.WithCancel(t.Context())
@@ -577,7 +577,7 @@ func TestChangesReleaseTheLockWhenInterrupted(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			svc, root := newService(t)
+			svc, root := newFileService(t)
 			mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 			tc.leave(t, svc, root)
 			ctx, interrupt := context.WithCancel(t.Context())
@@ -607,7 +607,7 @@ func TestChangesReleaseTheLockWhenInterrupted(t *testing.T) {
 // TestUseCasesSayInterrupted runs every use case with a context that has ended, as after Ctrl-C.
 func TestUseCasesSayInterrupted(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	stored := snapshot(t, svc.Store)
 	ref := load(t, svc, v1alpha1.KindNodeGroup, "workers")
@@ -644,7 +644,7 @@ func TestUseCasesSayInterrupted(t *testing.T) {
 // neither wait nor fail for the lock.
 func TestChangesThatNeedNoLock(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	held := holdLock(t, svc.Store)
 
@@ -680,7 +680,7 @@ func TestWaitForUnnamedHolder(t *testing.T) {
 	t.Parallel()
 	const unnamed = "cluster prod is locked, but its holder has written no lease"
 	synctest.Test(t, func(t *testing.T) {
-		svc, root := newService(t)
+		svc, root := newFileService(t)
 		mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 		held := holdLock(t, svc.Store)
 		if err := os.Remove(flockLease(root)); err != nil {
@@ -754,7 +754,7 @@ func TestLockLostAfterTheChange(t *testing.T) {
 		}
 	}
 	t.Run("create", func(t *testing.T) {
-		svc, _ := newService(t)
+		svc := newService(t)
 		svc.Store = forceUnlocked{unwrapped{svc.Store}, clusterPath}
 		changes, err := svc.Create(t.Context(), decode(t, clusterYAML, serversYAML, workersYAML), true)
 		wantSaved(t, err)
@@ -827,7 +827,7 @@ func TestConditionFailed(t *testing.T) {
 			"node group workers of cluster prod changed meanwhile; run the command again"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			svc, _ := newService(t)
+			svc := newService(t)
 			mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 			svc.Store = racing{svc.Store, tc.path}
 			wantError(t, tc.run(t, svc), tc.want)

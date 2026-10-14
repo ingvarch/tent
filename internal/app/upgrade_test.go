@@ -33,7 +33,7 @@ const (
 // assetstest, whose requests the second result records, and fails the test when it reaches a cloud or a Nomad.
 func upgradeService(t *testing.T, docs ...string) (*app.Service, *assetstest.Sites) {
 	t.Helper()
-	svc, _ := newService(t)
+	svc := newService(t)
 	svc.Version = "v0.4.0"
 	mustCreate(t, svc, docs...)
 	svc.Version = "v0.5.0"
@@ -164,8 +164,8 @@ func TestUpgradeHasNothingToWrite(t *testing.T) {
 			t.Run(tc.name+"/apply "+strconv.FormatBool(apply), func(t *testing.T) {
 				t.Parallel()
 				svc, sites := upgradeAt(t, tc.specVersion, tc.pin)
-				stored := snapshot(t, svc.Store)
 				held := holdLock(t, svc.Store) // a command with nothing to write takes no lock
+				stored := snapshot(t, svc.Store)
 				plan, err := svc.UpgradeCluster(t.Context(), "prod", apply)
 				if err != nil {
 					t.Fatalf("UpgradeCluster: %v", err)
@@ -348,8 +348,8 @@ func TestUpgradeRefuses(t *testing.T) {
 				if tc.prepare != nil {
 					tc.prepare(t, svc)
 				}
-				stored := snapshot(t, svc.Store)
 				held := holdLock(t, svc.Store) // a command that fails in its plan takes no lock
+				stored := snapshot(t, svc.Store)
 				plan, err := svc.UpgradeCluster(t.Context(), "prod", apply)
 				switch {
 				case tc.fields != nil:
@@ -415,7 +415,7 @@ func TestUpgradeIgnoresACompletedSpecThatDoesNotDecodeWhenTheSpecSetsTheVersion(
 func TestUpgradeNeedsTheFlagForAServerGroupOfOne(t *testing.T) {
 	t.Parallel()
 	one := edit(t, serversYAML, "size: 3", "size: 1")
-	svc, _ := newService(t)
+	svc := newService(t)
 	svc.Validate.AllowSingleServer = true
 	svc.Version = "v0.4.0"
 	mustCreate(t, svc, upgradeCluster(t, "2.0.6"), one, workersYAML)

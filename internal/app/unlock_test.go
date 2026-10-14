@@ -36,16 +36,15 @@ func wantUnlocked(t *testing.T, got *statestore.Lease, err error, want *statesto
 func TestUnlockNotLocked(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name string
-		wrap func(statestore.Store) statestore.Store
+		name    string
+		service func(*testing.T) *app.Service
 	}{
-		{"flock", func(s statestore.Store) statestore.Store { return s }},
-		{"lease", func(s statestore.Store) statestore.Store { return unwrapped{s} }},
+		{"flock", func(t *testing.T) *app.Service { svc, _ := newFileService(t); return svc }},
+		{"lease", newService},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			svc, _ := newService(t)
+			svc := tc.service(t)
 			mustCreate(t, svc, clusterYAML, serversYAML)
-			svc.Store = tc.wrap(svc.Store)
 			stored := snapshot(t, svc.Store)
 			for _, force := range []bool{false, true} {
 				removed, err := svc.Unlock(t.Context(), "prod", force)
@@ -60,16 +59,15 @@ func TestUnlockNotLocked(t *testing.T) {
 func TestUnlockMissingCluster(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name string
-		wrap func(statestore.Store) statestore.Store
+		name    string
+		service func(*testing.T) *app.Service
 	}{
-		{"flock", func(s statestore.Store) statestore.Store { return s }},
-		{"lease", func(s statestore.Store) statestore.Store { return unwrapped{s} }},
+		{"flock", func(t *testing.T) *app.Service { svc, _ := newFileService(t); return svc }},
+		{"lease", newService},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			svc, _ := newService(t)
+			svc := tc.service(t)
 			mustCreate(t, svc, clusterYAML, serversYAML)
-			svc.Store = tc.wrap(svc.Store)
 			stored := snapshot(t, svc.Store)
 			for _, force := range []bool{false, true} {
 				removed, err := svc.Unlock(t.Context(), "dev", force)
@@ -89,7 +87,7 @@ const stopHolder = "; that tent is still running and holds a file lock that only
 
 func TestUnlockRunningFlockHolder(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc, _ := newFileService(t)
 	held := holdLock(t, svc.Store)
 	for _, force := range []bool{false, true} {
 		removed, err := svc.Unlock(t.Context(), "prod", force)
@@ -104,7 +102,7 @@ func TestUnlockRunningFlockHolder(t *testing.T) {
 // TestUnlockDeadFlockHolder removes the lease that a tent left when it died holding the flock, which the OS released.
 func TestUnlockDeadFlockHolder(t *testing.T) {
 	t.Parallel()
-	svc, root := newService(t)
+	svc, root := newFileService(t)
 	dead := leaveFlockLease(t, root)
 	removed, err := svc.Unlock(t.Context(), "prod", false)
 	wantUnlocked(t, removed, err, &dead)
@@ -116,7 +114,7 @@ func TestUnlockDeadFlockHolder(t *testing.T) {
 // leaseService returns a service whose store locks with a lease object, holding lease.
 func leaseService(t *testing.T, lease statestore.Lease) *app.Service {
 	t.Helper()
-	svc, _ := newService(t)
+	svc := newService(t)
 	svc.Store = unwrapped{svc.Store}
 	put(t, svc.Store, lockPath, leaseJSON(t, lease))
 	return svc
@@ -207,7 +205,7 @@ func (failingPuts) Put(_ context.Context, p string, _ []byte, _ statestore.PutOp
 func TestUnlockUnreadableLease(t *testing.T) {
 	t.Parallel()
 	const hint = "; run it again with --force if that tent is gone"
-	svc, _ := newService(t)
+	svc := newService(t)
 	svc.Store = unwrapped{svc.Store}
 	put(t, svc.Store, lockPath, []byte("not a lease"))
 	jerr := json.Unmarshal([]byte("not a lease"), new(statestore.Lease))

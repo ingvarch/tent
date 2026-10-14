@@ -59,7 +59,7 @@ func TestBackupCreateIsCut(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				svc, _, w, _ := builtWorld(t)
+				svc, _, w := builtWorld(t)
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
 				if tc.at == "Put" {
@@ -114,7 +114,7 @@ func TestBackupCreateIsCut(t *testing.T) {
 func TestBackupCreateIsCutWhileItWaitsForASnapshot(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, w, _ := builtWorld(t)
+		svc, _, w := builtWorld(t)
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		svc.OnWarning = func(string) { cancel() } // as Ctrl-C would, while it waits

@@ -32,7 +32,7 @@ const markPath = "prod/nomad/bootstrapped"
 // Vultr fake that its providers reach, which holds nothing.
 func newCluster(t *testing.T) (*app.Service, *vultrfake.Fake) {
 	t.Helper()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	put(t, svc.Store, completedPath, []byte("completed"))
 	put(t, svc.Store, versionPath, []byte("v0.4.0\n"))
@@ -434,7 +434,7 @@ func TestDeleteClusterMissing(t *testing.T) {
 // interrupted create: tent cannot tell its cloud, so it deletes the state alone.
 func TestDeleteClusterWithoutClusterSpec(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	put(t, svc.Store, serversPath, encode(t, serversYAML))
 	put(t, svc.Store, workersPath, encode(t, workersYAML))
 	put(t, svc.Store, versionPath, []byte("v0.4.0\n"))
@@ -463,7 +463,7 @@ func TestDeleteClusterWithoutClusterSpec(t *testing.T) {
 // yet: tent made no cloud objects there.
 func TestDeleteClusterOnAnUnsupportedProvider(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	hetzner := edit(t, edit(t, clusterYAML, "provider: vultr", "provider: hetzner"), "region: ams",
 		"region: eu-central\n    zones: [fsn1, nbg1, hel1]")
 	put(t, svc.Store, clusterPath, encode(t, hetzner))
@@ -594,7 +594,7 @@ func TestDeleteCluster(t *testing.T) {
 		var progress []string
 		svc.OnProgress = func(p app.Progress) {
 			progress = append(progress, progressLine(p))
-			if n := len(list(t, svc.Store, "prod/")); n != len(builtState) {
+			if n := len(withoutLock(list(t, svc.Store, "prod/"))); n != len(builtState) {
 				t.Errorf("%d objects of the state are left during the cloud's deletes, want all %d", n, len(builtState))
 			}
 		}

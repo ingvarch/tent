@@ -106,7 +106,7 @@ func TestSpecChecksTheChannel(t *testing.T) {
 	} {
 		for _, uc := range specChecks {
 			t.Run(tc.name+"/"+uc.name, func(t *testing.T) {
-				svc, _ := newService(t)
+				svc := newService(t)
 				uc.prepare(t, svc, tc.doc)
 				svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.7")
 				svc.Providers = func(v1alpha1.Provider) (cloud.Provider, error) {
@@ -151,7 +151,7 @@ func TestChannelProblemsWithOthers(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			svc, root := newService(t)
+			svc, root := newFileService(t)
 			svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.7")
 			_, err := svc.Create(t.Context(), decode(t, tc.docs...), true)
 			wantFieldErrors(t, err, tc.want...)
@@ -173,7 +173,7 @@ const narrowClusterYAML = clusterYAML + "  access:\n    api: [203.0.113.0/24]\n"
 // channel allows but has not tested.
 func TestWarnsOfAnUntestedNomad(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.6", "2.0.7")
 	var warnings []string
 	svc.OnWarning = func(w string) { warnings = append(warnings, w) }
@@ -209,7 +209,7 @@ func TestWarnsOfAnUntestedNomad(t *testing.T) {
 func TestUpdateWarnsOfAnUntestedNomad(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _ := newService(t)
+		svc := newService(t)
 		mustCreate(t, svc, narrowClusterYAML, serversYAML, workersYAML)
 		withCloud(svc)
 		svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.7")
@@ -495,7 +495,7 @@ var moveChecks = specChecks[1:3]
 // a channel that allows 2.x from 2.0.0.
 func pinnedService(t *testing.T) *app.Service {
 	t.Helper()
-	svc, _ := newService(t)
+	svc := newService(t)
 	svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.7")
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	put(t, svc.Store, completedPath, completedSpec(t, svc, "2.0.7"))
@@ -737,7 +737,7 @@ func TestCommandsThatLoadTheSpecsPointToUpgradeForAVersionBelowTheMinimum(t *tes
 		} {
 			t.Run(tc.name+"/"+uc.name, func(t *testing.T) {
 				t.Parallel()
-				svc, _ := newService(t)
+				svc := newService(t)
 				svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.7")
 				mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 				put(t, svc.Store, clusterPath, encode(t, tc.cluster))
@@ -777,7 +777,7 @@ func TestWritesWithoutAClusterPointToUpgradeForAStoredVersionBelowTheMinimum(t *
 		} {
 			t.Run(fmt.Sprintf("%s/apply=%t", uc.name, apply), func(t *testing.T) {
 				t.Parallel()
-				svc, _ := newService(t)
+				svc := newService(t)
 				svc.Channels = stableChannel("2.0.0", "2.0.7", "2.0.7")
 				mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 				put(t, svc.Store, clusterPath, encode(t, old))

@@ -34,7 +34,7 @@ func (r *reads) List(ctx context.Context, prefix string) ([]string, error) {
 // ignores case, PROD would name prod's state.
 func TestNamesAreChecked(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	store := svc.Store
 	stored := snapshot(t, store)

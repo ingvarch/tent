@@ -3,8 +3,6 @@ package app
 import (
 	"bytes"
 	"errors"
-	"net/url"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,25 +10,17 @@ import (
 
 	"github.com/ingvarch/tent/internal/pki"
 	"github.com/ingvarch/tent/internal/statestore"
+	"github.com/ingvarch/tent/internal/statestore/memstore"
 )
 
-// secretsTestService returns a service over a new store and the layout of cluster prod.
+// secretsTestService returns a service over a new store in memory and the layout of cluster prod.
 func secretsTestService(t *testing.T) (*Service, statestore.Layout) {
 	t.Helper()
 	l, err := statestore.NewLayout("prod")
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.ToSlash(t.TempDir())
-	if !strings.HasPrefix(dir, "/") {
-		dir = "/" + dir
-	}
-	s, err := statestore.OpenWith(t.Context(), (&url.URL{Scheme: "file", Path: dir}).String(),
-		statestore.WithoutSync())
-	if err != nil {
-		t.Fatalf("open the store: %v", err)
-	}
-	return &Service{Store: s, Version: "dev"}, l
+	return &Service{Store: memstore.New(), Version: "dev"}, l
 }
 
 // TestPlanSecretsReturnsNewSecrets holds all four secrets of a new cluster, with a write for each.

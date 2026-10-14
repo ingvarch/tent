@@ -12,7 +12,7 @@ import (
 
 func TestLoad(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	for _, tc := range []struct {
 		kind, name, path, doc string
@@ -40,7 +40,7 @@ func TestLoad(t *testing.T) {
 
 func TestLoadMissing(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML)
 	for _, tc := range []struct {
 		cluster, kind, name, want string
@@ -66,7 +66,7 @@ func load(t *testing.T, svc *app.Service, kind, name string) app.Ref {
 
 func TestSave(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	ref := load(t, svc, v1alpha1.KindNodeGroup, "workers")
 	bigger := edit(t, workersYAML, "size: 2", "size: 4")
@@ -80,7 +80,7 @@ func TestSave(t *testing.T) {
 
 func TestSaveUnchanged(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	ref := load(t, svc, v1alpha1.KindCluster, "")
 	changes, err := svc.Save(t.Context(), ref, decode(t, clusterYAML), true)
@@ -111,7 +111,7 @@ func TestSaveChangedMeanwhile(t *testing.T) {
 		},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
-			svc, _ := newService(t)
+			svc := newService(t)
 			mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 			ref := load(t, svc, tc.kind, tc.name)
 			if _, err := svc.Replace(t.Context(), decode(t, tc.meanwhile), true); err != nil {
@@ -128,7 +128,7 @@ func TestSaveChangedMeanwhile(t *testing.T) {
 
 func TestSaveInvalid(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	ref := load(t, svc, v1alpha1.KindNodeGroup, "servers")
 	for _, apply := range []bool{false, true} {
@@ -142,7 +142,7 @@ func TestSaveInvalid(t *testing.T) {
 
 func TestSaveDeletedMeanwhile(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	ref := load(t, svc, v1alpha1.KindNodeGroup, "workers")
 	if err := svc.Store.Delete(t.Context(), workersPath); err != nil {
@@ -159,7 +159,7 @@ func TestSaveRename(t *testing.T) {
 		stillWorkers = "edit cannot rename; the spec must still be node group workers of cluster prod"
 		stillCluster = "edit cannot rename; the spec must still be cluster prod"
 	)
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	workers := load(t, svc, v1alpha1.KindNodeGroup, "workers")
 	prod := load(t, svc, v1alpha1.KindCluster, "")
@@ -185,7 +185,7 @@ func TestSaveRename(t *testing.T) {
 
 func TestSaveOneObject(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	ref := load(t, svc, v1alpha1.KindCluster, "")
 	for _, tc := range []struct {
@@ -205,7 +205,7 @@ func TestSaveOneObject(t *testing.T) {
 // another field.
 func TestSaveKeepsTheCloud(t *testing.T) {
 	t.Parallel()
-	svc, _ := newService(t)
+	svc := newService(t)
 	mustCreate(t, svc, clusterYAML, serversYAML, workersYAML)
 	ref := load(t, svc, v1alpha1.KindCluster, "")
 	for _, apply := range []bool{false, true} {
@@ -231,7 +231,7 @@ func TestSaveKeepsTheRole(t *testing.T) {
 	for _, tc := range roleMoves {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			svc, _ := newService(t)
+			svc := newService(t)
 			mustCreate(t, svc, tc.stored...)
 			stored := snapshot(t, svc.Store)
 			ref := load(t, svc, v1alpha1.KindNodeGroup, tc.group)

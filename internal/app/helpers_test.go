@@ -21,6 +21,7 @@ import (
 	"github.com/ingvarch/tent/internal/app"
 	"github.com/ingvarch/tent/internal/spec"
 	"github.com/ingvarch/tent/internal/statestore"
+	"github.com/ingvarch/tent/internal/statestore/memstore"
 )
 
 // The objects of the test cluster prod, with every defaulted field left out.
@@ -103,8 +104,15 @@ func fileURL(dir string) string {
 	return (&url.URL{Scheme: "file", Path: p}).String()
 }
 
-// newService returns a service over a new file store and the store's root directory, which does not exist yet.
-func newService(t *testing.T) (*app.Service, string) {
+// newService returns a service over a new store in memory.
+func newService(t *testing.T) *app.Service {
+	t.Helper()
+	return &app.Service{Store: memstore.New(), Version: "dev"}
+}
+
+// newFileService returns a service over a new file store and the store's root directory, which does not exist yet.
+// A test that reads the store's files, checks that nothing was written to disk, or needs the file lock uses it.
+func newFileService(t *testing.T) (*app.Service, string) {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "state")
 	s, err := statestore.OpenWith(t.Context(), fileURL(root), statestore.WithoutSync())
@@ -112,6 +120,29 @@ func newService(t *testing.T) (*app.Service, string) {
 		t.Fatalf("open the store: %v", err)
 	}
 	return &app.Service{Store: s, Version: "dev"}, root
+}
+
+// storeCopy holds the objects of a store with their content as stored, secrets included.
+type storeCopy map[string][]byte
+
+// copyOf returns the objects of the store s.
+func copyOf(t *testing.T, s statestore.Store) storeCopy {
+	t.Helper()
+	objs := storeCopy{}
+	for _, p := range list(t, s, "") {
+		objs[p] = get(t, s, p)
+	}
+	return objs
+}
+
+// newServiceFrom returns a service over a new store in memory that holds the objects of c.
+func newServiceFrom(t *testing.T, c storeCopy) *app.Service {
+	t.Helper()
+	svc := newService(t)
+	for p, data := range c {
+		put(t, svc.Store, p, data)
+	}
+	return svc
 }
 
 // mustCreate creates objects and fails the test on an error.
@@ -147,6 +178,12 @@ func list(t *testing.T, s statestore.Store, prefix string) []string {
 	return paths
 }
 
+// withoutLock returns the paths except the lock's lease. A store in memory lists the lease while a tent holds the
+// lock; a file store keeps the lease of its flock out of its list.
+func withoutLock(paths []string) []string {
+	return slices.DeleteFunc(slices.Clone(paths), func(p string) bool { return p == lockPath })
+}
+
 // wantStored fails the test unless the store holds data at p.
 func wantStored(t *testing.T, s statestore.Store, p string, data []byte) {
 	t.Helper()
@@ -163,12 +200,12 @@ func wantPaths(t *testing.T, s statestore.Store, want ...string) {
 	}
 }
 
-// snapshot returns every object in the store with its content. A secret of a cluster shows as its size and digest,
-// which change with it, so that a failure message never shows it.
+// snapshot returns every object in the store with its content, except the lock's lease, which a held lock renews.
+// A secret of a cluster shows as its size and digest, which change with it, so that a failure message never shows it.
 func snapshot(t *testing.T, s statestore.Store) map[string]string {
 	t.Helper()
 	objs := map[string]string{}
-	for _, p := range list(t, s, "") {
+	for _, p := range withoutLock(list(t, s, "")) {
 		objs[p] = string(get(t, s, p))
 		if isSecret(p) {
 			objs[p] = hidden(objs[p])
@@ -302,7 +339,7 @@ func leaveFlockLease(t *testing.T, root string) statestore.Lease {
 }
 
 // unwrapped hides the file store from statestore.NewLocker, which then locks with a lease in the store: the store
-// enforces conditional puts.
+// enforces conditional puts. A store in memory locks with a lease without it.
 type unwrapped struct{ statestore.Store }
 
 // noConditions is a store without conditional puts: statestore.NewLocker gives it a best-effort lock.

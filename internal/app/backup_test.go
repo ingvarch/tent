@@ -94,11 +94,6 @@ func failSnapshots(w *nomadWorld, err error) *int {
 	return calls
 }
 
-// nonLockWrites returns the paths of the writes that are not the lock's.
-func nonLockWrites(w *writeLog) []string {
-	return slices.DeleteFunc(slices.Clone(w.writes), func(p string) bool { return p == lockPath })
-}
-
 // TestStoredBackupText writes the line of a stored backup and its JSON.
 func TestStoredBackupText(t *testing.T) {
 	t.Parallel()
@@ -130,7 +125,8 @@ func TestStoredBackupText(t *testing.T) {
 func TestBackupCreateStoresTheSnapshot(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, f, w, root := builtWorld(t)
+		svc, root := newFileService(t)
+		f, w := buildOn(t, svc)
 		rec := &writeLog{Store: svc.Store}
 		svc.Store = rec
 		now := fixClock(svc)
@@ -164,7 +160,7 @@ func TestBackupCreateStoresTheSnapshot(t *testing.T) {
 			t.Errorf("%d lists of the machines, want one", n)
 		}
 		wantNoWrites(t, f.Calls()[cloudCalls:])
-		if diff := cmp.Diff([]string{want.Path}, nonLockWrites(rec)); diff != "" {
+		if diff := cmp.Diff([]string{want.Path}, withoutLock(rec.writes)); diff != "" {
 			t.Errorf("writes to the store besides the lock's (-want +got):\n%s", diff)
 		}
 		wantLockFree(t, svc.Store)
@@ -176,13 +172,13 @@ func TestBackupCreateStoresTheSnapshot(t *testing.T) {
 func TestBackupCreateRaisesTheTentVersion(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _, _ := builtWorld(t)
+		svc, _, _ := builtWorld(t)
 		rec := &writeLog{Store: svc.Store}
 		svc.Store, svc.Version = rec, "v0.9.0"
 
 		first := mustBackup(t, svc)
 
-		if diff := cmp.Diff([]string{versionPath, first.Path}, nonLockWrites(rec)); diff != "" {
+		if diff := cmp.Diff([]string{versionPath, first.Path}, withoutLock(rec.writes)); diff != "" {
 			t.Errorf("writes of the first backup (-want +got):\n%s", diff)
 		}
 		wantStored(t, svc.Store, versionPath, []byte("v0.9.0\n"))
@@ -191,7 +187,7 @@ func TestBackupCreateRaisesTheTentVersion(t *testing.T) {
 
 		second := mustBackup(t, svc)
 
-		if diff := cmp.Diff([]string{second.Path}, nonLockWrites(rec)); diff != "" {
+		if diff := cmp.Diff([]string{second.Path}, withoutLock(rec.writes)); diff != "" {
 			t.Errorf("writes of the second backup (-want +got):\n%s", diff)
 		}
 	})
@@ -202,7 +198,7 @@ func TestBackupCreateRaisesTheTentVersion(t *testing.T) {
 func TestBackupCreateHoldsTheLockAtEveryStep(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, w, _ := builtWorld(t)
+		svc, _, w := builtWorld(t)
 		rec := &recorder{Store: unwrapped{svc.Store}}
 		svc.Store = rec
 		var leased []string
@@ -231,7 +227,7 @@ func TestBackupCreateHoldsTheLockAtEveryStep(t *testing.T) {
 func TestBackupCreateWaitsForTheLock(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, w, _ := builtWorld(t)
+		svc, _, w := builtWorld(t)
 		held := holdLock(t, svc.Store)
 		svc.LockTimeout = time.Minute
 		nomadBefore := len(w.Log())
@@ -259,7 +255,7 @@ func TestBackupCreateWaitsForTheLock(t *testing.T) {
 func TestBackupCreateStopsWaitingForTheLock(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, w, _ := builtWorld(t)
+		svc, _, w := builtWorld(t)
 		held := holdLock(t, svc.Store)
 		svc.LockTimeout = 9 * time.Second
 		nomadBefore := len(w.Log())
@@ -297,7 +293,7 @@ func TestBackupCreateRefusesAnUnbuiltClusterWithoutTheLock(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				svc, f, w, _ := builtWorld(t)
+				svc, f, w := builtWorld(t)
 				tc.damage(t, svc)
 				rec := &writeLog{Store: svc.Store}
 				svc.Store = rec
@@ -353,7 +349,7 @@ func TestBackupCreateRefusesUnreachableServersUnderTheLock(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				svc, f, w, _ := builtWorld(t)
+				svc, f, w := builtWorld(t)
 				tc.prepare(t, svc, f)
 				rec := &writeLog{Store: svc.Store}
 				svc.Store = rec
@@ -368,7 +364,7 @@ func TestBackupCreateRefusesUnreachableServersUnderTheLock(t *testing.T) {
 				if !slices.Contains(rec.writes, lockPath) {
 					t.Errorf("writes %v: the refusal came before the lock", rec.writes)
 				}
-				if writes := nonLockWrites(rec); len(writes) != 0 {
+				if writes := withoutLock(rec.writes); len(writes) != 0 {
 					t.Errorf("writes besides the lock's: %v", writes)
 				}
 				wantLockFree(t, rec)
@@ -382,7 +378,7 @@ func TestBackupCreateRefusesUnreachableServersUnderTheLock(t *testing.T) {
 func TestBackupCreateEndsAtOnceWhenNomadIsNotReachable(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, w, _ := builtWorld(t)
+		svc, _, w := builtWorld(t)
 		for range 3 {
 			w.Fail(t, "Nodes", fmt.Errorf("no answer: %w", nomadops.ErrNotReady))
 		}
@@ -407,7 +403,7 @@ func TestBackupCreateEndsAtOnceWhenNomadIsNotReachable(t *testing.T) {
 func TestBackupCreateWaitsForASnapshot(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, w, _ := builtWorld(t)
+		svc, _, w := builtWorld(t)
 		var warnings []string
 		svc.OnWarning = func(s string) { warnings = append(warnings, s) }
 		refused := 0
@@ -442,7 +438,7 @@ func TestBackupCreateWaitsForASnapshot(t *testing.T) {
 func TestBackupCreateGivesUpOnASnapshot(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, w, _ := builtWorld(t)
+		svc, _, w := builtWorld(t)
 		failSnapshots(w, errRefused)
 		start := time.Now()
 
@@ -466,7 +462,7 @@ func TestBackupCreateGivesUpOnASnapshot(t *testing.T) {
 func TestBackupCreateStopsAtAPermanentSnapshotError(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, w, _ := builtWorld(t)
+		svc, _, w := builtWorld(t)
 		warned := false
 		svc.OnWarning = func(string) { warned = true }
 		denied := errors.New("403 Permission denied")
@@ -489,7 +485,7 @@ func TestBackupCreateStopsAtAPermanentSnapshotError(t *testing.T) {
 func TestBackupCreateNeverReplacesABackup(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _, _ := builtWorld(t)
+		svc, _, _ := builtWorld(t)
 		fixClock(svc)
 		first := mustBackup(t, svc)
 
@@ -512,7 +508,7 @@ func TestBackupCreateNeverReplacesABackup(t *testing.T) {
 func TestBackupCreateNamesAFailedStore(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _, _ := builtWorld(t)
+		svc, _, _ := builtWorld(t)
 		now := fixClock(svc)
 		want := backupOf(t, now, markOf(t, svc.Store))
 		svc.Store, svc.Version = &failing{Store: svc.Store, path: want.Path}, "v0.9.0"
@@ -533,7 +529,7 @@ func TestBackupCreateNamesAFailedStore(t *testing.T) {
 func TestBackupCreateLosesTheLockAfterTheWrite(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _, _ := builtWorld(t)
+		svc, _, _ := builtWorld(t)
 		now := fixClock(svc)
 		want := backupOf(t, now, markOf(t, svc.Store))
 		svc.Store = forceUnlocked{unwrapped{svc.Store}, want.Path}
@@ -557,7 +553,7 @@ func TestBackupCreateLosesTheLockAfterTheWrite(t *testing.T) {
 func TestBackupCreatePlansAgainUnderTheLock(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _, _ := builtWorld(t)
+		svc, _, _ := builtWorld(t)
 		held := holdLock(t, svc.Store)
 		svc.LockTimeout = time.Minute
 		done := make(chan app.StoredBackup, 1)
@@ -591,7 +587,7 @@ func TestBackupCreatePlansAgainUnderTheLock(t *testing.T) {
 func TestBackupCreateShowsNoSnapshotBytes(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, w, _ := builtWorld(t)
+		svc, _, w := builtWorld(t)
 		var warnings []string
 		svc.OnWarning = func(s string) { warnings = append(warnings, s) }
 		fixClock(svc)
@@ -664,7 +660,7 @@ func withoutOutsideCalls(t *testing.T, svc *app.Service) *writeLog {
 func TestBackupsListsOldestFirst(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _, _ := builtWorld(t)
+		svc, _, _ := builtWorld(t)
 		mark := markOf(t, svc.Store)
 		old := mark.Add(-48 * time.Hour)
 		base := mark.Add(-24 * time.Hour)
@@ -693,7 +689,7 @@ func TestBackupsListsOldestFirst(t *testing.T) {
 func TestBackupsWithoutAMarkAreAllEarlier(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _, _ := builtWorld(t)
+		svc, _, _ := builtWorld(t)
 		mark := markOf(t, svc.Store)
 		b := putBackup(t, svc.Store, mark.Add(time.Hour), mark)
 		deleteObject(t, svc, markPath)
@@ -714,7 +710,7 @@ func TestBackupsWithoutAMarkAreAllEarlier(t *testing.T) {
 func TestBackupsRefuseWhatTheStoreDoesNotHold(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _, _ := builtWorld(t)
+		svc, _, _ := builtWorld(t)
 
 		_, err := svc.Backups(t.Context(), "stage")
 
@@ -739,7 +735,7 @@ func TestBackupsRefuseWhatTheStoreDoesNotHold(t *testing.T) {
 func TestListedBackupJSON(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		svc, _, _, _ := builtWorld(t)
+		svc, _, _ := builtWorld(t)
 		empty, err := svc.Backups(t.Context(), "prod")
 		if err != nil {
 			t.Fatalf("Backups: %v", err)
