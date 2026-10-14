@@ -95,7 +95,8 @@ A local lab on 2026-10-10 ran Nomad 2.0.6 and 2.0.7 together in both directions 
 14. **A combined group is the one exception.** A new combined node runs a client of the new version while the other
     servers are old, and its create is not held back, since a combined group has no other order. The guide advises
     against a client ahead of its servers because new client features need new servers. The local run covered a newer
-    client with older servers and not a combined agent. M3.9's `upgrade` scenario runs it on Vultr.
+    client with older servers and not a combined agent. M3.9's `upgrade` scenario ran it on Vultr
+    (`w28exz`, `ae5dhs`): a 2.0.7 combined node joined 2.0.6 ones and the roll ended.
 15. **`rollout.CheckNewNode` holds the version rules of a new node** for `Next`, `serversHold` and `update`. A refusal
     says `the cluster's version is`, because the pin can differ from the version that a check holds. `validate cluster`
     takes the same phrase and warns that `update` has not applied the specs while the completed spec differs.
@@ -126,19 +127,21 @@ A local lab on 2026-10-10 ran Nomad 2.0.6 and 2.0.7 together in both directions 
   lowered joins later ahead of the pin, and `rolling-update` refuses until the version is raised again or `update`
   removes the machine.
 - **No command takes an upgrade back once the roll's first new server has joined** (Q14 of
-  [architecture §18](../architecture.md#18-open-questions), open). The way back is by hand: delete that machine in the
-  cloud, wait until its peer is gone, and run `tent update cluster`.
+  [architecture §18](../architecture.md#18-open-questions), answered (a) on 2026-10-13: decision 51, with no lab for
+  (b)). The way back is by hand: delete that machine in the cloud, wait until its peer is gone, and run `tent update
+  cluster`.
 - **`validate cluster` exits with 2 from `upgrade --yes` until the roll has ended,** since the nodes differ from the
   specs.
-- **Not verified on a real cluster:** whether autopilot's report holds a version for every Raft peer at the read
-  before the first client of a first build. M3.9's run on Vultr shows it.
+- **Autopilot's report held a version for every Raft peer** at the read before the first client of a first build, in
+  the create of the `ha` cluster on Vultr, in both runs `w28exz` and `ae5dhs` (2026-10-14).
 - **The tests know two Nomad versions, one patch apart.** A move to the next minor version is tested as a rule and has
   never run.
 
 ### Follow-ups
 
-- **M3.9** runs the `upgrade` scenario on Vultr from 2.0.6 to 2.0.7 with a combined cluster, and may then add 2.0.6 to
-  the channel's `tested` list.
+- **M3.9** ran the `upgrade` scenario on Vultr from 2.0.6 to 2.0.7 with a combined cluster (runs `w28exz` and
+  `ae5dhs`, [ADR-0043](0043-e2e-scenarios-ha-and-upgrade.md)), and 2.0.6 is in the channel's `tested` list since
+  `ae5dhs`.
 - A flag for the target version, a flow with a third version and an in-place upgrade of the binary
   ([ADR-0005](0005-immutable-nodes-and-nomad-aware-rollouts.md)) are left for later.
 

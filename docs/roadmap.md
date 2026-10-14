@@ -1,7 +1,7 @@
 # Roadmap
 
-> **Current status (2026-10-13):** M0 Foundation, M1 Vultr infrastructure and M2 Nomad bootstrap are complete. M3 Day-2
-> operations is in progress.
+> **Current status (2026-10-14):** M0 Foundation, M1 Vultr infrastructure, M2 Nomad bootstrap and M3 Day-2
+> operations are complete.
 >
 > M0 built the Go module, `tent version`, the Makefile, the import rules in golangci-lint, CI on Linux, macOS and
 > Windows, the release pipeline for `tent`, the API types with defaults and validation, the spec reader and writer,
@@ -34,7 +34,7 @@
 > maintainer's machine. Its runs found four faults, all fixed, and on 2026-10-07 `smoke` passed on ubuntu-24.04 and
 > ubuntu-26.04: M2 is done.
 >
-> M3 is in progress, in parts M3.1 to M3.9. M3.1 built the rollout decisions
+> M3 was built in parts M3.1 to M3.9. M3.1 built the rollout decisions
 > ([ADR-0035](adr/0035-rollout-decisions.md)): `internal/rollout` returns the next step of a rolling update or of a
 > removal of nodes from what the cloud and Nomad report, and a simulator proves it from every state a roll passes
 > through. It also added the `rollingUpdate` settings of a node group. M3.2 built the Nomad calls of a roll
@@ -59,14 +59,22 @@
 > version at a time, `update` pins a version only after its release files verify and refuses a node older than one
 > that runs, and it stops before a client that would run a newer Nomad than a server. The upgrade ran on the fakes.
 > Nomad 2.0.6 and 2.0.7 ran together in a local lab without tent, where the servers were rolled by hand in tent's
-> order ([platform notes §1.3](platform-notes.md#13-upgrades-and-version-skew)); M3.9's `upgrade` scenario runs it on
+> order ([platform notes §1.3](platform-notes.md#13-upgrades-and-version-skew)); M3.9's `upgrade` scenario ran it on
 > Vultr. M3.8 built `tent backup create`, `list` and `restore`
 > ([ADR-0042](adr/0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md)):
 > a backup is a snapshot of Nomad's state in the state store, under `backups/<bootstrap>/`, and a restore puts one
 > into servers that `update` built again from the same state store, only while they run no job and once for each
 > bootstrap. A restore that is cut is finished by running the command again, `delete cluster` deletes the backups, and
 > the run on Vultr gave the rebuilt server its old private address, so the old worker came back by itself ([platform
-> notes §3.16](platform-notes.md#316-spike-runs)).
+> notes §3.16](platform-notes.md#316-spike-runs)). M3.9 added the E2E scenarios `ha` and `upgrade`
+> ([ADR-0043](adr/0043-e2e-scenarios-ha-and-upgrade.md)): `ha` rolls the servers, restarts an old worker that must find
+> the new servers on its own, rolls the workers and restores a backup into rebuilt servers; `upgrade` rolls a combined
+> cluster from Nomad 2.0.6 to 2.0.7. A probe asks the servers for a leader and the service for a healthy allocation at
+> every second of each roll. Run `w28exz` (2026-10-14) found two faults of the suite, which are fixed. Run `ae5dhs`
+> (2026-10-14) passed both scenarios: no poll was leaderless or unserved, the longest stretch in which the checks could
+> not be read was 20.1 s and the longest in which a read of the service failed was 7.1 s. The full runs `qkmdrs`
+> and `hik34s` (`smoke`, `ha` and `upgrade`) passed on 2026-10-14. The channel lists 2.0.6 as tested since `ae5dhs`.
+> M3 is done.
 >
 > **Work items live in GitHub:** each milestone below links to its GitHub milestone, and the
 > [tent roadmap project][project] shows the open issues. This file keeps the goals and exit criteria; close issues as
@@ -81,8 +89,8 @@ These come from [architecture §18](architecture.md#18-open-questions). The firs
 seventh to the fifteenth on 2026-09-28, the sixteenth to the twenty-first on 2026-09-29, the twenty-second to the
 twenty-fourth on 2026-09-30, the twenty-fifth to the twenty-seventh on 2026-10-05, and the twenty-eighth to the
 thirty-second on 2026-10-06, the thirty-third to the thirty-fifth on 2026-10-07, the thirty-seventh to the
-forty-fourth on 2026-10-08, the forty-fifth to the forty-eighth on 2026-10-09, and the forty-ninth and the fiftieth on
-2026-10-12. The maintainer extended the twenty-third on 2026-10-02.
+forty-fourth on 2026-10-08, the forty-fifth to the forty-eighth on 2026-10-09, the forty-ninth and the fiftieth on
+2026-10-12, and the fifty-first on 2026-10-13. The maintainer extended the twenty-third on 2026-10-02.
 
 | # | Question | Decision |
 |---|---|---|
@@ -135,6 +143,7 @@ forty-fourth on 2026-10-08, the forty-fifth to the forty-eighth on 2026-10-09, a
 | 48 | tent remembers the highest index of each server and combined group | in the state store at `names/<nodegroup>`, so that the names of such a group only grow, also after a shrink or an operator's delete (2026-10-09); built in M3.4 for the roll, where a new server takes the index above it, and in M3.6 for the planner of `update` ([ADR-0038](adr/0038-rolling-update-of-server-groups.md), item 22, [ADR-0040](adr/0040-scale-down-through-the-rollout.md)) |
 | 49 | A node group keeps its role | `replace` and `edit` refuse to change the `spec.role` of a node group that the store holds (2026-10-12); built in M3.5: tent has no way to change the role of a stored group, since a cluster has exactly one server or combined group and no command deletes a node group ([ADR-0039](adr/0039-rolling-update-of-combined-groups.md)) |
 | 50 | No channel file from a URL | the channel is the one embedded in tent; an operator who wants another Nomad version than tent recommends sets `spec.nomad.version` (2026-10-12); architecture §13.5 and ADR-0026 had planned a URL that overrides the embedded file ([ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)) |
+| 51 | No command takes an upgrade back | once the roll's first new server of an upgrade has joined, no command takes the upgrade back; the way back is by hand, and ADR-0041 names it; no lab for taking it back in `update` (2026-10-13); nothing to build ([ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)) |
 
 New questions for the maintainer are issues with the `decision` label.
 
@@ -211,7 +220,7 @@ it: [`hack/vultr-spike/README.md`](../hack/vultr-spike/README.md).
 **Exit criteria:** E2E `ha` and `upgrade` pass on Vultr, with no quorum loss and no job downtime beyond the configured
 migrations.
 
-**Status:** in progress; see the note at the top of this file.
+**Status:** done on 2026-10-14; see the note at the top of this file.
 
 ## M4 Hetzner provider
 
@@ -317,6 +326,9 @@ Work after M6 or not scheduled yet: [issues with the `later` label][later].
   Maintainer decisions 46 and 47 are built. It ran on Vultr: a cluster of one server and one worker, a new server with
   the old private address, and a restore in 4 s ([platform notes §3.16](platform-notes.md#316-spike-runs)). Recorded
   in [ADR-0042](adr/0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md). Closes #105.
+- 2026-10-14: M3.9 is built: the E2E scenarios `ha` and `upgrade` with a probe of the leader and the service, run on
+  Vultr (see the status block above). Maintainer decision 51 is recorded. Recorded in
+  [ADR-0043](adr/0043-e2e-scenarios-ha-and-upgrade.md). Closes #106 and #107. M3 is complete.
 
 [project]: https://github.com/users/ingvarch/projects/2
 [later]: https://github.com/ingvarch/tent/issues?q=is%3Aissue%20label%3Alater

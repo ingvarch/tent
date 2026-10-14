@@ -502,8 +502,9 @@ github.com/ingvarch/tent
 │   ├── channels/        # embedded channel files: the Nomad versions allowed and tested, the CNI plugins
 │   ├── buildinfo/       # version, commit, date (ldflags); which release a version counts as
 │   └── buildconfig/     # tests only: CI, Makefile and release config agree; what tent-node links
-├── test/e2e/            # black-box E2E suite against real clouds (Vultr first); only main_test.go, smoke_test.go
-│   │                    # and harness_test.go carry //go:build e2e; imports none of tent's internal packages (ADR-0034)
+├── test/e2e/            # black-box E2E suite against real clouds (Vultr first); only main_test.go, harness_test.go,
+│   │                    # cluster_test.go and the scenarios (smoke, ha, upgrade) carry //go:build e2e; imports none of
+│   │                    # tent's internal packages (ADR-0034)
 │   ├── vultrapi/        # the suite's own Vultr API client over net/http
 │   └── janitor/         # finds and deletes the objects of E2E clusters that earlier runs left
 │       └── janitortest/ # tests only: a fake Vultr API for the janitor
@@ -3490,7 +3491,8 @@ right order. No rule was added for the roll.
 - **The exception is a combined group.** Its new node runs a client of the new version while the other servers are
   old, and its create is not held back, since a combined group has no other order. Nomad's guide advises against it.
   A 2.0.7 client with an intro token joined three 2.0.6 servers on the local Nomad, and a combined agent itself was not
-  run; M3.9's `upgrade` scenario runs it on Vultr.
+  run; M3.9's `upgrade` scenario ran it on Vultr (a 2.0.7 combined node joined 2.0.6 ones and the roll ended, runs
+  `w28exz` and `ae5dhs`).
 
 **Servers**, one at a time. A server group never goes below its size: it creates the replacement first.
 
@@ -3871,6 +3873,9 @@ cni:
     amd64: <sha256>
     arm64: <sha256>
 ```
+
+Since run `ae5dhs` (2026-10-14) the embedded file lists `tested: [2.0.6, 2.0.7]`; the file above stays as it was on
+2026-09-28.
 
 - A channel holds Nomad and the CNI plugins only. Images stay in the provider's table
   ([ADR-0023](adr/0023-vultr-inventory-dedupe-and-images.md)) and the API default (decision 4 of
@@ -4756,7 +4761,8 @@ of M3.8 reaches the state store alone. The other commands come with later milest
 
 Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen in
 [ADR-0014](adr/0014-vultr-first-provider-and-e2e.md) and its running is set in
-[ADR-0034](adr/0034-e2e-suite-on-vultr.md).
+[ADR-0034](adr/0034-e2e-suite-on-vultr.md) and extended by the scenarios of
+[ADR-0043](adr/0043-e2e-scenarios-ha-and-upgrade.md).
 
 1. **Unit tests:**
    - defaults and validation;
@@ -5392,7 +5398,7 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
      the metadata endpoint, and `delete` leaves nothing behind.
    - **Marking and the janitor.** Clusters are named `e2e-<run>-<image digits>`. The janitor (`hack/e2e-janitor`, and
      `TestMain` before every run) deletes the objects of a cluster whose name starts with `e2e-` and whose oldest object
-     is older than 3 hours: instances first (polled every 10 s, up to 5 minutes, until none is listed), then firewall
+     is older than 4 hours: instances first (polled every 10 s, up to 5 minutes, until none is listed), then firewall
      groups, VPCs and SSH keys. A refused VPC delete is repeated every 10 s, for up to 5 minutes per VPC. Without
      `--yes` it deletes nothing.
    - **Black box.** The suite imports none of tent's internal packages. It has its own Vultr API client and Nomad
@@ -5400,8 +5406,14 @@ Details in [ADR-0012](adr/0012-testing-strategy.md). The E2E platform is chosen 
    - Billing has a one-hour minimum per VM. A green run took 6 to 7 minutes on 2026-10-07: `create` 4 to 6.5
      minutes, `delete` about 20 s, the leak check up to 2 minutes on the cluster whose check runs while the other is
      still being built, every other step seconds ([platform notes §3.16](platform-notes.md#316-spike-runs)).
-   - The scenarios `ha` and `upgrade` are not built yet; they are the exit of M3. The checks of ADR-0012's `security`
-     scenario run in `smoke`.
+   - **Scenarios `ha` and `upgrade`** (M3.9, [ADR-0043](adr/0043-e2e-scenarios-ha-and-upgrade.md)). They run after
+     `smoke`, in parallel with each other, so a run has at most 10 machines. `ha` has 3 servers and 2 workers on the
+     first image: it changes the specs, rolls the servers, restarts an old worker that must find the new servers on
+     its own, rolls the workers, backs up Nomad, deletes the servers, has `update` build new ones and restores the
+     backup. `upgrade` builds a combined cluster of 3 on Nomad 2.0.6 (`E2E_UPGRADE_FROM`), runs `tent upgrade cluster`
+     and rolls it, on the last image. A probe polls the servers for a leader and the service for a healthy allocation
+     during each roll and fails the step on a leaderless or unserved stretch longer than 10 s (limits for the other
+     outcomes are in the ADR). They are the exit of M3. The checks of ADR-0012's `security` scenario run in `smoke`.
    - Nightly runs and runs on a PR label wait until a runner can reach the account.
    - Hetzner E2E, including the `arm` scenario on CAX, is added in M4 once an account can create servers reliably.
 6. **Platform spike.** [`hack/vultr-spike`](../hack/vultr-spike/README.md) verifies undocumented Vultr behaviour
@@ -5502,7 +5514,7 @@ See [ADR-0013](adr/0013-technology-stack.md). Releases and CI follow
 | Vultr counted a deleted machine against the account's instance limit, so the create of a replacement was refused (seen 2026-10-06, run `rugw2m`) | the replacement of a client that never registered fails in an account at its limit | the Vultr provider sends a refused node create again for up to 2 minutes after a delete that it made ([11.3](#113-creating-a-node)); a limit that still holds then returns the limit error with its hint, and so does a rerun of tent right after a run that deleted, since the window does not outlive the process |
 | Hetzner capacity and account limits (5 servers, creation restrictions since June 2026) | Hetzner provider cannot be E2E-tested | Vultr first (ADR-0014); Hetzner E2E in M4 |
 | Nomad 2.x version skew rules not yet restated: the upgrade guide of 2026-10-10 states them for 1.x ([platform notes §1.3](platform-notes.md#13-upgrades-and-version-skew)) | broken upgrades | channels allow one major version from a minimum, and tent warns about versions they have not tested; a version moves up by at most one minor version at a time, against the pin and against the oldest node that Nomad reports; servers before clients; no node older than one that runs ([13.5](#135-tent-upgrade-cluster---yes), [ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)); 2.0.6 and 2.0.7 ran together on a local Nomad on 2026-10-10, and a move to the next minor version has never run |
-| A new combined node runs a client of the new Nomad version while the other servers run the old one | the guide advises against a client ahead of its servers, since new client features need new servers | a combined group has no other order; a 2.0.7 client joined three 2.0.6 servers on a local Nomad (a combined agent was not run); M3.9's `upgrade` scenario runs it on Vultr ([13.3](#133-tent-rolling-update-cluster---yes)) |
+| A new combined node runs a client of the new Nomad version while the other servers run the old one | the guide advises against a client ahead of its servers, since new client features need new servers | a combined group has no other order; a 2.0.7 client joined three 2.0.6 servers on a local Nomad (a combined agent was not run); M3.9's `upgrade` scenario ran it on Vultr, runs `w28exz` and `ae5dhs` ([13.3](#133-tent-rolling-update-cluster---yes)) |
 | HashiCorp's embedded release key expires on 2030-03-01, or is rotated or revoked | tent cannot verify Nomad downloads, or trusts a revoked key | a weekly CI job fails 180 days before the expiry; a tent release embeds the new key ([8.5](#85-artifacts-and-verification)) |
 | BUSL licence of Nomad | a paid managed offering would need a commercial licence | tent downloads official binaries and never redistributes them; stays free (not legal advice) |
 | Nomad reads a rendered value differently from the HCL1 that the tests use: Nomad parses with its fork `v1.0.1-nomad-1`, the tests with upstream v1.0.0 | a node does not start, or runs with another setting | strict quoting refuses what HCL1 cannot read back; tests parse every golden back; the weekly `online` job runs `nomad config validate` of the channel's minimum and recommended Nomad on the goldens ([ADR-0030](adr/0030-nomad-on-nodes.md)) |
@@ -5755,20 +5767,16 @@ Decided on 2026-10-12:
     overrides the embedded file ([13.5](#135-tent-upgrade-cluster---yes),
     [ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)).
 
-Open for the maintainer, from the final review of M3.7 (Q14):
-- **Taking an upgrade back once the roll's first new server has joined.** After `upgrade --yes`, `update --yes` and
-  the first step of the roll, the cluster has one server on the new Nomad. `update` then refuses the old version in
-  the spec, and `rolling-update` refuses specs that `update` has not applied. When that server is unhealthy, the roll
-  does not go on either. The way back today is by hand: delete that machine in the cloud, wait until its peer is gone,
-  and run `tent update cluster`
-  ([ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)).
-  - (a) Keep it: the way is forward, and ADR-0041 names the way back by hand.
-  - (b) Let `update` take the upgrade back: the version check leaves out the servers and nodes whose machines the plan
-    removes, so the plan at the old version removes the new server as surplus. Nomad's guide says that downgrading
-    servers needs a new cluster, and whether old servers work on after a newer server led them is not verified, so (b)
-    needs a lab first.
-  - Recommendation: (a) for M3.7, and a lab for (b) before M3.9's `upgrade` scenario if the maintainer wants a way
-    back.
+Decided on 2026-10-13:
+
+51. **No command takes an upgrade back once the roll's first new server has joined** (Q14 of the final review of
+    M3.7, answered (a)). After `upgrade --yes`, `update --yes` and the first step of the roll, the cluster has one
+    server on the new Nomad. `update` then refuses the old version in the spec, and `rolling-update` refuses specs that
+    `update` has not applied. When that server is unhealthy, the roll does not go on either. The way back is by hand:
+    delete that machine in the cloud, wait until its peer is gone, and run `tent update cluster`
+    ([ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)). The maintainer did not take (b), an `update` that
+    removes the new server as surplus, since Nomad's guide says that downgrading servers needs a new cluster, and
+    whether old servers work on after a newer server led them is not verified. There is no lab for (b).
 
 Decisions 18 to 20 are recorded in [ADR-0028](adr/0028-tent-node-agent-units-and-delivery.md), decision 21 in
 [ADR-0029](adr/0029-host-firewall-runtime-and-cni-on-nodes.md), decisions 22 to 25 in
@@ -5777,7 +5785,7 @@ in [ADR-0032](adr/0032-joined-label-scrub-and-delete-guard.md), and decisions 29
 [ADR-0033](adr/0033-operator-commands.md), decisions 33 to 35 in [ADR-0035](adr/0035-rollout-decisions.md), decisions 39
 to 42 in [ADR-0037](adr/0037-rolling-update-of-client-groups.md), decisions 37, 38, 43, 44 and 48 in
 [ADR-0038](adr/0038-rolling-update-of-server-groups.md) (decisions 37 and 38 were first named in ADR-0035, item 15), and
-decision 49 in [ADR-0039](adr/0039-rolling-update-of-combined-groups.md), and decisions 45 and 50 in
+decision 49 in [ADR-0039](adr/0039-rolling-update-of-combined-groups.md), decisions 45, 50 and 51 in
 [ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md), and decisions 46 and 47 in
 [ADR-0042](adr/0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md).
 
