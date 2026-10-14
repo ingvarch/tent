@@ -458,3 +458,122 @@ func allocationsProblem(running int, job string, want int) string {
 	}
 	return fmt.Sprintf("%d running allocations of %s, want %d", running, job, want)
 }
+
+// storedBackup is the answer of `tent backup create -o json`, as far as the scenario reads it.
+type storedBackup struct {
+	Name string `json:"name"`
+	Size int    `json:"size"`
+}
+
+// parseStoredBackup reads the answer of `tent backup create -o json`; a backup without a name or a size is no backup.
+func parseStoredBackup(out []byte) (storedBackup, error) {
+	var b storedBackup
+	if err := json.Unmarshal(out, &b); err != nil {
+		return storedBackup{}, fmt.Errorf("read the stored backup: %w", err)
+	}
+	if b.Name == "" || b.Size <= 0 {
+		return storedBackup{}, fmt.Errorf("the stored backup has name %q and size %d", b.Name, b.Size)
+	}
+	return b, nil
+}
+
+// checkBackupList checks that `tent backup list -o json` lists the backup name alone and that it is of servers,
+// "current" or "earlier".
+func checkBackupList(out []byte, name, servers string) error {
+	var backups []struct {
+		Name    string `json:"name"`
+		Servers string `json:"servers"`
+	}
+	if err := json.Unmarshal(out, &backups); err != nil {
+		return fmt.Errorf("read the backups: %w", err)
+	}
+	if len(backups) != 1 {
+		return fmt.Errorf("%d backups listed, want 1", len(backups))
+	}
+	if got := backups[0]; got.Name != name || got.Servers != servers {
+		return fmt.Errorf("listed backup %s of %s servers, want %s of %s servers", got.Name, got.Servers, name, servers)
+	}
+	return nil
+}
+
+// checkRestored checks that the output of `tent backup restore --yes` reports the restore of backup into cluster.
+func checkRestored(out []byte, backup, cluster string) error {
+	want := "Restored: backup " + backup + " into cluster " + cluster + "."
+	if !strings.Contains(string(out), want) {
+		return fmt.Errorf("the output of the restore does not hold %q: %s", want, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// memberAddresses returns the addresses of the members, sorted.
+func memberAddresses(members []agentMember) []string {
+	out := make([]string, 0, len(members))
+	for _, m := range members {
+		out = append(out, m.Addr)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// nodeAddresses returns the addresses of the nodes, sorted.
+func nodeAddresses(nodes []nomadNode) []string {
+	out := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		out = append(out, n.Address)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// stepTime is how long a part of a step took.
+type stepTime struct {
+	Step string
+	Took time.Duration
+}
+
+// backupEvidence is what the backup step leaves to read: the stored backup, the time of each part, the private
+// addresses of the servers and workers that Nomad listed before the servers were deleted and at the end, and whether
+// the workers had to be rolled with --force.
+type backupEvidence struct {
+	Backup                       storedBackup
+	Times                        []stepTime
+	ServersBefore, WorkersBefore []string
+	ServersAfter, WorkersAfter   []string
+	Forced                       bool
+}
+
+// backupRecord writes the evidence as the text of the step's record file.
+func backupRecord(e backupEvidence) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "backup: %s\nsize: %d\n", e.Backup.Name, e.Backup.Size)
+	for _, st := range e.Times {
+		fmt.Fprintf(&b, "%s: %s\n", st.Step, st.Took)
+	}
+	for _, l := range []struct {
+		label string
+		addrs []string
+	}{
+		{"servers before", e.ServersBefore}, {"workers before", e.WorkersBefore},
+		{"servers after", e.ServersAfter}, {"workers after", e.WorkersAfter},
+	} {
+		fmt.Fprintf(&b, "%s: %s\n", l.label, cmp.Or(strings.Join(l.addrs, " "), "none"))
+	}
+	forced := "no"
+	if e.Forced {
+		forced = "yes"
+	}
+	fmt.Fprintf(&b, "forced roll of the workers: %s\n", forced)
+	return b.String()
+}
+
+// sleepContext waits for d and returns nil, or returns the context's error as soon as ctx ends.
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
