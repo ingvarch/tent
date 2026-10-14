@@ -3,14 +3,13 @@
 This guide builds a small Nomad cluster on Vultr and deletes it again. It takes about fifteen minutes and costs a
 few cents.
 
-> This guide uses tent v0.1.0, the first release that builds a Nomad cluster ([roadmap](roadmap.md)). `update cluster
-> --yes` builds the network, the firewalls, the machines and a running, secured Nomad cluster: a leader, ACLs
-> bootstrapped with the secret in the state store, and registered nodes. Once a node has joined, tent replaces its
-> user data, which holds its keys, with a stub. `tent export nomad` gives you a short-lived certificate and token for
-> the Nomad API, `tent validate cluster` checks the cluster, and `tent ui` serves the Nomad web UI on a port of your
-> machine. Not done yet:
-> - tent cannot scale a running cluster down before M3: `update` refuses to delete a node that joined Nomad, since it
->   cannot drain a node or check the Raft quorum yet. `delete cluster` still deletes everything.
+> This guide was written with tent v0.1.0, the first release that builds a Nomad cluster ([roadmap](roadmap.md)).
+> `update cluster --yes` builds the network, the firewalls, the machines and a running, secured Nomad cluster: a
+> leader, ACLs bootstrapped with the secret in the state store, and registered nodes. Once a node has joined, tent
+> replaces its user data, which holds its keys, with a stub. `tent export nomad` gives you a short-lived certificate
+> and token for the Nomad API, `tent validate cluster` checks the cluster, and `tent ui` serves the Nomad web UI on a
+> port of your machine. Since v0.2.0 tent also rolls, scales down, upgrades and backs up a running cluster
+> ([README](../README.md#what-works-now)).
 
 ## What you need
 

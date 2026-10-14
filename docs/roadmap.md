@@ -1,7 +1,8 @@
 # Roadmap
 
 > **Current status (2026-10-14):** M0 Foundation, M1 Vultr infrastructure, M2 Nomad bootstrap and M3 Day-2
-> operations are complete.
+> operations are complete. Release v0.1.0 (2026-10-07) builds a Nomad cluster; v0.2.0 (2026-10-14) adds the day-2
+> operations of M3.
 >
 > M0 built the Go module, `tent version`, the Makefile, the import rules in golangci-lint, CI on Linux, macOS and
 > Windows, the release pipeline for `tent`, the API types with defaults and validation, the spec reader and writer,
