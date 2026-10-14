@@ -927,6 +927,9 @@ through Playwright, with a throwaway `httputil.ReverseProxy`, and read in the so
     `downgrade`, `upgrade`, `newer version`, `older version`, `protocol version`, `minimum version`, `version skew`).
   - Not shown: a combined agent, a drain, Docker tasks, Linux, versions more than one patch apart, and tent-node's
     `refresh-join` (the clients learned the new servers from Nomad's heartbeats).
+  - **On Vultr (runs `w28exz` and `ae5dhs`, 2026-10-14):** a 2.0.7 combined node joined 2.0.6 ones and the roll of the
+    three nodes ended, as in the local lab, with the leader moving once and no `leaderless` poll
+    ([3.16](#316-spike-runs)).
 
 ### 1.4 Downloads and verification
 
@@ -1228,6 +1231,21 @@ tag:
 the VPC interface was up by `network-online.target` and the go-sockaddr templates resolved; at a shutdown with a job
 running Nomad stopped in 1.1 s, before Docker, without a drain; the client was ready and eligible after the reboot.
 Nomad did not reattach to its container after `systemctl restart docker` ([6.2](#62-firewalls-on-the-host)).
+
+**After a hard stop of a server (run `w28exz`, 2026-10-14, Nomad 2.0.7).** At about 01:07:29 a server stopped (a
+power-off). The probe's next read of the allocations through it timed out (7.1 s). Then for 30.2 s the reads of the
+checks of both running allocations failed, while the reads of the allocations and the service's registrations answered
+through other servers and listed both allocations running. A read of the checks goes over the connection of the
+allocation's client to a server. By a reading of Nomad's source, the client keeps that connection until its keepalive
+fails (5 s interval, about 10 s more for the ping) and its next heartbeat registers the node on another server. Run
+`ae5dhs` showed one stretch of 20.1 s without readable checks (`upgrade`) and one poll of 7.1 s in which the read of the
+registrations through a server that had just stopped failed (`ha`). Run `qkmdrs` showed one of 7.1 s (`upgrade`). The
+server rolls of `ha` in both runs showed no stretch without readable checks.
+
+**A rebooted client (run `ae5dhs`, 2026-10-14).** A worker that was built with the old servers and restarted after all
+three servers had been replaced came back with the same node ID. SSH answered from a new boot 2 min 17 s after the
+restart, and 11 s later the journal of that boot held `client: node registration complete` and Nomad listed the node
+ready and eligible. After the boot its `05-join.hcl` named the three new servers.
 
 **A tent-node of another version** (the first E2E run, run `0oqujb`, and a debug cluster built the same way,
 `e2e-dbgaa1-2404`, 2026-10-07). tent-node's `preflight` refuses a tent-node whose version is not the one in the
@@ -1770,6 +1788,10 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
   and HTTP from another instance, so the VPC does not bind addresses to instances. Nothing reserves such an address,
   though, and Vultr may later assign it to a new instance.
 - **Traffic.** Ping between instances over the VPC works with the image's default host firewall (spike 2026-09-25).
+- **A freed private address goes to a new machine (run `ae5dhs`, 2026-10-14).** After the rolls of `ha`, the new workers
+  had the addresses of servers that the roll had deleted. After the servers were deleted and rebuilt, the three new
+  servers got 10.64.0.3, .6 and .7, one of the three old addresses back (the servers before the delete had .3, .8 and
+  .9), while the workers were at .4 and .5.
 - **Deleting.** After the instances disappeared from `GET /v2/instances`, `DELETE /v2/vpcs/{id}` still failed for
   14–20 s with `400 The following servers are attached to this VPC network: <IPs>` (spike 2026-09-25). Retry it.
   On 2026-09-28 the delete succeeded 12 s after the instance was gone, on the second request; the `<IPs>` in the
@@ -1808,6 +1830,10 @@ Facts dated 2026-09-27 were read in the v3.33.0 source.
   - `type`: the same as `ip_type`.
   - `direction`: `"in"`.
   - `loadbalancer_id`: `""`.
+- **A creation date without a zone (run `w28exz`, 2026-10-14).** The firewall list gave a group made at 00:46:46 UTC
+  on 2026-10-14 the `date_created` `2026-10-13 20:46:46`: no zone, and 4 hours behind UTC, which is US Eastern time
+  (UTC-4 in summer). Other objects gave RFC 3339 with an offset. The E2E suite's client reads a date of that form as US
+  Eastern time; tent's own Vultr code skips a date it cannot read.
 - **A second copy of a rule is refused (checked 2026-09-27):** the same rule sent twice gets
   `400 {"error":"This rule is already defined ","status":400}` the second time, with a trailing space in the text.
   tent counts it as done.
@@ -2669,6 +2695,44 @@ server and one worker, at most 3 machines at once. A job of one allocation and o
 - **The first run** (18:57 to 21:50 UTC) failed on a fault of the script: `nomad job run` waits for its deployment, and
   with no node in the rebuilt cluster it waited until the maintainer's session stopped it. The script now uses
   `-detach`, and that cluster was deleted.
+
+**E2E runs of M3.9 (2026-10-14)**, `ha` on ubuntu-24.04 (3 servers and 2 workers) and `upgrade` on ubuntu-26.04 (3
+combined nodes, Nomad 2.0.6 to 2.0.7) at once, at most 10 machines
+([ADR-0043](adr/0043-e2e-scenarios-ha-and-upgrade.md)); `w28exz` and `ae5dhs` ran `make e2e
+E2E_RUN='TestHA|TestUpgrade'`, `qkmdrs` and `hik34s` the full `make e2e`:
+- **`w28exz`** (00:46 to 01:09 UTC; `ha` and `upgrade`): `upgrade` passed every step but the leak check. The roll of
+  three combined nodes from 2.0.6 to 2.0.7 took 14 min 27 s and its probe passed. `ha` passed `create` in 7 min 56 s,
+  which shows that autopilot's report held a version for every peer at the read before the first client
+  ([ADR-0041](adr/0041-upgrading-a-clusters-nomad-version.md)). Its server roll ended with exit 0 in 13 min 12 s, and
+  the probe failed it: `service unreached for 37.2 s`, 495 polls `led` and `served`, 4 `led` and `unreached`, no
+  `leaderless` poll, the leader moved once (10.64.0.3 to .8, at 01:06:07). The two faults were in the suite: Vultr's
+  zoneless creation date (see [3.6](#36-firewall-groups)) and the checks reads that fail after a hard stop of a server
+  (see [1.6](#16-the-agent-on-a-node)). Both are fixed.
+- **`ae5dhs`** (about 01:19 to 01:58 UTC, at the fixed code): both passed.
+  - `upgrade`: `create` 4 min 2 s, with tent's warning that 2.0.6 is untested; the roll 14 min 46 s; the probe saw 632
+    polls, all `led`, 630 `served` and 2 `unchecked` (one stretch of 20.1 s at 01:27:31, a hard stop of a combined
+    node), no `leaderless`, `unserved` or `unreached` poll and 10.1 s as the longest gap between polls; the leader moved
+    once (10.64.0.4 to .6); `delete` 21 s; no leftovers.
+  - `ha`: `create` 7 min 43 s; the server roll 12 min 14 s with 476 polls, all `led`, 475 `served` and one `unreached`
+    of 7.1 s (the read of the service's registrations through the server that had just stopped), the leader moved once
+    (10.64.0.4 to .8); the restart of `workers-0`, the worker roll 5 min 45 s with 336 polls, all `led` and `served`;
+    the backup step 9 min 36 s (backup create 3 s, 13,876 bytes; delete of the servers 3 s; `update` 3 min 12 s;
+    restore 10 s); `delete` 24 s; no leftovers. The restart and the restore are in [1.6](#16-the-agent-on-a-node) and
+    [3.5](#35-vpc).
+- **`qkmdrs`** (about 02:04 to 02:49 UTC, at `0f16490`, the full `make e2e`): every scenario passed. `smoke` passed
+  on both images (`create` 3 min 42 s and 4 min 38 s). `upgrade`: `create` 4 min 7 s without a warning, since the
+  channel now tests 2.0.6; the roll 14 min 53 s with 629 polls, all `led`, 628 `served` and one `unchecked` of 7.1 s;
+  the leader moved once. `ha`: `create` 7 min 26 s; the server roll 12 min 12 s with 478 polls, all `led` and `served`;
+  the restart of `workers-0` (a new boot after 2 min 18 s, the registration 16 s later, the same node ID, a join file
+  that named the three new servers); the worker roll 5 min 44 s with 336 polls, all `led` and `served`; the backup step
+  9 min 36 s (13,856 bytes; `update` 3 min 16 s; restore 9 s; the rebuilt servers at 10.64.0.4, .6 and .7, one old
+  address back; the workers back on their own, no forced roll); no leftovers.
+- **`hik34s`** (about 03:25 to 04:11 UTC, the full `make e2e` with the fixes of the final review): every scenario
+  passed, and every poll of the three probes was `led` and `served` (624 in `upgrade`'s roll of 14 min 57 s, 488 in
+  `ha`'s server roll of 12 min 30 s, 335 in its worker roll of 5 min 44 s); the probes found a good poll at once
+  after tent exited. One refresh of the addresses timed out after 5 s on Vultr's instance list, and the probe kept
+  the last addresses. The restart: a new boot after 2 min 18 s, the registration 11 s later. The backup step
+  10 min 12 s, no forced roll; no leftovers.
 
 **Still open:**
 - A halt whose call gets no answer, and how late Vultr may carry one out.

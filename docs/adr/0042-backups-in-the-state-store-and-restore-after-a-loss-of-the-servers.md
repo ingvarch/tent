@@ -140,8 +140,10 @@
 
 ### Follow-ups
 
-- M3.9's `ha` scenario runs a backup and a restore on Vultr. `tent backup delete`, `backup create --keep N` and a
-  restore inside `update` wait for issues.
+- M3.9's `ha` scenario ran a backup and a restore on Vultr in run `ae5dhs` (2026-10-14) with three servers: Vultr gave
+  the rebuilt servers one of their old private addresses back, the workers came back on their own, `validate` passed
+  after the 6-minute wait and no forced roll was needed ([ADR-0043](0043-e2e-scenarios-ha-and-upgrade.md)).
+  `tent backup delete`, `backup create --keep N` and a restore inside `update` wait for issues.
 
 ## Alternatives considered
 

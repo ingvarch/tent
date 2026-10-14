@@ -55,7 +55,7 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0031](0031-bootstrap-in-update.md) | Bootstrap in `update` | Accepted; amended by 0032, 0033, 0034, 0036, 0038, 0039, 0040, 0041 and 0042 |
 | [0032](0032-joined-label-scrub-and-delete-guard.md) | The joined label, the scrub and the delete guard | Accepted; amended by 0033, 0037, 0039 and 0040 |
 | [0033](0033-operator-commands.md) | Operator commands: validate, export nomad and ui | Accepted; amended by 0040 and 0041 |
-| [0034](0034-e2e-suite-on-vultr.md) | The E2E suite on Vultr | Accepted |
+| [0034](0034-e2e-suite-on-vultr.md) | The E2E suite on Vultr | Accepted; amended by 0043 |
 | [0035](0035-rollout-decisions.md) | Rollout decisions | Accepted; the refusal of two voters and single servers is gone (built in M3.4); amended by 0036, 0037, 0038, 0039, 0040 and 0041 |
 | [0036](0036-nomad-calls-of-a-roll.md) | The Nomad calls of a roll | Accepted; amended by 0038 and 0042 |
 | [0037](0037-rolling-update-of-client-groups.md) | Rolling update of client groups | Accepted; amended by 0038, 0039, 0040 and 0041 |
@@ -64,3 +64,4 @@ Nygard's format, lightly extended; see [template.md](template.md).
 | [0040](0040-scale-down-through-the-rollout.md) | Scale down through the rollout | Accepted; amended by 0041 |
 | [0041](0041-upgrading-a-clusters-nomad-version.md) | Upgrading a cluster's Nomad version | Accepted |
 | [0042](0042-backups-in-the-state-store-and-restore-after-a-loss-of-the-servers.md) | Backups in the state store and the restore after a loss of the servers | Accepted |
+| [0043](0043-e2e-scenarios-ha-and-upgrade.md) | E2E scenarios ha and upgrade | Accepted |

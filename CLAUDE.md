@@ -12,9 +12,10 @@ Providers, in order:
 2. **Hetzner Cloud** is second.
 3. **AWS** comes later. It must remain possible without changes to the core.
 
-**Status:** M0 Foundation (2026-09-27), M1 Vultr infrastructure (2026-09-28) and M2 Nomad bootstrap (2026-10-07) are
-complete. v0.1.0, the first release that builds a Nomad cluster, was tagged on 2026-10-07: archives, `.deb` and `.rpm`
-packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries that its nodes download.
+**Status:** M0 Foundation (2026-09-27), M1 Vultr infrastructure (2026-09-28), M2 Nomad bootstrap (2026-10-07) and M3
+Day-2 operations (2026-10-14) are complete. v0.1.0, the first release that builds a Nomad cluster, was tagged on
+2026-10-07: archives, `.deb` and `.rpm` packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries
+that its nodes download.
 - The skeleton is in place: Go module, `tent version`, Makefile, lint rules, CI on Linux, macOS and Windows, and a
   GoReleaser release pipeline. The repository is public, the release secrets are set, and the archives and packages
   ship third-party licence notices (ADR-0020). Renovate updates the Go modules and GitHub Actions.
@@ -86,14 +87,15 @@ packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries that
     Vultr on 2026-10-07 (spike v12, run `9pxbqn`); its one unexpected row was a fault of the script, which is fixed.
   - M2.9 added the E2E suite on Vultr (`test/e2e`, `test/e2e/vultrapi`, `test/e2e/janitor`, `hack/e2e-janitor`,
     ADR-0034): the scenario `smoke` builds a cluster per image (ubuntu-24.04 and ubuntu-26.04) and is built to check
-    the four exit criteria of M2, and a janitor deletes the objects of `e2e-` clusters that are older than 3 hours.
+    the four exit criteria of M2, and a janitor deletes the objects of `e2e-` clusters that are older than 4 hours.
     `make e2e` runs it from the maintainer's machine, not in CI. The labels `tent/e2e` and `tent/e2e-run` are removed.
     The runs of 2026-10-07 found four faults, all fixed: a node refuses a tent-node of another version than its
     tent's (`make e2e` builds both with one version); `update` asked for an intro token before Nomad's keyring had a
     key (the Nomad step now waits for it); the suite's `validate` lacked `--allow-single-server`; and the probe's one
     control site, `archive.ubuntu.com`, did not answer over IPv4 (it tries three now). The next three runs passed on
     both images (`r7l48w`, `58sglh`, `g57k85`): that is the exit of M2.
-- M3 Day-2 operations is in progress, in parts M3.1 to M3.9 (`docs/roadmap.md`).
+- M3 Day-2 operations was built in parts M3.1 to M3.9 (`docs/roadmap.md`) and is complete since 2026-10-14 (runs
+  `qkmdrs` and `hik34s`).
   - M3.1 added the rollout decisions (`internal/rollout`, ADR-0035; maintainer decisions 33 to 35): `Next(State,
     Mode)` returns one step of a rolling update (`Roll`) or of a removal of surplus nodes (`Shrink`) from what the
     cloud and Nomad report, and reaches nothing itself. A simulator with golden step sequences, invariants and a
@@ -210,6 +212,20 @@ packages, a Homebrew cask (`ingvarch/tap/tent`), and the tent-node binaries that
       `latest` refuses when the earlier backups are of more than one rebuild.
     - `nomadops` has `Jobs`, `TokenAccessor` and the class `ErrDenied`. `delete cluster` deletes the backups and the
       record. The run on Vultr gave a rebuilt server its old private address (platform notes §3.16).
+  - M3.9 added the E2E scenarios `ha` and `upgrade` and a probe (`test/e2e` `ha_test.go`, `upgrade_test.go`,
+    `cluster_test.go`, `probe_test.go`, `scenario_text_test.go`; ADR-0043; maintainer decision 51): `make e2e` runs
+    `smoke`, then `ha` and `upgrade` in parallel (at most 10 machines), and `E2E_RUN` picks scenarios.
+    - `ha` changes the specs, rolls the servers and then the workers, restarts an old worker between the rolls so that
+      it finds the new servers through `refresh-join`, and backs up Nomad, deletes the servers, rebuilds them and
+      restores the backup. `upgrade` rolls a combined cluster from Nomad 2.0.6 (`E2E_UPGRADE_FROM`) to the channel's
+      version.
+    - A probe polls the servers for a leader and the service for a healthy allocation during each roll and fails the
+      step on a breach of its limits (ADR-0043). The timeout of `make e2e` is 180 minutes, and a step ends 20 minutes
+      before it so the cleanups still delete the clusters.
+    - Decision 51: no command takes an upgrade back once the roll's first new server has joined (ADR-0041).
+    - Runs on Vultr (platform notes §3.16): `w28exz` found two faults of the suite (a creation date without a zone,
+      and checks that cannot be read after a hard stop of a server), `ae5dhs` passed `ha` and `upgrade`, and
+      `qkmdrs` and `hik34s` passed the full run. The channel lists 2.0.6 as tested since `ae5dhs`.
 
 ## Read before changing anything
 

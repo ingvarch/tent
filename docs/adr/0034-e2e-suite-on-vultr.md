@@ -1,6 +1,8 @@
 # ADR-0034: The E2E suite on Vultr
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by [ADR-0043](0043-e2e-scenarios-ha-and-upgrade.md) (the scenarios `ha` and `upgrade`, a
+  probe of the leader and the service during a roll, `E2E_RUN`, the timeout of 180 minutes, the janitor's age of 4
+  hours)
 - **Date:** 2026-10-07
 - **Deciders:** ingvarch
 - **Related:** amends [ADR-0012](0012-testing-strategy.md), [ADR-0014](0014-vultr-first-provider-and-e2e.md),
