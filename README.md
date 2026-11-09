@@ -91,3 +91,8 @@ terms for Nomad. tent does not redistribute Nomad.
 
 Nomad is a trademark of HashiCorp. tent is an independent project and is not affiliated with or endorsed by
 HashiCorp.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to report a bug and send a change, and [SECURITY.md](SECURITY.md) for
+how to report a vulnerability.

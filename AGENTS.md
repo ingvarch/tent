@@ -19,6 +19,8 @@ is the source of truth: a change that diverges from it or from an accepted ADR n
   development build, running the E2E suite or a release. It has the tools and their versions and the project structure.
 - [docs/features.md](docs/features.md) and [docs/quickstart.md](docs/quickstart.md): read before changing what a
   command does or prints, and update them with it.
+- [CONTRIBUTING.md](CONTRIBUTING.md): read before a commit or a pull request. It has the branch names, the commit
+  types and scopes, and the steps of a change.
 - [test/e2e/README.md](test/e2e/README.md): read before changing or running the E2E suite.
 - [hack/vultr-spike/README.md](hack/vultr-spike/README.md): read before running the spike or recording its findings.
 
