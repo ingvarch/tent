@@ -9,7 +9,7 @@ few cents.
 > replaces its user data, which holds its keys, with a stub. `tent export nomad` gives you a short-lived certificate
 > and token for the Nomad API, `tent validate cluster` checks the cluster, and `tent ui` serves the Nomad web UI on a
 > port of your machine. Since v0.2.0 tent also rolls, scales down, upgrades and backs up a running cluster
-> ([README](../README.md#what-works-now)).
+> ([features](features.md)).
 
 ## What you need
 
