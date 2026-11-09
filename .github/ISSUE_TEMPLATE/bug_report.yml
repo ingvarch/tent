@@ -1,0 +1,37 @@
+name: Bug report
+description: Something in tent does not work as documented
+labels: ["bug"]
+body:
+  - type: textarea
+    id: request
+    attributes:
+      label: What you did
+      description: The commands you ran and the specs they used. Remove API keys, tokens and secrets.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: The output or error you got.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What should have happened, with a link to the docs if they describe it.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `tent version`.
+    validations:
+      required: true
+  - type: input
+    id: cluster
+    attributes:
+      label: Cluster
+      description: The provider, region, OS image and Nomad version of the cluster, if the bug concerns one.
